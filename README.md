@@ -31,6 +31,9 @@ cargo run -p yien
 
 | Keys | Action |
 |---|---|
+| Ctrl+Shift+P | Command palette: every action, with its keys |
+| Ctrl+Shift+O | Go to a tab, pane or project; Enter with an empty query goes back to the last tab |
+| Ctrl+1 ... Ctrl+9 | Go to that tab of the current project |
 | Ctrl+Shift+T | New tab with your shell |
 | Ctrl+Shift+A | New tab with Claude Code |
 | Ctrl+Shift+S | Split the focused pane, Claude Code on the right |

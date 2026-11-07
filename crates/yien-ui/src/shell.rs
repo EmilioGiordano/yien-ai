@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::TitleBar;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc;
@@ -14,23 +15,25 @@ use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId, TabId,
 };
 
-use crate::actions::{
-    CLOSE_PANE_KEYS, CONTEXT, CONTEXT_BAR_KEYS, ClosePane, FOCUS_KEYS, FocusDown, FocusLeft,
-    FocusRight, FocusUp, GrowPane, JUMP_KEYS, JumpToNeedsYou, NEW_CLAUDE_TAB_KEYS, NEW_TAB_KEYS,
-    NEXT_TAB_KEYS, NewClaudeTab, NewTab, NextTab, PreviousTab, SPLIT_CLAUDE_KEYS, SPLIT_DOWN_KEYS,
-    SPLIT_RIGHT_KEYS, ShrinkPane, SplitDown, SplitRight, SplitRightClaude, SwapDown, SwapLeft,
-    SwapRight, SwapUp, TAB_BAR_KEYS, THEME_KEYS, ToggleContextBar, ToggleMaximize, ToggleTabBar,
-    ToggleTheme,
-};
+use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
+use crate::catalog::{CATALOG, profile_splits, shortcut};
 use crate::fonts::Fonts;
 use crate::layout::neighbor;
 use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
+use crate::palette::{
+    Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
+    keyboard_after_close, keyboard_pane, switcher_entries,
+};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
 
 const TAB_BAR_WIDTH: f32 = 264.0;
+/// The palette's width and its gap below the window top, as the prototype's.
+const PALETTE_WIDTH: f32 = 620.0;
+const PALETTE_TOP: f32 = 56.0;
+const PALETTE_LIST_HEIGHT: f32 = 380.0;
 const CONTEXT_BAR_WIDTH: f32 = 380.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
@@ -64,7 +67,17 @@ pub(crate) struct Shell {
     /// The chooser a mouse-down outside it just closed, and when. The click
     /// that follows on its own button must not open it again.
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
+    /// The command palette or the switcher, while open.
+    palette: Option<OpenPalette>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The palette's model and the widgets drawing it.
+struct OpenPalette {
+    model: Palette,
+    input: Entity<InputState>,
+    scroll: ScrollHandle,
+    _input_events: Subscription,
 }
 
 impl Shell {
@@ -121,6 +134,7 @@ impl Shell {
             notice: None,
             split_menu: None,
             menu_closed: None,
+            palette: None,
             _subscriptions: vec![activation],
         }
     }
@@ -230,7 +244,11 @@ impl Shell {
 
     /// Moves the keyboard to the selected tab's focused pane when that changes.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.workspace.selected_tab().map(|t| t.focused);
+        // The palette keeps the keyboard while open; closing it syncs again.
+        if self.palette.is_some() {
+            return;
+        }
+        let target = keyboard_pane(&self.workspace);
         if target == self.keyboard_on {
             return;
         }
@@ -353,16 +371,21 @@ impl Shell {
     }
 
     /// Opens a tab in the selected tab's project, running `profile`.
+    /// With every tab closed it falls back to the project selected last.
     fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
-        if let Some(project) = self.workspace.selected_project().map(|p| p.id) {
-            self.command(
+        match self.workspace.project_for_new_tab() {
+            Some(project) => self.command(
                 Command::NewTab {
                     project,
                     name: None,
                     profile: profile.map(ProfileId::new),
                 },
                 cx,
-            );
+            ),
+            None => {
+                self.notice = Some("There is no project to open a tab in.".to_owned());
+                cx.notify();
+            }
         }
     }
 
@@ -471,6 +494,202 @@ impl Shell {
         }
     }
 
+    /// Tab `n` of the selected tab's project (RF-NAV-05).
+    fn go_to_tab(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.workspace.nth_tab_of_selected_project(n) {
+            self.select_tab(tab, window, cx);
+        }
+    }
+
+    fn toggle_command_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_palette(Mode::Commands, window, cx);
+    }
+
+    fn toggle_switcher(&mut self, _: &ToggleSwitcher, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_palette(Mode::Switcher, window, cx);
+    }
+
+    /// Opens the palette in `mode`, or closes it when it is already open in
+    /// that mode. Typing then goes to its input, not the terminal.
+    fn toggle_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|open| open.model.mode() == mode)
+        {
+            self.close_palette(window, cx);
+            return;
+        }
+        self.split_menu = None;
+        let commands = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            command_entries(
+                |at| {
+                    let spec = CATALOG.get(at)?;
+                    shortcut(&keymap, (spec.action)().as_ref())
+                },
+                profile_splits(self.workspace.profiles()),
+            )
+        };
+        let places = switcher_entries(&self.workspace);
+        let placeholder = match mode {
+            Mode::Commands => "Execute a command…",
+            Mode::Switcher => "Go to a tab, pane or project. Type > for commands",
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let input_events = cx.subscribe_in(&input, window, Self::on_palette_input);
+        window.focus(&input.focus_handle(cx), cx);
+        self.palette = Some(OpenPalette {
+            model: Palette::new(mode, commands, places),
+            input,
+            scroll: ScrollHandle::new(),
+            _input_events: input_events,
+        });
+        cx.notify();
+    }
+
+    fn on_palette_input(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let query = input.read(cx).value();
+        if let Some(open) = self.palette.as_mut() {
+            open.model.set_query(&query);
+            open.scroll.scroll_to_item(0);
+            cx.notify();
+        }
+    }
+
+    /// Closes the palette and gives the keyboard to the pane the core says
+    /// is focused, which may have moved while the palette was open.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_none() {
+            return;
+        }
+        let terminal = match keyboard_after_close(&self.workspace) {
+            KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
+            KeyboardTo::Window => None,
+        };
+        match terminal {
+            Some((pane, terminal)) => {
+                self.keyboard_on = Some(pane);
+                let handle = terminal.read(cx).handle().clone();
+                window.focus(&handle, cx);
+            }
+            None => {
+                // No view yet: the next sync moves the keyboard once it exists.
+                self.keyboard_on = None;
+                window.focus(&self.focus, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Runs row `at`, or the selected row when `None`. The palette closes
+    /// first, so a command acts on the pane that has the keyboard again.
+    fn run_palette(&mut self, at: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = &self.palette else {
+            return;
+        };
+        let target = match at {
+            Some(at) => open.model.target_at(at),
+            None => open.model.target(),
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.close_palette(window, cx);
+        match target {
+            Target::Command(at) => {
+                if let Some(spec) = CATALOG.get(at) {
+                    window.dispatch_action((spec.action)(), cx);
+                }
+            }
+            Target::Tab(tab) => self.select_tab(tab, window, cx),
+            Target::Project(project) => {
+                let tab = self
+                    .workspace
+                    .tabs_by_recent()
+                    .iter()
+                    .find(|t| t.project == project)
+                    .map(|t| t.id);
+                if let Some(tab) = tab {
+                    self.select_tab(tab, window, cx);
+                }
+            }
+            Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
+            Target::Split(profile, orientation) => {
+                if let Some(pane) = self.focused_pane() {
+                    self.split_pane(pane, orientation, Some(profile), cx);
+                }
+            }
+        }
+    }
+
+    /// Relaunches the focused pane's program once it has stopped
+    /// (RF-PAN-19); a running program is left alone.
+    fn relaunch_pane(&mut self, _: &RelaunchPane, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.focused_pane() else {
+            return;
+        };
+        let pane = self.workspace.pane(id);
+        if pane.exited {
+            self.command(Command::RelaunchPane { pane: id }, cx);
+        } else {
+            self.notice = Some(format!("{} has not exited.", pane.name));
+            cx.notify();
+        }
+    }
+
+    fn toggle_project_fold(
+        &mut self,
+        _: &ToggleProjectFold,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.workspace.selected_project().map(|p| p.id) {
+            self.toggle_fold(project, cx);
+        }
+    }
+
+    fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_palette(-1, cx);
+    }
+
+    fn palette_down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_palette(1, cx);
+    }
+
+    fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(open) = self.palette.as_mut() {
+            open.model.move_by(delta);
+            if let Some(at) = open.model.selected() {
+                open.scroll.scroll_to_item(at);
+            }
+            cx.notify();
+        }
+    }
+
+    fn palette_confirm(&mut self, _: &PaletteConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_palette(None, window, cx);
+    }
+
+    fn palette_close(&mut self, _: &PaletteClose, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+    }
+
     /// The window title carries the counter so the taskbar shows it, like the
     /// prototype's document title.
     fn sync_title(&mut self, window: &mut Window) {
@@ -530,6 +749,8 @@ impl Shell {
                             .child("YIEN"),
                     )
                     .child(div().flex_1().min_w_0().children(crumbs))
+                    .child(self.render_palette_pill(cx))
+                    .child(div().flex_1())
                     .child(self.render_need_count(cx))
                     .child(
                         icon_button("toggle-theme", assets::THEME, &t)
@@ -557,6 +778,197 @@ impl Shell {
                             })),
                     ),
             )
+    }
+
+    /// The title bar button that opens the palette, as the prototype's.
+    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        h_flex()
+            .id("palette-pill")
+            .occlude()
+            .role(Role::Button)
+            .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
+            .flex_none()
+            .w(px(420.0))
+            .max_w(relative(0.4))
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(t.line)
+            .bg(t.bg)
+            .text_size(px(13.0))
+            .text_color(t.faint)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_palette(Mode::Commands, window, cx);
+            }))
+            .child(div().flex_1().min_w_0().child("Execute a command"))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(PALETTE_KEYS),
+            )
+    }
+
+    /// The command palette or the switcher over the window (RF-NAV-01,
+    /// RF-NAV-04), laid out as the prototype's `.palette`.
+    fn render_palette(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let open = self.palette.as_ref()?;
+        let t = self.theme;
+        let model = &open.model;
+        let selected = model.selected();
+        let rows: Vec<AnyElement> = model
+            .rows()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, row)| {
+                let entry = model.entry(row)?;
+                Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
+            })
+            .collect();
+        let (label, empty) = match model.listing() {
+            Mode::Commands => ("Command palette", "No command matches"),
+            Mode::Switcher => ("Go to a tab, pane or project", "Nothing matches"),
+        };
+        let none = rows.is_empty().then(|| {
+            div()
+                .p(px(14.0))
+                .text_size(px(13.0))
+                .text_color(t.muted)
+                .child(format!("{empty} \"{}\".", model.query()))
+        });
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .items_start()
+                .bg(rgba(0x0000_0059))
+                .child(
+                    v_flex()
+                        .id("palette")
+                        .role(Role::Dialog)
+                        .aria_label(label)
+                        .key_context(PALETTE_CONTEXT)
+                        .mt(px(PALETTE_TOP))
+                        .w(px(PALETTE_WIDTH))
+                        .max_w(relative(0.8))
+                        .overflow_hidden()
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(t.line)
+                        .bg(t.raised)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.close_palette(window, cx);
+                        }))
+                        .child(
+                            div()
+                                .px(px(14.0))
+                                .py(px(8.0))
+                                .border_b_1()
+                                .border_color(t.line)
+                                .text_size(px(14.5))
+                                .child(
+                                    Input::new(&open.input)
+                                        .appearance(false)
+                                        .aria_label("Search"),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .id("palette-list")
+                                .role(Role::ListBox)
+                                .track_scroll(&open.scroll)
+                                .overflow_y_scroll()
+                                .max_h(px(PALETTE_LIST_HEIGHT))
+                                .p(px(6.0))
+                                .children(rows)
+                                .children(none),
+                        ),
+                ),
+        )
+    }
+
+    fn render_palette_row(
+        &self,
+        at: usize,
+        row: &Row,
+        entry: &Entry,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme;
+        let style = |color: Rgba, weight: FontWeight| HighlightStyle {
+            color: Some(color.into()),
+            font_weight: Some(weight),
+            ..HighlightStyle::default()
+        };
+        let runs = ink_runs(&entry.text, entry.dim, &row.hits)
+            .into_iter()
+            .map(|(range, ink)| {
+                let look = match ink {
+                    Ink::Text => style(t.text, FontWeight::NORMAL),
+                    Ink::Dim => style(t.muted, FontWeight::NORMAL),
+                    Ink::Hit => style(t.ai, FontWeight::BOLD),
+                };
+                (range, look)
+            });
+        let text = StyledText::new(entry.text.clone()).with_highlights(runs);
+        let hint_color = match entry.state {
+            Some(AgentState::NeedsYou) => t.shu,
+            Some(AgentState::Error) => t.ochre,
+            _ => t.faint,
+        };
+        let label = if entry.hint.is_empty() {
+            entry.text.clone()
+        } else {
+            format!("{}, {}", entry.text, entry.hint)
+        };
+        h_flex()
+            .id(("palette-row", at))
+            .role(Role::ListBoxOption)
+            .aria_label(label)
+            .aria_selected(selected)
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(7.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .when(selected, |r| r.bg(t.hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.run_palette(Some(at), window, cx);
+            }))
+            .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(13.5))
+                    .child(text),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(hint_color)
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(entry.hint.clone()),
+            )
+            .into_any_element()
     }
 
     /// The global "needs you" counter (RF-ATN-03). Red only while someone
@@ -1203,20 +1615,31 @@ impl Shell {
                     div()
                         .id("notice")
                         .role(Role::Status)
-                        .min_w_0()
+                        .flex_shrink_0()
+                        .max_w(relative(0.5))
                         .overflow_hidden()
                         .text_ellipsis()
                         .text_color(t.ochre)
                         .child(notice),
                 )
             })
-            .child(div().ml_auto().child(format!(
-                "{JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
+            // The hint row gives way to the notice: without `min_w_0` its
+            // unwrapped width squeezed the notice to nothing.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_end()
+                    .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
+                "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
+                 {JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
                  {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
-                 {CONTEXT_BAR_KEYS} context bar · {NEXT_TAB_KEYS} next tab · {THEME_KEYS} theme"
-            )))
+                 {CONTEXT_BAR_KEYS} context bar · {TAB_NUMBER_KEYS} tab N · {NEXT_TAB_KEYS} next tab · \
+                 {THEME_KEYS} theme"
+                    ))),
+            )
     }
 }
 
@@ -1250,6 +1673,24 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_claude_tab))
             .on_action(cx.listener(Self::split_right_claude))
+            .on_action(cx.listener(Self::relaunch_pane))
+            .on_action(cx.listener(Self::toggle_project_fold))
+            .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_switcher))
+            .on_action(cx.listener(Self::palette_up))
+            .on_action(cx.listener(Self::palette_down))
+            .on_action(cx.listener(Self::palette_confirm))
+            .on_action(cx.listener(Self::palette_close))
+            .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab4, w, cx| this.go_to_tab(4, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab5, w, cx| this.go_to_tab(5, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab6, w, cx| this.go_to_tab(6, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab7, w, cx| this.go_to_tab(7, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab8, w, cx| this.go_to_tab(8, w, cx)))
+            .on_action(cx.listener(|this, _: &GoToTab9, w, cx| this.go_to_tab(9, w, cx)))
+            .relative()
             .size_full()
             .bg(t.panel)
             .text_color(t.text)
@@ -1267,6 +1708,7 @@ impl Render for Shell {
                     }),
             )
             .child(self.render_status_bar())
+            .children(self.render_palette(cx))
     }
 }
 
@@ -1307,4 +1749,37 @@ fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
 
 fn toggled(on: bool) -> Toggled {
     if on { Toggled::True } else { Toggled::False }
+}
+
+/// The catalog command behind each mouse control above, so every one has a
+/// palette row (RF-NAV-02). A new clickable control adds its command here.
+/// Tab rows are reached through the switcher; the split menu's profiles
+/// through `profile_splits`.
+#[cfg(test)]
+const MOUSE_COMMANDS: &[(&str, &str)] = &[
+    ("theme button", "theme.toggle"),
+    ("tab bar button", "tab_bar.toggle"),
+    ("context bar button", "context_bar.toggle"),
+    ("needs-you counter", "agent.next_needs_you"),
+    ("palette button", "palette.open"),
+    ("project head", "project.fold"),
+    ("relaunch button", "pane.relaunch"),
+    ("tab row", "switcher.open"),
+];
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob there would shadow `#[test]`.
+    use super::MOUSE_COMMANDS;
+    use crate::catalog::CATALOG;
+
+    #[test]
+    fn rf_nav_02_every_mouse_control_has_a_palette_command() {
+        for (control, id) in MOUSE_COMMANDS {
+            assert!(
+                CATALOG.iter().any(|spec| spec.id == *id),
+                "the {control} has no command {id}"
+            );
+        }
+    }
 }
