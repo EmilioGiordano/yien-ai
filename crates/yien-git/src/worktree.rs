@@ -80,6 +80,10 @@ pub enum WorktreeError {
     /// The worktree is locked (`git worktree lock`).
     #[error("{} is locked; unlock it with git worktree unlock first", .0.display())]
     Locked(PathBuf),
+    /// The repository sits where no `<repo>-wt` folder can go beside it,
+    /// such as a drive root.
+    #[error("{} has no parent folder to put worktrees in", .0.display())]
+    NoRoom(PathBuf),
     /// The folder is not a linked worktree of the repository (or is its main one).
     #[error("{} is not a linked worktree of this repository", .0.display())]
     NotLinked(PathBuf),
@@ -104,6 +108,7 @@ impl WorktreeError {
             Self::Dirty(_) => "worktree dirty",
             Self::Locked(_) => "worktree locked",
             Self::NotLinked(_) => "not a linked worktree",
+            Self::NoRoom(_) => "no room beside the repository",
             Self::Git(e) => e.kind(),
         }
     }
