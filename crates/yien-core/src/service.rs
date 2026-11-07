@@ -174,7 +174,7 @@ pub(crate) async fn run(
             .await;
     }
     service.execute(restored).await;
-    if service.ws.tab_count() == 0
+    if opens_start_folder(saved_tabs, service.ws.tab_count())
         && let Some(root) = service.ctx.config.start_project.clone()
     {
         service
@@ -490,6 +490,16 @@ fn apply_git(
     Some((fx, CoreMsg::TabGit { tab, git }))
 }
 
+/// Whether the start folder opens as a project: when no session was read, or
+/// when the saved one had tabs and none could be restored. A saved session
+/// the user emptied stays empty, and the window invites a new project.
+fn opens_start_folder(saved_tabs: Option<usize>, restored_tabs: usize) -> bool {
+    match saved_tabs {
+        None => true,
+        Some(saved) => saved > 0 && restored_tabs == 0,
+    }
+}
+
 /// The profiles new panes can be started with: the shell first, then each
 /// agent profile in the configured order.
 fn profile_list(config: &CoreConfig) -> Vec<ProfileInfo> {
@@ -622,6 +632,17 @@ mod tests {
         let (fx, _) = apply_git(&mut ws, &mut sent, report(tab, TabGit::NoRepository)).unwrap();
         assert_eq!(fx.len(), 1);
         assert_eq!(branch_of(&ws, tab), None);
+    }
+
+    #[test]
+    fn the_start_folder_opens_only_without_a_session_or_when_none_of_it_came_back() {
+        assert!(opens_start_folder(None, 0));
+        assert!(opens_start_folder(Some(2), 0));
+        assert!(!opens_start_folder(Some(2), 1));
+        assert!(
+            !opens_start_folder(Some(0), 0),
+            "the user closed every project"
+        );
     }
 
     #[test]

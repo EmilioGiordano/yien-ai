@@ -85,7 +85,7 @@ pub enum SessionSaveError {
 /// What [`open`] found.
 #[derive(Debug, Default)]
 pub(crate) struct Opened {
-    /// The session to restore, if any with at least one tab.
+    /// The session to restore, if one was read; it may hold no project.
     pub snapshot: Option<SessionSnapshot>,
     /// What the user should know: a damaged file, a newer one set aside.
     pub notices: Vec<String>,
@@ -118,10 +118,7 @@ pub(crate) fn open(store: &SessionStore) -> Opened {
     if let Some(notice) = damage_notice(&report) {
         opened.notices.push(notice);
     }
-    let snapshot = report
-        .restored
-        .map(|r| r.snapshot)
-        .filter(|s| s.projects.iter().any(|p| !p.tabs.is_empty()));
+    let snapshot = report.restored.map(|r| r.snapshot);
     if let Some(snapshot) = &snapshot {
         opened.disk = Disk {
             existing: folders(snapshot)
