@@ -9,7 +9,8 @@ use anyhow::{Context, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layer {
-    /// Layers 0 to 3, lower is purer; 4 is the `yien` binary on top.
+    /// Layers 0 to 3, lower is purer; 4 is the binaries on top (`yien`,
+    /// `yien-hook`).
     Level(u8),
     /// Test support: only ever a dev-dependency.
     Dev,
@@ -28,6 +29,7 @@ const LAYERS: &[(&str, Layer)] = &[
     ("yien-core", Layer::Level(3)),
     ("yien-ui", Layer::Level(3)),
     ("yien", Layer::Level(4)),
+    ("yien-hook", Layer::Level(4)),
     ("yien-testkit", Layer::Dev),
 ];
 
