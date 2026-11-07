@@ -50,6 +50,7 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/session-store`: the state file is `workspace.json` (plan §7.2), with backups `workspace.1.json` to `workspace.4.json`: five copies in all (RF-SES-06). `save` rotates only when the snapshot is `ROTATION_INTERVAL_MS` (60 s) past the one in `workspace.1.json`; other saves replace `workspace.json` atomically. A damaged `workspace.json` is moved to `workspace.damaged.json` for diagnosis, leaving the backups untouched.
 - `feat/session-store`: a generation with a newer `schema_version` stops `load` without restoring and makes `save` refuse; `preserve_newer` renames it to `workspace.v<N>.json` (plan §5.2), after which saving works.
 - `feat/session-store`: split ratios are checked as positive, one per child and summing to 1 (within 1e-3), but not against `yien-layout`'s 5 % minimum, because repeated splits legitimately go below it.
+- `feat/session-store`: schema v1 carries every plan §6.1 field before it ships: `selected` (project and tab, both optional, validated to exist), tab `branch`, `worktree` and `archived`, pane `name`, project `setup_script`. All have serde defaults, so a v1 file without them still loads.
 - `feat/session-store`: file I/O goes through the `Store` trait; the `fs` feature's `FsStore` uses only `std::fs` (temp file, `sync_all`, `rename`) and lacks `MOVEFILE_WRITE_THROUGH`, so `yien-platform` should supply the production store.
 
 ## In flight
