@@ -8811,9 +8811,10 @@ name = "yien"
 version = "0.0.0"
 dependencies = [
  "tracing",
- "yien-layout",
+ "yien-core",
  "yien-platform",
  "yien-proto",
+ "yien-pty",
  "yien-ui",
 ]
 
@@ -8899,9 +8900,9 @@ name = "yien-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-kit",
- "thiserror 2.0.21",
+ "tokio",
  "tracing",
- "yien-layout",
+ "yien-input",
  "yien-proto",
 ]
 
