@@ -1,4 +1,4 @@
-//! The portable Windows build: release binaries, README, licences and the
+//! The portable Windows build: release binaries, README, any licence files and the
 //! third-party notice in `<target>/dist/yien-<version>-windows-x64/`, then zipped.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +27,7 @@ pub const SUBSYSTEM_CONSOLE: u16 = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub source: PathBuf,
-    pub dest: &'static str,
+    pub dest: String,
     /// The PE subsystem the file must have, for executables.
     pub subsystem: Option<u16>,
 }
@@ -51,37 +51,62 @@ pub fn target_dir(env_value: Option<OsString>, root: &Path, cwd: &Path) -> PathB
     }
 }
 
+/// The licence files among the names of the files at the repository root,
+/// sorted: `LICENSE*` or `LICENCE*`, any case. None is fine while the licence
+/// is undecided.
+pub fn licence_files(root_file_names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut found: Vec<String> = root_file_names
+        .into_iter()
+        .filter(|name| {
+            let upper = name.to_ascii_uppercase();
+            upper.starts_with("LICENSE") || upper.starts_with("LICENCE")
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// The files copied from the build and the repository, in package order.
 /// `yien` must be a GUI program so a double-click opens no console;
 /// `yien-hook` must stay a console program, since Claude Code pipes its stdin.
-pub fn files(root: &Path, release_dir: &Path) -> Vec<Entry> {
-    vec![
+pub fn files(root: &Path, release_dir: &Path, licences: &[String]) -> Vec<Entry> {
+    let mut entries = vec![
         Entry {
             source: release_dir.join("yien.exe"),
-            dest: "yien.exe",
+            dest: "yien.exe".to_owned(),
             subsystem: Some(SUBSYSTEM_GUI),
         },
         Entry {
             source: release_dir.join("yien-hook.exe"),
-            dest: "yien-hook.exe",
+            dest: "yien-hook.exe".to_owned(),
             subsystem: Some(SUBSYSTEM_CONSOLE),
         },
         Entry {
             source: root.join("README.md"),
-            dest: "README.md",
+            dest: "README.md".to_owned(),
             subsystem: None,
         },
-        Entry {
-            source: root.join("LICENSE-MIT"),
-            dest: "LICENSE-MIT",
-            subsystem: None,
-        },
-        Entry {
-            source: root.join("LICENSE-APACHE"),
-            dest: "LICENSE-APACHE",
-            subsystem: None,
-        },
-    ]
+    ];
+    entries.extend(licences.iter().map(|name| Entry {
+        source: root.join(name),
+        dest: name.clone(),
+        subsystem: None,
+    }));
+    entries
+}
+
+/// The names of the regular files directly in `root`.
+fn root_file_names(root: &Path) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(root).with_context(|| format!("listing {}", root.display()))? {
+        let entry = entry.with_context(|| format!("listing {}", root.display()))?;
+        if entry.file_type().is_ok_and(|t| t.is_file())
+            && let Ok(name) = entry.file_name().into_string()
+        {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// The `[workspace.package] version` of the root `Cargo.toml`.
@@ -268,8 +293,9 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     }
     let package = dist.join(package_name(&version));
     std::fs::create_dir_all(&package).with_context(|| format!("creating {}", package.display()))?;
-    for entry in files(root, &target.join("release")) {
-        let dest = package.join(entry.dest);
+    let licences = licence_files(root_file_names(root)?);
+    for entry in files(root, &target.join("release"), &licences) {
+        let dest = package.join(&entry.dest);
         if let Some(expected) = entry.subsystem {
             let image = std::fs::read(&entry.source)
                 .with_context(|| format!("reading {}", entry.source.display()))?;
@@ -351,9 +377,22 @@ mod tests {
     }
 
     #[test]
-    fn package_holds_both_binaries_readme_and_licences() {
-        let entries = files(Path::new("/repo"), Path::new("/t/release"));
-        let dests: Vec<&str> = entries.iter().map(|e| e.dest).collect();
+    fn package_holds_both_binaries_and_the_readme() {
+        let entries = files(Path::new("/repo"), Path::new("/t/release"), &[]);
+        let dests: Vec<&str> = entries.iter().map(|e| e.dest.as_str()).collect();
+        assert_eq!(dests, ["yien.exe", "yien-hook.exe", "README.md"]);
+        assert_eq!(entries[0].source, Path::new("/t/release/yien.exe"));
+        assert_eq!(entries[0].subsystem, Some(SUBSYSTEM_GUI));
+        assert_eq!(entries[1].subsystem, Some(SUBSYSTEM_CONSOLE));
+        assert_eq!(entries[2].source, Path::new("/repo/README.md"));
+        assert_eq!(entries[2].subsystem, None);
+    }
+
+    #[test]
+    fn licence_files_are_added_after_the_readme() {
+        let licences = ["LICENSE-MIT".to_owned(), "LICENSE-APACHE".to_owned()];
+        let entries = files(Path::new("/repo"), Path::new("/t/release"), &licences);
+        let dests: Vec<&str> = entries.iter().map(|e| e.dest.as_str()).collect();
         assert_eq!(
             dests,
             [
@@ -364,17 +403,33 @@ mod tests {
                 "LICENSE-APACHE"
             ]
         );
-        assert_eq!(entries[0].source, Path::new("/t/release/yien.exe"));
-        assert_eq!(entries[0].subsystem, Some(SUBSYSTEM_GUI));
-        assert_eq!(entries[1].subsystem, Some(SUBSYSTEM_CONSOLE));
-        assert_eq!(entries[2].source, Path::new("/repo/README.md"));
+        assert_eq!(entries[4].source, Path::new("/repo/LICENSE-APACHE"));
         assert!(entries[2..].iter().all(|e| e.subsystem.is_none()));
+    }
+
+    #[test]
+    fn licence_files_are_picked_from_the_root_names() {
+        let names = [
+            "README.md",
+            "LICENSE-MIT",
+            "Cargo.toml",
+            "licence.txt",
+            "LICENSE",
+            "COPYING",
+        ]
+        .map(String::from);
+        assert_eq!(
+            licence_files(names),
+            ["LICENSE", "LICENSE-MIT", "licence.txt"]
+        );
+        assert!(licence_files(["README.md".to_owned()]).is_empty());
     }
 
     #[test]
     fn the_package_files_exist_in_the_repository() {
         let root = crate::workspace_root();
-        for entry in files(&root, Path::new("unused")) {
+        let licences = licence_files(root_file_names(&root).unwrap());
+        for entry in files(&root, Path::new("unused"), &licences) {
             if entry.subsystem.is_none() {
                 assert!(entry.source.is_file(), "{} missing", entry.source.display());
             }
