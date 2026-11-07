@@ -13,8 +13,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
+    INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -162,6 +162,9 @@ fn wait_for_client(pipe: &OwnedHandle, connected: &OwnedHandle, stop: &OwnedHand
     }
     match last_error() {
         ERROR_PIPE_CONNECTED => return Connect::Client,
+        // The client connected, wrote and closed before this call; its bytes
+        // may still be buffered, and a read reports EOF if not.
+        ERROR_NO_DATA => return Connect::Client,
         ERROR_IO_PENDING => {}
         _ => return Connect::Failed,
     }
@@ -423,5 +426,23 @@ fn os_error(call: &'static str, error: &io::Error) -> HookPipeError {
     HookPipeError::Os {
         call,
         code: error.raw_os_error().unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rnf_11_a_taken_pipe_name_cannot_be_created_again() {
+        let descriptor = user_only_descriptor().unwrap();
+        let name = wide(&format!(
+            "{}test-{}-{}",
+            super::super::HOOK_PIPE_PREFIX,
+            std::process::id(),
+            super::super::random_hex::<8>().unwrap()
+        ));
+        let _first = create_instance(&name, &descriptor, true).unwrap();
+        assert!(create_instance(&name, &descriptor, true).is_err());
     }
 }
