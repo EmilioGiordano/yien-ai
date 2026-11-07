@@ -31,13 +31,10 @@ impl ResumeFailure {
     /// The one-line notice for the user, naming the CLI by `profile`.
     pub fn notice(self, profile: &str) -> String {
         let why = match self {
-            Self::NotFound => "the saved conversation was not found".to_owned(),
-            Self::ExitedEarly(code) => format!("it exited with code {code} right after starting"),
+            Self::NotFound => "conversation not found".to_owned(),
+            Self::ExitedEarly(code) => format!("exited with code {code}"),
         };
-        format!(
-            "{profile} could not resume its session: {why}. A shell opened in its folder; \
-             relaunch the pane to start a new {profile} session."
-        )
+        format!("{profile} could not resume ({why}); a shell opened. Relaunch for a new session.")
     }
 
     /// A short name for the logs; never the screen's text.
@@ -131,9 +128,9 @@ mod tests {
     #[test]
     fn the_notice_names_the_cli_and_the_reason_on_one_line() {
         let notice = ResumeFailure::NotFound.notice("Claude Code");
-        assert!(notice.starts_with("Claude Code could not resume its session"));
+        assert!(notice.starts_with("Claude Code could not resume"));
         assert!(notice.contains("not found"));
-        assert!(notice.contains("relaunch the pane"));
+        assert!(notice.contains("Relaunch"));
         assert!(!notice.contains('\n'));
         let early = ResumeFailure::ExitedEarly(2).notice("Claude Code");
         assert!(early.contains("code 2"));
