@@ -212,6 +212,11 @@ pub struct Tree {
 
 impl Tree {
     /// A tree with a single pane filling everything.
+    ///
+    /// ```
+    /// let tree = yien_layout::Tree::new();
+    /// assert_eq!(tree.panes(), vec![0]);
+    /// ```
     pub fn new() -> Self {
         let root = Node {
             parent: None,
@@ -226,6 +231,13 @@ impl Tree {
     }
 
     /// Every pane, in tree order (left to right, top to bottom within a branch).
+    ///
+    /// ```
+    /// use yien_layout::{DropZone, Tree};
+    /// let mut tree = Tree::new();
+    /// let left = tree.split_towards(0, DropZone::Left).unwrap();
+    /// assert_eq!(tree.panes(), vec![left, 0]);
+    /// ```
     pub fn panes(&self) -> Vec<PaneId> {
         let mut out = Vec::new();
         self.collect(self.root, &mut out);
@@ -244,11 +256,21 @@ impl Tree {
     }
 
     /// How many panes the tree holds; never zero.
+    ///
+    /// ```
+    /// let mut tree = yien_layout::Tree::new();
+    /// tree.split(0, yien_layout::Orientation::Vertical);
+    /// assert_eq!(tree.len(), 2);
+    /// ```
     pub fn len(&self) -> usize {
         self.panes().len()
     }
 
     /// Always `false`: a tree always has a pane.
+    ///
+    /// ```
+    /// assert!(!yien_layout::Tree::new().is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         false
     }
@@ -277,6 +299,14 @@ impl Tree {
     /// When the target already sits in a branch of the same orientation the new
     /// pane joins that branch instead of nesting a new one; otherwise every
     /// split would deepen the tree and the ratios would stop being comparable.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Tree};
+    /// let mut tree = Tree::new();
+    /// let new = tree.split(0, Orientation::Horizontal).unwrap();
+    /// assert_eq!(tree.panes(), vec![0, new]);
+    /// assert_eq!(tree.split(99, Orientation::Horizontal), None);
+    /// ```
     pub fn split(&mut self, pane: PaneId, orientation: Orientation) -> Option<PaneId> {
         let zone = match orientation {
             Orientation::Horizontal => DropZone::Right,
@@ -287,6 +317,13 @@ impl Tree {
 
     /// Splits `pane`, putting the new one on the side `zone` names. The new pane
     /// takes half of the one it came from.
+    ///
+    /// ```
+    /// use yien_layout::{DropZone, Tree};
+    /// let mut tree = Tree::new();
+    /// let above = tree.split_towards(0, DropZone::Top).unwrap();
+    /// assert_eq!(tree.panes(), vec![above, 0]);
+    /// ```
     pub fn split_towards(&mut self, pane: PaneId, zone: DropZone) -> Option<PaneId> {
         let node = self.find(pane)?;
         let new_pane = self.next_pane;
@@ -296,6 +333,14 @@ impl Tree {
     }
 
     /// Removes a pane. The last one cannot be closed: a tree always has a pane.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Tree};
+    /// let mut tree = Tree::new();
+    /// assert!(!tree.close(0));
+    /// let new = tree.split(0, Orientation::Horizontal).unwrap();
+    /// assert!(tree.close(new));
+    /// ```
     pub fn close(&mut self, pane: PaneId) -> bool {
         if self.len() <= 1 {
             return false;
@@ -304,6 +349,15 @@ impl Tree {
     }
 
     /// Grows `pane` by `delta` (a fraction of its branch) at its siblings' cost.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// tree.split(0, Orientation::Horizontal);
+    /// assert!(tree.resize(0, 0.25));
+    /// let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// assert!((tree.layout(area)[&0].w - 75.0).abs() < 0.01);
+    /// ```
     pub fn resize(&mut self, pane: PaneId, delta: f32) -> bool {
         let Some(node) = self.find(pane) else {
             return false;
@@ -345,6 +399,14 @@ impl Tree {
     }
 
     /// Every pane's rectangle inside `area`.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// let below = tree.split(0, Orientation::Vertical).unwrap();
+    /// let rects = tree.layout(Rect::new(0.0, 0.0, 80.0, 40.0));
+    /// assert_eq!(rects[&below], Rect::new(0.0, 20.0, 80.0, 20.0));
+    /// ```
     pub fn layout(&self, area: Rect) -> HashMap<PaneId, Rect> {
         let mut out = HashMap::new();
         self.place(self.root, area, &mut out);
@@ -382,6 +444,15 @@ impl Tree {
     ///
     /// `current` is the zone already on screen, if any; it keeps its slot unless
     /// another beats it by [`ZONE_HYSTERESIS`].
+    ///
+    /// ```
+    /// use yien_layout::{DropZone, Rect, Tree};
+    /// let tree = Tree::new();
+    /// let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// let (pane, zone, preview) = tree.drop_target(95.0, 50.0, area, None).unwrap();
+    /// assert_eq!((pane, zone), (0, DropZone::Right));
+    /// assert_eq!(preview, Rect::new(50.0, 0.0, 50.0, 100.0));
+    /// ```
     pub fn drop_target(
         &self,
         x: f32,
@@ -432,6 +503,14 @@ impl Tree {
 
     /// Moves `pane` next to `target`. The pane keeps its identity, so whatever
     /// terminal it holds moves with it.
+    ///
+    /// ```
+    /// use yien_layout::{DropZone, Orientation, Tree};
+    /// let mut tree = Tree::new();
+    /// let b = tree.split(0, Orientation::Horizontal).unwrap();
+    /// assert!(tree.move_pane(b, 0, DropZone::Left));
+    /// assert_eq!(tree.panes(), vec![b, 0]);
+    /// ```
     pub fn move_pane(&mut self, pane: PaneId, target: PaneId, zone: DropZone) -> bool {
         if pane == target || self.find(pane).is_none() || self.find(target).is_none() {
             return false;
@@ -540,6 +619,15 @@ impl Tree {
     }
 
     /// Every draggable boundary, as hit targets `thickness` pixels wide.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// tree.split(0, Orientation::Horizontal);
+    /// let dividers = tree.dividers(Rect::new(0.0, 0.0, 100.0, 100.0), 6.0);
+    /// assert_eq!(dividers.len(), 1);
+    /// assert_eq!(dividers[0].rect, Rect::new(47.0, 0.0, 6.0, 100.0));
+    /// ```
     pub fn dividers(&self, area: Rect, thickness: f32) -> Vec<Divider> {
         let rects = self.node_rects(area);
         let half = thickness / 2.0;
@@ -596,6 +684,15 @@ impl Tree {
 
     /// The divider under a point, if any. Callers holding a cached set should
     /// use [`divider_at`] directly instead of rebuilding the layout.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// tree.split(0, Orientation::Vertical);
+    /// let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// assert!(tree.divider_at(10.0, 51.0, area, 6.0).is_some());
+    /// assert!(tree.divider_at(10.0, 10.0, area, 6.0).is_none());
+    /// ```
     pub fn divider_at(&self, x: f32, y: f32, area: Rect, thickness: f32) -> Option<Divider> {
         divider_at(&self.dividers(area, thickness), x, y)
     }
@@ -605,6 +702,16 @@ impl Tree {
     /// Unlike [`Tree::resize`], the space comes from the neighbour across that
     /// boundary alone; the rest of the branch stays put, which is what dragging
     /// a divider looks like.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// let b = tree.split(0, Orientation::Horizontal).unwrap();
+    /// let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// let id = tree.dividers(area, 6.0)[0].id;
+    /// assert!(tree.drag_divider(id, -20.0, area));
+    /// assert!((tree.layout(area)[&b].w - 70.0).abs() < 0.01);
+    /// ```
     pub fn drag_divider(&mut self, id: DividerId, delta: f32, area: Rect) -> bool {
         let Some(branch_rect) = self.node_rects(area).get(&id.branch).copied() else {
             return false;
@@ -669,6 +776,15 @@ impl Tree {
     /// among the panes on that side, take the one that overlaps the most across
     /// the movement axis, and break ties by distance. That is the rule a person
     /// actually has in mind.
+    ///
+    /// ```
+    /// use yien_layout::{Direction, Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// let below = tree.split(0, Orientation::Vertical).unwrap();
+    /// let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+    /// assert_eq!(tree.neighbour(0, Direction::Down, area), Some(below));
+    /// assert_eq!(tree.neighbour(0, Direction::Up, area), None);
+    /// ```
     pub fn neighbour(&self, pane: PaneId, direction: Direction, area: Rect) -> Option<PaneId> {
         let rects = self.layout(area);
         let from = *rects.get(&pane)?;
