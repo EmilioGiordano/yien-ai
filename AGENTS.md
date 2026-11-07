@@ -72,7 +72,9 @@ C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic>
 
 The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is the limit, not CPU.
 
-- `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the lock `D:/yien-build.lock`, and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds; if the gate waits a long time, tell Emilio.
+- `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the lock `D:/yien-build.lock`, and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds.
+- The gate gives up after an hour with exit code 75. That is not a test failure: report it, with the memory and process counts it printed, and the orchestrator tells Emilio. A lock whose owner died, or that is older than 4 hours, is broken automatically.
+- A gated build can outlast a tool call's time limit. Run long ones (full gate, release builds, first build of a slot) in the background and wait for them to finish.
 - Each worktree has an untracked `.yien-slot` file naming its target dir: `D:/More-Code-Projects/yien-compiled/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile on `C:`. Never share a target dir between two branches: mixed builds have caused real bugs.
 - Old slots are cleaned only when `D:` drops below about 40 GB free.
 - Branches run cheap checks on the crates they touch: `fmt --check`, `check -p <crates> --all-targets`, `test -p <crates>`. The full gate runs at integration.
@@ -94,6 +96,8 @@ A PR is ready to merge only when all of these hold:
 - The implementation is correct, tested and working: the full gate passed at integration.
 - The feature was validated through the interface, not only with unit tests.
 - `quality-reviewer` gave PASS.
+
+A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet) counts as met when the PR says so and why.
 
 ## Integration and merge
 
