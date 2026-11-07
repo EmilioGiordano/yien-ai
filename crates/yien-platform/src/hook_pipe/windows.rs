@@ -440,7 +440,7 @@ pub(crate) fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError
 }
 
 /// The current process user's SID, as `S-1-5-21-...`.
-fn current_user_sid() -> Result<String, HookPipeError> {
+pub(crate) fn current_user_sid() -> Result<String, HookPipeError> {
     let mut token: HANDLE = null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing;
     // `token` is a valid out pointer.
