@@ -393,7 +393,7 @@ fn event() -> io::Result<OwnedHandle> {
 }
 
 /// A self-relative security descriptor allocated by the OS.
-struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct SecurityDescriptor(pub(crate) PSECURITY_DESCRIPTOR);
 
 // SAFETY: the descriptor is immutable after creation and freed only on drop.
 unsafe impl Send for SecurityDescriptor {}
@@ -408,7 +408,7 @@ impl Drop for SecurityDescriptor {
 
 /// A DACL with one entry: full access for the current user (RNF-11). `P`
 /// blocks inherited entries.
-fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
+pub(crate) fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
     let sid = current_user_sid()?;
     if !sid
         .bytes()
