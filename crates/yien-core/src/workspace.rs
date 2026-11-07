@@ -1037,6 +1037,62 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_19_a_crashed_pane_gets_its_view_again_after_the_relaunch() {
+        let mut ws = Workspace::new();
+        ws.set_window_focus(true);
+        let (_, a) = project(&mut ws);
+        assert!(ws.panes[&a].visible && ws.panes[&a].seen);
+        let fx = ws.on_pane_event(a, PaneEvent::Crashed);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::View { .. })));
+        assert!(fx.iter().any(
+            |e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a && !p.running)
+        ));
+        let fx = run(&mut ws, Command::RelaunchPane { pane: a });
+        let relaunch = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Relaunch { pane } if *pane == a));
+        let view = fx.iter().position(
+            |e| matches!(e, Effect::View { pane, visible: true, seen: true } if *pane == a),
+        );
+        assert!(
+            relaunch.is_some() && view.is_some() && relaunch < view,
+            "{fx:?}"
+        );
+    }
+
+    #[test]
+    fn an_exit_updates_the_pane() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        let fx = ws.on_pane_event(a, PaneEvent::Exited(Some(2)));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a && !p.running && p.exit_code == Some(2)
+        )));
+    }
+
+    #[test]
+    fn a_new_tab_is_announced_before_its_pane_and_started_before_both() {
+        let mut ws = Workspace::new();
+        let fx = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/p".into(),
+                name: None,
+            },
+        );
+        let spawn = fx.iter().position(|e| matches!(e, Effect::Spawn { .. }));
+        let tab = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::TabUpdated(_))));
+        let pane = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(_))));
+        assert!(spawn.is_some() && spawn < tab && tab < pane, "{fx:?}");
+    }
+
+    #[test]
     fn stale_pane_events_are_ignored() {
         let mut ws = Workspace::new();
         assert!(
