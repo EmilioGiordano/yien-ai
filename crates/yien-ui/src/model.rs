@@ -229,6 +229,9 @@ pub struct WorkspaceView {
     closed_panes: HashSet<PaneId>,
     /// The profiles a new pane can start with, the shell first.
     profiles: Vec<ProfileInfo>,
+    /// Tabs in the order they were last selected, the latest first
+    /// (RF-NAV-05).
+    recent: Vec<TabId>,
 }
 
 impl WorkspaceView {
@@ -303,6 +306,7 @@ impl WorkspaceView {
                 .copied();
         }
         self.closed_tabs.insert(id);
+        self.recent.retain(|t| *t != id);
         let gone = tab.layout.panes();
         for pane in &gone {
             self.panes.remove(pane);
@@ -465,7 +469,32 @@ impl WorkspaceView {
         };
         self.selected = Some(id);
         self.folded.remove(&project);
+        self.recent.retain(|t| *t != id);
+        self.recent.insert(0, id);
         true
+    }
+
+    /// Every tab, the most recently selected first; tabs never selected
+    /// follow in tab-bar order (RF-NAV-05).
+    pub fn tabs_by_recent(&self) -> Vec<&TabView> {
+        let mut tabs: Vec<&TabView> = self
+            .recent
+            .iter()
+            .filter_map(|id| self.tabs.get(id))
+            .collect();
+        for tab in self.tabs_in_order() {
+            if !self.recent.contains(&tab.id) {
+                tabs.push(tab);
+            }
+        }
+        tabs
+    }
+
+    /// Tab `n` (from 1) of the selected tab's project, in tab-bar order
+    /// (RF-NAV-05).
+    pub fn nth_tab_of_selected_project(&self, n: usize) -> Option<TabId> {
+        let project = self.selected_project()?;
+        self.tabs_of(project).nth(n.checked_sub(1)?).map(|t| t.id)
     }
 
     /// A project's first tab, if it has one.
@@ -969,6 +998,36 @@ mod tests {
         }
         assert_eq!(seen, vec![11, 20, 10]);
         assert_eq!(view.tab_after(-1), Some(TabId::new(20)));
+    }
+
+    #[test]
+    fn rf_nav_05_tab_n_counts_within_the_selected_project() {
+        let mut view = demo();
+        assert_eq!(view.nth_tab_of_selected_project(1), Some(TabId::new(10)));
+        assert_eq!(view.nth_tab_of_selected_project(2), Some(TabId::new(11)));
+        assert_eq!(view.nth_tab_of_selected_project(3), None);
+        assert_eq!(view.nth_tab_of_selected_project(0), None);
+        view.select_tab(TabId::new(20));
+        assert_eq!(view.nth_tab_of_selected_project(1), Some(TabId::new(20)));
+        assert_eq!(view.nth_tab_of_selected_project(2), None);
+    }
+
+    #[test]
+    fn rf_nav_05_tabs_by_recent_put_the_last_selected_first() {
+        let ids = |view: &WorkspaceView| -> Vec<u64> {
+            view.tabs_by_recent().iter().map(|t| t.id.get()).collect()
+        };
+        let mut view = demo();
+        assert_eq!(ids(&view), vec![10, 11, 20]);
+        view.select_tab(TabId::new(20));
+        view.set_active(Some(TabId::new(11)));
+        assert_eq!(ids(&view), vec![11, 20, 10]);
+        view.select_tab(TabId::new(20));
+        assert_eq!(ids(&view), vec![20, 11, 10]);
+        view.tab_closed(TabId::new(20));
+        assert_eq!(ids(&view), vec![11, 10]);
+        assert!(!view.select_tab(TabId::new(99)));
+        assert_eq!(ids(&view), vec![11, 10]);
     }
 
     #[test]
