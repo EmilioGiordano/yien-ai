@@ -445,8 +445,9 @@ impl CoreHandle {
 
     /// Terminates every pane's program and closes its pseudo terminal, for
     /// the app's quit path after [`CoreHandle::save_session`]. Saving stops
-    /// first, so programs ending now never reach the saved session, and a
-    /// pane that starts its program afterwards has it closed at once.
+    /// first, so programs ending now never reach the saved session. A
+    /// program being started at that moment is closed and waited for like
+    /// the others, and no program starts afterwards.
     ///
     /// The closes run on threads of their own, without the core's runtime;
     /// the caller waits at most `timeout` for all of them together, and
@@ -466,17 +467,23 @@ impl CoreHandle {
         if let Some(writer) = &self.writer {
             writer.stop();
         }
-        let open = self.consoles.shut();
+        let mut open = self.consoles.shut();
         for closer in &open {
             if let Err(e) = closer.start() {
                 tracing::warn!("a pane did not start closing: {e}");
             }
         }
-        let total = open.len();
-        let still_open = open
-            .iter()
-            .filter(|c| !c.wait(deadline.saturating_duration_since(Instant::now())))
-            .count();
+        // Spawns under way at the shut register afterwards and close at once.
+        let late = self
+            .consoles
+            .wait_spawns(deadline.saturating_duration_since(Instant::now()));
+        open.extend(late.closers);
+        let total = open.len() + late.spawning;
+        let still_open = late.spawning
+            + open
+                .iter()
+                .filter(|c| !c.wait(deadline.saturating_duration_since(Instant::now())))
+                .count();
         if still_open == 0 {
             Ok(total)
         } else {
