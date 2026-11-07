@@ -301,14 +301,60 @@ fn a_reply_is_never_dropped_behind_a_full_input_queue() {
     while inputs.len() < sent.len() || replies.is_empty() {
         let bytes = next_bytes(&child);
         if bytes.starts_with(b"\x1b[") {
-            replies.push(bytes);
+            replies.push((inputs.len(), bytes));
         } else {
             inputs.push(bytes);
         }
     }
     assert_eq!(inputs, sent);
     assert_eq!(replies.len(), 1);
-    assert!(replies[0].ends_with(b"R"));
+    let (after, reply) = &replies[0];
+    assert!(reply.ends_with(b"R"));
+    assert_eq!(
+        *after,
+        yien_pty::INPUT_QUEUE_CAPACITY,
+        "the reply must go before the input still waiting"
+    );
+}
+
+#[test]
+fn a_reply_goes_before_a_resize_waiting_on_a_full_queue() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    let sent: Vec<Vec<u8>> = (0..300).map(|i| format!("<{i}>").into_bytes()).collect();
+    for bytes in &sent {
+        h.input(pane, bytes);
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    h.send(ClientMsg::ResizePane {
+        pane,
+        cols: 100,
+        rows: 30,
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    child.output(b"\x1b[6n");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut order = Vec::new();
+    while order.len() < sent.len() + 2 {
+        let deadline = Instant::now() + TIMEOUT;
+        let input = loop {
+            if let Some(input) = child.recv_input(Duration::from_millis(50)) {
+                break input;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for input");
+        };
+        order.push(match input {
+            FakeInput::Bytes(b) if b.starts_with(b"\x1b[") => "reply".to_owned(),
+            FakeInput::Bytes(b) => String::from_utf8(b).unwrap(),
+            FakeInput::Resize { cols, rows } => format!("resize {cols}x{rows}"),
+        });
+    }
+    let at = yien_pty::INPUT_QUEUE_CAPACITY;
+    assert_eq!(order[at - 1], format!("<{}>", at - 1));
+    assert_eq!(order[at], "reply");
+    assert_eq!(order[at + 1], "resize 100x30");
+    assert_eq!(order[at + 2], format!("<{at}>"));
 }
 
 #[test]

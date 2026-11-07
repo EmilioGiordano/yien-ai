@@ -92,6 +92,20 @@ impl Outbox {
     fn clear(&mut self) {
         *self = Self::default();
     }
+
+    /// Replies go before a pending resize: a full resize queue must not hold
+    /// back the answer the child is blocked on.
+    fn drain(&mut self, control: &PtyControl) -> Result<(), Blocked> {
+        write_all(control, &mut self.replies)?;
+        if let Some((cols, rows)) = self.resize {
+            match control.resize(cols, rows) {
+                Ok(()) | Err(PtyError::InvalidSize { .. }) => self.resize = None,
+                Err(PtyError::ResizeQueueFull) => return Err(Blocked::Full),
+                Err(_) => return Err(Blocked::Closed),
+            }
+        }
+        write_all(control, &mut self.input)
+    }
 }
 
 struct Session {
@@ -393,51 +407,23 @@ impl Actor {
         self.dirty = true;
     }
 
-    /// Writes what the outbox holds until the PTY's queue refuses; refused
-    /// bytes stay first in line for the retry.
+    /// Writes what the outbox holds, replies first, then the resize, then the
+    /// input, until the PTY's queue refuses; refused bytes stay first in line
+    /// for the retry.
     fn flush(&mut self) {
         let Some(session) = &self.session else {
             self.outbox.clear();
             self.retry_at = None;
             return;
         };
-        if let Some((cols, rows)) = self.outbox.resize {
-            match session.control.resize(cols, rows) {
-                Ok(()) | Err(PtyError::InvalidSize { .. }) => self.outbox.resize = None,
-                Err(PtyError::ResizeQueueFull) => {
-                    self.retry_at = Some(Instant::now() + RETRY_AFTER);
-                    return;
-                }
-                Err(_) => {
-                    self.outbox.clear();
-                    self.retry_at = None;
-                    return;
-                }
+        self.retry_at = match self.outbox.drain(&session.control) {
+            Ok(()) => None,
+            Err(Blocked::Full) => Some(Instant::now() + RETRY_AFTER),
+            Err(Blocked::Closed) => {
+                self.outbox.clear();
+                None
             }
-        }
-        loop {
-            let (queue, bytes) = if let Some(b) = self.outbox.replies.pop_front() {
-                (&mut self.outbox.replies, b)
-            } else if let Some(b) = self.outbox.input.pop_front() {
-                (&mut self.outbox.input, b)
-            } else {
-                break;
-            };
-            match session.control.write(bytes) {
-                Ok(()) => {}
-                Err(PtyError::InputQueueFull(returned)) => {
-                    queue.push_front(returned.into_bytes());
-                    self.retry_at = Some(Instant::now() + RETRY_AFTER);
-                    return;
-                }
-                Err(_) => {
-                    self.outbox.clear();
-                    self.retry_at = None;
-                    break;
-                }
-            }
-        }
-        self.retry_at = None;
+        };
     }
 
     fn step(&mut self, signal: &Signal) {
@@ -541,6 +527,30 @@ impl Actor {
             }
         }
     }
+}
+
+/// Why the outbox stopped writing.
+enum Blocked {
+    /// The PTY's queue is full; try again later.
+    Full,
+    /// The session is gone; nothing will be written.
+    Closed,
+}
+
+/// Writes `queue` in order until the PTY refuses; a refused chunk goes back
+/// to the front.
+fn write_all(control: &PtyControl, queue: &mut VecDeque<Vec<u8>>) -> Result<(), Blocked> {
+    while let Some(bytes) = queue.pop_front() {
+        match control.write(bytes) {
+            Ok(()) => {}
+            Err(PtyError::InputQueueFull(returned)) => {
+                queue.push_front(returned.into_bytes());
+                return Err(Blocked::Full);
+            }
+            Err(_) => return Err(Blocked::Closed),
+        }
+    }
+    Ok(())
 }
 
 fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
