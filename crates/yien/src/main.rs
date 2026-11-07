@@ -1,5 +1,5 @@
-//! The YIEN desktop app: starts the core on the system ConPTY, opens a
-//! project on the current folder and runs the window.
+//! The YIEN desktop app: starts the core on the system ConPTY, restores the
+//! saved session (or opens a project on the start folder) and runs the window.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -8,11 +8,13 @@ mod panic_log;
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
-use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, SendError};
+use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, SendError, SessionStore};
 use yien_platform::LogGuard;
+use yien_platform::state_store::FileStore;
 use yien_proto::frame::Frame;
-use yien_proto::{ClientMsg, Command, PaneId};
+use yien_proto::{ClientMsg, PaneId};
 use yien_pty::PortablePty;
 use yien_ui::{CoreClient, Refused};
 
@@ -40,6 +42,9 @@ fn main() -> ExitCode {
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let config = CoreConfig {
         hooks,
+        session: session_store(),
+        start_project: yien_platform::paths::start_dir()
+            .map(|dir| dir.to_string_lossy().into_owned()),
         ..CoreConfig::default()
     };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {
@@ -50,25 +55,32 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let root = std::env::current_dir()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_owned());
-    let open = ClientMsg::Command(Command::NewProject { root, name: None });
-    if let Err(error) = core.try_send(open) {
-        tracing::error!("could not open the first project: {error}");
-        eprintln!("yien: {error}");
-        return ExitCode::FAILURE;
-    }
+    let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
     yien_ui::run(Box::new(Client(core)), events, move || {
         tracing::info!("yien exiting");
+        if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
+            tracing::warn!("the session was not saved on quit: {error}");
+        }
         if let Some(file) = &settings_file {
             let _ = std::fs::remove_file(file);
         }
         drop(log);
     });
     ExitCode::SUCCESS
+}
+
+/// The longest the quit path waits to save the session.
+const QUIT_SAVE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The saved session under YIEN's data dir; `None` (nothing saved) when the
+/// data dir cannot be found.
+fn session_store() -> Option<SessionStore> {
+    let dir = yien_platform::paths::state_dir()
+        .inspect_err(|e| tracing::warn!("no data dir, the session is not saved: {e}"))
+        .ok()?;
+    Some(SessionStore::new(FileStore::new(dir)))
 }
 
 /// `yien-hook` sits next to this executable; the hook settings go under
