@@ -46,8 +46,23 @@ mod support {
 
         /// Runs a setup command, isolated from the user's global and system git config.
         pub fn git(&self, cwd: &Path, args: &[&str]) -> String {
-            let out = Command::new("git")
-                .current_dir(cwd)
+            let out = self.command(cwd, args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+
+        /// Like [`Sandbox::git`], for a command expected to fail; returns whether it succeeded.
+        pub fn git_may_fail(&self, cwd: &Path, args: &[&str]) -> bool {
+            self.command(cwd, args).output().unwrap().status.success()
+        }
+
+        fn command(&self, cwd: &Path, args: &[&str]) -> Command {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(cwd)
                 .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
                 .args(args)
                 .env("GIT_CONFIG_GLOBAL", &self.config)
@@ -55,15 +70,14 @@ mod support {
                 .env("GIT_AUTHOR_NAME", "Test")
                 .env("GIT_AUTHOR_EMAIL", "test@example.com")
                 .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+                .env("GIT_COMMITTER_EMAIL", "test@example.com");
+            cmd
+        }
+
+        /// A shell command that creates `marker`, for a config value git would run.
+        pub fn marker_command(marker: &Path) -> String {
+            let path = marker.to_string_lossy().replace('\\', "/");
+            format!("echo hit > '{path}'")
         }
 
         /// A new repository on `main` with one commit of `a.txt`.
@@ -176,7 +190,7 @@ fn rf_ctx_04_lists_changed_files() {
 }
 
 #[test]
-fn rf_ctx_04_status_never_writes_the_index() {
+fn rnf_14_status_never_writes_the_index() {
     let Some(sb) = Sandbox::new() else { return };
     let root = sb.repo("readonly");
     let index = root.join(".git/index");
@@ -339,4 +353,102 @@ fn watcher_refreshes_for_work_tree_edits() {
     })
     .unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Change::Refresh));
+}
+
+#[test]
+fn rnf_14_repo_filters_never_run() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("filters");
+    std::fs::write(root.join("b.md"), "b\n").unwrap();
+    std::fs::write(root.join("c.inc"), "c\n").unwrap();
+    sb.git(&root, &["add", "b.md", "c.inc"]);
+    sb.git(&root, &["commit", "-q", "-m", "more"]);
+
+    let clean = sb.dir.join("clean.marker");
+    let process = sb.dir.join("process.marker");
+    let included = sb.dir.join("included.marker");
+    let clean_cmd = format!("{}; cat", Sandbox::marker_command(&clean));
+    sb.git(&root, &["config", "filter.evil.clean", &clean_cmd]);
+    sb.git(&root, &["config", "filter.evil.required", "true"]);
+    sb.git(
+        &root,
+        &[
+            "config",
+            "filter.my proc.process",
+            &Sandbox::marker_command(&process),
+        ],
+    );
+    // A repo file pulled in through include.path still counts as repo config.
+    let include = sb.dir.join("included.cfg");
+    std::fs::write(
+        &include,
+        format!(
+            "[filter \"inc\"]\n\tclean = \"{}; cat\"\n",
+            Sandbox::marker_command(&included).replace('"', "\\\"")
+        ),
+    )
+    .unwrap();
+    sb.git(
+        &root,
+        &["config", "include.path", include.to_str().unwrap()],
+    );
+    std::fs::write(
+        root.join(".git/info/attributes"),
+        "*.txt filter=evil\n*.md filter=\"my proc\"\n*.inc filter=inc\n",
+    )
+    .unwrap();
+
+    // Stale stat data makes status re-read the files through their filters.
+    std::thread::sleep(Duration::from_millis(1100));
+    for (name, content) in [("a.txt", "one\n"), ("b.md", "b\n"), ("c.inc", "c\n")] {
+        std::fs::write(root.join(name), content).unwrap();
+    }
+
+    let status = git().status(&root).unwrap();
+    assert!(!status.is_dirty(), "{:?}", status.files);
+    for marker in [&clean, &process, &included] {
+        assert!(!marker.exists(), "{} ran", marker.display());
+    }
+}
+
+#[test]
+fn rnf_14_repo_fsmonitor_never_runs() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("fsmonitor");
+    let marker = sb.dir.join("fsmonitor.marker");
+    sb.git(
+        &root,
+        &[
+            "config",
+            "core.fsmonitor",
+            &Sandbox::marker_command(&marker),
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+
+    git().info(&root).unwrap();
+    assert!(!marker.exists(), "the fsmonitor command ran");
+}
+
+#[test]
+fn rf_ctx_04_merge_conflict() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("conflict");
+    sb.git(&root, &["switch", "-q", "-c", "other"]);
+    std::fs::write(root.join("a.txt"), "theirs\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "theirs"]);
+    sb.git(&root, &["switch", "-q", "main"]);
+    std::fs::write(root.join("a.txt"), "ours\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "ours"]);
+    assert!(!sb.git_may_fail(&root, &["merge", "-q", "other"]));
+
+    let status = git().status(&root).unwrap();
+    assert_eq!(
+        status.files,
+        vec![ChangedFile {
+            path: "a.txt".into(),
+            status: FileStatus::Conflicted
+        }]
+    );
 }
