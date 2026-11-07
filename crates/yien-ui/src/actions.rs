@@ -54,6 +54,16 @@ actions!(
         CopySelection,
         /// Pastes the clipboard into the terminal (RF-PAN-09).
         PasteClipboard,
+        /// Focuses the next pane that needs the user, the one waiting
+        /// longest first (RF-ATN-05).
+        JumpToNeedsYou,
+        /// Opens a tab with the shell in the selected tab's project.
+        NewTab,
+        /// Opens a tab with Claude Code in the selected tab's project
+        /// (RF-PAN-18).
+        NewClaudeTab,
+        /// Splits the focused pane, Claude Code on the right (RF-PAN-18).
+        SplitRightClaude,
     ]
 );
 
@@ -66,6 +76,10 @@ pub(crate) const SPLIT_RIGHT_KEYS: &str = "Alt+Shift+=";
 pub(crate) const SPLIT_DOWN_KEYS: &str = "Alt+Shift+-";
 pub(crate) const CLOSE_PANE_KEYS: &str = "Ctrl+Shift+W";
 pub(crate) const FOCUS_KEYS: &str = "Alt+Arrows";
+pub(crate) const JUMP_KEYS: &str = "Ctrl+Shift+J";
+pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
+pub(crate) const NEW_CLAUDE_TAB_KEYS: &str = "Ctrl+Shift+A";
+pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
@@ -95,5 +109,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-enter", ToggleMaximize, context),
         KeyBinding::new("ctrl-shift-c", CopySelection, terminal),
         KeyBinding::new("ctrl-shift-v", PasteClipboard, terminal),
+        KeyBinding::new("ctrl-shift-j", JumpToNeedsYou, context),
+        KeyBinding::new("ctrl-shift-t", NewTab, context),
+        KeyBinding::new("ctrl-shift-a", NewClaudeTab, context),
+        KeyBinding::new("ctrl-shift-s", SplitRightClaude, context),
     ]);
 }
