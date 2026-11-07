@@ -1509,7 +1509,7 @@ mod tests {
         let fx = run(
             &mut ws,
             Command::NewProject {
-                root: r"C:\Code\yien".into(),
+                root: "C:/Code//yien".into(),
                 name: None,
             },
         );

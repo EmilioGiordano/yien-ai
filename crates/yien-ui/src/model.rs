@@ -1298,7 +1298,7 @@ mod tests {
     #[test]
     fn rf_esp_01_adding_a_folder_that_is_a_project_selects_its_latest_tab() {
         let mut view = demo();
-        let spelled = r"C:\Code\project-1\";
+        let spelled = "C:/Code//project-1/";
         assert_eq!(
             view.folder_target(spelled),
             FolderTarget::Tab(TabId::new(10))
