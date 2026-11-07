@@ -619,7 +619,7 @@ impl Tree {
             return false;
         }
         let extent = span_of(branch_rect, *orientation);
-        if extent <= 0.0 || !delta.is_finite() {
+        if !extent.is_finite() || extent <= 0.0 || !delta.is_finite() {
             return false;
         }
 
@@ -631,7 +631,8 @@ impl Tree {
         if lo > hi {
             return false;
         }
-        let applied = (delta / extent).clamp(lo, hi);
+        // max/min, not clamp: clamp panics on a NaN bound.
+        let applied = (delta / extent).max(lo).min(hi);
         if applied.abs() < f32::EPSILON {
             return false;
         }
@@ -1327,6 +1328,24 @@ mod tests {
         let l = t.layout(AREA);
         assert_close(l[&0].w, 50.0);
         assert_close(l[&b].w, 50.0);
+    }
+
+    #[test]
+    fn non_finite_areas_are_refused() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+        for area in [
+            Rect::new(0.0, 0.0, f32::NAN, 100.0),
+            Rect::new(0.0, 0.0, f32::INFINITY, 100.0),
+        ] {
+            assert!(!t.drag_divider(id, 10.0, area));
+        }
+        assert!(t.drag_divider(id, 10.0, AREA));
+        let l = t.layout(AREA);
+        assert!(l.values().all(|r| r.w.is_finite()));
+        assert_close(l[&0].w, 60.0);
+        assert_close(l[&b].w, 40.0);
     }
 
     #[test]
