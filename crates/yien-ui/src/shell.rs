@@ -1712,7 +1712,7 @@ impl Shell {
                         ),
                 )
             })
-            .when(state.needs_you(), |row| {
+            .when_some(t.tab_row_bar(state), |row, red| {
                 row.child(
                     div()
                         .absolute()
@@ -1721,7 +1721,7 @@ impl Shell {
                         .bottom(px(6.0))
                         .w(px(2.0))
                         .rounded(px(2.0))
-                        .bg(t.shu),
+                        .bg(red),
                 )
             })
             .into_any_element()
@@ -1983,13 +1983,8 @@ impl Shell {
             .bg(t.term_bg)
             .text_color(t.term_text)
             .map(|p| {
-                if needs {
-                    p.border_2().border_color(t.shu)
-                } else if focused {
-                    p.border_1().border_color(t.term_strong)
-                } else {
-                    p.border_1().border_color(t.term_line)
-                }
+                let (width, color) = t.pane_border(focused, needs);
+                p.border(px(width)).border_color(color)
             })
             .child(head)
             .children(exited)

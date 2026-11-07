@@ -133,6 +133,25 @@ impl Theme {
             AgentState::Working | AgentState::Idle => self.muted,
         }
     }
+
+    /// A pane's border width and colour: red and thicker while its agent
+    /// needs the user, stronger than its neighbours' when it has the focus
+    /// (RF-PAN-17).
+    pub(crate) fn pane_border(&self, focused: bool, needs_you: bool) -> (f32, Rgba) {
+        if needs_you {
+            (2.0, self.shu)
+        } else if focused {
+            (1.0, self.term_strong)
+        } else {
+            (1.0, self.term_line)
+        }
+    }
+
+    /// The red bar at the left of a tab row, drawn whether or not the tab
+    /// is selected, only while one of its panes needs the user (RF-ATN-15).
+    pub(crate) fn tab_row_bar(&self, state: AgentState) -> Option<Rgba> {
+        state.needs_you().then_some(self.shu)
+    }
 }
 
 /// Points gpui-component, which paints the title bar, its window buttons and
@@ -227,6 +246,22 @@ mod tests {
             }
             assert_eq!(t.state_color(AgentState::NeedsYou), t.shu);
             assert_eq!(t.label_color(AgentState::NeedsYou), t.shu);
+        }
+    }
+
+    #[test]
+    fn rf_pan_17_the_focused_pane_stands_out_from_the_others() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let (_, focused) = t.pane_border(true, false);
+            let (_, other) = t.pane_border(false, false);
+            assert_ne!(focused, other, "{kind:?}");
+            assert_ne!(focused, t.shu, "{kind:?}: focus is not red (RN-01)");
+            assert!(
+                contrast(focused, t.term_bg) > contrast(other, t.term_bg),
+                "{kind:?}: the focused border is the stronger one"
+            );
+            assert_eq!(t.pane_border(true, true), (2.0, t.shu), "{kind:?}");
         }
     }
 
