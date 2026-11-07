@@ -452,3 +452,40 @@ fn rf_ctx_04_merge_conflict() {
         }]
     );
 }
+
+#[test]
+fn rnf_14_partial_clone_never_fetches() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.dir.join("partial");
+    std::fs::create_dir_all(&root).unwrap();
+    sb.git(&root, &["init", "-q", "-b", "main"]);
+    let lines: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(root.join("a.txt"), &lines).unwrap();
+    sb.git(&root, &["add", "a.txt"]);
+    sb.git(&root, &["commit", "-q", "-m", "first"]);
+    let old = sb.git(&root, &["rev-parse", "HEAD:a.txt"]);
+    // A staged rename with an edit makes status read the old blob for rename detection.
+    sb.git(&root, &["mv", "a.txt", "moved.txt"]);
+    std::fs::write(root.join("moved.txt"), format!("{lines}extra\n")).unwrap();
+    sb.git(&root, &["add", "moved.txt"]);
+    std::fs::remove_file(root.join(".git/objects").join(&old[..2]).join(&old[2..])).unwrap();
+
+    let marker = sb.dir.join("ssh.marker");
+    let ssh = format!("{}; false", Sandbox::marker_command(&marker));
+    for (key, value) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.url", "ssh://example.invalid/x"),
+        ("remote.origin.promisor", "true"),
+        ("core.sshCommand", ssh.as_str()),
+    ] {
+        sb.git(&root, &["config", key, value]);
+    }
+
+    let result = git().status(&root);
+    assert!(
+        !matches!(result, Err(GitError::Timeout(_))),
+        "status hung: {result:?}"
+    );
+    assert!(!marker.exists(), "the repository's ssh command ran");
+}
