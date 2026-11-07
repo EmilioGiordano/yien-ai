@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod paste;
+pub mod win32;
 
 /// The modifier keys held during a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
