@@ -27,14 +27,25 @@ pub(crate) enum ResumeFailure {
     ExitedEarly(u32),
 }
 
+/// The most of the CLI's last words a notice quotes.
+const SAID_CHARS: usize = 160;
+
 impl ResumeFailure {
-    /// The one-line notice for the user, naming the CLI by `profile`.
-    pub fn notice(self, profile: &str) -> String {
+    /// The one-line notice for the user, naming the CLI by `profile` and
+    /// quoting `said`, the last line it printed, since the shell that opens
+    /// takes the screen it was on. Shown to the user only, never logged.
+    pub fn notice(self, profile: &str, said: Option<&str>) -> String {
         let why = match self {
             Self::NotFound => "conversation not found".to_owned(),
             Self::ExitedEarly(code) => format!("exited with code {code}"),
         };
-        format!("{profile} could not resume ({why}); a shell opened. Relaunch for a new session.")
+        let notice = format!(
+            "{profile} could not resume ({why}); a shell opened. Relaunch for a new session."
+        );
+        match said {
+            Some(said) => format!("{notice} It said: {said}"),
+            None => notice,
+        }
     }
 
     /// A short name for the logs; never the screen's text.
@@ -71,6 +82,20 @@ pub(crate) fn resume_failed(
         Some(code) if code != 0 && elapsed <= EXIT_GRACE => Some(ResumeFailure::ExitedEarly(code)),
         _ => None,
     }
+}
+
+/// The last line with text on `screen`, trimmed and cut to [`SAID_CHARS`].
+pub(crate) fn last_words(screen: &[&str]) -> Option<String> {
+    let line = screen
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())?;
+    let mut said: String = line.chars().take(SAID_CHARS).collect();
+    if line.chars().nth(SAID_CHARS).is_some() {
+        said.push('…');
+    }
+    Some(said)
 }
 
 #[cfg(test)]
@@ -134,13 +159,30 @@ mod tests {
     }
 
     #[test]
+    fn rf_ses_11_the_notice_quotes_the_cli_s_last_line() {
+        let screen = ["", "Error: invalid API key  ", "", "   "];
+        let said = last_words(&screen);
+        assert_eq!(said.as_deref(), Some("Error: invalid API key"));
+        let notice = ResumeFailure::ExitedEarly(1).notice("Claude Code", said.as_deref());
+        assert!(
+            notice.ends_with("It said: Error: invalid API key"),
+            "{notice}"
+        );
+        assert_eq!(last_words(&["", "  "]), None);
+        let long = "x".repeat(SAID_CHARS + 5);
+        let cut = last_words(&[long.as_str()]).unwrap();
+        assert_eq!(cut.chars().count(), SAID_CHARS + 1);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
     fn the_notice_names_the_cli_and_the_reason_on_one_line() {
-        let notice = ResumeFailure::NotFound.notice("Claude Code");
+        let notice = ResumeFailure::NotFound.notice("Claude Code", None);
         assert!(notice.starts_with("Claude Code could not resume"));
         assert!(notice.contains("not found"));
         assert!(notice.contains("Relaunch"));
         assert!(!notice.contains('\n'));
-        let early = ResumeFailure::ExitedEarly(2).notice("Claude Code");
+        let early = ResumeFailure::ExitedEarly(2).notice("Claude Code", None);
         assert!(early.contains("code 2"));
         assert_eq!(ResumeFailure::ExitedEarly(2).kind(), "exited early");
     }

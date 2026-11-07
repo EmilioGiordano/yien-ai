@@ -743,6 +743,19 @@ fn rf_ses_11_a_resume_that_exits_with_an_error_at_once_opens_a_shell() {
 }
 
 #[test]
+fn rf_ses_11_the_fallback_notice_keeps_what_the_cli_said() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.output(b"Error: invalid API key\r\n\r\n");
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(
+        notice.ends_with("It said: Error: invalid API key"),
+        "{notice}"
+    );
+}
+
+#[test]
 fn rf_ses_11_a_relaunch_after_the_fallback_starts_a_new_agent_session() {
     let (store, claude, session) = first_run();
     let (mut again, child) = resumed(&store);
@@ -774,6 +787,81 @@ fn rf_ses_11_a_resumed_pane_the_user_stops_does_not_open_a_shell() {
     });
     std::thread::sleep(Duration::from_millis(300));
     assert!(again.backend.take_spawned().is_empty());
+}
+
+/// Waits for `pane` to exit and checks no shell opened in its place.
+fn exits_without_a_shell(run: &mut Run, pane: PaneId) {
+    run.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane: p, .. } if *p == pane => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(run.backend.take_spawned().is_empty());
+}
+
+#[test]
+fn rf_ses_11_a_resumed_agent_the_user_typed_into_ends_without_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    again
+        .core
+        .try_send(ClientMsg::Input {
+            pane: claude,
+            bytes: yien_proto::InputBytes::new(b"\x03".to_vec()),
+        })
+        .unwrap();
+    assert!(child.recv_input(TIMEOUT).is_some());
+    child.exit(1);
+    exits_without_a_shell(&mut again, claude);
+}
+
+#[cfg(windows)]
+#[test]
+fn rf_ses_11_a_resumed_agent_that_sent_a_hook_ends_without_a_shell() {
+    use std::io::Write;
+    use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV, connect_client};
+    use yien_proto::{AgentState, hook_frame};
+
+    let (store, claude, session) = first_run();
+    let hooks = HookConfig {
+        hook_exe: std::env::current_exe().unwrap(),
+        settings_dir: std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("yien-session-veto-{}", std::process::id())),
+    };
+    let mut again = Run::start_with(store, Some(hooks));
+    let child = again
+        .children(2)
+        .into_iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    let env = |key: &str| {
+        child
+            .spec()
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .unwrap()
+    };
+    let (token, pipe) = (env(HOOK_TOKEN_ENV), env(HOOK_PIPE_ENV));
+    for (event, extra) in [
+        ("SessionStart", r#","source":"resume""#),
+        ("UserPromptSubmit", ""),
+    ] {
+        let payload = format!(r#"{{"hook_event_name":"{event}","session_id":"{session}"{extra}}}"#);
+        let frame = hook_frame::encode(token.as_bytes(), event, payload.as_bytes()).unwrap();
+        let mut conn = connect_client(&pipe, Instant::now() + TIMEOUT).unwrap();
+        conn.write_all(&frame).unwrap();
+    }
+    again.wait_for(|m| match m {
+        CoreMsg::PaneState { pane, state } if *pane == claude && *state == AgentState::Working => {
+            Some(())
+        }
+        _ => None,
+    });
+    child.exit(1);
+    exits_without_a_shell(&mut again, claude);
 }
 
 #[test]

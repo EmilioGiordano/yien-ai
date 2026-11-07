@@ -281,7 +281,12 @@ struct Actor {
     /// resume failing.
     resumed_at: Option<Duration>,
     /// A resume found failed, for the run loop to fall back on.
-    failed_resume: Option<ResumeFailure>,
+    /// Also the CLI's last line on screen, for the notice.
+    failed_resume: Option<(ResumeFailure, Option<String>)>,
+    /// This launch showed it is alive: the user typed into it, or a hook
+    /// came with its token (Claude sends `SessionStart` once a resume
+    /// works). Its exit is then the session ending, never a failed resume.
+    launch_alive: bool,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -341,6 +346,7 @@ pub(crate) fn spawn(
         agent_plan: None,
         resumed_at: None,
         failed_resume: None,
+        launch_alive: false,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -449,8 +455,8 @@ impl Actor {
                 Wake::Timer => {}
             }
             self.on_timers();
-            if let Some(failure) = self.failed_resume.take() {
-                self.fall_back(failure).await;
+            if let Some((failure, said)) = self.failed_resume.take() {
+                self.fall_back(failure, said).await;
             }
             if self.start_due().is_some_and(|at| at <= Instant::now()) {
                 self.start_pending().await;
@@ -515,6 +521,7 @@ impl Actor {
         self.dirty = true;
         let resume = self.resume.take().filter(|_| self.plan.can_resume());
         self.resumed_at = resume.is_some().then(|| self.now());
+        self.launch_alive = false;
         let session_id = if resume.is_some() {
             resume.clone()
         } else if self.plan.preassigns_session() {
@@ -639,6 +646,7 @@ impl Actor {
             tracing::debug!(pane = self.id.get(), "hook from an earlier launch dropped");
             return;
         }
+        self.launch_alive = true;
         match item.event {
             Ok(event) => self.step(&Signal::Hook(event)),
             Err(_) => self.step(&Signal::Ambiguous),
@@ -740,6 +748,7 @@ impl Actor {
 
     fn on_input(&mut self, input: PaneInput) {
         if input.user {
+            self.launch_alive |= self.session.is_some();
             self.step(&Signal::Input);
         }
         if self.session.is_some() && !input.bytes.is_empty() {
@@ -778,9 +787,9 @@ impl Actor {
 
     /// Whether this exit ends a resume that failed. Reads the screen the
     /// program left, all of it fed before the exit was posted.
-    fn resume_failure(&mut self, code: Option<u32>) -> Option<ResumeFailure> {
+    fn resume_failure(&mut self, code: Option<u32>) -> Option<(ResumeFailure, Option<String>)> {
         let launched = self.resumed_at.take()?;
-        if self.fallback.is_none() || self.ctx.consoles.is_shut() {
+        if self.fallback.is_none() || self.launch_alive || self.ctx.consoles.is_shut() {
             return None;
         }
         let elapsed = self.now().saturating_sub(launched);
@@ -795,13 +804,14 @@ impl Actor {
         let frame = lock(&self.engine).frame();
         let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-        resume::resume_failed(code, elapsed, &rows)
+        let failure = resume::resume_failed(code, elapsed, &rows)?;
+        Some((failure, resume::last_words(&rows)))
     }
 
     /// Tells the user why the resume failed and opens the shell in the
     /// pane's folder (RF-SES-11). The workspace keeps the agent and its
     /// session for the saved session, so a restart tries the resume again.
-    async fn fall_back(&mut self, failure: ResumeFailure) {
+    async fn fall_back(&mut self, failure: ResumeFailure, said: Option<String>) {
         let Some(shell) = self.fallback.take() else {
             return;
         };
@@ -810,7 +820,9 @@ impl Actor {
             reason = failure.kind(),
             "resume failed, the pane opens a shell"
         );
-        self.report(PaneEvent::Notice(failure.notice(&self.plan.profile_name)));
+        self.report(PaneEvent::Notice(
+            failure.notice(&self.plan.profile_name, said.as_deref()),
+        ));
         if let Some(hooks) = &self.ctx.hooks {
             hooks.registry.revoke(self.id);
         }
