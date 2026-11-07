@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use yien_proto::{ClientMsg, Command, CoreMsg, PaneId};
 use yien_pty::PtyBackend;
 
-use crate::launch;
+use crate::launch::{self, LaunchPlan};
 use crate::pane::{self, PaneCmd};
 use crate::workspace::{Effect, PaneEvent, Workspace};
 use crate::{CoreConfig, CoreError};
@@ -22,10 +22,18 @@ pub(crate) struct Ctx {
     pub events: mpsc::Sender<CoreMsg>,
 }
 
+/// A running pane actor, and what it was started with so a crashed one can
+/// be started again.
+struct PaneHandle {
+    tx: mpsc::UnboundedSender<PaneCmd>,
+    plan: LaunchPlan,
+    cwd: String,
+}
+
 struct Service {
     ws: Workspace,
     ctx: Ctx,
-    panes: HashMap<PaneId, mpsc::UnboundedSender<PaneCmd>>,
+    panes: HashMap<PaneId, PaneHandle>,
     report: mpsc::UnboundedSender<(PaneId, PaneEvent)>,
 }
 
@@ -68,8 +76,31 @@ impl Service {
     }
 
     fn to_pane(&self, pane: PaneId, cmd: PaneCmd) {
-        if let Some(tx) = self.panes.get(&pane) {
-            let _ = tx.send(cmd);
+        if let Some(handle) = self.panes.get(&pane) {
+            let _ = handle.tx.send(cmd);
+        }
+    }
+
+    fn start_pane(&mut self, pane: PaneId, plan: LaunchPlan, cwd: String) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        pane::spawn(
+            pane,
+            plan.clone(),
+            cwd.clone(),
+            self.ctx.clone(),
+            rx,
+            self.report.clone(),
+        );
+        self.panes.insert(pane, PaneHandle { tx, plan, cwd });
+    }
+
+    fn relaunch(&mut self, pane: PaneId) {
+        let Some(handle) = self.panes.get(&pane) else {
+            return;
+        };
+        if handle.tx.send(PaneCmd::Relaunch).is_err() {
+            let (plan, cwd) = (handle.plan.clone(), handle.cwd.clone());
+            self.start_pane(pane, plan, cwd);
         }
     }
 
@@ -140,15 +171,11 @@ impl Service {
         for effect in effects {
             match effect {
                 Effect::Emit(msg) => self.emit(msg).await,
-                Effect::Spawn { pane, plan, cwd } => {
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    pane::spawn(pane, *plan, cwd, self.ctx.clone(), rx, self.report.clone());
-                    self.panes.insert(pane, tx);
-                }
+                Effect::Spawn { pane, plan, cwd } => self.start_pane(pane, *plan, cwd),
                 Effect::Stop { pane } => {
                     self.panes.remove(&pane);
                 }
-                Effect::Relaunch { pane } => self.to_pane(pane, PaneCmd::Relaunch),
+                Effect::Relaunch { pane } => self.relaunch(pane),
                 Effect::Terminate { pane } => self.to_pane(pane, PaneCmd::Terminate),
                 Effect::View {
                     pane,
