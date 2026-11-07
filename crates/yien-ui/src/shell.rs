@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::base::{h_flex, v_flex};
@@ -22,7 +23,9 @@ use crate::catalog::{CATALOG, profile_splits, shortcut};
 use crate::fonts::Fonts;
 use crate::git::ContextGit;
 use crate::layout::neighbor;
-use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
+use crate::model::{
+    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
+};
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, switcher_entries,
@@ -672,6 +675,65 @@ impl Shell {
         }
     }
 
+    /// Asks for a folder with the system's picker, which runs off the UI
+    /// thread, and registers it as a project (RF-ESP-01). Cancel does nothing.
+    fn add_project(&mut self, _: &AddProject, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match chosen.await {
+                Ok(Ok(Some(paths))) => Ok(paths.into_iter().next()),
+                Ok(Ok(None)) | Err(_) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+            };
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.folder_picked(picked, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A folder that is a project already selects that project; any other
+    /// becomes a new project with a shell tab, selected by the core.
+    fn folder_picked(
+        &mut self,
+        picked: Result<Option<PathBuf>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = match picked {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                self.notice = Some(format!("The folder picker failed: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(root) = path.to_str() else {
+            self.notice = Some(format!(
+                "{} cannot be a project: its name is not valid Unicode.",
+                path.display()
+            ));
+            cx.notify();
+            return;
+        };
+        match self.workspace.folder_target(root) {
+            FolderTarget::Tab(tab) => self.select_tab(tab, window, cx),
+            FolderTarget::NewProject => self.command(
+                Command::NewProject {
+                    root: root.to_owned(),
+                    name: None,
+                },
+                cx,
+            ),
+        }
+    }
+
     fn toggle_project_fold(
         &mut self,
         _: &ToggleProjectFold,
@@ -1055,6 +1117,23 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
+        let head = h_flex()
+            .flex_none()
+            .items_center()
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .pt(px(6.0))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(t.faint)
+            .child(div().flex_1().child("Projects"))
+            .child(
+                icon_button("add-project", assets::PLUS, &t)
+                    .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_project(&AddProject, window, cx);
+                    })),
+            );
         v_flex()
             .id("tab-bar")
             .role(Role::Navigation)
@@ -1065,6 +1144,7 @@ impl Shell {
             .border_r_1()
             .border_color(t.line)
             .bg(t.panel)
+            .child(head)
             .child(
                 v_flex()
                     .id("tab-list")
@@ -1239,6 +1319,9 @@ impl Shell {
             .h_full()
             .bg(t.bg)
             .p(px(HALF_GUTTER));
+        if self.workspace.has_no_projects() {
+            return self.render_no_project(area, cx);
+        }
         let Some(tab) = self.workspace.selected_tab() else {
             return area
                 .flex()
@@ -1269,6 +1352,62 @@ impl Shell {
             })
             .collect();
         area.child(div().relative().size_full().children(cells))
+    }
+
+    /// The pane area with no project at all: an invitation to add one.
+    fn render_no_project(&self, area: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.theme;
+        let hover = t.hover;
+        area.flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_color(t.muted)
+                    .when_some(self.fonts.display.clone(), |d, family| {
+                        d.font_family(family)
+                    })
+                    .text_size(px(18.0))
+                    .child("No project is open"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(t.faint)
+                    .child("Add a folder to start working in it."),
+            )
+            .child(
+                h_flex()
+                    .id("empty-add-project")
+                    .role(Role::Button)
+                    .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(14.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(t.line)
+                    .bg(t.raised)
+                    .text_size(px(13.5))
+                    .text_color(t.text)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_project(&AddProject, window, cx);
+                    }))
+                    .child(svg().path(assets::PLUS).size(px(14.0)).text_color(t.muted))
+                    .child("Add project")
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(t.faint)
+                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                            .child(ADD_PROJECT_KEYS),
+                    ),
+            )
     }
 
     fn render_pane(
@@ -1840,6 +1979,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
             .on_action(cx.listener(Self::toggle_project_fold))
+            .on_action(cx.listener(Self::add_project))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_switcher))
             .on_action(cx.listener(Self::palette_up))
@@ -1928,6 +2068,8 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("needs-you counter", "agent.next_needs_you"),
     ("palette button", "palette.open"),
     ("project head", "project.fold"),
+    ("add project button", "project.add"),
+    ("empty state's add project button", "project.add"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
 ];
