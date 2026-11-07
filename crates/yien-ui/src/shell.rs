@@ -672,6 +672,9 @@ impl Shell {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
+                                .when_some(self.fonts.mono.clone(), |d, family| {
+                                    d.font_family(family)
+                                })
                                 .child(detail),
                         ),
                 )
