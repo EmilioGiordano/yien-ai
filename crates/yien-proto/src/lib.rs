@@ -21,6 +21,7 @@ pub mod frame;
 mod git;
 pub mod hook_frame;
 mod msg;
+mod path;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,7 @@ pub use msg::{
     LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
     ProjectInfo, TabInfo, WorkspaceSnapshot,
 };
+pub use path::{folder_key, same_folder};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
 ///
