@@ -21,8 +21,10 @@ mod error;
 mod porcelain;
 mod repo;
 mod runner;
+mod watch;
 
 pub use error::{GitError, ParseError};
 pub use porcelain::{AheadBehind, ChangedFile, FileStatus, Head, Status, Upstream, parse_status};
 pub use repo::{GitInfo, Repo};
 pub use runner::{DEFAULT_TIMEOUT, Git, MAX_OUTPUT};
+pub use watch::{Change, DEFAULT_INTERVAL, DEFAULT_REFRESH, GitWatcher, WatchOptions};
