@@ -89,7 +89,10 @@ pub trait PtyBackend: Send + Sync {
 /// let spec = SpawnSpec::new("claude").arg("--continue").env("TERM", "xterm-256color").size(100, 30);
 /// assert_eq!((spec.cols, spec.rows), (100, 30));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` shows the number of arguments and only the names of the
+/// variables, since both can carry tokens (plan §5.4).
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
     /// The program, found through `PATH` when it is not a path.
     pub program: OsString,
@@ -103,6 +106,20 @@ pub struct SpawnSpec {
     pub cols: u16,
     /// Terminal height in cells, at least 1.
     pub rows: u16,
+}
+
+impl fmt::Debug for SpawnSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env_keys: Vec<_> = self.env.iter().map(|(key, _)| key).collect();
+        f.debug_struct("SpawnSpec")
+            .field("program", &self.program)
+            .field("args", &format_args!("{} args", self.args.len()))
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish()
+    }
 }
 
 impl SpawnSpec {
@@ -191,13 +208,25 @@ impl SpawnSpec {
 /// let events = [PtyEvent::Output(b"hi".to_vec()), PtyEvent::Exited(ExitStatus::from_code(0))];
 /// assert!(matches!(events[1], PtyEvent::Exited(s) if s.success()));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` shows only the length of output, so terminal content never
+/// reaches a log (plan §5.4).
+#[derive(Clone, PartialEq, Eq)]
 pub enum PtyEvent {
     /// Bytes exactly as the PTY produced them.
     Output(Vec<u8>),
     /// The child exited and its output went quiet. Normally the last event;
     /// bytes that still arrive after it are forwarded, never dropped.
     Exited(ExitStatus),
+}
+
+impl fmt::Debug for PtyEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Output(bytes) => write!(f, "Output({} bytes)", bytes.len()),
+            Self::Exited(status) => f.debug_tuple("Exited").field(status).finish(),
+        }
+    }
 }
 
 /// How the child ended.
@@ -350,16 +379,39 @@ impl fmt::Debug for ReturnedBytes {
 }
 
 /// What the writer thread does, in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum WriterMsg {
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
+}
+
+impl WriterMsg {
+    /// The bytes of an `Input`; a `Resize` carries none.
+    fn into_input(self) -> Vec<u8> {
+        match self {
+            Self::Input(bytes) => bytes,
+            Self::Resize { .. } => Vec::new(),
+        }
+    }
+}
+
+impl fmt::Debug for WriterMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Input(bytes) => write!(f, "Input({} bytes)", bytes.len()),
+            Self::Resize { cols, rows } => write!(f, "Resize({cols}x{rows})"),
+        }
+    }
 }
 
 /// The platform side of a session that is not a byte stream.
 pub(crate) trait ChildControl: Send + Sync {
     fn kill(&self) -> Result<(), PtyError>;
     fn pid(&self) -> Option<u32>;
+    /// Called from `Drop`, which must never block.
+    fn kill_on_drop(&self) {
+        let _ = self.kill();
+    }
 }
 
 pub(crate) fn check_size(cols: u16, rows: u16) -> Result<(), PtyError> {
@@ -406,10 +458,9 @@ impl PtyControl {
     pub fn write(&self, bytes: Vec<u8>) -> Result<(), PtyError> {
         match self.input.try_send(WriterMsg::Input(bytes)) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(WriterMsg::Input(bytes))) => {
-                Err(PtyError::InputQueueFull(ReturnedBytes(bytes)))
+            Err(TrySendError::Full(msg)) => {
+                Err(PtyError::InputQueueFull(ReturnedBytes(msg.into_input())))
             }
-            Err(TrySendError::Full(_)) => Err(PtyError::ResizeQueueFull),
             Err(TrySendError::Disconnected(_)) => Err(PtyError::Closed),
         }
     }
@@ -459,7 +510,7 @@ impl PtyControl {
 
 impl Drop for PtyControl {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.child.kill_on_drop();
     }
 }
 
@@ -578,5 +629,28 @@ impl PtySession {
     /// ```
     pub fn pid(&self) -> Option<u32> {
         self.control.pid()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_shows_args_env_values_or_output() {
+        let spec = SpawnSpec::new("claude")
+            .arg("--token=secret-arg")
+            .env("API_KEY", "secret-env");
+        let shown = format!("{spec:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(
+            shown.contains("API_KEY") && shown.contains("1 args"),
+            "{shown}"
+        );
+
+        let output = format!("{:?}", PtyEvent::Output(b"secret-out".to_vec()));
+        assert_eq!(output, "Output(10 bytes)");
+        let input = format!("{:?}", WriterMsg::Input(b"secret-in".to_vec()));
+        assert_eq!(input, "Input(9 bytes)");
     }
 }
