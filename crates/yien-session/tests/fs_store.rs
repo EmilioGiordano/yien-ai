@@ -61,7 +61,8 @@ fn fs_store_reads_missing_files_as_none_and_replaces_on_rename() {
         store.read("b.json").unwrap().as_deref(),
         Some(&b"first"[..])
     );
-    assert!(store.rename("a.json", "c.json").is_err());
+    let err = store.rename("a.json", "c.json").unwrap_err();
+    assert_eq!(err.name, "a.json -> c.json");
 }
 
 #[test]

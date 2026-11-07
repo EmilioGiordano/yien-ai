@@ -15,7 +15,7 @@ use std::io;
 pub struct StoreError {
     /// The operation: `read`, `write` or `rename`.
     pub op: &'static str,
-    /// The file it was working on.
+    /// The file it was working on; `from -> to` for a rename.
     pub name: String,
     /// The underlying error.
     #[source]
@@ -137,11 +137,11 @@ impl Store for MemStore {
         if !self.files.contains_key(from) {
             return Err(StoreError::new(
                 "rename",
-                from,
+                &format!("{from} -> {to}"),
                 io::Error::from(io::ErrorKind::NotFound),
             ));
         }
-        self.change("rename", from)?;
+        self.change("rename", &format!("{from} -> {to}"))?;
         if let Some(bytes) = self.files.remove(from) {
             self.files.insert(to.to_owned(), bytes);
         }
@@ -242,7 +242,7 @@ mod fs_store {
             let target = self.path("rename", to)?;
             fs::rename(source, target)
                 .and_then(|()| self.sync_dir())
-                .map_err(|err| StoreError::new("rename", from, err))
+                .map_err(|err| StoreError::new("rename", &format!("{from} -> {to}"), err))
         }
     }
 }
