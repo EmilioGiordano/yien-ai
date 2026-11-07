@@ -18,6 +18,8 @@ C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/01-vision.md       
 C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/design/prototipo-navegacion.html the UI prototype
 ```
 
+`ROADMAP.md` (in git) says where the project stands and what comes next.
+
 Behaviour comes from the ERS. Engineering choices come from the plan (05), which overrides 04 where they differ. If the code needs to contradict either, stop and report; do not silently diverge.
 
 ---
