@@ -11,6 +11,8 @@ publish.workspace = true
 yien-proto = { workspace = true }
 yien-layout = { workspace = true }
 yien-ui = { workspace = true }
+yien-platform = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

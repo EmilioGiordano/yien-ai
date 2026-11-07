@@ -102,6 +102,7 @@ A PR is ready to merge only when all of these hold:
 - The implementation is correct, tested and working: the full gate passed at integration.
 - The feature was validated through the interface, not only with unit tests.
 - `quality-reviewer` gave PASS.
+- GitHub CI is green on Windows, Linux and macOS.
 
 A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet) counts as met when the PR says so and why.
 
@@ -113,7 +114,7 @@ Ready branches are tested together before any reaches `main`.
 2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit; drop it with `git merge --abort` (conflict) or `git reset --hard HEAD~1` (merged but broken). `reset --hard` is allowed only on a `staging/*` branch.
 3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `xtask check-deps` and `xtask trace` (also through `scripts/cargo.sh`) once they exist.
 4. Run the UI validation of each feature on the staging build.
-5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR.
+5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR. Merge a PR only when its GitHub CI is green on all three systems (`gh pr checks <n>`); the local gate runs on Windows only and cannot see Linux or macOS failures.
 6. `git pull --ff-only` on the local `main`, then `git diff staging/<date> main` must be empty: that proves `main` is what was tested.
 
 On a failure:

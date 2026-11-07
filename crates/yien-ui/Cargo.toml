@@ -12,6 +12,7 @@ yien-proto = { workspace = true }
 yien-layout = { workspace = true }
 gpui-kit = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true
