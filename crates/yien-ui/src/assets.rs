@@ -14,14 +14,18 @@ pub(crate) const PANEL_LEFT: &str = "yien/panel-left.svg";
 pub(crate) const PANEL_RIGHT: &str = "yien/panel-right.svg";
 pub(crate) const THEME: &str = "yien/theme.svg";
 pub(crate) const BRANCH: &str = "yien/branch.svg";
+pub(crate) const SPLIT_RIGHT: &str = "yien/split-right.svg";
+pub(crate) const SPLIT_DOWN: &str = "yien/split-down.svg";
 
-const OWN: [(&str, &[u8]); 11] = [
+const OWN: [(&str, &[u8]); 13] = [
     (MARK, include_bytes!("../assets/mark.svg")),
     (CHEVRON, include_bytes!("../assets/chevron.svg")),
     (PANEL_LEFT, include_bytes!("../assets/panel-left.svg")),
     (PANEL_RIGHT, include_bytes!("../assets/panel-right.svg")),
     (THEME, include_bytes!("../assets/theme.svg")),
     (BRANCH, include_bytes!("../assets/branch.svg")),
+    (SPLIT_RIGHT, include_bytes!("../assets/split-right.svg")),
+    (SPLIT_DOWN, include_bytes!("../assets/split-down.svg")),
     (
         "yien/state-needs.svg",
         include_bytes!("../assets/state-needs.svg"),
