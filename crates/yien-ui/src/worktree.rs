@@ -97,6 +97,16 @@ impl Question {
         self.check.is_some()
     }
 
+    /// The Remove button's accessible name, which says when it cannot be
+    /// used yet.
+    pub(crate) fn remove_name(&self) -> &'static str {
+        if self.checked() {
+            "Remove worktree (Alt+R)"
+        } else {
+            "Remove worktree, unavailable until the check finishes (Alt+R)"
+        }
+    }
+
     /// The question's title.
     pub(crate) fn title(&self) -> String {
         match self.step {
@@ -307,6 +317,11 @@ mod tests {
         assert!(!q.checked());
         assert_eq!(q.remove(), Answer::Wait);
         assert_eq!(q.step, Step::Choose);
+        assert!(q.remove_name().contains("unavailable"));
+        assert_eq!(
+            question(Some(checked(0, 0, 0))).remove_name(),
+            "Remove worktree (Alt+R)"
+        );
         assert_eq!(q.work_text(), "Checking it for uncommitted changes…");
     }
 

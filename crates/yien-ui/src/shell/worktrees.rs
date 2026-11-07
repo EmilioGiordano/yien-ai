@@ -362,6 +362,7 @@ impl Shell {
                 )
                 .child(
                     self.dialog_button("worktree-remove", "Remove worktree", "Alt+R")
+                        .aria_label(q.remove_name())
                         .when(!q.checked(), |b| b.opacity(0.5).cursor_default())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.worktree_remove(&WorktreeRemove, window, cx);
