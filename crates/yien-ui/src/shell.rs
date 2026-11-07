@@ -5,6 +5,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::TitleBar;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::{ProjectId, TabId};
 
