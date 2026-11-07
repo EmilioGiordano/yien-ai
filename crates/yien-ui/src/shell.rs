@@ -1610,14 +1610,22 @@ impl Shell {
                     div()
                         .id("notice")
                         .role(Role::Status)
-                        .min_w_0()
+                        .flex_shrink_0()
+                        .max_w(relative(0.5))
                         .overflow_hidden()
                         .text_ellipsis()
                         .text_color(t.ochre)
                         .child(notice),
                 )
             })
-            .child(div().ml_auto().child(format!(
+            // The hint row gives way to the notice: without `min_w_0` its
+            // unwrapped width squeezed the notice to nothing.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_end()
+                    .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
                 "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
                  {JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
@@ -1625,7 +1633,8 @@ impl Shell {
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
                  {CONTEXT_BAR_KEYS} context bar · {TAB_NUMBER_KEYS} tab N · {NEXT_TAB_KEYS} next tab · \
                  {THEME_KEYS} theme"
-            )))
+                    ))),
+            )
     }
 }
 
