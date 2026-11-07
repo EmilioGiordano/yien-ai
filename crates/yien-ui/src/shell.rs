@@ -5,12 +5,14 @@ use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
@@ -19,6 +21,7 @@ use yien_proto::{
 
 use crate::actions::*;
 use crate::assets::{self, state_icon};
+use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
 use crate::fonts::Fonts;
@@ -78,6 +81,8 @@ pub(crate) struct Shell {
     confirm: Option<ConfirmClose>,
     /// The tab whose name is being edited in place (RF-ESP-16).
     renaming: Option<Renaming>,
+    /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
+    alerts: Alerts,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +114,7 @@ impl Shell {
         mut events: mpsc::Receiver<CoreMsg>,
         theme: Theme,
         fonts: Fonts,
+        os: Rc<dyn OsAttention>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -142,7 +148,29 @@ impl Shell {
         let activation = cx.observe_window_activation(window, |shell, window, cx| {
             let focused = window.is_window_active();
             shell.send(ClientMsg::WindowFocus { focused }, cx);
+            shell.alerts.refresh_badge();
+            shell.update_alerts(window, cx);
         });
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::Win32(win32) = handle.as_raw()
+        {
+            os.attach(win32.hwnd.get());
+        }
+        let (clicked, mut clicks) = mpsc::unbounded_channel::<String>();
+        os.on_activate(Box::new(move |launch| {
+            let _ = clicked.send(launch);
+        }));
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(launch) = clicks.recv().await {
+                let handled = this.update_in(cx, |shell, window, cx| {
+                    shell.toast_clicked(&launch, window, cx)
+                });
+                if handled.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
         Self {
             workspace: WorkspaceView::default(),
             theme,
@@ -160,6 +188,7 @@ impl Shell {
             palette: None,
             confirm: None,
             renaming: None,
+            alerts: Alerts::new(os),
             _subscriptions: vec![activation],
         }
     }
@@ -236,7 +265,42 @@ impl Shell {
         self.take_frames(take, cx);
         if changed {
             self.sync_focus(window, cx);
+            self.update_alerts(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Updates the badge and, when a pane started needing the user while the
+    /// window is in the background, schedules the toast for when the
+    /// coalescing window closes.
+    fn update_alerts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = window.is_window_active();
+        let Some(at) = self.alerts.update(&self.workspace, focused, Instant::now()) else {
+            return;
+        };
+        let wait = at.saturating_duration_since(Instant::now());
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update_in(cx, |shell, window, _| {
+                let focused = window.is_window_active();
+                let now = Instant::now().max(at);
+                shell.alerts.flush(&shell.workspace, focused, now);
+            });
+        })
+        .detach();
+    }
+
+    /// The user clicked YIEN's toast: bring the window forward on the pane it
+    /// named, or on the pane waiting longest if that one moved on.
+    fn toast_clicked(&mut self, launch: &str, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::debug!("toast clicked");
+        window.activate_window();
+        let waiting = self.workspace.waiting_panes();
+        let pane = launch_pane(launch)
+            .filter(|p| waiting.contains(p))
+            .or_else(|| waiting.first().copied());
+        if let Some(pane) = pane {
+            self.command(Command::FocusPane { pane }, cx);
         }
     }
 

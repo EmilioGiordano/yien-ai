@@ -8933,6 +8933,7 @@ name = "yien-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-kit",
+ "raw-window-handle",
  "tokio",
  "tracing",
  "yien-input",
