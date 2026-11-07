@@ -21,6 +21,7 @@ yien-agent = { path = "crates/yien-agent" }
 yien-core = { path = "crates/yien-core" }
 yien-session = { path = "crates/yien-session" }
 yien-platform = { path = "crates/yien-platform" }
+yien-git = { path = "crates/yien-git" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -49,3 +50,6 @@ expect_used = "warn"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[profile.release]
+strip = "symbols"

@@ -2,16 +2,18 @@
 //!
 //! - `check-deps`: enforces the layer rule on every `crates/*/Cargo.toml`.
 //! - `trace [--ers <path>]`: maps requirement ids to the tests named after them.
+//! - `dist`: builds and zips the portable Windows package.
 
 #![forbid(unsafe_code)]
 
 mod check_deps;
+mod dist;
 mod trace;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo xtask <check-deps | trace [--ers <path>]>";
+const USAGE: &str = "usage: cargo xtask <check-deps | trace [--ers <path>] | dist>";
 
 fn main() -> ExitCode {
     match run() {
@@ -28,6 +30,7 @@ fn run() -> anyhow::Result<ExitCode> {
     let root = workspace_root();
     match args.first().map(String::as_str) {
         Some("check-deps") if args.len() == 1 => check_deps::run(&root),
+        Some("dist") if args.len() == 1 => dist::run(&root),
         Some("trace") => match &args[1..] {
             [] => trace::run(&root, None),
             [flag, path] if flag == "--ers" => trace::run(&root, Some(PathBuf::from(path))),

@@ -8780,6 +8780,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "toml 1.2.1+spec-1.1.0",
 ]
 
@@ -8845,6 +8846,15 @@ dependencies = [
  "yien-proto",
  "yien-pty",
  "yien-vt",
+]
+
+[[package]]
+name = "yien-git"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

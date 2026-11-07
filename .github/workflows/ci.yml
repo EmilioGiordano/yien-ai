@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,6 +42,24 @@ jobs:
         run: cargo xtask check-deps
       - name: Requirement trace
         run: cargo xtask trace
+
+  dist:
+    name: portable build (windows)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the portable zip
+        run: cargo xtask dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yien-windows-x64
+          path: target/dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
 
   deny:
     name: cargo deny
