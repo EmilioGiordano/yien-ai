@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod mouse;
 pub mod paste;
 pub mod win32;
 
@@ -173,9 +174,69 @@ pub fn encode(key: &Key, mods: Mods) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Like [`encode`], but honours application cursor keys (DECCKM): with the
+/// mode on, unmodified arrows, Home and End send `ESC O x` instead of `ESC [ x`.
+///
+/// ```
+/// use yien_input::{encode_in, Key, Mods};
+///
+/// assert_eq!(encode_in(&Key::Up, Mods::NONE, true), Some(b"\x1bOA".to_vec()));
+/// assert_eq!(encode_in(&Key::Up, Mods::NONE, false), Some(b"\x1b[A".to_vec()));
+/// assert_eq!(encode_in(&Key::Up, Mods::CTRL, true), Some(b"\x1b[1;5A".to_vec()));
+/// ```
+pub fn encode_in(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
+    if app_cursor && mods == Mods::NONE {
+        let ss3 = match key {
+            Key::Up => Some(b'A'),
+            Key::Down => Some(b'B'),
+            Key::Right => Some(b'C'),
+            Key::Left => Some(b'D'),
+            Key::Home => Some(b'H'),
+            Key::End => Some(b'F'),
+            _ => None,
+        };
+        if let Some(final_byte) = ss3 {
+            return Some(vec![0x1b, b'O', final_byte]);
+        }
+    }
+    encode(key, mods)
+}
+
+/// What a terminal program asked to hear when its pane gains or loses the
+/// keyboard (mode 1004).
+///
+/// ```
+/// assert_eq!(yien_input::focus_report(true), b"\x1b[I");
+/// assert_eq!(yien_input::focus_report(false), b"\x1b[O");
+/// ```
+pub fn focus_report(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_cursor_switches_unmodified_arrows_to_ss3() {
+        assert_eq!(encode_in(&Key::Left, Mods::NONE, true).unwrap(), b"\x1bOD");
+        assert_eq!(encode_in(&Key::Home, Mods::NONE, true).unwrap(), b"\x1bOH");
+        assert_eq!(encode_in(&Key::End, Mods::NONE, true).unwrap(), b"\x1bOF");
+        assert_eq!(encode_in(&Key::Enter, Mods::NONE, true).unwrap(), b"\r");
+        assert_eq!(
+            encode_in(&Key::PageUp, Mods::NONE, true).unwrap(),
+            b"\x1b[5~"
+        );
+    }
+
+    #[test]
+    fn modified_arrows_ignore_app_cursor() {
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_in(&Key::Down, shift, true).unwrap(), b"\x1b[1;2B");
+    }
 
     fn enc(key: Key, mods: Mods) -> Vec<u8> {
         encode(&key, mods).unwrap()

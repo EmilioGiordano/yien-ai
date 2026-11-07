@@ -1,21 +1,29 @@
 //! The main window: title bar, tab bar, pane area, context bar and status bar,
-//! laid out as in the prototype.
+//! laid out as in the prototype, kept in step with the core's events.
 
+use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
+use std::rc::Rc;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_proto::{ProjectId, TabId};
+use tokio::sync::mpsc;
+use yien_proto::{ClientMsg, Command, CoreMsg, Direction, PaneId, ProjectId, TabId};
 
 use crate::actions::{
-    CONTEXT, CONTEXT_BAR_KEYS, NEXT_TAB_KEYS, NextTab, PreviousTab, TAB_BAR_KEYS, THEME_KEYS,
-    ToggleContextBar, ToggleTabBar, ToggleTheme,
+    CLOSE_PANE_KEYS, CONTEXT, CONTEXT_BAR_KEYS, ClosePane, FOCUS_KEYS, FocusDown, FocusLeft,
+    FocusRight, FocusUp, GrowPane, NEXT_TAB_KEYS, NextTab, PreviousTab, SPLIT_DOWN_KEYS,
+    SPLIT_RIGHT_KEYS, ShrinkPane, SplitDown, SplitRight, SwapDown, SwapLeft, SwapRight, SwapUp,
+    TAB_BAR_KEYS, THEME_KEYS, ToggleContextBar, ToggleMaximize, ToggleTabBar, ToggleTheme,
 };
 use crate::assets::{self, state_icon};
+use crate::bridge::{Link, core_busy, deliver};
 use crate::fonts::Fonts;
-use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView};
+use crate::layout::neighbor;
+use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
+use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
 
 const TAB_BAR_WIDTH: f32 = 264.0;
@@ -24,6 +32,10 @@ const TITLE_BAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// Half the 6 px gutter between panes: every cell is inset by it.
 const HALF_GUTTER: f32 = 3.0;
+/// How much one key press grows or shrinks a pane, as a fraction of its split.
+const RESIZE_STEP: f32 = 0.05;
+/// Events applied in one go; the rest wait for the next turn of the loop.
+const MAX_BATCH: usize = 1024;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -33,11 +45,19 @@ pub(crate) struct Shell {
     context_bar_open: bool,
     focus: FocusHandle,
     title: String,
+    link: Rc<Link>,
+    terminals: HashMap<PaneId, Entity<TerminalPane>>,
+    /// The pane the keyboard was last moved to.
+    keyboard_on: Option<PaneId>,
+    /// The last error from the core, shown in the status bar.
+    notice: Option<String>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
     pub(crate) fn new(
-        workspace: WorkspaceView,
+        link: Rc<Link>,
+        mut events: mpsc::Receiver<CoreMsg>,
         theme: Theme,
         fonts: Fonts,
         window: &mut Window,
@@ -47,20 +67,179 @@ impl Shell {
         // Bindings are scoped to the root's key context, which only takes part in
         // dispatch while something inside the root holds focus.
         window.focus(&focus, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(first) = events.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < MAX_BATCH {
+                    match events.try_recv() {
+                        Ok(msg) => batch.push(msg),
+                        Err(_) => break,
+                    }
+                }
+                let applied =
+                    this.update_in(cx, |shell, window, cx| shell.apply(batch, window, cx));
+                if applied.is_err() {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |shell, cx| {
+                shell.notice = Some("The YIEN core stopped. Restart YIEN.".to_owned());
+                cx.notify();
+            });
+        })
+        .detach();
+        let focused = window.is_window_active();
+        deliver(&link, ClientMsg::WindowFocus { focused }, cx);
+        let activation = cx.observe_window_activation(window, |shell, window, cx| {
+            let focused = window.is_window_active();
+            shell.send(ClientMsg::WindowFocus { focused }, cx);
+        });
         Self {
-            workspace,
+            workspace: WorkspaceView::default(),
             theme,
             fonts,
             tab_bar_open: true,
             context_bar_open: true,
             focus,
             title: String::new(),
+            link,
+            terminals: HashMap::new(),
+            keyboard_on: None,
+            notice: None,
+            _subscriptions: vec![activation],
         }
+    }
+
+    fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) {
+        deliver(&self.link, msg, cx);
+    }
+
+    fn command(&self, command: Command, cx: &mut Context<Self>) {
+        self.send(ClientMsg::Command(command), cx);
+    }
+
+    /// Applies a batch of core events, then takes the frame of every pane
+    /// that announced one. Events for panes or tabs the UI no longer knows
+    /// are dropped.
+    fn apply(&mut self, batch: Vec<CoreMsg>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut ready: BTreeSet<PaneId> = BTreeSet::new();
+        let mut changed = false;
+        for msg in batch {
+            match msg {
+                CoreMsg::PaneFrameReady { pane } => {
+                    ready.insert(pane);
+                    continue;
+                }
+                CoreMsg::WorkspaceSnapshot(snapshot) => {
+                    self.workspace = WorkspaceView::from_snapshot(&snapshot);
+                }
+                CoreMsg::ProjectUpdated(info) => self.workspace.project_updated(&info),
+                CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
+                CoreMsg::TabClosed { tab } => {
+                    for pane in self.workspace.tab_closed(tab) {
+                        ready.remove(&pane);
+                    }
+                }
+                CoreMsg::ActiveTab { tab } => self.workspace.set_active(tab),
+                CoreMsg::PaneUpdated(info) => self.workspace.pane_updated(&info),
+                CoreMsg::PaneClosed { pane } => {
+                    ready.remove(&pane);
+                    self.workspace.pane_closed(pane);
+                }
+                CoreMsg::PaneState { pane, state } => {
+                    self.workspace.pane_state(pane, state);
+                }
+                CoreMsg::PaneExited { pane, code } => {
+                    self.workspace.pane_exited(pane, code);
+                }
+                CoreMsg::SelectionText { text, .. } => {
+                    if let Some(text) = text.filter(|t| !t.is_empty()) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    continue;
+                }
+                CoreMsg::Error { message, .. } => self.notice = Some(message),
+            }
+            changed = true;
+        }
+        if changed {
+            self.sync_terminals(window, cx);
+        }
+        let take = frames_to_take(&ready, changed, &self.visible_panes(), |p| {
+            self.terminals.contains_key(&p)
+        });
+        self.take_frames(take, cx);
+        if changed {
+            self.sync_focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The panes of the selected tab that are drawn now.
+    fn visible_panes(&self) -> Vec<PaneId> {
+        self.workspace
+            .selected_tab()
+            .map(|t| t.rects().into_iter().map(|(p, _)| p).collect())
+            .unwrap_or_default()
+    }
+
+    /// Takes the latest frame of each pane from the core. The core sends no
+    /// new notice for a pane until its frame is taken, so a pane with a view
+    /// is always taken; `None` means nothing new.
+    fn take_frames(&self, panes: impl IntoIterator<Item = PaneId>, cx: &mut Context<Self>) {
+        for pane in panes {
+            let Some(terminal) = self.terminals.get(&pane) else {
+                continue;
+            };
+            if let Some(frame) = self.link.take_frame(pane) {
+                terminal.update(cx, |t, cx| t.set_frame(frame, cx));
+            }
+        }
+    }
+
+    /// One terminal view per pane the workspace holds; views of closed panes go.
+    fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panes = self.workspace.all_panes();
+        self.terminals.retain(|id, _| panes.contains(id));
+        for pane in panes {
+            if self.terminals.contains_key(&pane) {
+                continue;
+            }
+            let link = Rc::clone(&self.link);
+            let family = self.fonts.mono.clone();
+            let theme = self.theme;
+            let view = cx.new(|cx| TerminalPane::new(pane, link, family, theme, window, cx));
+            self.terminals.insert(pane, view);
+        }
+    }
+
+    /// Moves the keyboard to the selected tab's focused pane when that changes.
+    fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.workspace.selected_tab().map(|t| t.focused);
+        if target == self.keyboard_on {
+            return;
+        }
+        self.keyboard_on = target;
+        match target.and_then(|p| self.terminals.get(&p)) {
+            Some(terminal) => {
+                let handle = terminal.read(cx).handle().clone();
+                window.focus(&handle, cx);
+            }
+            None => window.focus(&self.focus, cx),
+        }
+    }
+
+    fn focused_pane(&self) -> Option<PaneId> {
+        self.workspace.selected_tab().map(|t| t.focused)
     }
 
     fn toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
         self.theme = Theme::of(self.theme.kind.toggled());
         sync_component_theme(&self.theme, cx);
+        let theme = self.theme;
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |t, cx| t.set_theme(theme, cx));
+        }
         cx.notify();
     }
 
@@ -74,20 +253,28 @@ impl Shell {
         cx.notify();
     }
 
-    fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace.select_next_tab() {
-            cx.notify();
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.workspace.tab_after(1) {
+            self.select_tab(tab, window, cx);
         }
     }
 
-    fn previous_tab(&mut self, _: &PreviousTab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace.select_previous_tab() {
-            cx.notify();
+    fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.workspace.tab_after(-1) {
+            self.select_tab(tab, window, cx);
         }
     }
 
-    fn select_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+    /// The core shows a tab's panes only while it is the active one, so the
+    /// selection goes through it; the local change just avoids a blank frame.
+    fn select_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.select_tab(id) {
+            self.command(Command::SelectTab { tab: id }, cx);
+            let take = frames_to_take(&BTreeSet::new(), true, &self.visible_panes(), |p| {
+                self.terminals.contains_key(&p)
+            });
+            self.take_frames(take, cx);
+            self.sync_focus(window, cx);
             cx.notify();
         }
     }
@@ -95,6 +282,99 @@ impl Shell {
     fn toggle_fold(&mut self, id: ProjectId, cx: &mut Context<Self>) {
         if self.workspace.toggle_fold(id) {
             cx.notify();
+        }
+    }
+
+    fn split(&mut self, orientation: yien_proto::Orientation, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane() {
+            self.command(
+                Command::SplitPane {
+                    pane,
+                    orientation,
+                    profile: None,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(yien_proto::Orientation::Horizontal, cx);
+    }
+
+    fn split_down(&mut self, _: &SplitDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(yien_proto::Orientation::Vertical, cx);
+    }
+
+    fn close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane() {
+            self.command(Command::ClosePane { pane }, cx);
+        }
+    }
+
+    fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        self.command(Command::FocusDirection { direction }, cx);
+    }
+
+    fn focus_left(&mut self, _: &FocusLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_direction(Direction::Left, cx);
+    }
+
+    fn focus_right(&mut self, _: &FocusRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_direction(Direction::Right, cx);
+    }
+
+    fn focus_up(&mut self, _: &FocusUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_direction(Direction::Up, cx);
+    }
+
+    fn focus_down(&mut self, _: &FocusDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.focus_direction(Direction::Down, cx);
+    }
+
+    fn resize(&mut self, delta: f32, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane() {
+            self.command(Command::ResizeSplit { pane, delta }, cx);
+        }
+    }
+
+    fn grow_pane(&mut self, _: &GrowPane, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize(RESIZE_STEP, cx);
+    }
+
+    fn shrink_pane(&mut self, _: &ShrinkPane, _: &mut Window, cx: &mut Context<Self>) {
+        self.resize(-RESIZE_STEP, cx);
+    }
+
+    fn swap(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        let Some(tab) = self.workspace.selected_tab() else {
+            return;
+        };
+        let a = tab.focused;
+        if let Some(b) = neighbor(&tab.rects(), a, direction) {
+            self.command(Command::SwapPanes { a, b }, cx);
+        }
+    }
+
+    fn swap_left(&mut self, _: &SwapLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap(Direction::Left, cx);
+    }
+
+    fn swap_right(&mut self, _: &SwapRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap(Direction::Right, cx);
+    }
+
+    fn swap_up(&mut self, _: &SwapUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap(Direction::Up, cx);
+    }
+
+    fn swap_down(&mut self, _: &SwapDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.swap(Direction::Down, cx);
+    }
+
+    fn toggle_maximize(&mut self, _: &ToggleMaximize, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane() {
+            self.command(Command::ToggleMaximize { pane }, cx);
         }
     }
 
@@ -238,7 +518,7 @@ impl Shell {
                                 .id(("tabs-of", project.id.get()))
                                 .role(Role::TabList)
                                 .aria_label(format!("Tabs of {}", project.name))
-                                .children(project.tabs.iter().map(|tab| {
+                                .children(self.workspace.tabs_of(project).map(|tab| {
                                     self.render_tab_row(tab, Some(tab.id) == selected, cx)
                                 })),
                         )
@@ -275,7 +555,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = self.theme;
-        let waiting = project.needs_you_tabs();
+        let waiting = self.workspace.needs_you_tabs_of(project);
         let id = project.id;
         let label = if waiting > 0 {
             format!("{}, {waiting} need you", project.name)
@@ -332,7 +612,7 @@ impl Shell {
 
     fn render_tab_row(&self, tab: &TabView, active: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
-        let state = tab.state();
+        let state = self.workspace.tab_state(tab);
         let id = tab.id;
         let hover = t.hover;
         let second_line = active || matches!(state, AgentState::NeedsYou | AgentState::Error);
@@ -360,7 +640,7 @@ impl Shell {
                         .hover(move |s| s.bg(hover))
                 }
             })
-            .on_click(cx.listener(move |this, _, _, cx| this.select_tab(id, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.select_tab(id, window, cx)))
             .child(
                 h_flex()
                     .items_center()
@@ -397,6 +677,9 @@ impl Shell {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
+                                .when_some(self.fonts.mono.clone(), |d, family| {
+                                    d.font_family(family)
+                                })
                                 .child(detail),
                         ),
                 )
@@ -416,7 +699,7 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_panes(&self) -> impl IntoElement {
+    fn render_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let area = div()
             .id("panes")
@@ -439,21 +722,33 @@ impl Shell {
                 .text_size(px(18.0))
                 .child("No tab is open");
         };
-        let single = tab.panes.len() == 1;
-        let cells = tab.pane_rects().into_iter().map(|(pane, rect)| {
-            div()
-                .absolute()
-                .left(relative(rect.x))
-                .top(relative(rect.y))
-                .w(relative(rect.w))
-                .h(relative(rect.h))
-                .p(px(HALF_GUTTER))
-                .child(self.render_pane(tab, pane, single))
-        });
+        let rects = tab.rects();
+        let single = rects.len() == 1;
+        let cells: Vec<AnyElement> = rects
+            .into_iter()
+            .map(|(id, rect)| {
+                let pane = self.workspace.pane(id);
+                div()
+                    .absolute()
+                    .left(relative(rect.x))
+                    .top(relative(rect.y))
+                    .w(relative(rect.w))
+                    .h(relative(rect.h))
+                    .p(px(HALF_GUTTER))
+                    .child(self.render_pane(tab, &pane, single, cx))
+                    .into_any_element()
+            })
+            .collect();
         area.child(div().relative().size_full().children(cells))
     }
 
-    fn render_pane(&self, tab: &TabView, pane: &PaneView, single: bool) -> impl IntoElement {
+    fn render_pane(
+        &self,
+        tab: &TabView,
+        pane: &PaneView,
+        single: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         let focused = pane.id == tab.focused;
         let needs = pane.state.needs_you();
@@ -502,15 +797,46 @@ impl Shell {
                     .text_color(state_color)
                     .child(pane.state.label()),
             );
-        let body = div()
-            .flex_1()
-            .min_h_0()
-            .px(px(10.0))
-            .py(px(8.0))
-            .text_size(px(12.5))
-            .text_color(t.term_faint)
-            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-            .child("No terminal yet.");
+        let exited = pane.exited.then(|| {
+            let id = pane.id;
+            let what = match pane.exit_code {
+                Some(code) => format!("{} exited with code {code}.", pane.name),
+                None => format!("{} is not running.", pane.name),
+            };
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .border_b_1()
+                .border_color(t.term_line)
+                .bg(t.term_raised)
+                .text_size(px(12.0))
+                .child(div().flex_1().min_w_0().text_color(t.ochre).child(what))
+                .child(
+                    div()
+                        .id(("relaunch", id.get()))
+                        .role(Role::Button)
+                        .aria_label(format!("Relaunch {}", pane.name))
+                        .flex_none()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(t.term_strong)
+                        .text_color(t.term_text)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.command(Command::RelaunchPane { pane: id }, cx);
+                        }))
+                        .child("Relaunch"),
+                )
+        });
+        let body = match self.terminals.get(&pane.id) {
+            Some(terminal) => terminal.clone().into_any_element(),
+            None => div().flex_1().into_any_element(),
+        };
         v_flex()
             .id(("pane", pane.id.get()))
             .role(Role::Group)
@@ -530,6 +856,7 @@ impl Shell {
                 }
             })
             .child(head)
+            .children(exited)
             .child(body)
     }
 
@@ -623,9 +950,31 @@ impl Shell {
                 ws.pane_count()
             ))
             .child(format!("{} working", ws.working_panes()))
+            .when_some(core_busy(self.link.shared_backlog()), |bar, text| {
+                bar.child(
+                    div()
+                        .id("core-busy")
+                        .role(Role::Status)
+                        .text_color(t.ochre)
+                        .child(text),
+                )
+            })
+            .when_some(self.notice.clone(), |bar, notice| {
+                bar.child(
+                    div()
+                        .id("notice")
+                        .role(Role::Status)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(t.ochre)
+                        .child(notice),
+                )
+            })
             .child(div().ml_auto().child(format!(
-                "{TAB_BAR_KEYS} tab bar · {CONTEXT_BAR_KEYS} context bar · \
-                 {NEXT_TAB_KEYS} next tab · {THEME_KEYS} theme"
+                "{SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
+                 {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
+                 {CONTEXT_BAR_KEYS} context bar · {NEXT_TAB_KEYS} next tab · {THEME_KEYS} theme"
             )))
     }
 }
@@ -642,6 +991,20 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::close_pane))
+            .on_action(cx.listener(Self::focus_left))
+            .on_action(cx.listener(Self::focus_right))
+            .on_action(cx.listener(Self::focus_up))
+            .on_action(cx.listener(Self::focus_down))
+            .on_action(cx.listener(Self::grow_pane))
+            .on_action(cx.listener(Self::shrink_pane))
+            .on_action(cx.listener(Self::swap_left))
+            .on_action(cx.listener(Self::swap_right))
+            .on_action(cx.listener(Self::swap_up))
+            .on_action(cx.listener(Self::swap_down))
+            .on_action(cx.listener(Self::toggle_maximize))
             .size_full()
             .bg(t.panel)
             .text_color(t.text)
@@ -653,7 +1016,7 @@ impl Render for Shell {
                     .flex_1()
                     .min_h_0()
                     .when(self.tab_bar_open, |row| row.child(self.render_tab_bar(cx)))
-                    .child(self.render_panes())
+                    .child(self.render_panes(cx))
                     .when(self.context_bar_open, |row| {
                         row.child(self.render_context_bar())
                     }),

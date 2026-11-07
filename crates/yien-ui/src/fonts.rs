@@ -3,6 +3,7 @@
 
 use gpui_kit::SharedString;
 
+// Japanese UI faces draw U+005C as a yen sign: paths and branches use MONO.
 const UI: &[&str] = &["Zen Kaku Gothic New", "Yu Gothic UI", "Segoe UI"];
 const MONO: &[&str] = &["M PLUS 1 Code", "Cascadia Mono", "Consolas"];
 const DISPLAY: &[&str] = &["Shippori Mincho B1", "Yu Mincho", "Georgia"];
