@@ -271,7 +271,7 @@ pub struct ProjectView {
 ///     tabs: vec![TabInfo {
 ///         id: TabId::new(2), project: ProjectId::new(1), name: "Tab 1".into(), dir: "C:/yien".into(),
 ///         branch: None, layout: LayoutNode::Pane(PaneId::new(3)), focused: PaneId::new(3), maximized: None,
-///         muted: false,
+///         muted: false, worktree: None,
 ///     }],
 ///     panes: vec![],
 ///     active_tab: Some(TabId::new(2)),
@@ -856,6 +856,7 @@ mod tests {
             focused: PaneId::new(panes[0]),
             maximized: None,
             muted: false,
+            worktree: None,
         }
     }
 

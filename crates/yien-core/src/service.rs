@@ -548,6 +548,9 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::SetTabMuted { .. }
         | Command::SetNotificationsMuted { .. }
         | Command::NewTab { .. }
+        | Command::NewWorktreeTab { .. }
+        | Command::CheckWorktree { .. }
+        | Command::RemoveWorktreeTab { .. }
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }
         | Command::FocusDirection { .. } => None,

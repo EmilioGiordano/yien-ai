@@ -356,6 +356,7 @@ mod tests {
             focused: PaneId::new(panes[0]),
             maximized: None,
             muted: false,
+            worktree: None,
         }
     }
 

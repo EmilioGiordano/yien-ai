@@ -228,6 +228,34 @@ pub enum Command {
         /// Whether toasts and flashes are off.
         muted: bool,
     },
+    /// Opens a tab on a new linked worktree with its own new branch
+    /// (RF-ESP-05). The worktree goes beside the repository, in
+    /// `<repo>-wt/<branch>`; a failure opens no tab and says why.
+    NewWorktreeTab {
+        /// The project whose repository gets the worktree.
+        project: ProjectId,
+        /// The new branch, which must not exist yet.
+        branch: String,
+        /// Where the branch starts: a branch, tag or commit; the project's
+        /// current `HEAD` when `None`.
+        base: Option<String>,
+    },
+    /// Asks what removing a worktree tab's worktree would lose; answered
+    /// with [`CoreMsg::WorktreeChecked`] (RF-ESP-07, RN-08).
+    CheckWorktree {
+        /// The tab.
+        tab: TabId,
+    },
+    /// Closes a worktree tab, terminating its panes, and then removes its
+    /// worktree folder. The branch is never deleted. Without
+    /// `discard_changes` a worktree with uncommitted changes is kept. A
+    /// worktree another tab still uses is kept (RF-ESP-07, RN-08).
+    RemoveWorktreeTab {
+        /// The tab.
+        tab: TabId,
+        /// Delete uncommitted changes too; only after the user confirmed it.
+        discard_changes: bool,
+    },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
         /// The tab.
@@ -498,6 +526,28 @@ pub struct TabInfo {
     pub maximized: Option<PaneId>,
     /// Its toasts and taskbar flashes are muted (RF-ATN-11).
     pub muted: bool,
+    /// The linked worktree the tab was opened on, which is `dir`; `None`
+    /// for a tab on the project's main working copy (RF-ESP-05).
+    pub worktree: Option<String>,
+}
+
+/// What removing a worktree would lose, as [`CoreMsg::WorktreeChecked`]
+/// reports it (RN-08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeCheck {
+    /// git looked.
+    Checked {
+        /// Changed and untracked files; removing deletes them.
+        changed: u32,
+        /// Commits not pushed (or, without an upstream, on no other
+        /// branch); the branch keeps them.
+        unpushed: u32,
+    },
+    /// git could not tell; the reason says why.
+    Failed {
+        /// For the user.
+        reason: String,
+    },
 }
 
 /// A pane as its title bar shows it (RF-PAN-12, RF-PAN-16, RF-PAN-20).
@@ -644,6 +694,20 @@ pub enum CoreMsg {
         /// Whether they are off.
         muted: bool,
     },
+    /// The answer to [`Command::CheckWorktree`].
+    WorktreeChecked {
+        /// The tab.
+        tab: TabId,
+        /// The worktree folder.
+        worktree: String,
+        /// What git found.
+        check: WorktreeCheck,
+    },
+    /// Something the user asked for finished; the message says what.
+    Notice {
+        /// For the user.
+        message: String,
+    },
     /// The answer to [`ClientMsg::CopySelection`].
     SelectionText {
         /// The pane.
@@ -710,6 +774,21 @@ mod tests {
                 muted: true,
             },
             Command::SetNotificationsMuted { muted: true },
+            Command::NewWorktreeTab {
+                project: ProjectId::new(1),
+                branch: "feat/x".into(),
+                base: Some("main".into()),
+            },
+            Command::NewWorktreeTab {
+                project: ProjectId::new(1),
+                branch: "fix/y".into(),
+                base: None,
+            },
+            Command::CheckWorktree { tab: TabId::new(2) },
+            Command::RemoveWorktreeTab {
+                tab: TabId::new(2),
+                discard_changes: true,
+            },
             Command::MovePane {
                 pane: PaneId::new(3),
                 target: PaneId::new(4),
@@ -774,6 +853,7 @@ mod tests {
             focused: PaneId::new(3),
             maximized: None,
             muted: true,
+            worktree: Some("C:/Code/yien-wt/feat-x".into()),
         };
         assert_eq!(round_trip(&frame), frame);
         let msgs = [
@@ -807,6 +887,24 @@ mod tests {
                 signal_lost: false,
             }),
             CoreMsg::NotificationsMuted { muted: true },
+            CoreMsg::WorktreeChecked {
+                tab: TabId::new(2),
+                worktree: "C:/Code/yien-wt/feat-x".into(),
+                check: WorktreeCheck::Checked {
+                    changed: 3,
+                    unpushed: 1,
+                },
+            },
+            CoreMsg::WorktreeChecked {
+                tab: TabId::new(2),
+                worktree: "C:/Code/yien-wt/feat-x".into(),
+                check: WorktreeCheck::Failed {
+                    reason: "git was not found".into(),
+                },
+            },
+            CoreMsg::Notice {
+                message: "Removed the worktree.".into(),
+            },
             CoreMsg::PaneState {
                 pane: PaneId::new(3),
                 state: AgentState::Error(ErrorReason::UnexpectedExit {

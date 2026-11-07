@@ -254,7 +254,10 @@ impl Shell {
                 CoreMsg::NotificationsMuted { muted } => {
                     self.workspace.set_notifications_muted(muted);
                 }
-                CoreMsg::Error { message, .. } => self.notice = Some(message),
+                CoreMsg::Error { message, .. } | CoreMsg::Notice { message } => {
+                    self.notice = Some(message);
+                }
+                CoreMsg::WorktreeChecked { .. } => continue,
             }
             changed = true;
         }

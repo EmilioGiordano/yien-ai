@@ -235,6 +235,7 @@ impl Workspace {
             focused: tab.focused,
             maximized: tab.maximized,
             muted: tab.muted,
+            worktree: None,
         }
     }
 
@@ -403,6 +404,9 @@ impl Workspace {
                 let plan = resolve(profile.as_ref())?;
                 self.new_tab(project, name, plan, &mut fx)?;
             }
+            Command::NewWorktreeTab { .. }
+            | Command::CheckWorktree { .. }
+            | Command::RemoveWorktreeTab { .. } => {}
             Command::CloseTab { tab } => self.close_tab(tab, &mut fx)?,
             Command::SelectTab { tab } => self.select(tab, &mut fx)?,
             Command::SplitPane {
