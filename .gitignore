@@ -12,3 +12,6 @@ REPORT-*.md
 # Local agent state
 /.claude/settings.local.json
 /.claude/worktrees/
+
+# Per-worktree build slot
+/.yien-slot
