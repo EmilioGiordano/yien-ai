@@ -122,8 +122,14 @@ pub struct InstanceError {
 /// Claims `data_dir` for this process, or asks the YIEN that holds it to
 /// show its window.
 pub fn claim(data_dir: &Path) -> Result<Claim, InstanceError> {
-    let absolute = std::path::absolute(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    imp::claim(&absolute, &instance_key(&absolute))
+    // The real folder, so a junction, a symlink or an 8.3 name for the same
+    // data dir gives the same key. A dir that cannot be made or read falls
+    // back to its absolute spelling.
+    let _ = std::fs::create_dir_all(data_dir);
+    let real = std::fs::canonicalize(data_dir)
+        .or_else(|_| std::path::absolute(data_dir))
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    imp::claim(&real, &instance_key(&real))
 }
 
 /// Brings this process's window (a Win32 `HWND`) forward for `request`:
@@ -158,7 +164,10 @@ fn normalize(path: &str, windows: bool) -> String {
         return if trimmed.is_empty() { path } else { trimmed }.to_owned();
     }
     let path = path.replace('/', "\\");
-    let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
+    let path = match path.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned(),
+    };
     path.trim_end_matches('\\').to_lowercase()
 }
 
@@ -183,6 +192,14 @@ mod tests {
         ];
         let keys: Vec<String> = same.iter().map(|p| normalize(p, true)).collect();
         assert!(keys.windows(2).all(|w| w[0] == w[1]), "{keys:?}");
+    }
+
+    #[test]
+    fn rf_ses_14_a_share_in_its_long_and_short_forms_is_one_key() {
+        assert_eq!(
+            normalize(r"\\?\UNC\server\share\YIEN", true),
+            normalize(r"\\server\share\yien\", true)
+        );
     }
 
     #[test]
