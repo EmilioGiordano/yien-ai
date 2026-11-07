@@ -1,0 +1,12 @@
+schema = 1
+id = "codex"
+name = "Codex"
+detect = { command = "codex", version_args = ["--version"], version_regex = '(\d+\.\d+\.\d+)' }
+
+[launch]
+resume = ["resume", "{session_id}"]
+session_id = "from_list"
+
+# No version verified yet (S7). OSC 9 alone never lights the red mark.
+[[rules]]
+sources = ["osc9"]
