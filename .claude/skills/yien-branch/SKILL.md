@@ -41,13 +41,12 @@ Wait for its report.
 
 ## 4. Review loop
 
-1. Spawn `quality-reviewer` on the worktree, with a fresh context and without the implementer's reasoning.
-2. On `FAIL`, send the findings to the implementer to fix, then send the fixed branch back to review.
-3. A fix verified by the suite needs no new review; new code does.
-4. Before relaying findings, sanity-check them. A finding that contradicts the plan is noted, not obeyed.
-5. After 3 failed rounds, stop and report to Emilio with the open findings.
+1. Spawn `quality-reviewer` with the worktree path and the TASK path, a fresh context and none of the implementer's reasoning.
+2. Before relaying findings, sanity-check them. A finding that contradicts the plan is noted, not obeyed.
+3. On `FAIL`, send the findings to the implementer to fix, then send the fix commits back to review. Every FAIL needs a later PASS.
+4. After 3 failed rounds, stop and report to Emilio with the open findings.
 
-Spawn `test-engineer` when the review reports missing coverage the implementer cannot cover alone.
+When the review reports coverage the implementer cannot add alone, spawn `test-engineer` with the worktree path, then have the implementer commit its tests.
 
 ## 5. Hand over
 
