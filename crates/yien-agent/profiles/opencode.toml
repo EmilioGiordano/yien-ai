@@ -1,0 +1,12 @@
+schema = 1
+id = "opencode"
+name = "OpenCode"
+detect = { command = "opencode", version_args = ["--version"], version_regex = '(\d+\.\d+\.\d+)' }
+
+[launch]
+resume = ["--session", "{session_id}"]
+session_id = "from_list"
+
+# No version verified yet (S8). BEL alone never lights the red mark.
+[[rules]]
+sources = ["bel"]
