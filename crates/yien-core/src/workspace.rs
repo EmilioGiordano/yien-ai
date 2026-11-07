@@ -270,6 +270,7 @@ impl Workspace {
                 tab.maximized = None;
                 let cwd = tab.dir.clone();
                 self.add_pane(new, tab_id, plan, cwd, &mut fx);
+                self.emit_pane(new, &mut fx);
                 self.focus(new, &mut fx)?;
             }
             Command::ClosePane { pane } => self.close_pane(pane, &mut fx)?,
@@ -399,6 +400,7 @@ impl Workspace {
         }
         self.add_pane(pane, tab_id, plan, dir, fx);
         self.emit_tab(tab_id, fx);
+        self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
         Ok(())
     }
@@ -428,7 +430,6 @@ impl Workspace {
                 seen: false,
             },
         );
-        self.emit_pane(pane, fx);
         fx.push(Effect::Spawn {
             pane,
             plan: Box::new(plan),
