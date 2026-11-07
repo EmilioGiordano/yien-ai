@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use yien_agent::{HookEvent, NotificationKind};
 use yien_platform::hook_pipe::{
     HOOK_PIPE_ENV, HOOK_PIPE_PREFIX, HOOK_TOKEN_ENV, HookDelivery, HookPipeServer, HookRegistry,
-    READ_TIMEOUT, Rejection,
+    MAX_CONNECTIONS, READ_TIMEOUT, Rejection,
 };
 use yien_proto::PaneId;
 use yien_proto::hook_frame::{FrameError, HEADER_LEN, MAX_HOOK_PAYLOAD};
@@ -82,7 +82,17 @@ fn wait_until(what: &str, cond: impl Fn() -> bool) {
 }
 
 fn raw_client(pipe: &str) -> std::fs::File {
-    std::fs::OpenOptions::new().write(true).open(pipe).unwrap()
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let opened = std::fs::OpenOptions::new().write(true).open(pipe);
+        match &opened {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => return opened.unwrap(),
+        }
+    }
 }
 
 #[test]
@@ -229,6 +239,63 @@ fn pipe_variable_outside_the_pipe_namespace_is_ignored() {
     assert_silent_success(&out);
     assert_eq!(std::fs::read(&file).unwrap(), b"untouched");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn rnf_11_pipe_names_that_normalize_elsewhere_are_ignored() {
+    let dir = std::env::temp_dir().join(format!("yien-hook-dots-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("victim.txt");
+    std::fs::write(&file, b"untouched").unwrap();
+    let victim = file.to_str().unwrap();
+    let names = [
+        format!(r"{HOOK_PIPE_PREFIX}x\..\..\{victim}"),
+        format!(r"{HOOK_PIPE_PREFIX}1-0123456789abcdef\..\..\{victim}"),
+        format!("{HOOK_PIPE_PREFIX}x/../../{victim}"),
+        format!("{HOOK_PIPE_PREFIX}."),
+        HOOK_PIPE_PREFIX.to_owned(),
+    ];
+    for name in &names {
+        let out = run_hook(
+            Some(name),
+            Some("abc"),
+            "Stop",
+            br#"{"hook_event_name":"Stop"}"#,
+        );
+        assert_silent_success(&out);
+        assert_eq!(std::fs::read(&file).unwrap(), b"untouched", "{name:?}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn clients_beyond_the_cap_are_refused_as_busy() {
+    let pipe = start();
+    // Each held client occupies a connection thread until its read times out.
+    let held: Vec<_> = (0..=MAX_CONNECTIONS)
+        .map(|_| raw_client(pipe.server.name()))
+        .collect();
+    wait_until("a busy rejection", || {
+        pipe.server.stats().last_rejection == Some(Rejection::Busy)
+    });
+    drop(held);
+}
+
+#[test]
+fn dropping_the_server_with_a_connection_in_flight_returns_promptly() {
+    let pipe = start();
+    let mut client = raw_client(pipe.server.name());
+    client.write_all(b"YH").unwrap();
+    // Give the server time to start reading the frame.
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    drop(pipe.server);
+    assert!(
+        started.elapsed() < READ_TIMEOUT / 2,
+        "took {:?}",
+        started.elapsed()
+    );
+    drop(client);
 }
 
 #[test]
