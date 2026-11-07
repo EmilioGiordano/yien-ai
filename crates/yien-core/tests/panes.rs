@@ -726,6 +726,7 @@ fn panes_in_a_hidden_tab_send_frames_once_shown() {
     h.command(Command::NewTab {
         project,
         name: None,
+        profile: None,
     });
     let shown = h.wait_for(|m| match m {
         CoreMsg::TabUpdated(t) if t.id != first_tab => Some(t.focused),
