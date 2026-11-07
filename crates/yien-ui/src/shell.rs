@@ -20,7 +20,7 @@ use yien_proto::{
 use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
-use crate::catalog::{CATALOG, profile_splits, shortcut};
+use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
 use crate::fonts::Fonts;
 use crate::git::ContextGit;
 use crate::layout::neighbor;
@@ -92,7 +92,6 @@ struct Renaming {
 struct ConfirmClose {
     project: ProjectId,
     name: String,
-    busy: usize,
     focus: FocusHandle,
 }
 
@@ -818,10 +817,29 @@ impl Shell {
         self.confirm = Some(ConfirmClose {
             project,
             name,
-            busy,
             focus,
         });
         cx.notify();
+    }
+
+    /// While the question is open, a window command closes it and goes no
+    /// further, so a key cannot act on a workspace hidden behind it.
+    fn close_on_window_commands(
+        &self,
+        dialog: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        CATALOG
+            .iter()
+            .filter(|spec| spec.scope == Scope::Window)
+            .fold(dialog, |dialog, spec| {
+                dialog.on_boxed_action(
+                    &*(spec.action)(),
+                    cx.listener(|this, _: &dyn Action, window, cx| {
+                        this.confirm_cancel(&ConfirmCancel, window, cx);
+                    }),
+                )
+            })
     }
 
     fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
@@ -848,9 +866,15 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
-        let (panes, are) = match confirm.busy {
-            1 => ("1 pane".to_owned(), "is"),
-            n => (format!("{n} panes"), "are"),
+        let detail = match self.workspace.busy_panes_of(confirm.project) {
+            0 => "Nothing in it is running any more. Nothing on disk is deleted.".to_owned(),
+            1 => "1 pane is still running an agent or a program; closing the project stops \
+                  it. Nothing on disk is deleted."
+                .to_owned(),
+            n => format!(
+                "{n} panes are still running an agent or a program; closing the project \
+                 stops them. Nothing on disk is deleted."
+            ),
         };
         let button = |id: &'static str, label: &'static str, keys: &'static str| {
             h_flex()
@@ -904,16 +928,14 @@ impl Shell {
                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                             this.confirm_cancel(&ConfirmCancel, window, cx);
                         }))
+                        .map(|dialog| self.close_on_window_commands(dialog, cx))
                         .child(
                             div()
                                 .text_size(px(15.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(format!("Close {}?", confirm.name)),
                         )
-                        .child(div().text_size(px(13.0)).text_color(t.muted).child(format!(
-                            "{panes} {are} still running an agent or a program; closing the \
-                             project stops them. Nothing on disk is deleted."
-                        )))
+                        .child(div().text_size(px(13.0)).text_color(t.muted).child(detail))
                         .child(
                             h_flex()
                                 .justify_end()
