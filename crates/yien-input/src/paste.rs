@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn multiline_without_bracketed_would_execute() {
+    fn rf_pan_09_multiline_without_bracketed_would_execute() {
         assert_eq!(
             assess("one\ntwo\nthree", false),
             Risk::WouldExecute { lines: 3 }
@@ -96,13 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn bracketed_paste_makes_multiline_safe() {
+    fn rf_pan_09_bracketed_paste_makes_multiline_safe() {
         // The program promised to treat it as data, so nagging would be noise.
         assert_eq!(assess("one\ntwo\nthree", true), Risk::Safe);
     }
 
     #[test]
-    fn trailing_newline_still_submits() {
+    fn rf_pan_09_trailing_newline_still_submits() {
         // "rm -rf /\n" runs on arrival: the newline is the Enter.
         assert!(matches!(
             assess("rm -rf /\n", false),
