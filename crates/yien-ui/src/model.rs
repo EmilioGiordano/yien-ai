@@ -980,6 +980,22 @@ mod tests {
     }
 
     #[test]
+    fn rf_atn_15_an_unselected_tab_that_needs_you_shows_the_red_bar() {
+        let mut view = demo();
+        let t = crate::theme::Theme::of(crate::theme::ThemeKind::default());
+        let bar =
+            |v: &WorkspaceView, id| t.tab_row_bar(v.tab_state(v.tab(TabId::new(id)).unwrap()));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
+        assert_eq!(bar(&view, 20), None);
+        assert_eq!(bar(&view, 11), None);
+        assert!(view.pane_state(PaneId::new(200), NEEDS));
+        assert_eq!(bar(&view, 20), Some(t.shu));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
+        assert!(view.pane_state(PaneId::new(200), P::Idle));
+        assert_eq!(bar(&view, 20), None);
+    }
+
+    #[test]
     fn rf_atn_05_the_jump_goes_oldest_first_and_cycles() {
         let mut view = demo();
         // 100 waits since 100; 200 and 110 start waiting later, 110 last.
