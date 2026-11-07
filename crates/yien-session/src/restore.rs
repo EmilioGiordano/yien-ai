@@ -31,7 +31,7 @@ pub enum ResumeAction {
 /// Decides how to relaunch a pane.
 ///
 /// An agent session is resumed only when the pane has its exact id and the user did not end
-/// it (RN-04, RN-05); an empty id counts as none. A session whose agent kind is not the
+/// it (RN-04, RN-05); an empty or blank id counts as none. A session whose agent kind is not the
 /// pane's profile is never resumed, so one CLI's id never reaches another. Anything else
 /// starts fresh.
 ///
@@ -61,7 +61,7 @@ pub fn resume_plan(pane: &PaneRecord) -> ResumeAction {
         Some(agent) => match &agent.session_id {
             Some(id)
                 if !agent.ended_explicitly
-                    && !id.as_str().is_empty()
+                    && !id.as_str().trim().is_empty()
                     && agent.kind == pane.profile =>
             {
                 ResumeAction::Resume {
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn rn_05_without_an_exact_id_nothing_is_resumed() {
-        for session in [None, Some("")] {
+        for session in [None, Some(""), Some(" \t ")] {
             assert_eq!(
                 resume_plan(&agent_pane(session, false)),
                 ResumeAction::Fresh { rerun_offer: None }
