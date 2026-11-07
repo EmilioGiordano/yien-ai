@@ -10,10 +10,12 @@ mod panic_log;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use yien_core::{Core, CoreConfig, CoreHandle, GitConfig, HookConfig, SendError, SessionStore};
 use yien_platform::LogGuard;
+use yien_platform::single_instance::{self, Claim, Instance};
 use yien_platform::state_store::FileStore;
 use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, PaneId};
@@ -46,6 +48,13 @@ fn main() -> ExitCode {
     if let Err(error) = dll_search {
         tracing::error!("{error}");
     }
+    // Before the core loads or saves anything: a second start on the same
+    // data dir only asks the running YIEN for its window (RF-SES-14).
+    let window = Arc::new(AtomicIsize::new(0));
+    let Some(_instance) = claim_data_dir(&window) else {
+        drop(log);
+        return ExitCode::SUCCESS;
+    };
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let config = CoreConfig {
@@ -67,7 +76,7 @@ fn main() -> ExitCode {
         }
     };
     // Before the window opens, so its taskbar button carries the toasts' app id.
-    let attention = Rc::new(attention::Attention::new());
+    let attention = Rc::new(attention::Attention::new(window));
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
@@ -94,6 +103,41 @@ fn main() -> ExitCode {
         drop(log);
     });
     ExitCode::SUCCESS
+}
+
+/// Claims YIEN's data dir for this process. `None` when another YIEN holds
+/// it: that one was asked to show its window, and this one must exit. A
+/// failed check is logged and the app starts anyway.
+fn claim_data_dir(window: &Arc<AtomicIsize>) -> Option<Option<Instance>> {
+    let claimed = yien_platform::paths::data_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|dir| single_instance::claim(&dir).map_err(|e| e.to_string()));
+    match claimed {
+        Ok(Claim::First(instance)) => {
+            let window = Arc::clone(window);
+            Some(Some(instance.serve(move |request| {
+                tracing::info!(
+                    activate = request.activate,
+                    "another start on this data dir asked for the window"
+                );
+                let hwnd = window.load(Ordering::Acquire);
+                if hwnd != 0 {
+                    single_instance::show_window(hwnd, request);
+                }
+            })))
+        }
+        Ok(Claim::Running { delivered }) => {
+            tracing::info!(
+                delivered,
+                "YIEN already runs on this data dir; this start exits"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!("the single instance check failed, starting anyway: {error}");
+            Some(None)
+        }
+    }
 }
 
 /// How long a new pane waits for its drawn size before its program starts;

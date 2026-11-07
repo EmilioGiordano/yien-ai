@@ -40,7 +40,7 @@ mod unsupported;
 #[cfg(not(windows))]
 use unsupported as imp;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 #[cfg(windows)]
 use windows as imp;
 

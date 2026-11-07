@@ -384,6 +384,40 @@ mod tests {
     }
 
     #[test]
+    fn rf_age_03_agent_clis_run_on_the_users_own_account() {
+        let profiles = builtin_profiles().unwrap();
+        let fill = Fill {
+            pane: PaneId::new(1),
+            session_id: Some("s-1"),
+            resume: None,
+            hooks: Some(HOOKS),
+        };
+        for id in ["claude", "codex", "opencode"] {
+            let plan = resolve(Some(&ProfileId::new(id)), &profiles, &shell()).unwrap();
+            let spec = plan.spec(&fill, "C:/Code", 80, 24);
+            // The environment is the user's, minus Claude's session markers:
+            // YIEN adds only its own variables and no credentials of its own.
+            for (key, _) in &spec.env {
+                let key = key.to_string_lossy();
+                assert!(key.starts_with("YIEN_"), "{id} sets {key}");
+            }
+            for removed in &spec.env_remove {
+                let removed = removed.to_string_lossy();
+                assert!(
+                    CLAUDE_SESSION_MARKERS.contains(&removed.as_ref()),
+                    "{id} drops {removed}"
+                );
+            }
+            for arg in args(&spec) {
+                let arg = arg.to_ascii_lowercase();
+                for word in ["key", "token", "login", "auth", "password"] {
+                    assert!(!arg.contains(word), "{id} passes {arg}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rf_ses_03_a_resume_launch_passes_the_exact_session_and_the_hooks() {
         let plan = claude();
         assert!(plan.can_resume());

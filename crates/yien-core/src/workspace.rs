@@ -75,6 +75,10 @@ pub(crate) enum PaneEvent {
     Failed(String),
     /// Something the user should know about a program that runs.
     Notice(String),
+    /// The pane runs a stand-in for its profile's program, with this name
+    /// and profile name: the shell a failed resume fell back to
+    /// (RF-SES-11). `None` once the profile's own program runs again.
+    Standin(Option<(String, String)>),
     /// The actor itself died; a relaunch starts a new one.
     Crashed,
     Selection(Option<String>),
@@ -171,6 +175,9 @@ struct Pane {
     signal_lost: bool,
     visible: bool,
     seen: bool,
+    /// The name and profile name of a stand-in program, shown instead of
+    /// the profile's while it runs; the saved session keeps the profile.
+    standin: Option<(String, String)>,
 }
 
 /// Every project, tab and pane, and which tab is selected.
@@ -645,6 +652,7 @@ impl Workspace {
                 signal_lost: false,
                 visible: false,
                 seen: false,
+                standin: None,
             },
         );
         fx.push(Effect::Spawn {
@@ -871,9 +879,15 @@ impl Workspace {
                     message,
                 }));
             }
+            PaneEvent::Standin(standin) => {
+                p.standin = standin;
+                self.emit_pane(pane, &mut fx);
+            }
             PaneEvent::Crashed => {
                 p.running = false;
                 p.exit_code = None;
+                // The restarted actor runs the pane's own program again.
+                p.standin = None;
                 // The restarted actor starts idle and reports no change, so a
                 // red mark would otherwise outlive the agent that raised it.
                 p.needs_you_since = None;
@@ -977,14 +991,18 @@ fn project_info(p: &Project) -> ProjectInfo {
 }
 
 fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
+    let (default_name, profile_name) = match &p.standin {
+        Some((name, profile)) => (name, profile),
+        None => (&p.default_name, &p.profile_name),
+    };
     PaneInfo {
         id,
         tab: p.tab,
         name: p
             .custom_name
             .clone()
-            .unwrap_or_else(|| p.default_name.clone()),
-        profile: p.profile_name.clone(),
+            .unwrap_or_else(|| default_name.clone()),
+        profile: profile_name.clone(),
         profile_id: ProfileId::new(p.profile.clone()),
         title: p.title.clone(),
         cwd: p.cwd.clone(),
@@ -1335,6 +1353,20 @@ mod tests {
             matches!(fx[..], [Effect::Relaunch { pane }] if pane == a),
             "{fx:?}"
         );
+    }
+
+    #[test]
+    fn rf_ses_11_a_crash_drops_the_fallback_shell_name() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let own = ws.panes[&a].profile_name.clone();
+        ws.on_pane_event(
+            a,
+            PaneEvent::Standin(Some(("Shell".to_owned(), "Fallback".to_owned()))),
+        );
+        assert_eq!(pane_info(a, &ws.panes[&a]).profile, "Fallback");
+        ws.on_pane_event(a, PaneEvent::Crashed);
+        assert_eq!(pane_info(a, &ws.panes[&a]).profile, own);
     }
 
     #[test]

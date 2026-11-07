@@ -87,6 +87,18 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-d"]
     ),
     command!(
+        "region.next",
+        "workspace: move focus to next area",
+        FocusNextRegion,
+        ["f6"]
+    ),
+    command!(
+        "region.previous",
+        "workspace: move focus to previous area",
+        FocusPreviousRegion,
+        ["shift-f6"]
+    ),
+    command!(
         "agent.next_needs_you",
         "agent: go to next that needs you",
         JumpToNeedsYou,
@@ -444,6 +456,7 @@ mod tests {
             ("context_bar.toggle", CONTEXT_BAR_KEYS),
             ("theme.toggle", THEME_KEYS),
             ("tab.next", NEXT_TAB_KEYS),
+            ("region.next", REGION_KEYS),
             ("pane.split_right", SPLIT_RIGHT_KEYS),
             ("pane.split_down", SPLIT_DOWN_KEYS),
             ("pane.close", CLOSE_PANE_KEYS),

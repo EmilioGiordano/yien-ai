@@ -196,6 +196,21 @@ impl Run {
         })
     }
 
+    /// The next notice about `pane`. The pane must not report an exit
+    /// before it.
+    fn pane_notice(&mut self, pane: PaneId) -> String {
+        self.wait_for(|m| match m {
+            CoreMsg::Error {
+                pane: Some(p),
+                message,
+            } if *p == pane => Some(message.clone()),
+            CoreMsg::PaneExited { pane: p, .. } if *p == pane => {
+                panic!("the pane reported an exit")
+            }
+            _ => None,
+        })
+    }
+
     /// The focused pane of the first tab announced.
     fn first_pane(&mut self) -> PaneId {
         self.wait_for(|m| match m {
@@ -659,6 +674,213 @@ fn rf_ses_03_a_restored_claude_terminated_before_it_starts_relaunches_fresh() {
     let launch = args(&child);
     assert!(!launch.iter().any(|a| a == "--resume"), "{launch:?}");
     assert!(!launch.contains(&session), "{launch:?}");
+}
+
+/// Restores `store` and returns the run and its resumed Claude child.
+fn resumed(store: &Shared) -> (Run, FakeChild) {
+    let run = Run::start(store);
+    let claude = run
+        .children(2)
+        .into_iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    assert_eq!(args(&claude)[0], "--resume");
+    (run, claude)
+}
+
+fn saved_session_of(store: &Shared, pane: PaneId) -> Option<String> {
+    let saved = store.saved()?;
+    let record = saved.projects[0].tabs[0]
+        .panes
+        .iter()
+        .find(|p| p.id == pane)?
+        .clone();
+    assert_eq!(record.profile.as_str(), "claude");
+    record
+        .agent
+        .and_then(|a| a.session_id)
+        .map(|s| s.as_str().to_owned())
+}
+
+#[test]
+fn rf_ses_11_a_resume_that_finds_no_conversation_opens_a_shell_and_keeps_the_session() {
+    let (store, claude, session) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.output(format!("No conversation found with session ID: {session}\r\n").as_bytes());
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(notice.contains("could not resume"), "{notice}");
+    assert!(notice.contains("not found"), "{notice}");
+    let shell = again.children(1).pop().unwrap();
+    assert_eq!(shell.spec().program, "fake-shell");
+    assert_eq!(
+        shell.spec().cwd.as_deref(),
+        Some(std::path::Path::new(ROOT))
+    );
+    // The pane says what runs in it; the saved session keeps the agent.
+    again.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == claude && p.profile == "Shell" => Some(()),
+        _ => None,
+    });
+    again.save();
+    assert_eq!(saved_session_of(&store, claude), Some(session.clone()));
+    drop(again);
+
+    // Nothing was lost: the next start tries the same session again.
+    let (again, child) = resumed(&store);
+    assert_eq!(args(&child)[1], session);
+    drop(again);
+}
+
+#[test]
+fn rf_ses_11_a_resume_that_exits_with_an_error_at_once_opens_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(notice.contains("code 1"), "{notice}");
+    assert_eq!(again.children(1)[0].spec().program, "fake-shell");
+}
+
+#[test]
+fn rf_ses_11_the_fallback_notice_keeps_what_the_cli_said() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.output(b"Error: invalid API key\r\n\r\n");
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(
+        notice.ends_with("It said: Error: invalid API key"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn rf_ses_11_a_relaunch_after_the_fallback_starts_a_new_agent_session() {
+    let (store, claude, session) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.exit(1);
+    again.pane_notice(claude);
+    let shell = again.children(1).pop().unwrap();
+    again.command(Command::RelaunchPane { pane: claude });
+    let relaunched = again.children(1).pop().unwrap();
+    assert!(shell.was_killed());
+    assert_eq!(relaunched.spec().program, "claude");
+    again.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == claude && p.profile == "Claude Code" => Some(()),
+        _ => None,
+    });
+    let launch = args(&relaunched);
+    assert_eq!(launch[0], "--session-id");
+    assert_ne!(launch[1], session);
+    wait_until(|| saved_session_of(&store, claude).as_deref() == Some(launch[1].as_str()));
+}
+
+#[test]
+fn rf_ses_11_a_resumed_pane_the_user_stops_does_not_open_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, _child) = resumed(&store);
+    again.command(Command::TerminatePane { pane: claude });
+    again.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane, .. } if *pane == claude => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(again.backend.take_spawned().is_empty());
+}
+
+/// Waits for `pane` to exit and checks no shell opened in its place.
+fn exits_without_a_shell(run: &mut Run, pane: PaneId) {
+    run.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane: p, .. } if *p == pane => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(run.backend.take_spawned().is_empty());
+}
+
+#[test]
+fn rf_ses_11_a_resumed_agent_the_user_typed_into_ends_without_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    again
+        .core
+        .try_send(ClientMsg::Input {
+            pane: claude,
+            bytes: yien_proto::InputBytes::new(b"\x03".to_vec()),
+        })
+        .unwrap();
+    assert!(child.recv_input(TIMEOUT).is_some());
+    child.exit(1);
+    exits_without_a_shell(&mut again, claude);
+}
+
+#[cfg(windows)]
+#[test]
+fn rf_ses_11_a_resumed_agent_that_sent_a_hook_ends_without_a_shell() {
+    use std::io::Write;
+    use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV, connect_client};
+    use yien_proto::{AgentState, hook_frame};
+
+    let (store, claude, session) = first_run();
+    let hooks = HookConfig {
+        hook_exe: std::env::current_exe().unwrap(),
+        settings_dir: std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("yien-session-veto-{}", std::process::id())),
+    };
+    let mut again = Run::start_with(store, Some(hooks));
+    let child = again
+        .children(2)
+        .into_iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    let env = |key: &str| {
+        child
+            .spec()
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .unwrap()
+    };
+    let (token, pipe) = (env(HOOK_TOKEN_ENV), env(HOOK_PIPE_ENV));
+    for (event, extra) in [
+        ("SessionStart", r#","source":"resume""#),
+        ("UserPromptSubmit", ""),
+    ] {
+        let payload = format!(r#"{{"hook_event_name":"{event}","session_id":"{session}"{extra}}}"#);
+        let frame = hook_frame::encode(token.as_bytes(), event, payload.as_bytes()).unwrap();
+        let mut conn = connect_client(&pipe, Instant::now() + TIMEOUT).unwrap();
+        conn.write_all(&frame).unwrap();
+    }
+    again.wait_for(|m| match m {
+        CoreMsg::PaneState { pane, state } if *pane == claude && *state == AgentState::Working => {
+            Some(())
+        }
+        _ => None,
+    });
+    child.exit(1);
+    exits_without_a_shell(&mut again, claude);
+}
+
+#[test]
+fn rf_ses_11_quitting_while_a_resume_starts_opens_no_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    again.core.shutdown(TIMEOUT).unwrap();
+    assert!(child.was_killed());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(again.backend.take_spawned().is_empty());
+    while let Ok(msg) = again.events.try_recv() {
+        if let CoreMsg::Error {
+            pane: Some(p),
+            message,
+        } = msg
+        {
+            assert_ne!(p, claude, "{message}");
+        }
+    }
 }
 
 #[test]

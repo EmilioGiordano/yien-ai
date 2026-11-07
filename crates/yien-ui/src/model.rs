@@ -567,6 +567,16 @@ impl WorkspaceView {
         project.tabs.iter().filter_map(|id| self.tabs.get(id))
     }
 
+    /// The tab rows the tab bar draws, top to bottom: folded projects show
+    /// none (RF-NAV-08 moves the keyboard over these).
+    pub fn drawn_tabs(&self) -> Vec<TabId> {
+        self.projects
+            .iter()
+            .filter(|p| !self.is_folded(p.id))
+            .flat_map(|p| self.tabs_of(p).map(|t| t.id))
+            .collect()
+    }
+
     /// A tab by id.
     pub fn tab(&self, id: TabId) -> Option<&TabView> {
         self.tabs.get(&id)
@@ -980,6 +990,22 @@ mod tests {
     }
 
     #[test]
+    fn rf_atn_15_an_unselected_tab_that_needs_you_shows_the_red_bar() {
+        let mut view = demo();
+        let t = crate::theme::Theme::of(crate::theme::ThemeKind::default());
+        let bar =
+            |v: &WorkspaceView, id| t.tab_row_bar(v.tab_state(v.tab(TabId::new(id)).unwrap()));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
+        assert_eq!(bar(&view, 20), None);
+        assert_eq!(bar(&view, 11), None);
+        assert!(view.pane_state(PaneId::new(200), NEEDS));
+        assert_eq!(bar(&view, 20), Some(t.shu));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
+        assert!(view.pane_state(PaneId::new(200), P::Idle));
+        assert_eq!(bar(&view, 20), None);
+    }
+
+    #[test]
     fn rf_atn_05_the_jump_goes_oldest_first_and_cycles() {
         let mut view = demo();
         // 100 waits since 100; 200 and 110 start waiting later, 110 last.
@@ -1305,6 +1331,19 @@ mod tests {
         assert_eq!(ids(&view), vec![11, 10]);
         assert!(!view.select_tab(TabId::new(99)));
         assert_eq!(ids(&view), vec![11, 10]);
+    }
+
+    #[test]
+    fn rf_nav_08_the_keyboard_walks_the_tab_rows_the_bar_draws() {
+        let mut view = demo();
+        let ids =
+            |v: &WorkspaceView| -> Vec<u64> { v.drawn_tabs().iter().map(|t| t.get()).collect() };
+        assert_eq!(ids(&view), vec![10, 11, 20]);
+        view.toggle_fold(ProjectId::new(1));
+        assert_eq!(ids(&view), vec![20]);
+        let rows = view.drawn_tabs();
+        let cursor = crate::region::move_cursor(&rows, Some(TabId::new(10)), None, 1);
+        assert_eq!(cursor, Some(TabId::new(20)));
     }
 
     #[test]

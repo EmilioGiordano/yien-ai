@@ -1,17 +1,29 @@
 //! The window's toasts, taskbar badge and flash, over `yien-platform`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
+
 use yien_platform::attention::{AttentionError, OsAttention as Platform, Toast};
 use yien_ui::{OsAttention, ToastText};
 
 /// [`OsAttention`] on the platform layer. Failures go to the log at debug
 /// level with the step and error code only (RF-ATN-16): the window's red
 /// mark and counter do not depend on them.
-pub(crate) struct Attention(Platform);
+pub(crate) struct Attention {
+    os: Platform,
+    /// The window's handle once it exists, 0 before; shared with whoever
+    /// else must bring the window forward.
+    window: Arc<AtomicIsize>,
+}
 
 impl Attention {
     /// Takes YIEN's app id for the process; call it before the window opens.
-    pub(crate) fn new() -> Self {
-        Self(Platform::new())
+    /// `window` receives the window's handle when it attaches.
+    pub(crate) fn new(window: Arc<AtomicIsize>) -> Self {
+        Self {
+            os: Platform::new(),
+            window,
+        }
     }
 }
 
@@ -23,11 +35,12 @@ fn log(result: Result<(), AttentionError>) {
 
 impl OsAttention for Attention {
     fn attach(&self, hwnd: isize) {
-        self.0.attach(hwnd);
+        self.window.store(hwnd, Ordering::Release);
+        self.os.attach(hwnd);
     }
 
     fn toast(&self, toast: &ToastText) {
-        log(self.0.toast(&Toast {
+        log(self.os.toast(&Toast {
             title: toast.title.clone(),
             body: toast.body.clone(),
             launch: toast.launch.clone(),
@@ -36,7 +49,7 @@ impl OsAttention for Attention {
     }
 
     fn badge(&self, count: usize) {
-        let set = self.0.set_badge(count);
+        let set = self.os.set_badge(count);
         if set.is_ok() {
             tracing::debug!(count, "taskbar badge set");
         }
@@ -44,10 +57,10 @@ impl OsAttention for Attention {
     }
 
     fn flash(&self) {
-        log(self.0.flash());
+        log(self.os.flash());
     }
 
     fn on_activate(&self, callback: Box<dyn Fn(String) + Send + Sync>) {
-        self.0.on_activate(callback);
+        self.os.on_activate(callback);
     }
 }
