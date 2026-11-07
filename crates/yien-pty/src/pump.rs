@@ -155,39 +155,63 @@ mod tests {
         }
     }
 
-    /// Returns once `flag` is set, as `Child::wait` does on exit.
-    fn wait_on(flag: Arc<AtomicBool>, code: u32) -> impl FnOnce() -> io::Result<ExitStatus> {
+    /// For tests that check ordering only: a quiet window far longer than the
+    /// gap between the exit and the test's next write, even on a slow runner.
+    fn ordering_drain() -> Drain {
+        Drain {
+            quiet: Duration::from_millis(500),
+            cap: Duration::from_secs(3),
+        }
+    }
+
+    /// Returns when the test calls [`Pump::exit`], as `Child::wait` does on
+    /// exit, and tells the test it is returning.
+    fn wait_on(
+        exit: Receiver<()>,
+        returning: SyncSender<()>,
+    ) -> impl FnOnce() -> io::Result<ExitStatus> {
         move || {
-            while !flag.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Ok(ExitStatus::from_code(code))
+            let _ = exit.recv();
+            let _ = returning.send(());
+            Ok(ExitStatus::from_code(0))
         }
     }
 
     struct Pump {
         events: Receiver<PtyEvent>,
-        child_exit: Arc<AtomicBool>,
+        exit: SyncSender<()>,
+        returning: Receiver<()>,
         exited: Arc<AtomicBool>,
+    }
+
+    impl Pump {
+        /// Ends the child and returns once the waiter has seen it, so what
+        /// the test does next happens after the exit.
+        fn exit(&self) {
+            self.exit.send(()).unwrap();
+            self.returning.recv_timeout(TIMEOUT).unwrap();
+        }
     }
 
     fn start(reader: io::PipeReader, capacity: usize, drain: Drain) -> Pump {
         let (tx, events) = sync_channel(capacity);
         let shared = Arc::new(ReaderShared::default());
-        let child_exit = Arc::new(AtomicBool::new(false));
+        let (exit, exit_rx) = sync_channel(1);
+        let (returning_tx, returning) = sync_channel(1);
         let exited = Arc::new(AtomicBool::new(false));
         {
             let (tx, shared) = (tx.clone(), Arc::clone(&shared));
             thread::spawn(move || run_reader(reader, tx, shared));
         }
         {
-            let wait = wait_on(Arc::clone(&child_exit), 0);
+            let wait = wait_on(exit_rx, returning_tx);
             let exited = Arc::clone(&exited);
             thread::spawn(move || run_waiter(wait, tx, shared, exited, drain));
         }
         Pump {
             events,
-            child_exit,
+            exit,
+            returning,
             exited,
         }
     }
@@ -225,16 +249,15 @@ mod tests {
         }
         feeder.join().unwrap().unwrap();
         assert_eq!(got, sent);
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
     }
 
     #[test]
     fn output_after_exit_inside_the_quiet_window_comes_before_exited() {
         let (reader, mut writer) = io::pipe().unwrap();
-        let pump = start(reader, 4, fast_drain());
+        let pump = start(reader, 4, ordering_drain());
         writer.write_all(b"before").unwrap();
-        pump.child_exit.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(20));
+        pump.exit();
         writer.write_all(b" after").unwrap();
 
         let (out, status) = until_exit(&pump.events);
@@ -249,7 +272,7 @@ mod tests {
         let drain = fast_drain();
         let pump = start(reader, 4, drain);
         let start = Instant::now();
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
 
         let (_, status) = until_exit(&pump.events);
         assert!(status.success());
@@ -268,7 +291,7 @@ mod tests {
         let pump = start(reader, 4, drain);
         let start = Instant::now();
         drop(writer);
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
 
         let (_, status) = until_exit(&pump.events);
         assert!(status.success());
@@ -278,12 +301,11 @@ mod tests {
     #[test]
     fn output_after_an_exit_that_followed_a_long_idle_still_comes_before_exited() {
         let (reader, mut writer) = io::pipe().unwrap();
-        let drain = fast_drain();
+        let drain = ordering_drain();
         let pump = start(reader, 4, drain);
-        // The reader has been parked far longer than the quiet window.
-        thread::sleep(drain.quiet * 3);
-        pump.child_exit.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(20));
+        // The reader has been parked longer than the quiet window.
+        thread::sleep(drain.quiet + Duration::from_millis(100));
+        pump.exit();
         writer.write_all(b"final frame").unwrap();
 
         let (out, status) = until_exit(&pump.events);
@@ -313,7 +335,7 @@ mod tests {
             })
         };
         let start = Instant::now();
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
 
         let (out, status) = until_exit(&pump.events);
         assert!(status.success());
@@ -331,7 +353,7 @@ mod tests {
             writer.write_all(chunk).unwrap();
             thread::sleep(Duration::from_millis(10));
         }
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
         // Longer than the quiet window, while the reader is stuck in `send`.
         thread::sleep(Duration::from_millis(300));
 
@@ -352,7 +374,7 @@ mod tests {
             writer.write_all(chunk).unwrap();
             thread::sleep(Duration::from_millis(10));
         }
-        pump.child_exit.store(true, Ordering::SeqCst);
+        pump.exit();
         // Several caps long, while the reader is stuck in `send`.
         thread::sleep(Duration::from_millis(400));
 
