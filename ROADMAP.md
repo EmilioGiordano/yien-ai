@@ -25,6 +25,7 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M0 skeleton: workspace, CI, deny, proto, testkit, xtask, foothy layout and input | `build/workspace-skeleton` | done on the branch: all of these, green locally; CI not yet run on the three systems |
 | M0 rest: `tracing` setup, error conventions | follow-up `build/` | pending |
 | M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
+| VT engine: `yien-vt`, `VtEngine` on alacritty, `osc_scan`, frames, hot scrollback, search, links | `feat/vt-engine` | done on the branch, in review; cold scrollback and frame diffs pending |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; rest pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
@@ -37,6 +38,10 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `build/workspace-skeleton`: layer-0 crates do not depend on each other. `yien-layout` keeps its own `PaneId` (a `u64` handed out by the tree); mapping it to `yien_proto::PaneId` is the core's job.
 - `build/workspace-skeleton`: foothy's `win32.rs` (win32-input-mode encoding) was left out of `yien-input` as the TASK asked. It makes no OS calls, and plan §3.2 places win32-input-mode in `yien-input`, so it should come back there with M1 input, not go to `yien-platform`.
 - `build/workspace-skeleton`: `xtask check-deps` also requires `#![forbid(unsafe_code)]` in every crate root except `yien-pty` and `yien-platform`, limits `yien-proto` to `serde`, and holds layers 0 and 1 to an allowlist of external crates kept in `xtask/src/check_deps.rs` (adding one is a reviewed change).
+- `feat/vt-engine`: the engine has no clock. A synchronized update (mode 2026) holds output and replies until it closes; the pane actor calls `flush_sync` once `sync_pending` has been true for `SYNC_UPDATE_TIMEOUT` (150 ms), restarting that timer whenever `sync_generation` changes.
+- `feat/vt-engine`: `Frame.cursor` is `None` only when scrolled out of view; a hidden cursor keeps its point (`Cursor::visible` false) so the IME window can follow it (RF-PAN-15).
+- `feat/vt-engine`: `osc_scan` treats `OSC 9;<number>;…` as a ConEmu command (`9;4` progress, `9;9` cwd), never as a notification, so it cannot raise a false red mark (RN-02). Only 7-bit `ESC ]`, BEL and `ESC \` are recognised; C1 bytes are UTF-8 continuation bytes in practice.
+- `feat/vt-engine`: link detection covers OSC 8, URLs and absolute Windows drive paths; relative and Unix paths are left for later.
 - `feat/ui-shell`: ADR-02 taken: the UI is GPUI through the crates.io package `gpui-kit =0.7.1` (bundles gpui and gpui-component), the pin Zenkai builds and runs on this PC. The lock holds `gpui-base`, `gpui-component` and `gpui-kit-assets` at 0.7.1 to match Zenkai. Its tree needs `0BSD` and `bzip2-1.0.6` in the deny licence list and seven unmaintained-crate advisories ignored (listed in `deny.toml`).
 - `feat/ui-shell`: the `yien` binary is layer 4 in `check-deps`; it may depend on every layer and nothing depends on it. `yien-ui` owns `run()`, so the binary does not depend on gpui.
 - `feat/ui-shell`: the view model (`WorkspaceView`) lives in `yien-ui`, keyed by `yien-proto` ids, and models all five RF-AGE-05 states. The counter counts panes (RF-ATN-03); project heads count tabs.
