@@ -270,8 +270,8 @@ impl Workspace {
                 tab.maximized = None;
                 let cwd = tab.dir.clone();
                 self.add_pane(new, tab_id, plan, cwd, &mut fx);
-                self.emit_pane(new, &mut fx);
                 self.focus(new, &mut fx)?;
+                self.emit_pane(new, &mut fx);
             }
             Command::ClosePane { pane } => self.close_pane(pane, &mut fx)?,
             Command::FocusPane { pane } => self.focus(pane, &mut fx)?,
@@ -1070,6 +1070,28 @@ mod tests {
             Command::NewProject {
                 root: "C:/p".into(),
                 name: None,
+            },
+        );
+        let spawn = fx.iter().position(|e| matches!(e, Effect::Spawn { .. }));
+        let tab = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::TabUpdated(_))));
+        let pane = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(_))));
+        assert!(spawn.is_some() && spawn < tab && tab < pane, "{fx:?}");
+    }
+
+    #[test]
+    fn a_split_announces_the_layout_before_the_new_pane() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let fx = run(
+            &mut ws,
+            Command::SplitPane {
+                pane: a,
+                orientation: Orientation::Horizontal,
+                profile: None,
             },
         );
         let spawn = fx.iter().position(|e| matches!(e, Effect::Spawn { .. }));
