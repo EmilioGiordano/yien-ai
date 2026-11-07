@@ -446,3 +446,58 @@ fn copy_selection_returns_the_selected_text() {
     });
     assert_eq!(text.as_deref(), Some("copy"));
 }
+
+#[test]
+fn dropping_the_last_handle_terminates_every_program() {
+    let mut h = Harness::start();
+    let (_, first, child_a) = h.project();
+    let (_, child_b) = h.split(first, None);
+    let clone = h.core.clone();
+    drop(clone);
+    assert!(!child_a.was_killed());
+    drop(h.core);
+    wait_until(|| child_a.was_killed() && child_b.was_killed());
+}
+
+#[test]
+fn panes_in_a_hidden_tab_send_frames_once_shown() {
+    let mut h = Harness::start();
+    h.command(Command::NewProject {
+        root: env!("CARGO_MANIFEST_DIR").into(),
+        name: None,
+    });
+    let (project, first_tab) = h.wait_for(|m| match m {
+        CoreMsg::ProjectUpdated(p) => Some((p.id, p.tabs[0])),
+        _ => None,
+    });
+    let hidden = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.focused),
+        _ => None,
+    });
+    let hidden_child = h.child();
+    h.command(Command::NewTab {
+        project,
+        name: None,
+    });
+    let shown = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) if t.id != first_tab => Some(t.focused),
+        _ => None,
+    });
+    let shown_child = h.child();
+
+    hidden_child.output(b"hidden text");
+    std::thread::sleep(Duration::from_millis(50));
+    shown_child.output(b"shown text");
+    h.wait_for(|m| match m {
+        CoreMsg::PaneFrame { pane, .. } if *pane == hidden => {
+            panic!("a pane in a hidden tab sent a frame")
+        }
+        CoreMsg::PaneFrame { pane, frame } if *pane == shown && frame.text().contains("shown") => {
+            Some(())
+        }
+        _ => None,
+    });
+
+    h.command(Command::SelectTab { tab: first_tab });
+    h.frame_with(hidden, "hidden text");
+}
