@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_split_puts_panes_side_by_side() {
+    fn rf_pan_01_horizontal_split_puts_panes_side_by_side() {
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let l = t.layout(AREA);
@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn vertical_split_stacks_panes() {
+    fn rf_pan_01_vertical_split_stacks_panes() {
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Vertical).unwrap();
         let l = t.layout(AREA);
@@ -949,7 +949,7 @@ mod tests {
     // --- moving a pane elsewhere in the layout ---
 
     #[test]
-    fn drop_target_picks_the_nearest_edge() {
+    fn rf_pan_05_drop_target_picks_the_nearest_edge() {
         let mut t = Tree::new();
         t.split(0, Orientation::Horizontal);
         // Inside the left pane (0..50 x 0..100).
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_pane_keeps_every_pane() {
+    fn rf_pan_05_moving_a_pane_keeps_every_pane() {
         //   +----+----+          +----+----+
         //   |    | b  |          | c  | b  |
         //   | 0  +----+  c left  | 0  +----+
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn dragging_moves_the_boundary_by_the_pixels_asked() {
+    fn rf_pan_02_dragging_moves_the_boundary_by_the_pixels_asked() {
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
         let id = t.dividers(AREA, 6.0)[0].id;
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn dragging_only_touches_the_two_neighbours() {
+    fn rf_pan_02_dragging_only_touches_the_two_neighbours() {
         // Three side by side. Moving the first boundary must leave the third alone,
         // which is what tells a divider drag apart from `resize`.
         let mut t = Tree::new();
@@ -1205,7 +1205,7 @@ mod tests {
     // --- directional navigation: the part Warp flags as hard ---
 
     #[test]
-    fn moves_between_side_by_side_panes() {
+    fn rf_pan_03_moves_between_side_by_side_panes() {
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
         assert_eq!(t.neighbour(0, Direction::Right, AREA), Some(b));
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn crosses_branches_by_geometry_not_by_tree_order() {
+    fn rf_pan_03_crosses_branches_by_geometry_not_by_tree_order() {
         // Left spans the full height; the right side is split in two.
         //   +--------+--------+
         //   |        |   b    |
