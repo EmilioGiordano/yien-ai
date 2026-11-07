@@ -54,6 +54,12 @@ pub fn assess(text: &str, bracketed: bool) -> Risk {
 
 /// Lines the text would submit. A single trailing newline still submits the
 /// line before it, so it counts.
+///
+/// ```
+/// use yien_input::paste::line_count;
+/// assert_eq!(line_count(""), 0);
+/// assert_eq!(line_count("a\r\nb\n"), 3);
+/// ```
 pub fn line_count(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -65,11 +71,19 @@ pub fn line_count(text: &str) -> usize {
 }
 
 /// Line endings normalised to CR, which is what Enter sends.
+///
+/// ```
+/// assert_eq!(yien_input::paste::normalize("a\r\nb\nc"), "a\rb\rc");
+/// ```
 pub fn normalize(text: &str) -> String {
     text.replace("\r\n", "\r").replace('\n', "\r")
 }
 
 /// Wraps the text so a program that asked for bracketed paste can tell it apart.
+///
+/// ```
+/// assert_eq!(yien_input::paste::bracket("ls"), b"\x1b[200~ls\x1b[201~");
+/// ```
 pub fn bracket(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + 12);
     out.extend_from_slice(b"\x1b[200~");
