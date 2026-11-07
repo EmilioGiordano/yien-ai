@@ -646,6 +646,16 @@ impl Workspace {
             PaneEvent::Crashed => {
                 p.running = false;
                 p.exit_code = None;
+                // The restarted actor starts idle and reports no change, so a
+                // red mark would otherwise outlive the agent that raised it.
+                p.needs_you_since = None;
+                if p.state != AgentState::Idle {
+                    p.state = AgentState::Idle;
+                    fx.push(Effect::Emit(CoreMsg::PaneState {
+                        pane,
+                        state: AgentState::Idle,
+                    }));
+                }
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message: "This pane stopped after an internal error. Relaunch it to start \
@@ -1095,6 +1105,24 @@ mod tests {
             matches!(fx[..], [Effect::Relaunch { pane }] if pane == a),
             "{fx:?}"
         );
+    }
+
+    #[test]
+    fn rn_02_a_crashed_actor_takes_its_red_mark_with_it() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Permission);
+        ws.on_pane_event(a, PaneEvent::State(needs, Some(3)));
+        let fx = ws.on_pane_event(a, PaneEvent::Crashed);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneState { pane, state: AgentState::Idle }) if *pane == a
+        )));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p))
+                if p.id == a && p.state == AgentState::Idle && p.needs_you_since.is_none()
+        )));
     }
 
     #[test]
