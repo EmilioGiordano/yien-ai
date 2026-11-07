@@ -4,8 +4,8 @@ mod common;
 
 use common::sample;
 use yien_session::{
-    BACKUPS, CURRENT_FILE, MemStore, ROTATION_INTERVAL_MS, SaveError, SkipReason, Store,
-    generation_name, load, preserve_newer, save, serialize,
+    BACKUPS, CURRENT_FILE, DAMAGED_FILE, MemStore, ROTATION_INTERVAL_MS, SaveError, SkipReason,
+    Store, generation_name, load, preserve_newer, save, serialize,
 };
 
 const MINUTE: u64 = ROTATION_INTERVAL_MS;
@@ -118,14 +118,26 @@ fn rf_ses_06_an_invalid_generation_is_skipped_with_its_problems() {
 #[test]
 fn rf_ses_06_a_damaged_current_file_is_kept_when_saving() {
     let mut store = MemStore::new();
-    save(&mut store, &sample(0)).unwrap();
+    for minute in 0..=5 {
+        save(&mut store, &sample(minute * MINUTE)).unwrap();
+    }
     store.insert(CURRENT_FILE, b"garbage".to_vec());
-    assert!(save(&mut store, &sample(1)).unwrap().rotated);
+    assert!(!save(&mut store, &sample(5 * MINUTE + 1)).unwrap().rotated);
     assert_eq!(
-        store.read(&generation_name(1)).unwrap().as_deref(),
+        store.read(DAMAGED_FILE).unwrap().as_deref(),
         Some(&b"garbage"[..])
     );
-    assert_eq!(load(&store).restored.unwrap().snapshot, sample(1));
+    for generation in 1..=BACKUPS {
+        assert_eq!(
+            saved_at(&store, generation),
+            Some((5 - generation as u64) * MINUTE),
+            "backup {generation} untouched"
+        );
+    }
+    assert_eq!(
+        load(&store).restored.unwrap().snapshot,
+        sample(5 * MINUTE + 1)
+    );
 }
 
 #[test]

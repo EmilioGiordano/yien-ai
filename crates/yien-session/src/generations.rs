@@ -15,6 +15,10 @@ pub const CURRENT_FILE: &str = "workspace.json";
 /// `workspace.4.json`, five copies in all.
 pub const BACKUPS: usize = 4;
 
+/// Where [`save`] keeps a damaged [`CURRENT_FILE`] for diagnosis (plan §5.2), replacing any
+/// earlier one.
+pub const DAMAGED_FILE: &str = "workspace.damaged.json";
+
 /// The least time between the snapshot in `workspace.1.json` and the one that pushes it
 /// down, in milliseconds. Saves in between only replace [`CURRENT_FILE`].
 pub const ROTATION_INTERVAL_MS: u64 = 60_000;
@@ -76,9 +80,10 @@ pub struct Saved {
 
 /// Writes the snapshot as [`CURRENT_FILE`], atomically.
 ///
-/// The previous file is first pushed down to `workspace.1.json` when it is damaged or when
-/// the snapshot is [`ROTATION_INTERVAL_MS`] away from the one in `workspace.1.json`; the
-/// oldest backup then drops off. Refuses to write an invalid snapshot, and refuses while any
+/// The previous file is first pushed down to `workspace.1.json` when the snapshot is
+/// [`ROTATION_INTERVAL_MS`] away from the one in `workspace.1.json`; the oldest backup then
+/// drops off. A damaged previous file is moved to [`DAMAGED_FILE`] instead, for diagnosis,
+/// and the backups stay as they are. Refuses to write an invalid snapshot, and refuses while any
 /// generation holds a newer schema, since rotation would move or drop it.
 ///
 /// ```
@@ -114,9 +119,13 @@ pub fn save(store: &mut impl Store, snapshot: &SessionSnapshot) -> Result<Saved,
         }
     }
 
+    if present[0] && !current_healthy {
+        store.rename(CURRENT_FILE, DAMAGED_FILE)?;
+        present[0] = false;
+    }
     let due = backup_saved_at
         .is_none_or(|at: u64| at.abs_diff(snapshot.saved_at) >= ROTATION_INTERVAL_MS);
-    let rotated = present[0] && (!current_healthy || due);
+    let rotated = present[0] && due;
     if rotated {
         for generation in (1..BACKUPS).rev() {
             if present[generation] {

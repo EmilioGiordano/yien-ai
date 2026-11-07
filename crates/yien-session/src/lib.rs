@@ -57,8 +57,8 @@ pub use codec::{
     migrate_with, schema_version_of, serialize,
 };
 pub use generations::{
-    BACKUPS, CURRENT_FILE, LoadReport, ROTATION_INTERVAL_MS, Restored, SaveError, Saved,
-    SkipReason, Skipped, generation_name, load, preserve_newer, save,
+    BACKUPS, CURRENT_FILE, DAMAGED_FILE, LoadReport, ROTATION_INTERVAL_MS, Restored, SaveError,
+    Saved, SkipReason, Skipped, generation_name, load, preserve_newer, save,
 };
 pub use model::{
     AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, SessionRef,
