@@ -228,8 +228,17 @@ pub(crate) struct ProfileSplit {
     pub(crate) orientation: Orientation,
 }
 
+/// Profile splits a keyed catalog command already runs: the shell both ways
+/// (`pane.split_right`, `pane.split_down`) and Claude Code on the right
+/// (`pane.split_right_claude`).
+const KEYED_SPLITS: &[(&str, Orientation)] = &[
+    ("shell", Orientation::Horizontal),
+    ("shell", Orientation::Vertical),
+    ("claude", Orientation::Horizontal),
+];
+
 /// "Split right with" and "split down with" for every profile, in the
-/// profiles' order.
+/// profiles' order, leaving out those a keyed command covers.
 pub(crate) fn profile_splits(profiles: &[ProfileInfo]) -> Vec<ProfileSplit> {
     let mut splits = Vec::new();
     for (orientation, way) in [
@@ -237,6 +246,12 @@ pub(crate) fn profile_splits(profiles: &[ProfileInfo]) -> Vec<ProfileSplit> {
         (Orientation::Vertical, "down"),
     ] {
         for profile in profiles {
+            let keyed = KEYED_SPLITS
+                .iter()
+                .any(|(id, o)| *id == profile.id.as_str() && *o == orientation);
+            if keyed {
+                continue;
+            }
             splits.push(ProfileSplit {
                 title: format!("pane: split {way} with {}", profile.name),
                 profile: profile.id.clone(),
@@ -434,20 +449,32 @@ mod tests {
                 id: ProfileId::new("claude"),
                 name: "Claude Code".into(),
             },
+            ProfileInfo {
+                id: ProfileId::new("codex"),
+                name: "Codex".into(),
+            },
         ];
         let titles: Vec<String> = profile_splits(&profiles)
             .into_iter()
             .map(|s| s.title)
             .collect();
+        // The shell both ways and Claude Code on the right are keyed
+        // commands already, so they are not repeated.
         assert_eq!(
             titles,
             [
-                "pane: split right with Shell",
-                "pane: split right with Claude Code",
-                "pane: split down with Shell",
+                "pane: split right with Codex",
                 "pane: split down with Claude Code",
+                "pane: split down with Codex",
             ]
         );
+        for id in [
+            "pane.split_right",
+            "pane.split_down",
+            "pane.split_right_claude",
+        ] {
+            assert!(spec(id).is_some_and(|s| !s.keys.is_empty()), "{id}");
+        }
         assert!(profile_splits(&[]).is_empty());
     }
 

@@ -583,7 +583,7 @@ mod tests {
             name: "Claude Code".into(),
         }];
         let entries = command_entries(|_| None, crate::catalog::profile_splits(&profiles));
-        assert_eq!(entries.len(), CATALOG.len() + 2);
+        assert_eq!(entries.len(), CATALOG.len() + 1);
         let mut palette = Palette::new(Mode::Commands, entries, Vec::new());
         palette.set_query("split down with claude");
         assert_eq!(
