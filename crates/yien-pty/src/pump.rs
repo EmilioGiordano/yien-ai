@@ -94,13 +94,14 @@ pub(crate) fn run_waiter(
 ) {
     let status = wait().unwrap_or(ExitStatus { code: None });
     exited.store(true, Ordering::SeqCst);
-    let parked_at_exit = shared.lock().parked_total(Instant::now());
+    let exit_at = Instant::now();
+    let parked_at_exit = shared.lock().parked_total(exit_at);
     loop {
         let state = shared.lock();
         let now = Instant::now();
         let quiet = state
             .parked_since
-            .is_some_and(|since| now.saturating_duration_since(since) >= drain.quiet);
+            .is_some_and(|since| now.saturating_duration_since(since.max(exit_at)) >= drain.quiet);
         let capped = state.parked_since.is_some()
             && state.parked_total(now).saturating_sub(parked_at_exit) >= drain.cap;
         if state.eof || quiet || capped {
@@ -275,6 +276,23 @@ mod tests {
     }
 
     #[test]
+    fn output_after_an_exit_that_followed_a_long_idle_still_comes_before_exited() {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let drain = fast_drain();
+        let pump = start(reader, 4, drain);
+        // The reader has been parked far longer than the quiet window.
+        thread::sleep(drain.quiet * 3);
+        pump.child_exit.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(20));
+        writer.write_all(b"final frame").unwrap();
+
+        let (out, status) = until_exit(&pump.events);
+        assert_eq!(out, b"final frame");
+        assert!(status.success());
+        drop(writer);
+    }
+
+    #[test]
     fn a_child_that_never_goes_quiet_still_exits_at_the_cap() {
         let (reader, mut writer) = io::pipe().unwrap();
         let drain = Drain {
@@ -297,9 +315,10 @@ mod tests {
         let start = Instant::now();
         pump.child_exit.store(true, Ordering::SeqCst);
 
-        let (_, status) = until_exit(&pump.events);
+        let (out, status) = until_exit(&pump.events);
         assert!(status.success());
         assert!(start.elapsed() >= drain.cap);
+        assert!(!out.is_empty() && out.iter().all(|&b| b == b'.'));
         stop.store(true, Ordering::SeqCst);
         chatter.join().unwrap();
     }
