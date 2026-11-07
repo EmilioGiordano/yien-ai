@@ -92,6 +92,10 @@ pub(crate) struct Shell {
     tab_cursor: Option<TabId>,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
+    /// F6 put the keyboard in a bar. Only then does the bar keep it when the
+    /// core moves the pane focus; a click in a bar focuses it too, and the
+    /// pane must still get the keyboard after it.
+    keyboard_in_bar: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -202,6 +206,7 @@ impl Shell {
             context_focus: cx.focus_handle(),
             tab_cursor: None,
             keyboard_region: Region::Panes,
+            keyboard_in_bar: false,
             _subscriptions: vec![activation],
         }
     }
@@ -386,7 +391,8 @@ impl Shell {
     /// Moves the keyboard to the selected tab's focused pane when that
     /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.overlay_has_keyboard() || self.region(window, cx) != Region::Panes {
+        let kept = self.keyboard_in_bar && self.region(window, cx) != Region::Panes;
+        if self.overlay_has_keyboard() || kept {
             return;
         }
         let target = keyboard_pane(&self.workspace);
@@ -462,8 +468,12 @@ impl Shell {
                 let selected = self.workspace.selected_tab().map(|t| t.id);
                 self.tab_cursor = region::cursor_on_entry(&rows, self.tab_cursor, selected);
                 window.focus(&self.tab_bar_focus, cx);
+                self.keyboard_in_bar = true;
             }
-            Region::ContextBar => window.focus(&self.context_focus, cx),
+            Region::ContextBar => {
+                window.focus(&self.context_focus, cx);
+                self.keyboard_in_bar = true;
+            }
             Region::Panes => self.give_back_keyboard(window, cx),
         }
         cx.notify();
@@ -830,6 +840,7 @@ impl Shell {
     /// Gives the keyboard to the pane the core says is focused, or to the
     /// window when no tab is open, after an overlay held it.
     fn give_back_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_in_bar = false;
         let terminal = match keyboard_after_close(&self.workspace) {
             KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
             KeyboardTo::Window => None,
