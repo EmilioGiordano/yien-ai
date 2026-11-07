@@ -109,6 +109,17 @@ fn forward_slashes(path: &Path) -> String {
 /// Writes the settings file and opens the pipe. Every delivery goes to its
 /// pane's actor without blocking the pipe thread.
 pub(crate) fn start(config: &HookConfig, panes: Links) -> Result<Hooks, HooksError> {
+    start_with(config, panes, |registry, panes| {
+        HookPipeServer::start(registry, move |d| route(&panes, d))
+    })
+}
+
+/// [`start`] with another way to open the pipe.
+fn start_with(
+    config: &HookConfig,
+    panes: Links,
+    open: impl FnOnce(HookRegistry, Links) -> Result<HookPipeServer, HookPipeError>,
+) -> Result<Hooks, HooksError> {
     if !config.hook_exe.is_file() {
         return Err(HooksError::MissingHook(config.hook_exe.clone()));
     }
@@ -122,8 +133,7 @@ pub(crate) fn start(config: &HookConfig, panes: Links) -> Result<Hooks, HooksErr
             source,
         })?;
     let registry = HookRegistry::new();
-    let server = HookPipeServer::start(registry.clone(), move |d| route(&panes, d));
-    let server = match server {
+    let server = match open(registry.clone(), panes) {
         Ok(server) => server,
         Err(e) => {
             let _ = std::fs::remove_file(&settings_path);
@@ -229,6 +239,38 @@ mod tests {
         let err = start(&config, Arc::default()).unwrap_err();
         assert!(matches!(err, HooksError::MissingHook(_)), "{err}");
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_pipe_that_cannot_open_leaves_no_settings_file() {
+        let dir = std::env::temp_dir().join(format!("yien-hooks-nopipe-{}", std::process::id()));
+        let config = HookConfig {
+            hook_exe: std::env::current_exe().unwrap(),
+            settings_dir: dir.clone(),
+        };
+        let refused = HookPipeError::Os {
+            call: "CreateNamedPipeW",
+            code: 5,
+        };
+        let file = config.settings_file();
+        let err = start_with(&config, Arc::default(), |_, _| {
+            assert!(
+                file.is_file(),
+                "the settings are written before the pipe opens"
+            );
+            Err(refused.clone())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, HooksError::Pipe(e) if *e == refused),
+            "{err}"
+        );
+        assert!(
+            err.to_string().starts_with("could not open the hook pipe"),
+            "{err}"
+        );
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
