@@ -153,12 +153,6 @@ struct Pending {
     cause: Cause,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScreenAsk {
-    Notify(Source),
-    Watchdog,
-}
-
 /// The agent state of one pane and everything the next step depends on.
 ///
 /// ```
@@ -183,7 +177,7 @@ pub struct Machine {
     signal_lost: bool,
     pending: Option<Pending>,
     input_pending: bool,
-    awaiting_screen: Option<ScreenAsk>,
+    awaiting_screen: bool,
     last_activity: Duration,
     watchdog_at: Option<Duration>,
     session_ended: bool,
@@ -201,7 +195,7 @@ impl Machine {
             signal_lost: false,
             pending: None,
             input_pending: false,
-            awaiting_screen: None,
+            awaiting_screen: false,
             last_activity: Duration::ZERO,
             watchdog_at: None,
             session_ended: false,
@@ -315,7 +309,7 @@ impl Machine {
         let cause = Cause::Source(source);
         match signal {
             Signal::Hook(event) => self.on_hook(event, cause, now, fx),
-            Signal::Osc(osc) => self.on_osc(*osc, source, now, fx),
+            Signal::Osc(osc) => self.on_osc(*osc, cause, now, fx),
             _ => {}
         }
     }
@@ -361,8 +355,7 @@ impl Machine {
         }
     }
 
-    fn on_osc(&mut self, osc: OscSignal, source: Source, now: Duration, fx: &mut Vec<Effect>) {
-        let cause = Cause::Source(source);
+    fn on_osc(&mut self, osc: OscSignal, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         match osc {
             OscSignal::Status7501(AgentStatus::Working) => self.start_turn(cause, now, fx),
             OscSignal::Status7501(AgentStatus::Blocked) => {
@@ -379,37 +372,21 @@ impl Machine {
                     self.end_turn(cause, now, fx);
                 }
             }
-            OscSignal::Notify9 | OscSignal::Notify777 | OscSignal::Bell => {
-                if self.state != AgentState::Working {
-                    return;
-                }
-                if self.screen_allowed() {
-                    self.awaiting_screen = Some(ScreenAsk::Notify(source));
-                    fx.push(Effect::CheckScreen);
-                } else {
-                    self.end_turn(cause, now, fx);
-                }
-            }
+            // Done or waiting? A notification cannot tell (RN-02); S7 and S8
+            // decide what Codex and OpenCode notifications mean.
+            OscSignal::Notify9 | OscSignal::Notify777 | OscSignal::Bell => {}
         }
     }
 
     fn on_screen(&mut self, verdict: ScreenVerdict, now: Duration, fx: &mut Vec<Effect>) {
-        if !self.screen_allowed() || self.state != AgentState::Working {
-            self.awaiting_screen = None;
-            return;
-        }
-        let Some(ask) = self.awaiting_screen.take() else {
-            return;
-        };
-        match (verdict, ask) {
-            (ScreenVerdict::NeedsYou, _) => {
-                let cause = Cause::Source(Source::Screen);
-                self.needs(NeedsReason::ScreenRule, cause, now, fx);
-            }
-            (ScreenVerdict::NoMatch, ScreenAsk::Notify(source)) => {
-                self.end_turn(Cause::Source(source), now, fx);
-            }
-            (ScreenVerdict::NoMatch, ScreenAsk::Watchdog) => {}
+        let asked = std::mem::take(&mut self.awaiting_screen);
+        if asked
+            && verdict == ScreenVerdict::NeedsYou
+            && self.screen_allowed()
+            && self.state == AgentState::Working
+        {
+            let cause = Cause::Source(Source::Screen);
+            self.needs(NeedsReason::ScreenRule, cause, now, fx);
         }
     }
 
@@ -431,8 +408,8 @@ impl Machine {
             return;
         }
         if now >= self.last_activity + period {
-            if self.screen_allowed() && self.awaiting_screen.is_none() {
-                self.awaiting_screen = Some(ScreenAsk::Watchdog);
+            if self.screen_allowed() && !self.awaiting_screen {
+                self.awaiting_screen = true;
                 fx.push(Effect::CheckScreen);
             }
             self.last_activity = now;
@@ -496,7 +473,7 @@ impl Machine {
         self.signal_lost = true;
         self.input_pending = false;
         self.pending = None;
-        self.awaiting_screen = None;
+        self.awaiting_screen = false;
         self.set_state(AgentState::Idle, cause, now, fx);
     }
 
@@ -525,7 +502,7 @@ impl Machine {
             }
         } else {
             self.pending = None;
-            self.awaiting_screen = None;
+            self.awaiting_screen = false;
             self.watchdog_at = None;
         }
     }
