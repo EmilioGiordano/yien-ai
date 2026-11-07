@@ -50,3 +50,6 @@ expect_used = "warn"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[profile.release]
+strip = "symbols"
