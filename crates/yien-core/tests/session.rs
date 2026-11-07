@@ -196,6 +196,21 @@ impl Run {
         })
     }
 
+    /// The next notice about `pane`. The pane must not report an exit
+    /// before it.
+    fn pane_notice(&mut self, pane: PaneId) -> String {
+        self.wait_for(|m| match m {
+            CoreMsg::Error {
+                pane: Some(p),
+                message,
+            } if *p == pane => Some(message.clone()),
+            CoreMsg::PaneExited { pane: p, .. } if *p == pane => {
+                panic!("the pane reported an exit")
+            }
+            _ => None,
+        })
+    }
+
     /// The focused pane of the first tab announced.
     fn first_pane(&mut self) -> PaneId {
         self.wait_for(|m| match m {
@@ -659,6 +674,122 @@ fn rf_ses_03_a_restored_claude_terminated_before_it_starts_relaunches_fresh() {
     let launch = args(&child);
     assert!(!launch.iter().any(|a| a == "--resume"), "{launch:?}");
     assert!(!launch.contains(&session), "{launch:?}");
+}
+
+/// Restores `store` and returns the run and its resumed Claude child.
+fn resumed(store: &Shared) -> (Run, FakeChild) {
+    let run = Run::start(store);
+    let claude = run
+        .children(2)
+        .into_iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    assert_eq!(args(&claude)[0], "--resume");
+    (run, claude)
+}
+
+fn saved_session_of(store: &Shared, pane: PaneId) -> Option<String> {
+    let saved = store.saved()?;
+    let record = saved.projects[0].tabs[0]
+        .panes
+        .iter()
+        .find(|p| p.id == pane)?
+        .clone();
+    assert_eq!(record.profile.as_str(), "claude");
+    record
+        .agent
+        .and_then(|a| a.session_id)
+        .map(|s| s.as_str().to_owned())
+}
+
+#[test]
+fn rf_ses_11_a_resume_that_finds_no_conversation_opens_a_shell_and_keeps_the_session() {
+    let (store, claude, session) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.output(
+        format!(
+            "No conversation found with session ID: {session}
+"
+        )
+        .as_bytes(),
+    );
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(notice.contains("could not resume"), "{notice}");
+    assert!(notice.contains("not found"), "{notice}");
+    let shell = again.children(1).pop().unwrap();
+    assert_eq!(shell.spec().program, "fake-shell");
+    assert_eq!(
+        shell.spec().cwd.as_deref(),
+        Some(std::path::Path::new(ROOT))
+    );
+    again.save();
+    assert_eq!(saved_session_of(&store, claude), Some(session.clone()));
+    drop(again);
+
+    // Nothing was lost: the next start tries the same session again.
+    let (again, child) = resumed(&store);
+    assert_eq!(args(&child)[1], session);
+    drop(again);
+}
+
+#[test]
+fn rf_ses_11_a_resume_that_exits_with_an_error_at_once_opens_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.exit(1);
+    let notice = again.pane_notice(claude);
+    assert!(notice.contains("code 1"), "{notice}");
+    assert_eq!(again.children(1)[0].spec().program, "fake-shell");
+}
+
+#[test]
+fn rf_ses_11_a_relaunch_after_the_fallback_starts_a_new_agent_session() {
+    let (store, claude, session) = first_run();
+    let (mut again, child) = resumed(&store);
+    child.exit(1);
+    again.pane_notice(claude);
+    let shell = again.children(1).pop().unwrap();
+    again.command(Command::RelaunchPane { pane: claude });
+    let relaunched = again.children(1).pop().unwrap();
+    assert!(shell.was_killed());
+    assert_eq!(relaunched.spec().program, "claude");
+    let launch = args(&relaunched);
+    assert_eq!(launch[0], "--session-id");
+    assert_ne!(launch[1], session);
+    wait_until(|| saved_session_of(&store, claude).as_deref() == Some(launch[1].as_str()));
+}
+
+#[test]
+fn rf_ses_11_a_resumed_pane_the_user_stops_does_not_open_a_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, _child) = resumed(&store);
+    again.command(Command::TerminatePane { pane: claude });
+    again.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane, .. } if *pane == claude => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(again.backend.take_spawned().is_empty());
+}
+
+#[test]
+fn rf_ses_11_quitting_while_a_resume_starts_opens_no_shell() {
+    let (store, claude, _) = first_run();
+    let (mut again, child) = resumed(&store);
+    again.core.shutdown(TIMEOUT).unwrap();
+    assert!(child.was_killed());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(again.backend.take_spawned().is_empty());
+    while let Ok(msg) = again.events.try_recv() {
+        if let CoreMsg::Error {
+            pane: Some(p),
+            message,
+        } = msg
+        {
+            assert_ne!(p, claude, "{message}");
+        }
+    }
 }
 
 #[test]
