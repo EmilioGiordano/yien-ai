@@ -1,6 +1,6 @@
 [package]
 name = "yien-ui"
-description = "The YIEN window: projects, vertical tabs and panes, drawn with GPUI."
+description = "The YIEN window: projects, vertical tabs and terminal panes, drawn with GPUI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,9 @@ publish.workspace = true
 
 [dependencies]
 yien-proto = { workspace = true }
-yien-layout = { workspace = true }
+yien-input = { workspace = true }
 gpui-kit = { workspace = true }
-thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true
