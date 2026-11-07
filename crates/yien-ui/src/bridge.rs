@@ -8,7 +8,7 @@
 //! so.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -86,7 +86,8 @@ pub(crate) enum Backlog {
     Clear,
     /// Messages wait for the core to take them.
     Waiting,
-    /// The budget is spent: new messages are refused.
+    /// The budget is spent, or a message did not fit: new messages are
+    /// refused until the queue drains.
     Full,
 }
 
@@ -132,6 +133,9 @@ fn budget(lane: Lane) -> usize {
 pub(crate) struct Link {
     client: Box<dyn CoreClient>,
     queues: RefCell<BTreeMap<Lane, VecDeque<ClientMsg>>>,
+    /// Lanes that refused a message since they last drained, so a big paste
+    /// refused by a nearly empty queue still shows as full.
+    refused: RefCell<BTreeSet<Lane>>,
     stopped: Cell<bool>,
     /// Bumped whenever a queue's [`Backlog`] changes, so the window knows to
     /// redraw its indicators.
@@ -145,6 +149,7 @@ impl Link {
         Self {
             client,
             queues: RefCell::new(BTreeMap::new()),
+            refused: RefCell::new(BTreeSet::new()),
             stopped: Cell::new(false),
             revision: Cell::new(0),
             flushing: Cell::new(false),
@@ -152,6 +157,9 @@ impl Link {
     }
 
     fn backlog(&self, lane: Lane) -> Backlog {
+        if self.refused.borrow().contains(&lane) {
+            return Backlog::Full;
+        }
         let queues = self.queues.borrow();
         match queues.get(&lane) {
             None => Backlog::Clear,
@@ -197,6 +205,7 @@ impl Link {
             if let Some(queue) = queues.get_mut(&lane) {
                 let used: usize = queue.iter().map(cost).sum();
                 if used + cost(&msg) > budget(lane) {
+                    self.refused.borrow_mut().insert(lane);
                     return Sent::Full;
                 }
                 queue.push_back(msg);
@@ -233,6 +242,7 @@ impl Link {
                         .and_then(VecDeque::pop_front);
                     let Some(msg) = next else {
                         self.queues.borrow_mut().remove(&lane);
+                        self.refused.borrow_mut().remove(&lane);
                         break;
                     };
                     match self.client.send(msg) {
@@ -271,6 +281,7 @@ impl Link {
     fn stop(&self) -> Sent {
         self.stopped.set(true);
         self.queues.borrow_mut().clear();
+        self.refused.borrow_mut().clear();
         Sent::Stopped
     }
 }
@@ -491,6 +502,22 @@ mod tests {
         assert_eq!(link.pane_backlog(pane), Backlog::Clear);
         assert_ne!(link.revision(), before);
         assert_eq!(link.send(input(9)), Sent::Delivered);
+    }
+
+    #[test]
+    fn a_message_too_big_for_the_room_left_shows_the_pane_as_full() {
+        let (fake, link) = link(100);
+        let pane = PaneId::new(1);
+        fake.stalled.borrow_mut().push(pane);
+        link.send(big_input(1, PANE_BUDGET - 1));
+        assert_eq!(link.pane_backlog(pane), Backlog::Waiting);
+        let before = link.revision();
+        assert_eq!(link.send(big_input(1, 2)), Sent::Full);
+        assert_eq!(link.pane_backlog(pane), Backlog::Full);
+        assert_ne!(link.revision(), before);
+        fake.stalled.borrow_mut().clear();
+        assert!(!link.flush().waiting);
+        assert_eq!(link.pane_backlog(pane), Backlog::Clear);
     }
 
     #[test]
