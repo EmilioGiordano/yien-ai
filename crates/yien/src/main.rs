@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use yien_core::{Core, CoreConfig, CoreHandle, SendError};
 use yien_platform::LogGuard;
-use yien_proto::{ClientMsg, Command};
+use yien_proto::frame::Frame;
+use yien_proto::{ClientMsg, Command, PaneId};
 use yien_pty::PortablePty;
 use yien_ui::{CoreClient, Refused};
 
@@ -24,6 +25,10 @@ impl CoreClient for Client {
             SendError::Busy(msg) => Refused::Busy(msg),
             SendError::Stopped(_) => Refused::Stopped,
         })
+    }
+
+    fn take_frame(&self, pane: PaneId) -> Option<Frame> {
+        self.0.take_frame(pane)
     }
 }
 
