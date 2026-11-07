@@ -331,13 +331,15 @@ impl VtEngine for AlacrittyEngine {
                 .is_some_and(|range| range.contains(indexed.point));
             line.push(self.frame_cell(indexed.cell, selected));
         }
-        let cursor = from_term_shape(content.cursor.shape).and_then(|shape| {
-            let at = point_to_viewport(offset, content.cursor.point)?;
+        let visible = content.cursor.shape != TermCursorShape::Hidden;
+        let shape = from_term_shape(self.term.cursor_style().shape).unwrap_or_default();
+        let cursor = point_to_viewport(offset, content.cursor.point).and_then(|at| {
             let row = u16::try_from(at.line).ok().filter(|r| *r < size.rows)?;
             let col = u16::try_from(at.column.0).ok()?;
             Some(Cursor {
                 point: ViewportPoint::new(row, col),
                 shape,
+                visible,
             })
         });
         Frame {

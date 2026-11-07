@@ -237,10 +237,14 @@ pub enum CursorShape {
 /// The cursor as it should be drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cursor {
-    /// Where it is in the viewport.
+    /// Where it is in the viewport. On a wide character it is the first of
+    /// the two cells, and a block cursor should cover both.
     pub point: ViewportPoint,
-    /// Its shape.
+    /// The shape the program asked for, even while hidden.
     pub shape: CursorShape,
+    /// Whether to draw it. Programs such as Claude Code hide the cursor
+    /// (`ESC [ ? 25 l`) but the point still anchors the IME window (RF-PAN-15).
+    pub visible: bool,
 }
 
 /// The visible part of a pane, ready to draw.
@@ -260,7 +264,8 @@ pub struct Frame {
     pub size: Size,
     /// `size.rows` rows of `size.cols` cells each, top to bottom.
     pub lines: Vec<Vec<Cell>>,
-    /// The cursor, or `None` when it is hidden or scrolled out of view.
+    /// The cursor, or `None` only when it is scrolled out of view. A hidden
+    /// cursor is still here, with [`Cursor::visible`] false.
     pub cursor: Option<Cursor>,
     /// How many lines the viewport is scrolled back into the history.
     pub display_offset: usize,

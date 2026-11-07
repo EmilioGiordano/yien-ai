@@ -30,7 +30,7 @@ fn render(frame: &Frame) -> String {
                 continue;
             }
             let at_cursor = frame.cursor.is_some_and(|cur| {
-                usize::from(cur.point.row) == r && usize::from(cur.point.col) == c
+                cur.visible && usize::from(cur.point.row) == r && usize::from(cur.point.col) == c
             });
             if at_cursor {
                 text.push('█');
@@ -464,14 +464,36 @@ fn rf_age_02_unclosed_synchronized_update_is_flushed_with_its_replies() {
 #[test]
 fn cursor_shape_and_visibility_follow_the_program() {
     let mut e = engine(10, 3);
-    let cursor = e.frame().cursor.expect("visible");
+    let cursor = e.frame().cursor.expect("in view");
     assert_eq!(cursor.shape, CursorShape::Block);
+    assert!(cursor.visible);
     e.feed(b"ab\x1b[6 q");
-    let cursor = e.frame().cursor.expect("visible");
+    let cursor = e.frame().cursor.expect("in view");
     assert_eq!(cursor.shape, CursorShape::Beam);
     assert_eq!(cursor.point, vp(0, 2));
     e.feed(b"\x1b[?25l");
-    assert_eq!(e.frame().cursor, None);
+    let hidden = e.frame().cursor.expect("a hidden cursor keeps its point");
+    assert!(!hidden.visible);
+    assert_eq!(hidden.point, vp(0, 2));
+    assert_eq!(hidden.shape, CursorShape::Beam);
+    e.feed(b"\x1b[?25h");
+    assert!(e.frame().cursor.expect("in view").visible);
+}
+
+#[test]
+fn rf_pan_15_hidden_cursor_point_follows_the_program() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x1b[?25l> type here\x1b[2;3H");
+    let cursor = e.frame().cursor.expect("a hidden cursor keeps its point");
+    assert!(!cursor.visible);
+    assert_eq!(cursor.point, vp(1, 2));
+}
+
+#[test]
+fn rf_pan_10_cursor_on_a_wide_char_points_at_its_first_cell() {
+    let mut e = engine(10, 3);
+    e.feed("a\u{4e2d}\x1b[1;3H".as_bytes());
+    assert_eq!(e.frame().cursor.expect("in view").point, vp(0, 1));
 }
 
 #[test]
