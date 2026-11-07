@@ -12,6 +12,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod hook_frame;
+
 use serde::{Deserialize, Serialize};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
