@@ -23,6 +23,9 @@ pub(crate) const RENAME_CONTEXT: &str = "YienRename";
 /// Key context of a question the window asks before acting.
 pub(crate) const CONFIRM_CONTEXT: &str = "YienConfirm";
 
+/// Key context of the tab bar while it holds the keyboard (RF-NAV-08).
+pub(crate) const TAB_BAR_CONTEXT: &str = "YienTabBar";
+
 actions!(
     yien,
     [
@@ -134,6 +137,20 @@ actions!(
         PaletteConfirm,
         /// Closes the palette without running anything.
         PaletteClose,
+        /// Moves the keyboard to the next region: tab bar, panes, context
+        /// bar (RF-NAV-08).
+        FocusNextRegion,
+        /// Moves the keyboard to the previous region (RF-NAV-08).
+        FocusPreviousRegion,
+        /// Moves the tab bar's cursor one row up.
+        TabBarUp,
+        /// Moves the tab bar's cursor one row down.
+        TabBarDown,
+        /// Selects the tab under the tab bar's cursor and gives the keyboard
+        /// to its pane.
+        TabBarSelect,
+        /// Gives the keyboard back to the pane without selecting anything.
+        TabBarLeave,
     ]
 );
 
@@ -154,6 +171,7 @@ pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const SWITCHER_KEYS: &str = "Ctrl+Shift+O";
 pub(crate) const TAB_NUMBER_KEYS: &str = "Ctrl+1..9";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
+pub(crate) const REGION_KEYS: &str = "F6";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
@@ -168,6 +186,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
     let rename = format!("{RENAME_CONTEXT} > Input");
     let rename = Some(rename.as_str());
     let confirm = Some(CONFIRM_CONTEXT);
+    let tab_bar = Some(TAB_BAR_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -182,6 +201,10 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", RenameCancel, rename),
         KeyBinding::new("enter", ConfirmAccept, confirm),
         KeyBinding::new("escape", ConfirmCancel, confirm),
+        KeyBinding::new("up", TabBarUp, tab_bar),
+        KeyBinding::new("down", TabBarDown, tab_bar),
+        KeyBinding::new("enter", TabBarSelect, tab_bar),
+        KeyBinding::new("escape", TabBarLeave, tab_bar),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -225,6 +248,10 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(RenameCancel),
         Box::new(ConfirmAccept),
         Box::new(ConfirmCancel),
+        Box::new(TabBarUp),
+        Box::new(TabBarDown),
+        Box::new(TabBarSelect),
+        Box::new(TabBarLeave),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -343,6 +370,30 @@ mod tests {
         let stack = ["Root", CONTEXT, CONFIRM_CONTEXT];
         assert!(first_is("enter", &stack, &ConfirmAccept));
         assert!(first_is("escape", &stack, &ConfirmCancel));
+    }
+
+    #[test]
+    fn rf_nav_08_f6_moves_between_regions_from_anywhere() {
+        let tab_bar = ["Root", CONTEXT, TAB_BAR_CONTEXT];
+        for stack in [&TERMINAL_STACK[..], &tab_bar[..], &["Root", CONTEXT][..]] {
+            assert!(first_is("f6", stack, &FocusNextRegion), "{stack:?}");
+            assert!(
+                first_is("shift-f6", stack, &FocusPreviousRegion),
+                "{stack:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_nav_08_arrows_and_enter_drive_the_tab_bar_only_while_it_has_the_keyboard() {
+        let tab_bar = ["Root", CONTEXT, TAB_BAR_CONTEXT];
+        assert!(first_is("up", &tab_bar, &TabBarUp));
+        assert!(first_is("down", &tab_bar, &TabBarDown));
+        assert!(first_is("enter", &tab_bar, &TabBarSelect));
+        assert!(first_is("escape", &tab_bar, &TabBarLeave));
+        for keys in ["up", "down", "enter", "escape"] {
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
     }
 
     #[test]

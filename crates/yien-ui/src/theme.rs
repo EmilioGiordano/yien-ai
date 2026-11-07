@@ -152,6 +152,12 @@ impl Theme {
     pub(crate) fn tab_row_bar(&self, state: AgentState) -> Option<Rgba> {
         state.needs_you().then_some(self.shu)
     }
+
+    /// The ring around the region that holds the keyboard (RF-NAV-08).
+    /// Indigo, never red: red means an agent needs the user (RN-01).
+    pub(crate) fn focus_ring(&self) -> Rgba {
+        self.ai
+    }
 }
 
 /// Points gpui-component, which paints the title bar, its window buttons and
@@ -262,6 +268,19 @@ mod tests {
                 "{kind:?}: the focused border is the stronger one"
             );
             assert_eq!(t.pane_border(true, true), (2.0, t.shu), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn rf_nav_08_the_focus_ring_is_indigo_and_visible_on_the_bars() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            assert_eq!(t.focus_ring(), t.ai, "{kind:?}");
+            assert_ne!(t.focus_ring(), t.shu, "{kind:?}");
+            for bg in [t.panel, t.raised] {
+                let ratio = contrast(t.focus_ring(), bg);
+                assert!(ratio >= 3.0, "{kind:?}: the ring is {ratio:.2}:1");
+            }
         }
     }
 

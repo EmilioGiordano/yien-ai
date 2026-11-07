@@ -35,6 +35,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, switcher_entries,
 };
+use crate::region::{self, Region};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
 
@@ -83,6 +84,14 @@ pub(crate) struct Shell {
     renaming: Option<Renaming>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
+    /// The tab bar and the context bar as places the keyboard can be
+    /// (RF-NAV-08); the pane area is the terminals' own focus.
+    tab_bar_focus: FocusHandle,
+    context_focus: FocusHandle,
+    /// The tab row the arrows are on while the tab bar has the keyboard.
+    tab_cursor: Option<TabId>,
+    /// The region that held the keyboard at the last render.
+    keyboard_region: Region,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -189,6 +198,10 @@ impl Shell {
             confirm: None,
             renaming: None,
             alerts: Alerts::new(os),
+            tab_bar_focus: cx.focus_handle(),
+            context_focus: cx.focus_handle(),
+            tab_cursor: None,
+            keyboard_region: Region::Panes,
             _subscriptions: vec![activation],
         }
     }
@@ -370,9 +383,10 @@ impl Shell {
         self.palette.is_some() || self.confirm.is_some() || self.renaming.is_some()
     }
 
-    /// Moves the keyboard to the selected tab's focused pane when that changes.
+    /// Moves the keyboard to the selected tab's focused pane when that
+    /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.overlay_has_keyboard() {
+        if self.overlay_has_keyboard() || self.region(window, cx) != Region::Panes {
             return;
         }
         let target = keyboard_pane(&self.workspace);
@@ -403,14 +417,109 @@ impl Shell {
         cx.notify();
     }
 
-    fn toggle_tab_bar(&mut self, _: &ToggleTabBar, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_tab_bar(&mut self, _: &ToggleTabBar, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_bar_open = !self.tab_bar_open;
+        if !self.tab_bar_open && self.region(window, cx) == Region::TabBar {
+            self.give_back_keyboard(window, cx);
+        }
         cx.notify();
     }
 
-    fn toggle_context_bar(&mut self, _: &ToggleContextBar, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_context_bar(
+        &mut self,
+        _: &ToggleContextBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.context_bar_open = !self.context_bar_open;
+        if !self.context_bar_open && self.region(window, cx) == Region::ContextBar {
+            self.give_back_keyboard(window, cx);
+        }
         cx.notify();
+    }
+
+    /// The region that holds the keyboard; the pane area when no bar does.
+    fn region(&self, window: &Window, cx: &App) -> Region {
+        if self.tab_bar_focus.contains_focused(window, cx) {
+            Region::TabBar
+        } else if self.context_focus.contains_focused(window, cx) {
+            Region::ContextBar
+        } else {
+            Region::Panes
+        }
+    }
+
+    /// F6 and Shift+F6 (RF-NAV-08). An overlay keeps the keyboard.
+    fn move_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_has_keyboard() {
+            return;
+        }
+        let from = self.region(window, cx);
+        let to = region::next_region(from, forward, self.tab_bar_open, self.context_bar_open);
+        match to {
+            Region::TabBar => {
+                let rows = self.workspace.drawn_tabs();
+                let selected = self.workspace.selected_tab().map(|t| t.id);
+                self.tab_cursor = region::cursor_on_entry(&rows, self.tab_cursor, selected);
+                window.focus(&self.tab_bar_focus, cx);
+            }
+            Region::ContextBar => window.focus(&self.context_focus, cx),
+            Region::Panes => self.give_back_keyboard(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn focus_next_region(
+        &mut self,
+        _: &FocusNextRegion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_region(true, window, cx);
+    }
+
+    fn focus_previous_region(
+        &mut self,
+        _: &FocusPreviousRegion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_region(false, window, cx);
+    }
+
+    fn move_tab_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
+        let rows = self.workspace.drawn_tabs();
+        let selected = self.workspace.selected_tab().map(|t| t.id);
+        self.tab_cursor = region::move_cursor(&rows, self.tab_cursor, selected, by);
+        cx.notify();
+    }
+
+    fn tab_bar_up(&mut self, _: &TabBarUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_tab_cursor(-1, cx);
+    }
+
+    fn tab_bar_down(&mut self, _: &TabBarDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_tab_cursor(1, cx);
+    }
+
+    /// Enter on a tab row: select it, as a click would, and give the
+    /// keyboard to its pane.
+    fn tab_bar_select(&mut self, _: &TabBarSelect, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.workspace.drawn_tabs();
+        if let Some(tab) = self.tab_cursor.filter(|t| rows.contains(t)) {
+            self.select_tab(tab, window, cx);
+        }
+        self.give_back_keyboard(window, cx);
+    }
+
+    fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
+        self.give_back_keyboard(window, cx);
+    }
+
+    /// The tab row to ring, while the tab bar has the keyboard.
+    fn ringed_tab(&self) -> Option<TabId> {
+        self.tab_cursor
+            .filter(|_| self.keyboard_region == Region::TabBar)
     }
 
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1534,8 +1643,11 @@ impl Shell {
             );
         v_flex()
             .id("tab-bar")
+            .key_context(TAB_BAR_CONTEXT)
+            .track_focus(&self.tab_bar_focus)
             .role(Role::Navigation)
             .aria_label("Projects and tabs")
+            .relative()
             .w(px(TAB_BAR_WIDTH))
             .flex_none()
             .h_full()
@@ -1553,6 +1665,9 @@ impl Shell {
                     .pb(px(10.0))
                     .children(groups),
             )
+            .when(self.keyboard_region == Region::TabBar, |bar| {
+                bar.child(focus_ring(&t))
+            })
     }
 
     fn render_project_head(
@@ -1667,6 +1782,9 @@ impl Shell {
                     row.border_color(gpui_kit::transparent_black())
                         .hover(move |s| s.bg(hover))
                 }
+            })
+            .when(self.ringed_tab() == Some(id), |row| {
+                row.border_color(t.focus_ring())
             })
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if this.renaming.as_ref().is_some_and(|r| r.tab == id) {
@@ -2119,14 +2237,19 @@ impl Shell {
         let t = self.theme;
         v_flex()
             .id("context-bar")
+            .track_focus(&self.context_focus)
             .role(Role::Complementary)
             .aria_label("Context bar")
+            .relative()
             .w(px(CONTEXT_BAR_WIDTH))
             .flex_none()
             .h_full()
             .border_l_1()
             .border_color(t.line)
             .bg(t.panel)
+            .when(self.keyboard_region == Region::ContextBar, |bar| {
+                bar.child(focus_ring(&t))
+            })
     }
 
     fn render_context_bar(&self) -> impl IntoElement {
@@ -2400,7 +2523,8 @@ impl Shell {
                  {NEW_CLAUDE_TAB_KEYS} Claude tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
                  {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
-                 {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
+                 {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {REGION_KEYS} move focus · \
+                 {TAB_BAR_KEYS} tab bar · \
                  {CONTEXT_BAR_KEYS} context bar · {TAB_NUMBER_KEYS} tab N · {NEXT_TAB_KEYS} next tab · \
                  {THEME_KEYS} theme"
                     ))),
@@ -2420,6 +2544,7 @@ fn mute_notice(muted: bool, what: &str) -> String {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window);
+        self.keyboard_region = self.region(window, cx);
         let t = self.theme;
         v_flex()
             .key_context(CONTEXT)
@@ -2464,6 +2589,12 @@ impl Render for Shell {
             .on_action(cx.listener(Self::palette_down))
             .on_action(cx.listener(Self::palette_confirm))
             .on_action(cx.listener(Self::palette_close))
+            .on_action(cx.listener(Self::focus_next_region))
+            .on_action(cx.listener(Self::focus_previous_region))
+            .on_action(cx.listener(Self::tab_bar_up))
+            .on_action(cx.listener(Self::tab_bar_down))
+            .on_action(cx.listener(Self::tab_bar_select))
+            .on_action(cx.listener(Self::tab_bar_leave))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
@@ -2494,6 +2625,16 @@ impl Render for Shell {
             .children(self.render_palette(cx))
             .children(self.render_confirm(cx))
     }
+}
+
+/// The indigo ring drawn over a bar that holds the keyboard (RF-NAV-08);
+/// the bar must be `relative`.
+fn focus_ring(t: &Theme) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .border_2()
+        .border_color(t.focus_ring())
 }
 
 /// A 30 px square button holding a 16 px icon, as the prototype's `.icon-btn`.
