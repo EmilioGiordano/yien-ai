@@ -187,6 +187,7 @@ impl Shell {
                     }
                     continue;
                 }
+                CoreMsg::TabGit { .. } => continue,
                 CoreMsg::Error { message, .. } => self.notice = Some(message),
             }
             changed = true;

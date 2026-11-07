@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 4);
+//! assert_eq!(PROTO_VERSION, 5);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -18,11 +18,13 @@
 #![forbid(unsafe_code)]
 
 pub mod frame;
+mod git;
 pub mod hook_frame;
 mod msg;
 
 use serde::{Deserialize, Serialize};
 
+pub use git::{GitFacts, GitFile, GitFileStatus, GitHead, GitUpstream, MAX_GIT_FILES, TabGit};
 pub use msg::{
     AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason, InputBytes,
     LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
@@ -34,7 +36,7 @@ pub use msg::{
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 4;
+pub const PROTO_VERSION: u32 = 5;
 
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {
