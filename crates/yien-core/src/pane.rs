@@ -708,6 +708,7 @@ impl Actor {
                 if let Some(agent) = self.agent_plan.take() {
                     self.plan = agent;
                     self.reset_machine();
+                    self.report(PaneEvent::Standin(None));
                 }
                 // A relaunch starts a new session, even before the first start.
                 if let Some(p) = self.pending.take() {
@@ -816,6 +817,10 @@ impl Actor {
         self.hook_serial = None;
         self.agent_plan = Some(std::mem::replace(&mut self.plan, shell));
         self.reset_machine();
+        self.report(PaneEvent::Standin(Some((
+            self.plan.default_name.clone(),
+            self.plan.profile_name.clone(),
+        ))));
         self.start().await;
     }
 

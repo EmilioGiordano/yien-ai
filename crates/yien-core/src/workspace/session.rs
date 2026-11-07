@@ -272,6 +272,7 @@ impl Workspace {
                     signal_lost: false,
                     visible: false,
                     seen: false,
+                    standin: None,
                 },
             );
             fx.push(Effect::Spawn {
