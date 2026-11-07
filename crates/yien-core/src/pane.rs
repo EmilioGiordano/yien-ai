@@ -364,7 +364,7 @@ impl Actor {
                     self.on_cmd(cmd).await;
                 }
                 Wake::Input(input) => self.on_input(input),
-                Wake::Hook(item) => self.on_hook(item),
+                Wake::Hook(item) => self.on_hook(item, &mut hooks),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
                 Wake::Noticed { owed } => self.notice_owed = owed,
@@ -464,13 +464,18 @@ impl Actor {
         self.step(&Signal::Spawned);
     }
 
-    fn on_hook(&mut self, item: HookItem) {
+    /// Once the pipe has refused an event, the queued ones are older than
+    /// the gap: stepping them after `SourceLost` could clear it and bring the
+    /// red mark back from a stale state, so they are dropped with it.
+    fn on_hook(&mut self, item: HookItem, queue: &mut mpsc::Receiver<HookItem>) {
+        if self.hooks_lost.swap(false, Ordering::AcqRel) {
+            while queue.try_recv().is_ok() {}
+            self.step(&Signal::SourceLost);
+            return;
+        }
         match item {
             Ok(event) => self.step(&Signal::Hook(event)),
             Err(_) => self.step(&Signal::Ambiguous),
-        }
-        if self.hooks_lost.swap(false, Ordering::AcqRel) {
-            self.step(&Signal::SourceLost);
         }
     }
 
@@ -925,6 +930,140 @@ mod tests {
         let cut = panic_message(&"é".repeat(MAX_PANIC_CHARS + 9));
         assert_eq!(cut.chars().count(), MAX_PANIC_CHARS + 3);
         assert!(cut.ends_with("..."));
+    }
+
+    /// A Claude pane actor on a fake PTY, without a hook pipe, so the "signal
+    /// lost" mark comes from the state machine alone.
+    struct Solo {
+        runtime: tokio::runtime::Runtime,
+        reports: Arc<crate::report::Reports>,
+        cmds: mpsc::Sender<PaneCmd>,
+        hooks: mpsc::Sender<HookItem>,
+        hooks_lost: Arc<AtomicBool>,
+        _events: mpsc::Receiver<CoreMsg>,
+        _input: mpsc::Sender<PaneInput>,
+    }
+
+    impl Solo {
+        /// Starts the actor with `queued` already waiting in its hook queue.
+        fn start(queued: Vec<HookItem>, lost: bool) -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_time()
+                .build()
+                .unwrap();
+            let config = crate::CoreConfig::default();
+            let claude = yien_proto::ProfileId::new("claude");
+            let mut plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
+            plan.hooks = false;
+            let (events, events_rx) = mpsc::channel(64);
+            let ctx = Ctx {
+                backend: Arc::new(yien_pty::FakePty::new()),
+                config: Arc::new(config),
+                events,
+                reports: Arc::default(),
+                engine: alacritty,
+                hooks: None,
+                attention: Arc::default(),
+            };
+            let reports = Arc::clone(&ctx.reports);
+            let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
+            for item in queued {
+                hooks.try_send(item).unwrap();
+            }
+            let hooks_lost = Arc::new(AtomicBool::new(lost));
+            let (cmds, cmds_rx) = mpsc::channel(8);
+            let (input, input_rx) = mpsc::channel(8);
+            let setup = PaneSetup {
+                id: PaneId::new(1),
+                plan,
+                cwd: ".".to_owned(),
+                size: (20, 4),
+                slot: Arc::default(),
+                visible: false,
+                seen: false,
+                hooks: hooks_rx,
+                hooks_lost: Arc::clone(&hooks_lost),
+            };
+            runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
+            Self {
+                runtime,
+                reports,
+                cmds,
+                hooks,
+                hooks_lost,
+                _events: events_rx,
+                _input: input,
+            }
+        }
+
+        /// Everything the actor reports within `window`.
+        fn collect(&self, window: Duration) -> Vec<PaneEvent> {
+            let mut seen = Vec::new();
+            let end = Instant::now() + window;
+            self.runtime.block_on(async {
+                while let Ok(batch) = tokio::time::timeout_at(end, self.reports.next()).await {
+                    seen.extend(batch.into_values().flatten());
+                }
+            });
+            seen
+        }
+    }
+
+    fn last_state(events: &[PaneEvent]) -> Option<AgentState> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::State(state, _) => Some(*state),
+            _ => None,
+        })
+    }
+
+    fn last_signal_lost(events: &[PaneEvent]) -> Option<bool> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::SignalLost(lost) => Some(*lost),
+            _ => None,
+        })
+    }
+
+    /// Longer than the "needs you" confirmation, so a red mark would show.
+    const SETTLE: Duration = Duration::from_millis(800);
+
+    #[test]
+    fn hooks_queued_before_a_refused_one_are_dropped_with_it() {
+        use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
+        let queued = vec![
+            Ok(UserPromptSubmit),
+            Ok(UserPromptSubmit),
+            Ok(PermissionRequest),
+        ];
+        let pane = Solo::start(queued, true);
+        let events = pane.collect(SETTLE);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        assert!(
+            matches!(last_state(&events), None | Some(AgentState::Idle)),
+            "{events:?}"
+        );
+        assert_eq!(last_signal_lost(&events), Some(true), "{events:?}");
+    }
+
+    #[test]
+    fn a_hook_after_the_refused_ones_is_read_again() {
+        use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
+        let pane = Solo::start(vec![Ok(UserPromptSubmit)], true);
+        assert_eq!(last_signal_lost(&pane.collect(SETTLE)), Some(true));
+        assert!(!pane.hooks_lost.load(Ordering::Acquire));
+        pane.hooks.try_send(Ok(UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(Ok(PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
     }
 
     #[test]
