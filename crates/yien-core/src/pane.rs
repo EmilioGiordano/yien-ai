@@ -312,7 +312,10 @@ impl Actor {
             let take_input = self.outbox.input.is_empty();
             let take_output = self.outbox.replies.len() < REPLY_BACKLOG;
             let (slot, pane) = (&self.slot, self.id);
+            // Commands first: input queued before a relaunch or terminate is
+            // dropped with the old program, never written to it or the next.
             let wake = tokio::select! {
+                biased;
                 cmd = cmds.recv() => Wake::Cmd(cmd),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
@@ -329,7 +332,12 @@ impl Actor {
             };
             match wake {
                 Wake::Cmd(None) => break,
-                Wake::Cmd(Some(cmd)) => self.on_cmd(cmd).await,
+                Wake::Cmd(Some(cmd)) => {
+                    if matches!(cmd, PaneCmd::Relaunch | PaneCmd::Terminate) {
+                        while input.try_recv().is_ok() {}
+                    }
+                    self.on_cmd(cmd).await;
+                }
                 Wake::Input(input) => self.on_input(input),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),

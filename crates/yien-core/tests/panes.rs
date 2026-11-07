@@ -749,3 +749,40 @@ fn panes_in_a_hidden_tab_send_frames_once_shown() {
     h.command(Command::SelectTab { tab: first_tab });
     h.frame_with(hidden, "hidden text");
 }
+
+#[test]
+fn rf_pan_19_input_queued_for_the_old_program_does_not_reach_the_relaunched_one() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for i in 0..400 {
+        h.input(pane, format!("old {i}\r").as_bytes());
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    h.command(Command::RelaunchPane { pane });
+    let again = h.child();
+    wait_until(|| child.was_killed());
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(again.recv_input(Duration::from_millis(100)), None);
+    h.input(pane, b"fresh");
+    assert_eq!(next_bytes(&again), b"fresh");
+}
+
+#[test]
+fn rf_pan_20_input_queued_before_terminate_is_dropped() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for i in 0..400 {
+        h.input(pane, format!("old {i}\r").as_bytes());
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    h.command(Command::TerminatePane { pane });
+    h.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane: p, .. } if *p == pane => Some(()),
+        _ => None,
+    });
+    let mut received = 0;
+    while child.recv_input(Duration::from_millis(50)).is_some() {
+        received += 1;
+    }
+    assert_eq!(received, yien_pty::INPUT_QUEUE_CAPACITY);
+}
