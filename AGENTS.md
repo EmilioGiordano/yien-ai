@@ -185,7 +185,9 @@ cargo xtask check-deps               # layer rule
 cargo xtask trace                    # requirement ids vs tests
 ```
 
-`cargo fmt --all` in write mode reformats every crate, uncommitted work included. Run `--check` and format only your own files.
+`cargo fmt --all` in write mode reformats every crate, uncommitted work included. Run `--check`, then `rustfmt --edition 2024 <file>` on your own files only.
+
+A command that does not exist yet (no workspace, no `xtask`) is skipped and reported as `n/a`, not as a failure.
 
 **Never run the app from an agent** (`cargo run -p yien` or any binary that opens a window). It steals focus. Report what a human must check instead.
 
