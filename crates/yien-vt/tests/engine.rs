@@ -263,6 +263,24 @@ fn rf_pan_09_out_of_range_points_are_clamped() {
 }
 
 #[test]
+fn rf_pan_09_block_selection_from_the_right_edge_does_not_panic() {
+    let mut e = engine(2, 5);
+    e.feed(b"ab\r\ncd");
+    e.start_selection(vp(4, 1), Side::Left, SelectionKind::Block);
+    e.update_selection(vp(0, 1), Side::Right);
+    assert_eq!(e.selection_text(), None);
+}
+
+#[test]
+fn rf_pan_09_block_selection_yields_a_rectangle() {
+    let mut e = engine(10, 3);
+    e.feed(b"abcdef\r\nghijkl\r\nmnopqr");
+    e.start_selection(vp(0, 1), Side::Left, SelectionKind::Block);
+    e.update_selection(vp(2, 3), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("bcd\nhij\nnop"));
+}
+
+#[test]
 fn rf_pan_09_bracketed_paste_mode_is_reported() {
     let mut e = engine(10, 3);
     assert!(!e.modes().bracketed_paste);

@@ -235,6 +235,28 @@ impl AlacrittyEngine {
         Point::new(self.clamp_line(at.line), self.clamp_col(at.col))
     }
 
+    /// alacritty's block range can start one column past the last one (a drag
+    /// starting on the right half of the last cell), and its
+    /// `selection_to_string` then indexes out of bounds; clamp first.
+    fn block_text(&self) -> Option<String> {
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let last = self.term.last_column();
+        let (first_col, last_col) = (range.start.column.min(last), range.end.column.min(last));
+        if range.start.column > last || first_col > last_col {
+            return None;
+        }
+        let lines: Vec<String> = (range.start.line.0..=range.end.line.0)
+            .map(|line| {
+                let line = Line(line);
+                let text = self
+                    .term
+                    .bounds_to_string(Point::new(line, first_col), Point::new(line, last_col));
+                text.trim_end().to_owned()
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
+
     fn hyperlink_at(&self, point: Point) -> Option<Link> {
         let grid = self.term.grid();
         let link = grid[point].hyperlink()?;
@@ -397,7 +419,13 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn selection_text(&self) -> Option<String> {
-        self.term.selection_to_string().filter(|s| !s.is_empty())
+        let selection = self.term.selection.as_ref()?;
+        let text = if selection.ty == SelectionType::Block {
+            self.block_text()?
+        } else {
+            self.term.selection_to_string()?
+        };
+        (!text.is_empty()).then_some(text)
     }
 
     fn search(&self, query: &str) -> Result<Vec<Match>, VtError> {
