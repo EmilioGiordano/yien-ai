@@ -34,7 +34,6 @@ pub(crate) enum Done {
         branch: String,
     },
     AddFailed {
-        branch: String,
         message: String,
     },
     Checked {
@@ -61,24 +60,65 @@ pub(crate) fn add(job: AddJob) -> Done {
             worktree: path_text(&path),
             branch: job.branch,
         },
-        Err(e) => {
+        Err((e, path)) => {
             tracing::debug!("worktree not created: {}", e.kind());
-            Done::AddFailed {
-                branch: job.branch,
-                message: e.to_string(),
-            }
+            let left = match (&e, &path) {
+                // git ran and did not finish cleanly: say what it left.
+                (WorktreeError::Git(_), Some(path)) => leftovers(&git, &job, path),
+                _ => Vec::new(),
+            };
+            let message = if left.is_empty() {
+                format!("No worktree was created for {}: {e}.", job.branch)
+            } else {
+                format!(
+                    "Creating the worktree for {} failed part-way ({e}). It left {}; nothing \
+                     was deleted.",
+                    job.branch,
+                    left.join(", ")
+                )
+            };
+            Done::AddFailed { message }
         }
     }
 }
 
-fn create(git: &Git, job: &AddJob) -> Result<PathBuf, WorktreeError> {
+/// Creates the worktree; a failure comes with the folder it was aimed at,
+/// once that is known.
+fn create(git: &Git, job: &AddJob) -> Result<PathBuf, (WorktreeError, Option<PathBuf>)> {
     let root = Path::new(&job.root);
-    let repo = git.discover(root)?;
+    let repo = git.discover(root).map_err(|e| (e.into(), None))?;
     let main = repo.main_worktree.unwrap_or(repo.root);
     let path = default_worktree_path(&main, &job.branch)
-        .ok_or_else(|| WorktreeError::PathTaken(main.clone()))?;
-    git.add_worktree(root, &job.branch, &path, job.base.as_deref())?;
+        .ok_or_else(|| (WorktreeError::NoRoom(main.clone()), None))?;
+    git.add_worktree(root, &job.branch, &path, job.base.as_deref())
+        .map_err(|e| (e, Some(path.clone())))?;
     Ok(path)
+}
+
+/// What a failed add left behind: the branch, the registration, the folder.
+/// The checks before git ran ruled all three out, so each is git's doing.
+fn leftovers(git: &Git, job: &AddJob, path: &Path) -> Vec<String> {
+    let root = Path::new(&job.root);
+    let mut left = Vec::new();
+    if git.has_branch(root, &job.branch).unwrap_or(false) {
+        left.push(format!("the branch {}", job.branch));
+    }
+    let registered = git
+        .worktrees(root)
+        .map(|list| list.iter().any(|wt| same_dir(&wt.path, path)))
+        .unwrap_or(false);
+    if registered {
+        left.push("a worktree registered with git (git worktree list)".to_owned());
+    }
+    if path.exists() {
+        left.push(format!("the folder {}", path_text(path)));
+    }
+    left
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let text = |p: &Path| path_text(p).trim_end_matches('/').to_lowercase();
+    text(a) == text(b)
 }
 
 /// What removing the worktree would lose now.

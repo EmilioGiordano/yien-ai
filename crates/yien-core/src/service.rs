@@ -313,14 +313,15 @@ impl Service {
                     Err(e) => CoreMsg::Error {
                         pane: None,
                         message: format!(
-                            "The worktree {worktree} on branch {branch} was created, but no tab                              could open on it: {e}. It stays on disk."
+                            "The worktree {worktree} on branch {branch} was created, but no tab \
+                             could open on it: {e}. It stays on disk."
                         ),
                     },
                 }
             }
-            Done::AddFailed { branch, message } => CoreMsg::Error {
+            Done::AddFailed { message, .. } => CoreMsg::Error {
                 pane: None,
-                message: format!("No worktree was created for {branch}: {message}."),
+                message,
             },
             Done::Checked {
                 tab,
