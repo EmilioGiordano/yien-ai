@@ -480,7 +480,7 @@ pub struct PaneInfo {
     pub session_id: Option<String>,
 }
 
-/// The whole workspace, sent first and whenever the UI needs to resync.
+/// The whole workspace, sent as the core's first event.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     /// Every project, in tab-bar order.
