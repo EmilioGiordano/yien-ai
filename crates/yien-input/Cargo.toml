@@ -1,0 +1,13 @@
+[package]
+name = "yien-input"
+description = "Turns YIEN key presses and pasted text into the bytes a terminal program expects."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
