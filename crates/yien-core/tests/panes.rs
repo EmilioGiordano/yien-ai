@@ -1026,11 +1026,10 @@ fn the_shutdown_returns_within_its_bound_when_a_pane_never_closes() {
 }
 
 #[test]
-fn a_pane_that_starts_after_the_shutdown_is_closed_at_once() {
-    let wait = Duration::from_millis(300);
+fn a_pane_waiting_to_start_never_starts_after_the_shutdown() {
+    let wait = Duration::from_secs(2);
     let mut h = waiting(wait, wait);
     h.pending_project();
     assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 0);
-    let child = h.child();
-    wait_until(|| child.was_killed() && child.was_closed());
+    h.assert_nothing_spawned_for(wait + Duration::from_millis(500));
 }
