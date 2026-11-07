@@ -89,6 +89,8 @@ impl Shell {
             });
         })
         .detach();
+        let focused = window.is_window_active();
+        deliver(&link, ClientMsg::WindowFocus { focused }, cx);
         let activation = cx.observe_window_activation(window, |shell, window, cx| {
             let focused = window.is_window_active();
             shell.send(ClientMsg::WindowFocus { focused }, cx);
