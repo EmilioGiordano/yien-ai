@@ -18,13 +18,11 @@ use tokio::sync::mpsc::error::TryRecvError;
 use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, ShellCommand};
 use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV};
 use yien_proto::{
-    AgentState, ClientMsg, Command, CoreMsg, NeedsReason, Orientation, PaneId, PaneInfo, ProfileId,
-    TabId,
+    AgentState, ClientMsg, Command, CoreMsg, Orientation, PaneId, PaneInfo, ProfileId, TabId,
 };
 use yien_pty::{FakeChild, FakePty};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const NEEDS: AgentState = AgentState::NeedsYou(NeedsReason::Permission);
 
 /// A settings folder of this test run's own, never a real profile.
 fn scratch_dir() -> PathBuf {
@@ -139,6 +137,7 @@ impl Harness {
         (new, self.child())
     }
 
+    #[cfg(windows)]
     fn state(&mut self, pane: PaneId) -> AgentState {
         self.wait_for(|m| match m {
             CoreMsg::PaneState { pane: p, state } if *p == pane => Some(*state),
@@ -154,6 +153,7 @@ impl Harness {
     }
 
     /// Nothing about `pane`'s state arrives for a while.
+    #[cfg(windows)]
     fn no_state_change(&mut self, pane: PaneId) {
         let until = Instant::now() + Duration::from_millis(600);
         while Instant::now() < until {
@@ -272,9 +272,11 @@ fn rf_pan_18_a_new_tab_can_start_with_claude() {
 #[cfg(windows)]
 mod pipe {
     use yien_platform::hook_pipe::connect_client;
-    use yien_proto::hook_frame;
+    use yien_proto::{NeedsReason, hook_frame};
 
     use super::*;
+
+    const NEEDS: AgentState = AgentState::NeedsYou(NeedsReason::Permission);
 
     /// Sends one hook frame the way `yien-hook` does.
     fn send_hook(child: &FakeChild, event: &str, payload: &str) {
