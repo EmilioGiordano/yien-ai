@@ -11,10 +11,10 @@ Read `AGENTS.md` first; it is the rulebook. The briefs in `.claude/agents/` are 
 
 ## 1. Worktree
 
-From the main checkout, with `main` up to date:
+From the main checkout, run `git fetch origin`, then cut from `origin/main` (or `main` while the remote has no `main`):
 
 ```
-git worktree add -b <type>/<topic> C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic> main
+git worktree add -b <type>/<topic> C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic> origin/main
 ```
 
 If another running branch touches the same files, do not start this one in parallel; say so.
@@ -52,15 +52,16 @@ When the review reports coverage the implementer cannot add alone, spawn `test-e
 
 On `PASS`:
 
-1. Check `git log main..HEAD`: every message is one `type/short description` line with no trailers, and the commits are small.
-2. Push the branch: `git push -u origin <type>/<topic>`.
-3. Open the PR with `gh pr create`. The body covers:
+1. Push the branch: `git push -u origin <type>/<topic>`.
+2. Open the PR with `gh pr create`. The body covers:
    - the decisions taken and the options rejected;
    - what is left undone;
    - the requirement ids covered;
+   - new dependencies and spec impact from the implementer's report;
    - what a human must check.
 
    No attribution lines.
+3. Record new dependencies and spec impact in `docs/` (absolute paths in `AGENTS.md`).
 4. Write `REPORT-<topic>.md` in the worktree (gitignored): verdict, commits, checks, findings and their resolution, risks, manual checks.
 5. Report to Emilio in Spanish: the PR link, what changed, and what he should try.
 
