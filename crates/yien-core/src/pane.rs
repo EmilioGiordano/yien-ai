@@ -212,11 +212,21 @@ impl Actor {
         self.ctx.config.clock.now()
     }
 
+    /// Starts a session on a fresh engine: modes, screen and pending sync
+    /// updates of the last run do not leak into the next, and a reader still
+    /// feeding the old engine cannot reach this one.
     async fn start(&mut self) {
         self.session = None;
         self.outbox.clear();
         self.retry_at = None;
+        self.sync = None;
         let size = lock(&self.engine).size();
+        self.engine = Arc::new(Mutex::new(AlacrittyEngine::new(
+            self.ctx.config.vt.clone(),
+            size.cols,
+            size.rows,
+        )));
+        self.dirty = true;
         let spec = self.plan.spec(self.id, &self.cwd, size.cols, size.rows);
         let backend = Arc::clone(&self.ctx.backend);
         let spawned = tokio::task::spawn_blocking(move || backend.spawn(spec)).await;
