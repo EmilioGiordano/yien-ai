@@ -18,7 +18,9 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod porcelain;
 mod runner;
 
 pub use error::{GitError, ParseError};
+pub use porcelain::{AheadBehind, ChangedFile, FileStatus, Head, Status, Upstream, parse_status};
 pub use runner::{DEFAULT_TIMEOUT, Git, MAX_OUTPUT};
