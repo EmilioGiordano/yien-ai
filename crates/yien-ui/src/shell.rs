@@ -1,7 +1,7 @@
 //! The main window: title bar, tab bar, pane area, context bar and status bar,
 //! laid out as in the prototype, kept in step with the core's events.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
 use std::rc::Rc;
 
@@ -10,7 +10,6 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc;
-use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, Command, CoreMsg, Direction, PaneId, ProjectId, TabId};
 
 use crate::actions::{
@@ -119,15 +118,16 @@ impl Shell {
         self.send(ClientMsg::Command(command), cx);
     }
 
-    /// Applies a batch of core events. Only the newest frame of each pane is
-    /// drawn; events for panes or tabs the UI no longer knows are dropped.
+    /// Applies a batch of core events, then takes the frame of every pane
+    /// that announced one. Events for panes or tabs the UI no longer knows
+    /// are dropped.
     fn apply(&mut self, batch: Vec<CoreMsg>, window: &mut Window, cx: &mut Context<Self>) {
-        let mut frames: HashMap<PaneId, Frame> = HashMap::new();
+        let mut ready: BTreeSet<PaneId> = BTreeSet::new();
         let mut changed = false;
         for msg in batch {
             match msg {
-                CoreMsg::PaneFrame { pane, frame } => {
-                    frames.insert(pane, frame);
+                CoreMsg::PaneFrameReady { pane } => {
+                    ready.insert(pane);
                     continue;
                 }
                 CoreMsg::WorkspaceSnapshot(snapshot) => {
@@ -137,13 +137,13 @@ impl Shell {
                 CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
-                        frames.remove(&pane);
+                        ready.remove(&pane);
                     }
                 }
                 CoreMsg::ActiveTab { tab } => self.workspace.set_active(tab),
                 CoreMsg::PaneUpdated(info) => self.workspace.pane_updated(&info),
                 CoreMsg::PaneClosed { pane } => {
-                    frames.remove(&pane);
+                    ready.remove(&pane);
                     self.workspace.pane_closed(pane);
                 }
                 CoreMsg::PaneState { pane, state } => {
@@ -164,15 +164,34 @@ impl Shell {
         }
         if changed {
             self.sync_terminals(window, cx);
+            ready.extend(self.visible_panes());
         }
-        for (pane, frame) in frames {
-            if let Some(terminal) = self.terminals.get(&pane) {
-                terminal.update(cx, |t, cx| t.set_frame(frame, cx));
-            }
-        }
+        self.take_frames(ready, cx);
         if changed {
             self.sync_focus(window, cx);
             cx.notify();
+        }
+    }
+
+    /// The panes of the selected tab that are drawn now.
+    fn visible_panes(&self) -> Vec<PaneId> {
+        self.workspace
+            .selected_tab()
+            .map(|t| t.rects().into_iter().map(|(p, _)| p).collect())
+            .unwrap_or_default()
+    }
+
+    /// Takes the latest frame of each pane from the core. The core sends no
+    /// new notice for a pane until its frame is taken, so a pane with a view
+    /// is always taken; `None` means nothing new.
+    fn take_frames(&self, panes: impl IntoIterator<Item = PaneId>, cx: &mut Context<Self>) {
+        for pane in panes {
+            let Some(terminal) = self.terminals.get(&pane) else {
+                continue;
+            };
+            if let Some(frame) = self.link.take_frame(pane) {
+                terminal.update(cx, |t, cx| t.set_frame(frame, cx));
+            }
         }
     }
 
@@ -249,6 +268,7 @@ impl Shell {
     fn select_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.select_tab(id) {
             self.command(Command::SelectTab { tab: id }, cx);
+            self.take_frames(self.visible_panes(), cx);
             self.sync_focus(window, cx);
             cx.notify();
         }
