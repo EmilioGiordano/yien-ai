@@ -61,6 +61,9 @@ pub(crate) struct Shell {
     notice: Option<String>,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
     split_menu: Option<(PaneId, Orientation)>,
+    /// The chooser a mouse-down outside it just closed, and when. The click
+    /// that follows on its own button must not open it again.
+    menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -117,6 +120,7 @@ impl Shell {
             keyboard_on: None,
             notice: None,
             split_menu: None,
+            menu_closed: None,
             _subscriptions: vec![activation],
         }
     }
@@ -337,7 +341,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let open = Some((pane, orientation));
-        self.split_menu = if self.split_menu == open { None } else { open };
+        let just_closed = self.menu_closed.take().is_some_and(|(menu, at)| {
+            Some(menu) == open && at.elapsed() < std::time::Duration::from_millis(500)
+        });
+        self.split_menu = if self.split_menu == open || just_closed {
+            None
+        } else {
+            open
+        };
         cx.notify();
     }
 
@@ -1079,7 +1090,10 @@ impl Shell {
             .text_size(px(12.5))
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.split_menu = None;
+                this.menu_closed = this
+                    .split_menu
+                    .take()
+                    .map(|menu| (menu, std::time::Instant::now()));
                 cx.notify();
             }))
             .children(options)
