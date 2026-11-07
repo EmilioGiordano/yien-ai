@@ -87,6 +87,10 @@ pub enum WorktreeError {
     /// The folder is not a linked worktree of the repository (or is its main one).
     #[error("{} is not a linked worktree of this repository", .0.display())]
     NotLinked(PathBuf),
+    /// `git worktree add` itself ran and did not finish cleanly, so it may
+    /// have left a branch, a registration or a folder behind.
+    #[error("git worktree add did not finish: {0}")]
+    AddInterrupted(#[source] GitError),
     /// git failed or could not run.
     #[error(transparent)]
     Git(#[from] GitError),
@@ -109,7 +113,7 @@ impl WorktreeError {
             Self::Locked(_) => "worktree locked",
             Self::NotLinked(_) => "not a linked worktree",
             Self::NoRoom(_) => "no room beside the repository",
-            Self::Git(e) => e.kind(),
+            Self::AddInterrupted(e) | Self::Git(e) => e.kind(),
         }
     }
 }
@@ -241,6 +245,20 @@ impl Git {
         let args = ["worktree", "add", "-q", "-b", branch, "--", &path_arg, base];
         match self.run_write(dir, &overrides, &args) {
             Ok(_) => Ok(()),
+            // git succeeded but a program it started still holds its output:
+            // the worktree is there if git lists it.
+            Err(GitError::PipeHeld { success: true }) => {
+                let listed = self
+                    .worktrees(dir)
+                    .is_ok_and(|list| list.iter().any(|wt| same_path(&wt.path, path)));
+                if listed {
+                    Ok(())
+                } else {
+                    Err(WorktreeError::AddInterrupted(GitError::PipeHeld {
+                        success: true,
+                    }))
+                }
+            }
             // Another add took the name or the folder since the checks
             // above; tell which by looking, not by git's wording.
             Err(GitError::Failed { message, .. }) if message.contains("already exists") => {
@@ -250,7 +268,7 @@ impl Git {
                     WorktreeError::BranchExists(branch.to_owned())
                 })
             }
-            Err(e) => Err(e.into()),
+            Err(e) => Err(WorktreeError::AddInterrupted(e)),
         }
     }
 

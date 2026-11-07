@@ -64,8 +64,9 @@ pub(crate) fn add(job: AddJob) -> Done {
         Err((e, path)) => {
             tracing::debug!("worktree not created: {}", e.kind());
             let left = match (&e, &path) {
-                // git ran and did not finish cleanly: say what it left.
-                (WorktreeError::Git(_), Some(path)) => leftovers(&git, &job, path),
+                // `git worktree add` ran and did not finish cleanly: say what
+                // it left. A failed check before it left nothing.
+                (WorktreeError::AddInterrupted(_), Some(path)) => leftovers(&git, &job, path),
                 _ => Vec::new(),
             };
             let message = if left.is_empty() {
