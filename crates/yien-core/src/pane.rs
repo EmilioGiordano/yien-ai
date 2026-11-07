@@ -205,6 +205,10 @@ pub(crate) struct PaneSetup {
     pub cwd: String,
     pub size: (u16, u16),
     pub slot: Arc<FrameSlot>,
+    /// The view the workspace last sent, so a restarted actor draws and
+    /// counts as seen without waiting for the next change.
+    pub visible: bool,
+    pub seen: bool,
 }
 
 struct Actor {
@@ -237,7 +241,10 @@ pub(crate) fn spawn(
 ) {
     let (cols, rows) = setup.size;
     let engine = Arc::new(Mutex::new((ctx.engine)(&ctx.config.vt, cols, rows)));
-    let machine = Machine::new(setup.plan.machine.clone());
+    let mut machine = Machine::new(setup.plan.machine.clone());
+    if setup.seen {
+        machine = machine.step(&Signal::Seen(true), ctx.config.clock.now()).0;
+    }
     let id = setup.id;
     let reports = Arc::clone(&ctx.reports);
     let actor = Actor {
@@ -253,7 +260,7 @@ pub(crate) fn spawn(
         outbox: Outbox::default(),
         retry_at: None,
         dirty: false,
-        visible: false,
+        visible: setup.visible,
         last_frame: None,
         notice_owed: false,
         sync: None,
@@ -264,6 +271,8 @@ pub(crate) fn spawn(
         if let Err(e) = task.await
             && e.is_panic()
         {
+            let message = panic_message(e.into_panic().as_ref());
+            tracing::error!(pane = id.get(), %message, "pane actor panicked");
             reports.push(id, PaneEvent::Crashed);
         }
     });
@@ -305,7 +314,10 @@ impl Actor {
             let take_input = self.outbox.input.is_empty();
             let take_output = self.outbox.replies.len() < REPLY_BACKLOG;
             let (slot, pane) = (&self.slot, self.id);
+            // Commands first: input queued before a relaunch or terminate is
+            // dropped with the old program, never written to it or the next.
             let wake = tokio::select! {
+                biased;
                 cmd = cmds.recv() => Wake::Cmd(cmd),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
@@ -322,7 +334,12 @@ impl Actor {
             };
             match wake {
                 Wake::Cmd(None) => break,
-                Wake::Cmd(Some(cmd)) => self.on_cmd(cmd).await,
+                Wake::Cmd(Some(cmd)) => {
+                    if matches!(cmd, PaneCmd::Relaunch | PaneCmd::Terminate) {
+                        while input.try_recv().is_ok() {}
+                    }
+                    self.on_cmd(cmd).await;
+                }
                 Wake::Input(input) => self.on_input(input),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
@@ -595,19 +612,21 @@ impl Actor {
         });
     }
 
-    fn frame_due(&self) -> Option<Instant> {
+    /// A pane that never drew is due at `now`, the caller's own instant: a
+    /// fresh `Instant::now()` here would always land after it and never be due.
+    fn frame_due(&self, now: Instant) -> Option<Instant> {
         if !(self.dirty && self.visible) {
             return None;
         }
         Some(match self.last_frame {
             Some(t) => t + self.ctx.config.frame_interval,
-            None => Instant::now(),
+            None => now,
         })
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         [
-            self.frame_due(),
+            self.frame_due(Instant::now()),
             self.sync.map(|(_, at)| at),
             self.retry_at,
             self.wake_at,
@@ -648,7 +667,7 @@ impl Actor {
             self.wake_at = None;
             self.step(&Signal::Tick);
         }
-        if self.frame_due().is_some_and(|at| at <= now) {
+        if self.frame_due(now).is_some_and(|at| at <= now) {
             self.publish(now);
         }
     }
@@ -667,6 +686,27 @@ impl Actor {
                 Err(TrySendError::Full(_)) => false,
             }
         });
+    }
+}
+
+/// Longest panic message logged, in chars. Messages can quote runtime
+/// strings, so they are capped to limit what reaches the log (plan §5.4).
+const MAX_PANIC_CHARS: usize = 200;
+
+/// The text of a panic payload, capped; a non-text payload is not logged.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match text {
+        Some(text) if text.chars().count() > MAX_PANIC_CHARS => {
+            let mut cut: String = text.chars().take(MAX_PANIC_CHARS).collect();
+            cut.push_str("...");
+            cut
+        }
+        Some(text) => text.to_owned(),
+        None => "<non-string payload>".to_owned(),
     }
 }
 
@@ -801,6 +841,16 @@ mod tests {
         events.send(PtyEvent::Exited(ExitStatus::from_code(0))).ok();
         assert!(rx.blocking_recv().is_none());
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn panic_messages_are_capped_and_only_text_is_kept() {
+        assert_eq!(panic_message(&"boom"), "boom");
+        assert_eq!(panic_message(&String::from("boom")), "boom");
+        assert_eq!(panic_message(&42_u32), "<non-string payload>");
+        let cut = panic_message(&"é".repeat(MAX_PANIC_CHARS + 9));
+        assert_eq!(cut.chars().count(), MAX_PANIC_CHARS + 3);
+        assert!(cut.ends_with("..."));
     }
 
     #[test]

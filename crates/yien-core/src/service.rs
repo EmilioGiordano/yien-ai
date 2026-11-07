@@ -52,6 +52,8 @@ struct PaneHandle {
     cwd: String,
     size: (u16, u16),
     slot: Arc<FrameSlot>,
+    visible: bool,
+    seen: bool,
 }
 
 struct Service {
@@ -110,28 +112,21 @@ impl Service {
         }
     }
 
-    /// Input normally goes from the handle straight to the pane; this path
-    /// serves a message that reached the service anyway.
-    async fn write(&self, pane: PaneId, input: PaneInput) {
-        let tx = links(&self.links).get(&pane).map(|l| l.input.clone());
-        if let Some(tx) = tx {
-            let _ = tx.send(input).await;
-        }
-    }
-
     fn start_pane(&mut self, pane: PaneId, plan: LaunchPlan, cwd: String, size: (u16, u16)) {
         let (tx, cmds) = mpsc::channel(PANE_COMMANDS);
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
-        let slot = self
-            .panes
-            .get(&pane)
-            .map_or_else(Arc::default, |h| Arc::clone(&h.slot));
+        let (slot, visible, seen) = self.panes.get(&pane).map_or_else(
+            || (Arc::default(), false, false),
+            |h| (Arc::clone(&h.slot), h.visible, h.seen),
+        );
         let setup = PaneSetup {
             id: pane,
             plan: plan.clone(),
             cwd: cwd.clone(),
             size,
             slot: Arc::clone(&slot),
+            visible,
+            seen,
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -149,6 +144,8 @@ impl Service {
                 cwd,
                 size,
                 slot,
+                visible,
+                seen,
             },
         );
     }
@@ -159,7 +156,7 @@ impl Service {
     }
 
     /// Relaunches the pane's program; an actor that crashed is started again
-    /// at the pane's last size.
+    /// at the pane's last size and view.
     async fn relaunch(&mut self, pane: PaneId) {
         let Some(handle) = self.panes.get(&pane) else {
             return;
@@ -177,20 +174,8 @@ impl Service {
     async fn on_client(&mut self, msg: ClientMsg) {
         match msg {
             ClientMsg::Command(command) => self.on_command(command).await,
-            ClientMsg::Input { pane, bytes } => {
-                let input = PaneInput {
-                    bytes: bytes.into_vec(),
-                    user: true,
-                };
-                self.write(pane, input).await;
-            }
-            ClientMsg::Report { pane, bytes } => {
-                let input = PaneInput {
-                    bytes: bytes.into_vec(),
-                    user: false,
-                };
-                self.write(pane, input).await;
-            }
+            // The handle sends input straight to the pane's own queue.
+            ClientMsg::Input { .. } | ClientMsg::Report { .. } => {}
             ClientMsg::ResizePane { pane, cols, rows } => {
                 if let Some(handle) = self.panes.get_mut(&pane) {
                     handle.size = (cols, rows);
@@ -263,7 +248,12 @@ impl Service {
                     pane,
                     visible,
                     seen,
-                } => self.to_pane(pane, PaneCmd::View { visible, seen }).await,
+                } => {
+                    if let Some(handle) = self.panes.get_mut(&pane) {
+                        (handle.visible, handle.seen) = (visible, seen);
+                    }
+                    self.to_pane(pane, PaneCmd::View { visible, seen }).await;
+                }
             }
         }
     }

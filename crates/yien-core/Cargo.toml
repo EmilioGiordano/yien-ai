@@ -15,6 +15,7 @@ yien-agent = { workspace = true }
 yien-pty = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 yien-pty = { workspace = true, features = ["fake"] }

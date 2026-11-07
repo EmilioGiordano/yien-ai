@@ -8,7 +8,7 @@ use tokio::sync::mpsc::Receiver;
 use yien_proto::frame::{
     Frame, GridPoint, Link, Match, Modes, SelectionKind, Side, Size, ViewportPoint,
 };
-use yien_proto::{ClientMsg, Command, CoreMsg, PaneId};
+use yien_proto::{AgentState, ClientMsg, Command, CoreMsg, PaneId};
 use yien_pty::{FakeChild, FakePty};
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine, VtError, VtOutput};
 
@@ -169,6 +169,13 @@ impl Harness {
         message
     }
 
+    fn state(&mut self, pane: PaneId) -> AgentState {
+        self.wait_for(|m| match m {
+            CoreMsg::PaneState { pane: p, state } if *p == pane => Some(*state),
+            _ => None,
+        })
+    }
+
     fn frame_with(&mut self, pane: PaneId, text: &str) -> Frame {
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -238,5 +245,32 @@ fn rf_pan_19_a_crashed_pane_relaunches_at_its_size_and_draws_again() {
             cols: 100,
             rows: 30
         }
+    );
+}
+
+#[test]
+fn rf_pan_19_a_crashed_pane_given_commands_before_its_relaunch_still_draws_and_is_seen() {
+    let mut h = Harness::start();
+    let (pane, child) = h.project();
+    h.send(ClientMsg::Scroll {
+        pane,
+        delta: PANIC_IN_ACTOR,
+    });
+    h.failure(pane);
+    wait_until(|| child.was_killed());
+    h.send(ClientMsg::WindowFocus { focused: true });
+    h.send(ClientMsg::Command(Command::FocusPane { pane }));
+    h.send(ClientMsg::Command(Command::RelaunchPane { pane }));
+    let again = h.child();
+    again.output(b"drawn again");
+    h.frame_with(pane, "drawn again");
+
+    again.output(b"\x1b]133;C\x07");
+    assert_eq!(h.state(pane), AgentState::Working);
+    again.output(b"\x1b]133;D;0\x07");
+    assert_eq!(
+        h.state(pane),
+        AgentState::Idle,
+        "a seen pane ends its turn idle"
     );
 }
