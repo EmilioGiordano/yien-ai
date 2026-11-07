@@ -199,7 +199,6 @@ struct Session {
     exited: bool,
 }
 
-/// What a pane actor starts with.
 pub(crate) struct PaneSetup {
     pub id: PaneId,
     pub plan: LaunchPlan,
@@ -671,11 +670,8 @@ impl Actor {
     }
 }
 
-/// Why the outbox stopped writing.
 enum Blocked {
-    /// The PTY's queue is full; try again later.
     Full,
-    /// The session is gone; nothing will be written.
     Closed,
 }
 
