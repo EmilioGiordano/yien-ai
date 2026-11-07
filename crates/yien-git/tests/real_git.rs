@@ -1,0 +1,491 @@
+//! Against the real `git`, on throwaway repositories. Each test skips when git is missing.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use yien_git::{
+    AheadBehind, Change, ChangedFile, FileStatus, Git, GitError, GitWatcher, Head, WatchOptions,
+};
+
+// Helpers sit in a cfg(test) module so clippy's allow-unwrap-in-tests covers them.
+#[cfg(test)]
+mod support {
+    use super::*;
+
+    /// A temp folder holding repositories and an empty global git config, removed on drop.
+    pub struct Sandbox {
+        pub dir: PathBuf,
+        config: PathBuf,
+    }
+
+    impl Sandbox {
+        pub fn new() -> Option<Self> {
+            let ok = Command::new("git")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !ok {
+                eprintln!("git not found, skipping");
+                return None;
+            }
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "yien-git-it-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let config = dir.join("gitconfig");
+            std::fs::write(&config, "").unwrap();
+            Some(Self { dir, config })
+        }
+
+        /// Runs a setup command, isolated from the user's global and system git config.
+        pub fn git(&self, cwd: &Path, args: &[&str]) -> String {
+            let out = self.command(cwd, args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+
+        /// Like [`Sandbox::git`], for a command expected to fail; returns whether it succeeded.
+        pub fn git_may_fail(&self, cwd: &Path, args: &[&str]) -> bool {
+            self.command(cwd, args).output().unwrap().status.success()
+        }
+
+        fn command(&self, cwd: &Path, args: &[&str]) -> Command {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", &self.config)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com");
+            cmd
+        }
+
+        /// A shell command that creates `marker`, for a config value git would run.
+        pub fn marker_command(marker: &Path) -> String {
+            let path = marker.to_string_lossy().replace('\\', "/");
+            format!("echo hit > '{path}'")
+        }
+
+        /// A new repository on `main` with one commit of `a.txt`.
+        pub fn repo(&self, name: &str) -> PathBuf {
+            let root = self.dir.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            self.git(&root, &["init", "-q", "-b", "main"]);
+            std::fs::write(root.join("a.txt"), "one\n").unwrap();
+            self.git(&root, &["add", "a.txt"]);
+            self.git(&root, &["commit", "-q", "-m", "first"]);
+            root
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    pub fn git() -> Git {
+        Git::new().with_timeout(Duration::from_secs(20))
+    }
+
+    pub fn same(a: &Path, b: &Path) -> bool {
+        a.canonicalize().unwrap() == b.canonicalize().unwrap()
+    }
+}
+
+use support::{Sandbox, git, same};
+
+#[test]
+fn clean_repo_on_a_branch() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("clean");
+    let oid = sb.git(&root, &["rev-parse", "HEAD"]);
+
+    let info = git().info(&root).unwrap();
+    assert_eq!(
+        info.status.head,
+        Head::Branch {
+            name: "main".into(),
+            oid
+        }
+    );
+    assert!(!info.status.is_dirty());
+    assert_eq!(info.status.upstream, None);
+    assert!(same(&info.repo.root, &root));
+    assert!(!info.repo.linked_worktree);
+    assert!(same(info.repo.main_worktree.as_deref().unwrap(), &root));
+}
+
+#[test]
+fn subdirectory_finds_the_root() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("sub");
+    let deep = root.join("x/y");
+    std::fs::create_dir_all(&deep).unwrap();
+    let repo = git().discover(&deep).unwrap();
+    assert!(same(&repo.root, &root));
+}
+
+#[test]
+fn rf_ctx_04_lists_changed_files() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("dirty");
+    std::fs::write(root.join("b.txt"), "b\n").unwrap();
+    std::fs::write(root.join("c.txt"), "c\n").unwrap();
+    sb.git(&root, &["add", "b.txt", "c.txt"]);
+    sb.git(&root, &["commit", "-q", "-m", "more"]);
+
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    std::fs::remove_file(root.join("b.txt")).unwrap();
+    sb.git(&root, &["mv", "c.txt", "c moved ü.txt"]);
+    std::fs::write(root.join("staged new.txt"), "n\n").unwrap();
+    sb.git(&root, &["add", "staged new.txt"]);
+    std::fs::write(root.join("año 日本.txt"), "u\n").unwrap();
+
+    let status = git().status(&root).unwrap();
+    assert!(status.is_dirty());
+    let mut files = status.files.clone();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(
+        files,
+        vec![
+            ChangedFile {
+                path: "a.txt".into(),
+                status: FileStatus::Modified
+            },
+            ChangedFile {
+                path: "año 日本.txt".into(),
+                status: FileStatus::Untracked
+            },
+            ChangedFile {
+                path: "b.txt".into(),
+                status: FileStatus::Deleted
+            },
+            ChangedFile {
+                path: "c moved ü.txt".into(),
+                status: FileStatus::Renamed {
+                    from: "c.txt".into()
+                }
+            },
+            ChangedFile {
+                path: "staged new.txt".into(),
+                status: FileStatus::Added
+            },
+        ]
+    );
+}
+
+#[test]
+fn rnf_14_status_never_writes_the_index() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("readonly");
+    let index = root.join(".git/index");
+    // Rewriting a tracked file makes the index's stat data stale, which a plain
+    // `git status` would refresh by rewriting the index.
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let before = std::fs::read(&index).unwrap();
+    let before_mtime = std::fs::metadata(&index).unwrap().modified().unwrap();
+
+    let info = git().info(&root).unwrap();
+    assert!(!info.status.is_dirty());
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&index).unwrap().modified().unwrap(),
+        before_mtime
+    );
+    assert!(!root.join(".git/index.lock").exists());
+}
+
+#[test]
+fn unborn_branch() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.dir.join("unborn");
+    std::fs::create_dir_all(&root).unwrap();
+    sb.git(&root, &["init", "-q", "-b", "trunk"]);
+    let status = git().status(&root).unwrap();
+    assert_eq!(
+        status.head,
+        Head::Unborn {
+            name: "trunk".into()
+        }
+    );
+}
+
+#[test]
+fn detached_head() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("detached");
+    sb.git(&root, &["checkout", "-q", "--detach"]);
+    let oid = sb.git(&root, &["rev-parse", "HEAD"]);
+    let status = git().status(&root).unwrap();
+    assert_eq!(status.head, Head::Detached { oid: oid.clone() });
+    assert_eq!(status.head.label(), &oid[..7]);
+}
+
+#[test]
+fn ahead_and_behind_the_upstream() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("upstream");
+    sb.git(&root, &["branch", "base"]);
+    sb.git(&root, &["branch", "-q", "--set-upstream-to", "base"]);
+    std::fs::write(root.join("a.txt"), "local\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "local"]);
+    sb.git(&root, &["switch", "-q", "base"]);
+    std::fs::write(root.join("z.txt"), "z\n").unwrap();
+    sb.git(&root, &["add", "z.txt"]);
+    sb.git(&root, &["commit", "-q", "-m", "z"]);
+    std::fs::write(root.join("y.txt"), "y\n").unwrap();
+    sb.git(&root, &["add", "y.txt"]);
+    sb.git(&root, &["commit", "-q", "-m", "y"]);
+    sb.git(&root, &["switch", "-q", "main"]);
+
+    let upstream = git().status(&root).unwrap().upstream.unwrap();
+    assert_eq!(upstream.name, "base");
+    assert_eq!(
+        upstream.ahead_behind,
+        Some(AheadBehind {
+            ahead: 1,
+            behind: 2
+        })
+    );
+}
+
+#[test]
+fn linked_worktree_reports_its_main_worktree() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("main-wt");
+    let wt = sb.dir.join("linked wt");
+    sb.git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/x",
+            wt.to_str().unwrap(),
+        ],
+    );
+
+    let info = git().info(&wt).unwrap();
+    assert!(info.repo.linked_worktree);
+    assert!(same(&info.repo.root, &wt));
+    assert!(same(info.repo.main_worktree.as_deref().unwrap(), &root));
+    assert!(same(&info.repo.common_dir, &root.join(".git")));
+    assert_eq!(info.status.head.branch(), Some("feat/x"));
+
+    let main = git().discover(&root).unwrap();
+    assert!(!main.linked_worktree);
+}
+
+#[test]
+fn outside_a_repository() {
+    let Some(sb) = Sandbox::new() else { return };
+    let plain = sb.dir.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    match git().info(&plain) {
+        Err(GitError::NotARepository) => {}
+        Ok(info) => eprintln!(
+            "temp dir sits inside a repo ({}), skipping",
+            info.repo.root.display()
+        ),
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn watcher_reports_a_branch_switch() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("watch");
+    let repo = git().discover(&root).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let options = WatchOptions {
+        interval: Duration::from_millis(50),
+        refresh: None,
+    };
+    let watcher = GitWatcher::spawn(&repo, options, move |c| {
+        let _ = tx.send(c);
+    })
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(rx.try_recv().is_err(), "no change, no callback");
+
+    sb.git(&root, &["switch", "-q", "-c", "other"]);
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Change::Git));
+    assert_eq!(git().status(&root).unwrap().head.branch(), Some("other"));
+
+    let start = Instant::now();
+    drop(watcher);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "drop stops the thread"
+    );
+}
+
+#[test]
+fn watcher_refreshes_for_work_tree_edits() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("refresh");
+    let repo = git().discover(&root).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let options = WatchOptions {
+        interval: Duration::from_millis(20),
+        refresh: Some(Duration::from_millis(100)),
+    };
+    let _watcher = GitWatcher::spawn(&repo, options, move |c| {
+        let _ = tx.send(c);
+    })
+    .unwrap();
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Change::Refresh));
+}
+
+#[test]
+fn rnf_14_repo_filters_never_run() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("filters");
+    std::fs::write(root.join("b.md"), "b\n").unwrap();
+    std::fs::write(root.join("c.inc"), "c\n").unwrap();
+    sb.git(&root, &["add", "b.md", "c.inc"]);
+    sb.git(&root, &["commit", "-q", "-m", "more"]);
+
+    let clean = sb.dir.join("clean.marker");
+    let process = sb.dir.join("process.marker");
+    let included = sb.dir.join("included.marker");
+    let clean_cmd = format!("{}; cat", Sandbox::marker_command(&clean));
+    sb.git(&root, &["config", "filter.evil.clean", &clean_cmd]);
+    sb.git(&root, &["config", "filter.evil.required", "true"]);
+    sb.git(
+        &root,
+        &[
+            "config",
+            "filter.my proc.process",
+            &Sandbox::marker_command(&process),
+        ],
+    );
+    // A repo file pulled in through include.path still counts as repo config.
+    let include = sb.dir.join("included.cfg");
+    std::fs::write(
+        &include,
+        format!(
+            "[filter \"inc\"]\n\tclean = \"{}; cat\"\n",
+            Sandbox::marker_command(&included).replace('"', "\\\"")
+        ),
+    )
+    .unwrap();
+    sb.git(
+        &root,
+        &["config", "include.path", include.to_str().unwrap()],
+    );
+    std::fs::write(
+        root.join(".git/info/attributes"),
+        "*.txt filter=evil\n*.md filter=\"my proc\"\n*.inc filter=inc\n",
+    )
+    .unwrap();
+
+    // Stale stat data makes status re-read the files through their filters.
+    std::thread::sleep(Duration::from_millis(1100));
+    for (name, content) in [("a.txt", "one\n"), ("b.md", "b\n"), ("c.inc", "c\n")] {
+        std::fs::write(root.join(name), content).unwrap();
+    }
+
+    let status = git().status(&root).unwrap();
+    assert!(!status.is_dirty(), "{:?}", status.files);
+    for marker in [&clean, &process, &included] {
+        assert!(!marker.exists(), "{} ran", marker.display());
+    }
+}
+
+#[test]
+fn rnf_14_repo_fsmonitor_never_runs() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("fsmonitor");
+    let marker = sb.dir.join("fsmonitor.marker");
+    sb.git(
+        &root,
+        &[
+            "config",
+            "core.fsmonitor",
+            &Sandbox::marker_command(&marker),
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+
+    git().info(&root).unwrap();
+    assert!(!marker.exists(), "the fsmonitor command ran");
+}
+
+#[test]
+fn rf_ctx_04_merge_conflict() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("conflict");
+    sb.git(&root, &["switch", "-q", "-c", "other"]);
+    std::fs::write(root.join("a.txt"), "theirs\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "theirs"]);
+    sb.git(&root, &["switch", "-q", "main"]);
+    std::fs::write(root.join("a.txt"), "ours\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "ours"]);
+    assert!(!sb.git_may_fail(&root, &["merge", "-q", "other"]));
+
+    let status = git().status(&root).unwrap();
+    assert_eq!(
+        status.files,
+        vec![ChangedFile {
+            path: "a.txt".into(),
+            status: FileStatus::Conflicted
+        }]
+    );
+}
+
+#[test]
+fn rnf_14_partial_clone_never_fetches() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.dir.join("partial");
+    std::fs::create_dir_all(&root).unwrap();
+    sb.git(&root, &["init", "-q", "-b", "main"]);
+    let lines: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(root.join("a.txt"), &lines).unwrap();
+    sb.git(&root, &["add", "a.txt"]);
+    sb.git(&root, &["commit", "-q", "-m", "first"]);
+    let old = sb.git(&root, &["rev-parse", "HEAD:a.txt"]);
+    // A staged rename with an edit makes status read the old blob for rename detection.
+    sb.git(&root, &["mv", "a.txt", "moved.txt"]);
+    std::fs::write(root.join("moved.txt"), format!("{lines}extra\n")).unwrap();
+    sb.git(&root, &["add", "moved.txt"]);
+    std::fs::remove_file(root.join(".git/objects").join(&old[..2]).join(&old[2..])).unwrap();
+
+    let marker = sb.dir.join("ssh.marker");
+    let ssh = format!("{}; false", Sandbox::marker_command(&marker));
+    for (key, value) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.url", "ssh://example.invalid/x"),
+        ("remote.origin.promisor", "true"),
+        ("core.sshCommand", ssh.as_str()),
+    ] {
+        sb.git(&root, &["config", key, value]);
+    }
+
+    let result = git().status(&root);
+    assert!(
+        !matches!(result, Err(GitError::Timeout(_))),
+        "status hung: {result:?}"
+    );
+    assert!(!marker.exists(), "the repository's ssh command ran");
+}

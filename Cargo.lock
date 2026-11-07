@@ -8846,6 +8846,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yien-git"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "yien-hook"
 version = "0.0.0"
 dependencies = [
