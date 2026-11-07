@@ -605,6 +605,7 @@ mod tests {
             history_len: 0,
             background: Rgb::default(),
             cursor_color: Rgb::default(),
+            modes: Modes::default(),
         }
     }
 

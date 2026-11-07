@@ -110,7 +110,7 @@ impl TerminalPane {
     }
 
     fn modes(&self) -> Modes {
-        self.frame.as_ref().map(frame_modes).unwrap_or_default()
+        self.frame.as_ref().map(|f| f.modes).unwrap_or_default()
     }
 
     fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) {
@@ -461,11 +461,6 @@ impl TerminalPane {
             )
             .into_any_element()
     }
-}
-
-/// The terminal modes of a frame.
-fn frame_modes(_frame: &Frame) -> Modes {
-    Modes::default()
 }
 
 fn mods_of(m: &Modifiers) -> Mods {
