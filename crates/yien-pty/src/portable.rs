@@ -150,8 +150,6 @@ impl PtyBackend for PortablePty {
 
         // The writer owns the master, so the pseudo console closes on this
         // thread once every sender is gone: ClosePseudoConsole can block.
-        // It starts before the reader so ConPTY's startup query can be
-        // answered from the first byte read.
         let master = pair.master;
         thread::Builder::new()
             .name("yien-pty-writer".into())
@@ -175,16 +173,12 @@ impl PtyBackend for PortablePty {
         {
             let exited = Arc::clone(&exited);
             let drain = self.drain;
-            // `try_wait` and not `wait`: under ConPTY `wait` never returns
-            // (seen in foothy), while `try_wait` reports the exit.
-            let probe = move || {
-                child
-                    .try_wait()
-                    .map(|s| s.map(|s| ExitStatus::from_code(s.exit_code())))
-            };
+            // Not `try_wait`: it reports exit code 259 (STILL_ACTIVE) and a
+            // failed status query as "still running" on Windows.
+            let wait = move || child.wait().map(|s| ExitStatus::from_code(s.exit_code()));
             thread::Builder::new()
                 .name("yien-pty-waiter".into())
-                .spawn(move || run_waiter(probe, events_tx, shared, exited, drain))
+                .spawn(move || run_waiter(wait, events_tx, shared, exited, drain))
                 .map_err(|e| fail(PtyError::Setup(e.into())))?;
         }
 
