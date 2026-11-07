@@ -127,6 +127,11 @@ pub trait VtEngine: Send {
     /// [`SYNC_UPDATE_TIMEOUT`].
     fn sync_pending(&self) -> bool;
 
+    /// Changes each time a synchronized update is opened, reopened or
+    /// extended. When it differs from the value the owner saw when it started
+    /// its [`SYNC_UPDATE_TIMEOUT`] timer, the owner restarts the timer.
+    fn sync_generation(&self) -> u64;
+
     /// Applies the output held by an open synchronized update and closes it.
     fn flush_sync(&mut self) -> VtOutput;
 

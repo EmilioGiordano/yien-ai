@@ -50,21 +50,26 @@ impl EventListener for Listener {
 
 /// The synchronized-update (mode 2026) timer without a clock: it only records
 /// that an update is open. The pane actor owns time and calls
-/// [`VtEngine::flush_sync`] when the update has been open too long.
+/// [`VtEngine::flush_sync`] when the update has been open too long. Every
+/// (re)arm bumps `generation`, so the owner knows to restart its timer.
 #[derive(Debug, Default)]
-struct SyncFlag(bool);
+struct SyncFlag {
+    open: bool,
+    generation: u64,
+}
 
 impl Timeout for SyncFlag {
     fn set_timeout(&mut self, _: Duration) {
-        self.0 = true;
+        self.open = true;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn clear_timeout(&mut self) {
-        self.0 = false;
+        self.open = false;
     }
 
     fn pending_timeout(&self) -> bool {
-        self.0
+        self.open
     }
 }
 
@@ -290,6 +295,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn sync_pending(&self) -> bool {
         self.parser.sync_timeout().pending_timeout()
+    }
+
+    fn sync_generation(&self) -> u64 {
+        self.parser.sync_timeout().generation
     }
 
     fn flush_sync(&mut self) -> VtOutput {

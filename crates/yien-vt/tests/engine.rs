@@ -481,6 +481,22 @@ fn cursor_shape_and_visibility_follow_the_program() {
 }
 
 #[test]
+fn sync_generation_changes_when_an_update_is_reopened_in_one_chunk() {
+    let mut e = engine(20, 3);
+    assert_eq!(e.sync_generation(), 0);
+    e.feed(b"\x1b[?2026hone\x1b[?2026l\x1b[?2026htwo");
+    assert!(e.sync_pending(), "the second update is still open");
+    assert_eq!(e.sync_generation(), 2);
+    assert_eq!(e.frame().line_text(0), "one");
+    let seen = e.sync_generation();
+    e.feed(b"\x1b[?2026hthree");
+    assert!(e.sync_generation() != seen, "extending re-arms the timer");
+    e.flush_sync();
+    assert!(!e.sync_pending());
+    assert_eq!(e.frame().line_text(0), "onetwothree");
+}
+
+#[test]
 fn rf_pan_15_hidden_cursor_point_follows_the_program() {
     let mut e = engine(20, 3);
     e.feed(b"\x1b[?25l> type here\x1b[2;3H");
