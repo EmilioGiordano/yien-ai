@@ -9,7 +9,7 @@ mod panic_log;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use yien_core::{Core, CoreConfig, CoreHandle, SendError};
+use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, SendError};
 use yien_platform::LogGuard;
 use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, Command, PaneId};
@@ -36,7 +36,11 @@ fn main() -> ExitCode {
     let log = start_logging();
     panic_log::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
-    let (core, events) = match Core::start(Arc::new(PortablePty::new()), CoreConfig::default()) {
+    let config = CoreConfig {
+        hooks: hook_config(),
+        ..CoreConfig::default()
+    };
+    let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {
         Ok(started) => started,
         Err(error) => {
             tracing::error!("could not start the core: {error}");
@@ -60,6 +64,26 @@ fn main() -> ExitCode {
         drop(log);
     });
     ExitCode::SUCCESS
+}
+
+/// `yien-hook` sits next to this executable; the hook settings go under
+/// YIEN's data dir (RNF-14). `None` when either cannot be found, which the
+/// core treats as hooks being off.
+fn hook_config() -> Option<HookConfig> {
+    let exe = std::env::current_exe()
+        .inspect_err(|e| tracing::warn!("cannot locate yien.exe, hooks are off: {e}"))
+        .ok()?;
+    let hook_exe = exe
+        .parent()?
+        .join(format!("yien-hook{}", std::env::consts::EXE_SUFFIX));
+    let settings_dir = yien_platform::paths::data_dir()
+        .inspect_err(|e| tracing::warn!("no data dir, hooks are off: {e}"))
+        .ok()?
+        .join("hooks");
+    Some(HookConfig {
+        hook_exe,
+        settings_dir,
+    })
 }
 
 /// Without a log file there is nowhere else to report the failure, so it goes to stderr.
