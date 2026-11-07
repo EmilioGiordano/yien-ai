@@ -29,9 +29,50 @@ use std::fmt;
 /// Environment variable that carries the hook pipe's name to `yien-hook`.
 pub const HOOK_PIPE_ENV: &str = "YIEN_HOOK_PIPE";
 
-/// Every hook pipe name starts with this; `yien-hook` refuses any other
-/// path, so a tampered environment cannot make it write to a file.
+/// Every hook pipe name starts with this, followed by the server's pid, `-`
+/// and 16 lowercase hex digits (see [`hook_pipe_name`]).
 pub const HOOK_PIPE_PREFIX: &str = r"\\.\pipe\yien-hook-";
+
+/// Hex digits of the random nonce in a hook pipe name.
+const PIPE_NONCE_LEN: usize = 16;
+
+/// The hook pipe name for server process `pid` and a random `nonce`.
+///
+/// ```
+/// use yien_proto::hook_frame::{hook_pipe_name, hook_pipe_pid};
+///
+/// let name = hook_pipe_name(4242, 0xbeef);
+/// assert_eq!(name, r"\\.\pipe\yien-hook-4242-000000000000beef");
+/// assert_eq!(hook_pipe_pid(&name), Some(4242));
+/// ```
+pub fn hook_pipe_name(pid: u32, nonce: u64) -> String {
+    format!("{HOOK_PIPE_PREFIX}{pid}-{nonce:016x}")
+}
+
+/// The server pid in a hook pipe name, or `None` when `name` is not exactly
+/// the shape [`hook_pipe_name`] makes. `yien-hook` opens nothing else, so a
+/// tampered environment cannot point it at a file: Win32 resolves `..` even
+/// inside `\\.\` paths, and this shape has no `.`, `\` or `/` after the prefix.
+///
+/// ```
+/// use yien_proto::hook_frame::hook_pipe_pid;
+///
+/// assert_eq!(hook_pipe_pid(r"\\.\pipe\yien-hook-1-00000000000000ff"), Some(1));
+/// assert_eq!(hook_pipe_pid(r"\\.\pipe\yien-hook-1-00\..\..\C:\x"), None);
+/// ```
+pub fn hook_pipe_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(HOOK_PIPE_PREFIX)?;
+    let (pid, nonce) = rest.split_once('-')?;
+    let pid_ok = !pid.is_empty() && pid.len() <= 10 && pid.bytes().all(|b| b.is_ascii_digit());
+    let nonce_ok = nonce.len() == PIPE_NONCE_LEN
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !pid_ok || !nonce_ok {
+        return None;
+    }
+    pid.parse().ok()
+}
 
 /// Environment variable that carries the per-pane token to `yien-hook`. The
 /// same name as `yien_agent::HOOK_TOKEN_ENV`.
@@ -308,6 +349,33 @@ mod tests {
     #[test]
     fn pipe_prefix_is_a_local_pipe_path() {
         assert_eq!(HOOK_PIPE_PREFIX.as_bytes()[..9], *br"\\.\pipe\");
+    }
+
+    #[test]
+    fn rnf_11_pipe_names_outside_the_exact_shape_are_refused() {
+        let good = hook_pipe_name(77, u64::MAX);
+        assert_eq!(hook_pipe_pid(&good), Some(77));
+        let n = "0123456789abcdef";
+        let p = HOOK_PIPE_PREFIX;
+        let bad = [
+            String::new(),
+            p.to_owned(),
+            format!(r"{p}1-{n}\..\..\C:\victim.txt"),
+            format!(r"{p}..\..\C:\victim.txt"),
+            format!(r"{p}1-{n}/../x"),
+            format!(r"{p}1-{n}."),
+            format!(r"{p}."),
+            format!(r"{p}1-0123456789ABCDEF"),
+            format!(r"{p}1-{n}0"),
+            format!(r"{p}-{n}"),
+            format!(r"{p}99999999999-{n}"),
+            format!(r"{p}1-2-{n}"),
+            format!(r"\\?\pipe\yien-hook-1-{n}"),
+            format!(r"C:\yien-hook-1-{n}"),
+        ];
+        for name in bad {
+            assert_eq!(hook_pipe_pid(&name), None, "{name:?}");
+        }
     }
 
     #[test]
