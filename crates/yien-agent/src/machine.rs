@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use crate::signal::{
-    AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict, Signal, Source,
+    AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
+    SessionStartSource, Signal, Source,
 };
 
 /// How long a "needs you" signal must stand without a contrary one before the
@@ -316,12 +317,20 @@ impl Machine {
 
     fn on_hook(&mut self, event: &HookEvent, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         match event {
-            HookEvent::SessionStart { session_id, .. } => {
+            HookEvent::SessionStart { session_id, source } => {
                 if let Some(id) = session_id {
                     fx.push(Effect::SessionId(id.clone()));
                 }
                 self.session_ended = false;
-                self.set_state(AgentState::Idle, cause, now, fx);
+                // Compaction (and a resume landing mid-turn) is part of the
+                // turn; going idle here would miss its red and its Stop.
+                let keeps_turn = matches!(
+                    source,
+                    SessionStartSource::Compact | SessionStartSource::Resume
+                );
+                if !(keeps_turn && self.in_turn()) {
+                    self.set_state(AgentState::Idle, cause, now, fx);
+                }
             }
             HookEvent::UserPromptSubmit => self.start_turn(cause, now, fx),
             HookEvent::PreToolUse | HookEvent::PostToolUse => self.resume_work(cause, now, fx),
