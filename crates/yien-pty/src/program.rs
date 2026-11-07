@@ -127,86 +127,92 @@ fn batch_unsafe(arg: &OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
 
-    fn files(list: &[&str]) -> impl Fn(&Path) -> bool {
-        let set: HashSet<PathBuf> = list.iter().map(PathBuf::from).collect();
-        move |p| set.contains(p)
-    }
+    // Drive letters and `;` separators make these paths Windows only.
+    #[cfg(windows)]
+    mod lookup {
+        use std::collections::HashSet;
 
-    fn path(dirs: &[&str]) -> OsString {
-        std::env::join_paths(dirs).unwrap()
-    }
+        use super::*;
 
-    #[test]
-    fn rf_age_02_a_bare_name_finds_the_exe_on_path() {
-        let path = path(&["C:/Tools", "C:/Users/u/.local/bin"]);
-        let found = find(
-            OsStr::new("claude"),
-            Some(&path),
-            Some(OsStr::new(".COM;.EXE;.BAT;.CMD")),
-            files(&["C:/Users/u/.local/bin/claude.exe"]),
-        );
-        assert_eq!(
-            found,
-            Some(PathBuf::from("C:/Users/u/.local/bin").join("claude.exe"))
-        );
-    }
+        fn files(list: &[&str]) -> impl Fn(&Path) -> bool {
+            let set: HashSet<PathBuf> = list.iter().map(PathBuf::from).collect();
+            move |p| set.contains(p)
+        }
 
-    #[test]
-    fn rf_age_02_an_npm_shim_finds_the_cmd_not_the_shell_script() {
-        let path = path(&["C:/npm"]);
-        let found = find(
-            OsStr::new("opencode"),
-            Some(&path),
-            Some(OsStr::new(".EXE;.CMD")),
-            files(&["C:/npm/opencode", "C:/npm/opencode.cmd"]),
-        );
-        assert_eq!(found, Some(PathBuf::from("C:/npm").join("opencode.cmd")));
-    }
+        fn path(dirs: &[&str]) -> OsString {
+            std::env::join_paths(dirs).unwrap()
+        }
 
-    #[test]
-    fn path_order_and_extension_order_decide() {
-        let path = path(&["C:/a", "C:/b"]);
-        let exists = files(&["C:/a/x.cmd", "C:/a/x.exe", "C:/b/x.exe"]);
-        let found = find(
-            OsStr::new("x"),
-            Some(&path),
-            Some(OsStr::new(".EXE;.CMD")),
-            exists,
-        );
-        assert_eq!(found, Some(PathBuf::from("C:/a").join("x.exe")));
-    }
+        #[test]
+        fn rf_age_02_a_bare_name_finds_the_exe_on_path() {
+            let path = path(&["C:/Tools", "C:/Users/u/.local/bin"]);
+            let found = find(
+                OsStr::new("claude"),
+                Some(&path),
+                Some(OsStr::new(".COM;.EXE;.BAT;.CMD")),
+                files(&["C:/Users/u/.local/bin/claude.exe"]),
+            );
+            assert_eq!(
+                found,
+                Some(PathBuf::from("C:/Users/u/.local/bin").join("claude.exe"))
+            );
+        }
 
-    #[test]
-    fn a_name_with_its_extension_is_looked_up_as_is() {
-        let path = path(&["C:/w"]);
-        let found = find(
-            OsStr::new("pwsh.exe"),
-            Some(&path),
-            None,
-            files(&["C:/w/pwsh.exe", "C:/w/pwsh.exe.exe"]),
-        );
-        assert_eq!(found, Some(PathBuf::from("C:/w").join("pwsh.exe")));
-    }
+        #[test]
+        fn rf_age_02_an_npm_shim_finds_the_cmd_not_the_shell_script() {
+            let path = path(&["C:/npm"]);
+            let found = find(
+                OsStr::new("opencode"),
+                Some(&path),
+                Some(OsStr::new(".EXE;.CMD")),
+                files(&["C:/npm/opencode", "C:/npm/opencode.cmd"]),
+            );
+            assert_eq!(found, Some(PathBuf::from("C:/npm").join("opencode.cmd")));
+        }
 
-    #[test]
-    fn paths_and_missing_programs_are_left_alone() {
-        let path = path(&["C:/w"]);
-        let any = |_: &Path| true;
-        assert_eq!(
-            find(OsStr::new("C:/x/claude.exe"), Some(&path), None, any),
-            None
-        );
-        assert_eq!(find(OsStr::new("sub/claude"), Some(&path), None, any), None);
-        assert_eq!(find(OsStr::new(""), Some(&path), None, any), None);
-        assert_eq!(find(OsStr::new("claude"), None, None, any), None);
-        assert_eq!(
-            find(OsStr::new("claude"), Some(&path), None, files(&[])),
-            None
-        );
+        #[test]
+        fn path_order_and_extension_order_decide() {
+            let path = path(&["C:/a", "C:/b"]);
+            let exists = files(&["C:/a/x.cmd", "C:/a/x.exe", "C:/b/x.exe"]);
+            let found = find(
+                OsStr::new("x"),
+                Some(&path),
+                Some(OsStr::new(".EXE;.CMD")),
+                exists,
+            );
+            assert_eq!(found, Some(PathBuf::from("C:/a").join("x.exe")));
+        }
+
+        #[test]
+        fn a_name_with_its_extension_is_looked_up_as_is() {
+            let path = path(&["C:/w"]);
+            let found = find(
+                OsStr::new("pwsh.exe"),
+                Some(&path),
+                None,
+                files(&["C:/w/pwsh.exe", "C:/w/pwsh.exe.exe"]),
+            );
+            assert_eq!(found, Some(PathBuf::from("C:/w").join("pwsh.exe")));
+        }
+
+        #[test]
+        fn paths_and_missing_programs_are_left_alone() {
+            let path = path(&["C:/w"]);
+            let any = |_: &Path| true;
+            assert_eq!(
+                find(OsStr::new("C:/x/claude.exe"), Some(&path), None, any),
+                None
+            );
+            assert_eq!(find(OsStr::new("sub/claude"), Some(&path), None, any), None);
+            assert_eq!(find(OsStr::new(""), Some(&path), None, any), None);
+            assert_eq!(find(OsStr::new("claude"), None, None, any), None);
+            assert_eq!(
+                find(OsStr::new("claude"), Some(&path), None, files(&[])),
+                None
+            );
+        }
     }
 
     #[test]
