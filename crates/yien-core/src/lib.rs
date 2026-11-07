@@ -142,6 +142,14 @@ pub struct CoreConfig {
     pub frame_interval: Duration,
     /// Columns and rows a pane starts with, until the UI sends its size.
     pub initial_size: (u16, u16),
+    /// How long a new pane waits for the UI's first size before it starts
+    /// its program, so the PTY is created at the size it is drawn at. Past
+    /// it the program starts at the last size the UI reported for any pane,
+    /// or at `initial_size`. Zero, with `ui_wait`, starts it at once.
+    pub size_wait: Duration,
+    /// How long a new pane waits while the UI has not reported any size
+    /// yet, as at start when the window is not shown. At least `size_wait`.
+    pub ui_wait: Duration,
     /// Threads of the core's runtime.
     pub worker_threads: usize,
     /// The Claude Code hook pipe (ADR-09). `None` runs without it: Claude
@@ -164,6 +172,8 @@ impl Default for CoreConfig {
             clock: Arc::new(MonotonicClock::new()),
             frame_interval: FRAME_INTERVAL,
             initial_size: (80, 24),
+            size_wait: Duration::ZERO,
+            ui_wait: Duration::ZERO,
             worker_threads: 2,
             hooks: None,
             session: None,
@@ -280,6 +290,7 @@ impl Core {
             engine,
             hooks: hooks.clone(),
             attention: Arc::new(AtomicU64::new(0)),
+            ui_size: Arc::new(tokio::sync::watch::Sender::new(None)),
         };
         runtime.spawn(service::run(
             ctx,
