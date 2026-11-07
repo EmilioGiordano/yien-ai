@@ -24,6 +24,13 @@ pub enum Risk {
         /// Lines the paste would submit.
         lines: usize,
     },
+    /// Carries escape or other control characters (anything in C0 except tab,
+    /// CR and LF, or in C1), which can drive the terminal or the program
+    /// instead of being read as text.
+    ControlCharacters {
+        /// How many such characters the paste holds.
+        count: usize,
+    },
     /// Big enough that the user cannot have read all of it.
     Large {
         /// Size of the paste in bytes.
@@ -40,8 +47,13 @@ pub enum Risk {
 /// assert_eq!(assess("ls", false), Risk::Safe);
 /// assert_eq!(assess("a\nb", false), Risk::WouldExecute { lines: 2 });
 /// assert_eq!(assess("a\nb", true), Risk::Safe);
+/// assert_eq!(assess("a\x1b[201~b", true), Risk::ControlCharacters { count: 1 });
 /// ```
 pub fn assess(text: &str, bracketed: bool) -> Risk {
+    let count = text.chars().filter(|&c| is_unsafe_control(c)).count();
+    if count > 0 {
+        return Risk::ControlCharacters { count };
+    }
     let lines = line_count(text);
     if lines > 1 && !bracketed {
         return Risk::WouldExecute { lines };
@@ -79,15 +91,32 @@ pub fn normalize(text: &str) -> String {
     text.replace("\r\n", "\r").replace('\n', "\r")
 }
 
+/// Control characters a paste must not carry: C0 except tab, LF and CR, and C1.
+fn is_unsafe_control(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{1f}' | '\u{80}'..='\u{9f}') && !matches!(c, '\t' | '\n' | '\r')
+}
+
 /// Wraps the text so a program that asked for bracketed paste can tell it apart.
 ///
+/// ESC and the C1 controls (8-bit CSI among them) are dropped from the payload:
+/// otherwise a pasted `ESC[201~` ends the bracket early and the rest of the
+/// paste runs as typed input.
+///
 /// ```
-/// assert_eq!(yien_input::paste::bracket("ls"), b"\x1b[200~ls\x1b[201~");
+/// use yien_input::paste::bracket;
+/// assert_eq!(bracket("ls"), b"\x1b[200~ls\x1b[201~");
+/// assert_eq!(bracket("a\x1b[201~b"), b"\x1b[200~a[201~b\x1b[201~");
 /// ```
 pub fn bracket(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + 12);
     out.extend_from_slice(b"\x1b[200~");
-    out.extend_from_slice(text.as_bytes());
+    let mut buf = [0u8; 4];
+    for c in text
+        .chars()
+        .filter(|&c| c != '\x1b' && !matches!(c, '\u{80}'..='\u{9f}'))
+    {
+        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    }
     out.extend_from_slice(b"\x1b[201~");
     out
 }
@@ -159,5 +188,40 @@ mod tests {
     #[test]
     fn bracket_wraps_the_payload() {
         assert_eq!(bracket("hi"), b"\x1b[200~hi\x1b[201~");
+    }
+
+    #[test]
+    fn rf_pan_09_paste_cannot_close_the_bracket() {
+        let payload = "echo hi\x1b[201~rm -rf ~\r\u{9b}201~";
+        let bytes = bracket(payload);
+        let end = b"\x1b[201~";
+        let closes = bytes.windows(end.len()).filter(|w| *w == end).count();
+        assert_eq!(closes, 1, "only the closing marker may end the paste");
+        assert!(bytes.ends_with(end));
+        assert!(!bytes[6..bytes.len() - end.len()].contains(&0x1b));
+        assert!(!String::from_utf8(bytes).unwrap().contains('\u{9b}'));
+    }
+
+    #[test]
+    fn rf_pan_09_assess_flags_embedded_escapes() {
+        assert_eq!(
+            assess("echo hi\x1b[201~rm -rf ~", true),
+            Risk::ControlCharacters { count: 1 }
+        );
+        assert_eq!(
+            assess("a\u{7}b\u{9b}c", false),
+            Risk::ControlCharacters { count: 2 }
+        );
+    }
+
+    #[test]
+    fn tab_and_line_breaks_are_not_control_risks() {
+        assert_eq!(assess("a\tb", false), Risk::Safe);
+        assert_eq!(assess("a\r\nb", true), Risk::Safe);
+    }
+
+    #[test]
+    fn bracket_keeps_ordinary_text_intact() {
+        assert_eq!(bracket("ñ\tok\r"), "\x1b[200~ñ\tok\r\x1b[201~".as_bytes());
     }
 }

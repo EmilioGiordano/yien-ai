@@ -35,22 +35,49 @@ pub fn requirement_id(test_name: &str) -> Option<String> {
 }
 
 /// Names of the functions marked `#[test]` (or `#[<runtime>::test]`) in a file.
+///
+/// Handles `#[x::test(...)]`, attributes spread over several lines and an
+/// attribute on the same line as the `fn`.
 pub fn test_names(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut pending_test = false;
+    // Open brackets of an attribute that continues on the next line.
+    let mut attr_depth = 0usize;
     for line in source.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
+        let mut rest = line.trim();
+        if attr_depth > 0 {
+            match close_brackets(rest, attr_depth) {
+                Ok(end) => {
+                    attr_depth = 0;
+                    rest = rest[end..].trim_start();
+                }
+                Err(depth) => {
+                    attr_depth = depth;
+                    continue;
+                }
+            }
         }
-        if let Some(attr) = line.strip_prefix("#[").and_then(|a| a.strip_suffix(']')) {
-            if attr == "test" || attr.ends_with("::test") {
+        while let Some(attr) = rest.strip_prefix("#[") {
+            let path: String = attr
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                .collect();
+            if path == "test" || path.ends_with("::test") {
                 pending_test = true;
             }
+            match close_brackets(attr, 1) {
+                Ok(end) => rest = attr[end..].trim_start(),
+                Err(depth) => {
+                    attr_depth = depth;
+                    rest = "";
+                }
+            }
+        }
+        if rest.is_empty() || rest.starts_with("//") {
             continue;
         }
-        if pending_test && let Some(at) = line.find("fn ") {
-            let name: String = line[at + 3..]
+        if pending_test && let Some(at) = rest.find("fn ") {
+            let name: String = rest[at + 3..]
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
@@ -61,6 +88,24 @@ pub fn test_names(source: &str) -> Vec<String> {
         pending_test = false;
     }
     names
+}
+
+/// Scans `text` with `depth` brackets already open. Returns the byte offset just
+/// past the bracket that closes them, or the depth still open at the end.
+fn close_brackets(text: &str, mut depth: usize) -> Result<usize, usize> {
+    for (i, c) in text.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(depth)
 }
 
 /// R1 ids from the ERS tables: RF rows whose release column says R1, and
@@ -242,6 +287,52 @@ mod tests {
             test_names(source),
             vec!["rf_pan_01_splits", "rn_02_async", "plain"]
         );
+    }
+
+    #[test]
+    fn runtime_test_attributes_with_arguments_count() {
+        let source = "
+            #[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]
+            async fn rf_ses_01_restores() {}
+
+            #[some_crate::test(timeout = 5)]
+            fn rnf_09_power_loss() {}
+
+            #[cfg_attr(test, allow(dead_code))]
+            fn rf_pan_02_not_a_test() {}
+        ";
+        assert_eq!(
+            test_names(source),
+            vec!["rf_ses_01_restores", "rnf_09_power_loss"]
+        );
+    }
+
+    #[test]
+    fn a_test_attribute_on_the_fn_line_counts() {
+        let source = "#[test] fn rf_pan_01_a() {}\n#[test] #[ignore] fn rn_01_b() {}\n";
+        assert_eq!(test_names(source), vec!["rf_pan_01_a", "rn_01_b"]);
+    }
+
+    #[test]
+    fn multi_line_attributes_after_test_keep_it_pending() {
+        let source = "
+            #[test]
+            #[should_panic(
+                expected = \"boom\"
+            )]
+            fn rf_pan_03_panics() {}
+
+            #[tokio::test(
+                flavor = \"current_thread\",
+            )]
+            async fn rn_04_ended() {}
+
+            #[allow(
+                dead_code
+            )]
+            fn rf_pan_04_helper() {}
+        ";
+        assert_eq!(test_names(source), vec!["rf_pan_03_panics", "rn_04_ended"]);
     }
 
     #[test]
