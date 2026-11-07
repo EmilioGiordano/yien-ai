@@ -112,7 +112,7 @@ Title: `type/short description`. Body, in English: what was chosen, what was rej
 
 ## Comments
 
-Keep a comment only when deleting it would let someone reintroduce a bug you can name, break an invariant not visible in the code, or violate an external constraint the code cannot show (ConPTY behaviour, a Win32 rule, a CLI's hook format). One or two lines. The same applies to `///`.
+Keep a comment only when deleting it would let someone reintroduce a bug you can name, break an invariant not visible in the code, or violate an external constraint the code cannot show (ConPTY behaviour, a Win32 rule, a CLI's hook format). One or two lines. The same applies to `///` on private items; public API items get a short doc comment with an example (plan §11.1).
 
 Design reasoning goes in the report, the commit or the PR, never in the code.
 
