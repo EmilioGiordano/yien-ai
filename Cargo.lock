@@ -8853,6 +8853,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "yien-session"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "yien-proto",
+]
+
+[[package]]
 name = "yien-testkit"
 version = "0.0.0"
 
