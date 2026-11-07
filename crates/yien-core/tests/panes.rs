@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use yien_agent::Profile;
-use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand};
+use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand, ShutdownError};
 use yien_proto::frame::Frame;
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
@@ -990,4 +990,47 @@ fn a_pane_relaunched_before_it_starts_takes_the_last_size_the_ui_reported() {
     h.command(Command::RelaunchPane { pane });
     let child = h.child();
     assert_eq!((child.spec().cols, child.spec().rows), (111, 33));
+}
+
+#[test]
+fn the_shutdown_closes_every_pane() {
+    let mut h = Harness::start();
+    let (_, first, first_child) = h.project();
+    let (_, second_child) = h.split(first, None);
+    let started = Instant::now();
+    assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 2);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    for child in [&first_child, &second_child] {
+        assert!(child.was_killed() && child.was_closed());
+    }
+}
+
+#[test]
+fn the_shutdown_returns_within_its_bound_when_a_pane_never_closes() {
+    let mut h = Harness::start();
+    let (_, first, first_child) = h.project();
+    h.backend.stall_closes(true);
+    let (_, stuck) = h.split(first, None);
+    let bound = Duration::from_millis(300);
+    let started = Instant::now();
+    let result = h.core.shutdown(bound);
+    let took = started.elapsed();
+    assert!(
+        matches!(result, Err(ShutdownError::TimedOut { open: 1, total: 2 })),
+        "{result:?}"
+    );
+    assert!(took >= bound && took < Duration::from_secs(1), "{took:?}");
+    for child in [&first_child, &stuck] {
+        assert!(child.was_killed() && child.was_closed());
+    }
+}
+
+#[test]
+fn a_pane_that_starts_after_the_shutdown_is_closed_at_once() {
+    let wait = Duration::from_millis(300);
+    let mut h = waiting(wait, wait);
+    h.pending_project();
+    assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 0);
+    let child = h.child();
+    wait_until(|| child.was_killed() && child.was_closed());
 }
