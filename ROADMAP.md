@@ -46,6 +46,7 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/ui-shell`: the `yien` binary is layer 4 in `check-deps`; it may depend on every layer and nothing depends on it. `yien-ui` owns `run()`, so the binary does not depend on gpui.
 - `feat/ui-shell`: the view model (`WorkspaceView`) lives in `yien-ui`, keyed by `yien-proto` ids, and models all five RF-AGE-05 states. The counter counts panes (RF-ATN-03); project heads count tabs.
 - `build/tracing-and-input-mode`: logs go to `<data dir>/logs`, where the data dir is `%LOCALAPPDATA%\YIEN` or `$YIEN_DATA_DIR`, not to the state dir that plan §5.4 names, so a throwaway profile redirects them too. Debug builds also log to stderr. `yien-platform` uses `#![deny(unsafe_code)]`, so later OS code can allow `unsafe` per module with a `// SAFETY:` line.
+- `build/tracing-and-input-mode`: the log guard is dropped in the callback `yien_ui::run` takes for gpui's `on_app_quit`, because gpui calls `process::exit` at Windows end of session without returning from `run`. `vte` (off) and `alacritty_terminal` (warn) are capped on top of `YIEN_LOG`, since their debug and trace records carry terminal content. The binary logs panics (location and a message capped at 200 chars) before the default hook.
 - `feat/ui-shell`: the sumi `shu` red is below WCAG AA on `panel` (4.39:1) and `raised` (4.11:1), where the tab bar and the counter use it (RNF-18). Left as designed, pending a token change.
 
 ## In flight
