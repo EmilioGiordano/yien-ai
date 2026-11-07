@@ -35,6 +35,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
+| Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | no | — |
 
 "Not explicitly forbidden" is not permission.
 
@@ -81,15 +82,18 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 
 ## The branch loop
 
-Every branch goes through the same loop: steps 1–6 with the `yien-branch` skill, step 7 with `yien-integrate`.
+Every branch goes through the same loop: steps 1–7 with the `yien-branch` skill, step 8 with `yien-integrate`.
 
 1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
 2. `implementer` implements and runs the branch checks, committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
-4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. When the same area fails twice, the reviewer says whether the problem is the patch or the design; a design problem is redesigned, not patched again. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
-5. When the review reports coverage the implementer cannot add alone, `test-engineer` writes the tests and `implementer` commits them.
-6. On PASS, the orchestrator pushes and opens the PR as a draft.
-7. The branch goes through integration and UI validation. Then the orchestrator merges it.
+4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
+   - Each re-review brief carries the previous findings with their resolution (fixed in a commit, argued against, deliberate). With that, the reviewer says whether a repeated fault is the patch or the design. A design problem is redesigned, not patched again.
+   - A finding that contradicts the ERS or the plan is overridden by the orchestrator: it is recorded as deliberate in the REPORT and in the next brief, and it no longer counts toward the verdict. A finding that turns out wrong also goes into the reviewer's "Known false positives", committed on the branch being reviewed.
+5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
+6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS.
+7. On PASS, the orchestrator pushes and opens the PR as a draft.
+8. The branch goes through integration and UI validation. Then the orchestrator merges it.
 
 A PR is ready to merge only when all of these hold:
 
