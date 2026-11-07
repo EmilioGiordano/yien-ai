@@ -69,6 +69,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-o"]
     ),
     command!(
+        "project.add",
+        "project: add project…",
+        AddProject,
+        ["ctrl-shift-k"]
+    ),
+    command!(
         "tab_bar.toggle",
         "workspace: toggle tab bar",
         ToggleTabBar,
@@ -98,6 +104,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         NewClaudeTab,
         ["ctrl-shift-a"]
     ),
+    command!("tab.rename", "tab: rename tab", RenameTab, []),
     command!("tab.next", "tab: next tab", NextTab, ["ctrl-tab"]),
     command!(
         "tab.previous",
@@ -210,6 +217,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleProjectFold,
         []
     ),
+    command!("project.close", "project: close project", CloseProject, []),
     command!(
         "theme.toggle",
         "theme: toggle sumi / washi",
@@ -433,6 +441,7 @@ mod tests {
             ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),
             ("palette.open", PALETTE_KEYS),
             ("switcher.open", SWITCHER_KEYS),
+            ("project.add", ADD_PROJECT_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

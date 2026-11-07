@@ -1796,7 +1796,8 @@ impl Shell {
                     .justify_end()
                     .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
                 "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
-                 {JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
+                 {JUMP_KEYS} next that needs you · {ADD_PROJECT_KEYS} add project · \
+                 {NEW_CLAUDE_TAB_KEYS} Claude tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
                  {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
