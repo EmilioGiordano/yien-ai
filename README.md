@@ -17,6 +17,10 @@ YIEN opens a project on the folder it was started from; start it from a terminal
 
 Data and logs go to `%LOCALAPPDATA%\YIEN` (logs in `logs\`). Set `YIEN_DATA_DIR` to use another folder and `YIEN_LOG` (for example `debug`) to change the log level.
 
+### Removing YIEN
+
+Delete the unzipped folder and `%LOCALAPPDATA%\YIEN`. The first time YIEN shows a notification it also registers its name for Windows under `HKEY_CURRENT_USER\Software\Classes\AppUserModelId\YIEN.App`; remove that key too, for example with `reg delete "HKCU\Software\Classes\AppUserModelId\YIEN.App" /f`.
+
 ## Build from source
 
 Install Rust with [rustup](https://rustup.rs); `rust-toolchain.toml` pins the toolchain, which rustup installs on the first build. Then:
