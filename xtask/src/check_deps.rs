@@ -346,19 +346,13 @@ mod tests {
     fn the_binary_may_depend_on_every_layer_and_nothing_on_it() {
         let set = [manifest(
             "yien",
-            "[dependencies]
-yien-ui = { workspace = true }
-yien-core = \"0\"
-             yien-proto = \"0\"
-gpui-kit = \"0\"",
+            "[dependencies]\nyien-ui = \"0\"\nyien-core = \"0\"\nyien-proto = \"0\"\ngpui-kit = \"0\"",
         )];
         assert_eq!(check(&set), Vec::<String>::new());
 
-        let set = [manifest("yien-core", "[dependencies]
-yien = \"0\"")];
+        let set = [manifest("yien-core", "[dependencies]\nyien = \"0\"")];
         assert_violation(&set, "yien-core -> yien");
-        let set = [manifest("yien", "[dependencies]
-yien-testkit = \"0\"")];
+        let set = [manifest("yien", "[dependencies]\nyien-testkit = \"0\"")];
         assert_violation(&set, "yien-testkit is dev-only");
     }
 
