@@ -1,0 +1,13 @@
+[package]
+name = "yien-testkit"
+description = "Test doubles and fixtures for YIEN: fake clock, and later fake PTY and .yrec replay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
