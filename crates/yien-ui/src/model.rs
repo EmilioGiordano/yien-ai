@@ -232,6 +232,8 @@ pub struct WorkspaceView {
     /// Tabs in the order they were last selected, the latest first
     /// (RF-NAV-05).
     recent: Vec<TabId>,
+    /// The project of the tab selected last, kept after its tabs close.
+    last_project: Option<ProjectId>,
 }
 
 impl WorkspaceView {
@@ -471,7 +473,19 @@ impl WorkspaceView {
         self.folded.remove(&project);
         self.recent.retain(|t| *t != id);
         self.recent.insert(0, id);
+        self.last_project = Some(project);
         true
+    }
+
+    /// The project a new tab opens in: the selected tab's; with no tab
+    /// selected, the project selected last, or else the first project.
+    pub fn project_for_new_tab(&self) -> Option<ProjectId> {
+        if let Some(project) = self.selected_project() {
+            return Some(project.id);
+        }
+        self.last_project
+            .filter(|id| self.projects.iter().any(|p| p.id == *id))
+            .or_else(|| self.projects.first().map(|p| p.id))
     }
 
     /// Every tab, the most recently selected first; tabs never selected
@@ -913,6 +927,23 @@ mod tests {
         view.set_active(Some(TabId::new(20)));
         view.tab_closed(TabId::new(20));
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(11)));
+    }
+
+    #[test]
+    fn a_new_tab_after_every_tab_closed_opens_in_the_last_project() {
+        let mut view = demo();
+        view.select_tab(TabId::new(20));
+        for id in [10, 11, 20] {
+            view.tab_closed(TabId::new(id));
+        }
+        assert!(view.selected_tab().is_none());
+        assert_eq!(view.project_for_new_tab(), Some(ProjectId::new(2)));
+        let fresh = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(3, &[]), project(4, &[])],
+            ..WorkspaceSnapshot::default()
+        });
+        assert_eq!(fresh.project_for_new_tab(), Some(ProjectId::new(3)));
+        assert_eq!(WorkspaceView::default().project_for_new_tab(), None);
     }
 
     #[test]

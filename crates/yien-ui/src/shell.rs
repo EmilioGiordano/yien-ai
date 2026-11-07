@@ -371,16 +371,21 @@ impl Shell {
     }
 
     /// Opens a tab in the selected tab's project, running `profile`.
+    /// With every tab closed it falls back to the project selected last.
     fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
-        if let Some(project) = self.workspace.selected_project().map(|p| p.id) {
-            self.command(
+        match self.workspace.project_for_new_tab() {
+            Some(project) => self.command(
                 Command::NewTab {
                     project,
                     name: None,
                     profile: profile.map(ProfileId::new),
                 },
                 cx,
-            );
+            ),
+            None => {
+                self.notice = Some("There is no project to open a tab in.".to_owned());
+                cx.notify();
+            }
         }
     }
 
