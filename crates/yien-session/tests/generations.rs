@@ -320,3 +320,89 @@ fn rnf_10_an_unreadable_current_file_fails_the_save() {
     ));
     assert_eq!(saved_at(&store.inner, 0), Some(5 * MINUTE));
 }
+
+/// The damaged-current path renames the damaged file, then writes: a crash at either step
+/// still restores the newest good backup, and finishing restores the new snapshot.
+#[test]
+fn rnf_10_a_crash_while_setting_a_damaged_file_aside_keeps_a_valid_generation() {
+    let mut base = filled_store();
+    base.insert(CURRENT_FILE, b"garbage".to_vec());
+    let new = sample(5 * MINUTE + 1);
+
+    let mut steps = 0;
+    loop {
+        let mut store = base.clone().crash_after(steps);
+        let finished = save(&mut store, &new).is_ok();
+        let restored = load(&store).restored.expect("a generation survives");
+        if finished {
+            assert_eq!(restored.snapshot, new);
+            assert_eq!(
+                store.read(DAMAGED_FILE).unwrap().as_deref(),
+                Some(&b"garbage"[..])
+            );
+            break;
+        }
+        assert_eq!(restored.generation, 1, "crash after {steps} step(s)");
+        assert_eq!(restored.snapshot, sample(4 * MINUTE));
+        steps += 1;
+    }
+    assert_eq!(steps, 2, "one rename, then the write");
+}
+
+#[test]
+fn rf_ses_06_a_newer_backup_is_preserved_and_saving_resumes() {
+    let mut store = filled_store();
+    let newer = br#"{"schema_version": 2, "saved_at": 0}"#;
+    store.insert(&generation_name(3), newer.to_vec());
+    assert!(matches!(
+        save(&mut store, &sample(6 * MINUTE)),
+        Err(SaveError::NewerSchema { .. })
+    ));
+
+    assert_eq!(
+        preserve_newer(&mut store).unwrap(),
+        vec!["workspace.v2.json"]
+    );
+    assert_eq!(store.read(&generation_name(3)).unwrap(), None);
+    assert_eq!(
+        store.read("workspace.v2.json").unwrap().as_deref(),
+        Some(&newer[..])
+    );
+    save(&mut store, &sample(6 * MINUTE)).unwrap();
+    assert_eq!(load(&store).restored.unwrap().snapshot, sample(6 * MINUTE));
+}
+
+#[test]
+fn rf_ses_06_several_newer_generations_are_all_preserved() {
+    let mut store = filled_store();
+    let docs: [(usize, &[u8]); 3] = [
+        (0, br#"{"schema_version": 2, "n": 0}"#),
+        (1, br#"{"schema_version": 3, "n": 1}"#),
+        (3, br#"{"schema_version": 2, "n": 3}"#),
+    ];
+    for (generation, bytes) in docs {
+        store.insert(&generation_name(generation), bytes.to_vec());
+    }
+
+    let moved = preserve_newer(&mut store).unwrap();
+    assert_eq!(
+        moved,
+        vec![
+            "workspace.v2.json",
+            "workspace.v3.json",
+            "workspace.v2.1.json"
+        ]
+    );
+    for ((_, bytes), name) in docs.iter().zip(&moved) {
+        assert_eq!(store.read(name).unwrap().as_deref(), Some(*bytes));
+    }
+    for generation in [0, 1, 3] {
+        assert_eq!(store.read(&generation_name(generation)).unwrap(), None);
+    }
+
+    let report = load(&store);
+    assert_eq!(report.newer_schema(), None);
+    assert_eq!(report.restored.unwrap().snapshot, sample(3 * MINUTE));
+    save(&mut store, &sample(6 * MINUTE)).unwrap();
+    assert_eq!(load(&store).restored.unwrap().snapshot, sample(6 * MINUTE));
+}
