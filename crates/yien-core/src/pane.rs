@@ -553,6 +553,7 @@ impl Actor {
             }
         };
         let (control, events) = session.into_parts();
+        self.ctx.consoles.add(control.closer());
         let (tx, reader) = mpsc::channel(READER_QUEUE);
         let engine = Arc::clone(&self.engine);
         let feed = move |bytes: &[u8]| {
@@ -1136,6 +1137,7 @@ mod tests {
                 hooks: Some(Arc::new(crate::hooks::Hooks::detached())),
                 attention: Arc::default(),
                 ui_size: Arc::new(watch::Sender::new(None)),
+                consoles: Arc::default(),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
