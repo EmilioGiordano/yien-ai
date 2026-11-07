@@ -323,8 +323,16 @@ impl Shell {
         }
     }
 
+    /// Folds or unfolds a project at once; the core saves it and confirms.
     fn toggle_fold(&mut self, id: ProjectId, cx: &mut Context<Self>) {
-        if self.workspace.toggle_fold(id) {
+        if let Some(collapsed) = self.workspace.toggle_fold(id) {
+            self.command(
+                Command::SetProjectCollapsed {
+                    project: id,
+                    collapsed,
+                },
+                cx,
+            );
             cx.notify();
         }
     }
