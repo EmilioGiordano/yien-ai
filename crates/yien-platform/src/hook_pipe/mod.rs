@@ -350,6 +350,22 @@ fn event_kind(event: &Result<HookEvent, HookError>) -> &'static str {
     }
 }
 
+/// Opens the client end of hook pipe `name`, as `yien-hook` does, retrying
+/// while every instance is busy until `deadline`. Returns `None` for a name
+/// not made by [`HookPipeServer`] (so a tampered environment cannot point it
+/// at a file), when the pipe is missing, or when its server is not the
+/// process the name says (someone else took the name after YIEN exited).
+///
+/// ```
+/// use std::time::Instant;
+/// use yien_platform::hook_pipe::connect_client;
+///
+/// assert!(connect_client(r"C:\Windows\win.ini", Instant::now()).is_none());
+/// ```
+pub fn connect_client(name: &str, deadline: Instant) -> Option<std::fs::File> {
+    imp::connect(name, deadline)
+}
+
 /// The hook pipe of one YIEN instance. Dropping it stops accepting and waits
 /// for the connections in flight, each bounded by [`READ_TIMEOUT`].
 pub struct HookPipeServer {
@@ -360,7 +376,9 @@ pub struct HookPipeServer {
 
 impl HookPipeServer {
     /// Creates the pipe under a fresh random name and starts accepting.
-    /// `on_event` runs on a connection thread, once per delivered event.
+    /// `on_event` runs on a connection thread, once per delivered event. It
+    /// must not block: dropping the server waits for every connection thread,
+    /// so a callback that blocks delays the drop by as long.
     ///
     /// ```no_run
     /// let registry = yien_platform::hook_pipe::HookRegistry::new();
@@ -379,11 +397,8 @@ impl HookPipeServer {
             rejected: AtomicU64::new(0),
             last_rejection: Mutex::new(None),
         });
-        let name = format!(
-            "{HOOK_PIPE_PREFIX}{}-{}",
-            std::process::id(),
-            random_hex::<8>()?
-        );
+        let nonce = getrandom::u64().map_err(|_| HookPipeError::Random)?;
+        let name = hook_frame::hook_pipe_name(std::process::id(), nonce);
         let transport = imp::Server::start(&name, Arc::clone(&shared))?;
         Ok(Self {
             name,

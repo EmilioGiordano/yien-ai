@@ -4,13 +4,17 @@
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use yien_proto::hook_frame;
 
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
@@ -26,12 +30,10 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND, ReadFile,
 };
-use windows_sys::Win32::System::IO::{
-    CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
-};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, OpenProcessToken, ResetEvent, SetEvent,
@@ -43,8 +45,9 @@ use super::{HookPipeError, MAX_CONNECTIONS, READ_TIMEOUT, Rejection, Shared};
 /// Inbound buffer of each pipe instance; frames larger than this stream.
 const IN_BUFFER: u32 = 64 * 1024;
 
-/// Pause before retrying after an instance could not be created.
-const RETRY_MS: u32 = 200;
+/// Pause after a failed connect or instance creation, so a repeating failure
+/// cannot spin the accept loop.
+const BACKOFF_MS: u32 = 50;
 
 pub(super) struct Server {
     stop: Arc<OwnedHandle>,
@@ -81,11 +84,16 @@ impl Drop for Server {
     }
 }
 
+/// Serves clients until `stop` is set. The server always owns at least one
+/// instance of the name: the next listening instance is created before a
+/// connected one is handed off, and an instance that cannot be handed off is
+/// disconnected and reused. Otherwise, with zero instances, anyone could
+/// create the name and receive the hooks.
 fn accept_loop(
     first: OwnedHandle,
     name: &[u16],
     descriptor: &SecurityDescriptor,
-    stop: &OwnedHandle,
+    stop: &Arc<OwnedHandle>,
     shared: &Arc<Shared>,
 ) {
     let connected = match event() {
@@ -96,37 +104,41 @@ fn accept_loop(
         }
     };
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
-    let mut next = Some(first);
+    let mut listening = first;
     loop {
-        let pipe = match next.take() {
-            Some(pipe) => pipe,
-            None => match create_instance(name, descriptor, false) {
-                Ok(pipe) => pipe,
-                Err(e) => {
-                    tracing::warn!(error = %e, "hook pipe instance not created; retrying");
-                    // SAFETY: `stop` is a live event handle.
-                    if unsafe { WaitForSingleObject(stop.as_raw_handle(), RETRY_MS) }
-                        == WAIT_OBJECT_0
-                    {
-                        break;
-                    }
-                    continue;
-                }
-            },
-        };
-        match wait_for_client(&pipe, &connected, stop) {
+        match wait_for_client(&listening, &connected, stop) {
             Connect::Stopped => break,
-            Connect::Failed => {}
+            Connect::Failed => {
+                disconnect(&listening);
+                if backoff(stop) {
+                    break;
+                }
+            }
             Connect::Client => {
                 workers.retain(|w| !w.is_finished());
                 if workers.len() >= MAX_CONNECTIONS {
                     shared.reject(Rejection::Busy, Instant::now());
+                    disconnect(&listening);
                     continue;
                 }
+                let next = match create_instance(name, descriptor, false) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hook pipe instance not created");
+                        shared.reject(Rejection::Busy, Instant::now());
+                        disconnect(&listening);
+                        if backoff(stop) {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let client = std::mem::replace(&mut listening, next);
                 let worker_shared = Arc::clone(shared);
+                let worker_stop = Arc::clone(stop);
                 match thread::Builder::new()
                     .name("yien-hook-conn".into())
-                    .spawn(move || serve(&pipe, &worker_shared))
+                    .spawn(move || serve(&client, &worker_stop, &worker_shared))
                 {
                     Ok(worker) => workers.push(worker),
                     Err(e) => {
@@ -140,6 +152,18 @@ fn accept_loop(
     for worker in workers {
         let _ = worker.join();
     }
+}
+
+/// Waits [`BACKOFF_MS`]; returns whether `stop` was set meanwhile.
+fn backoff(stop: &OwnedHandle) -> bool {
+    // SAFETY: `stop` is a live event handle.
+    unsafe { WaitForSingleObject(stop.as_raw_handle(), BACKOFF_MS) == WAIT_OBJECT_0 }
+}
+
+/// Drops the client of `pipe`, leaving the instance ready for the next one.
+fn disconnect(pipe: &OwnedHandle) {
+    // SAFETY: `pipe` is a live pipe instance with no I/O in flight.
+    unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) };
 }
 
 enum Connect {
@@ -168,23 +192,14 @@ fn wait_for_client(pipe: &OwnedHandle, connected: &OwnedHandle, stop: &OwnedHand
         ERROR_IO_PENDING => {}
         _ => return Connect::Failed,
     }
-    let handles: [HANDLE; 2] = [connected.as_raw_handle(), stop.as_raw_handle()];
-    // SAFETY: both handles are live events.
-    let woke = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
-    if woke == WAIT_OBJECT_0 {
-        let mut n = 0u32;
-        // SAFETY: the connect on `ov` has completed; this only reads its result.
-        if unsafe { GetOverlappedResult(handle, &ov, &mut n, 0) } != 0 {
-            return Connect::Client;
-        }
-        return Connect::Failed;
+    match wait_io(handle, &ov, connected, stop, INFINITE) {
+        Wait::Done(Ok(_)) => Connect::Client,
+        Wait::Done(Err(_)) => Connect::Failed,
+        Wait::Stopped | Wait::TimedOut => Connect::Stopped,
     }
-    // Stop requested, or the wait failed: never leave `ov` referenced.
-    cancel_and_wait(handle, &ov);
-    Connect::Stopped
 }
 
-fn serve(pipe: &OwnedHandle, shared: &Shared) {
+fn serve(pipe: &OwnedHandle, stop: &OwnedHandle, shared: &Shared) {
     let Ok(event) = event() else {
         shared.reject(Rejection::Io(io::ErrorKind::Other), Instant::now());
         return;
@@ -192,15 +207,58 @@ fn serve(pipe: &OwnedHandle, shared: &Shared) {
     let mut reader = PipeReader {
         pipe,
         event,
+        stop,
         deadline: Instant::now() + READ_TIMEOUT,
     };
     shared.handle(&mut reader);
 }
 
-/// Reads from a connected overlapped pipe, giving up at `deadline`.
+/// How an overlapped operation ended.
+enum Wait {
+    Done(io::Result<u32>),
+    TimedOut,
+    Stopped,
+}
+
+/// Waits for the operation on `ov` (whose event is `done`), for `stop` or for
+/// `ms`. Unless it returns [`Wait::Done`], the operation has been cancelled,
+/// and in every case the OS no longer references `ov` or its buffer.
+fn wait_io(
+    handle: HANDLE,
+    ov: &OVERLAPPED,
+    done: &OwnedHandle,
+    stop: &OwnedHandle,
+    ms: u32,
+) -> Wait {
+    let handles: [HANDLE; 2] = [done.as_raw_handle(), stop.as_raw_handle()];
+    // SAFETY: both handles are live events.
+    let woke = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, ms) };
+    if woke == WAIT_OBJECT_0 {
+        let mut n = 0u32;
+        // SAFETY: the operation on `ov` has completed; this only reads its result.
+        return Wait::Done(
+            if unsafe { GetOverlappedResult(handle, ov, &mut n, 0) } != 0 {
+                Ok(n)
+            } else {
+                Err(io::Error::last_os_error())
+            },
+        );
+    }
+    cancel_and_wait(handle, ov);
+    if woke == WAIT_TIMEOUT {
+        Wait::TimedOut
+    } else {
+        // Stop requested, or the wait itself failed.
+        Wait::Stopped
+    }
+}
+
+/// Reads from a connected overlapped pipe, giving up at `deadline` or when
+/// the server stops.
 struct PipeReader<'a> {
     pipe: &'a OwnedHandle,
     event: OwnedHandle,
+    stop: &'a OwnedHandle,
     deadline: Instant,
 }
 
@@ -219,8 +277,7 @@ impl Read for PipeReader<'_> {
         let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
         ov.hEvent = self.event.as_raw_handle();
         // SAFETY: `buf` is valid for `len` bytes. `buf` and `ov` outlive the
-        // read: every path below waits for it to complete, or cancels it and
-        // waits for the cancellation, before returning.
+        // read: `wait_io` below returns only once the OS is done with both.
         if unsafe { ReadFile(handle, buf.as_mut_ptr(), len, null_mut(), &mut ov) } == 0 {
             match last_error() {
                 ERROR_IO_PENDING => {}
@@ -231,23 +288,49 @@ impl Read for PipeReader<'_> {
         let ms = u32::try_from(remaining.as_millis())
             .unwrap_or(INFINITE - 1)
             .clamp(1, INFINITE - 1);
-        let mut n = 0u32;
-        // SAFETY: `ov` belongs to the read started above.
-        if unsafe { GetOverlappedResultEx(handle, &ov, &mut n, ms, 0) } != 0 {
-            return Ok(n as usize);
-        }
-        match last_error() {
-            WAIT_TIMEOUT => {
-                cancel_and_wait(handle, &ov);
-                Err(io::ErrorKind::TimedOut.into())
-            }
-            ERROR_BROKEN_PIPE => Ok(0),
-            code => {
-                cancel_and_wait(handle, &ov);
-                Err(io::Error::from_raw_os_error(code as i32))
-            }
+        match wait_io(handle, &ov, &self.event, self.stop, ms) {
+            Wait::Done(Ok(n)) => Ok(n as usize),
+            Wait::Done(Err(e)) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+            Wait::Done(Err(e)) => Err(e),
+            Wait::TimedOut => Err(io::ErrorKind::TimedOut.into()),
+            Wait::Stopped => Err(io::ErrorKind::ConnectionAborted.into()),
         }
     }
+}
+
+/// Opens the client end of hook pipe `name`, retrying while every instance is
+/// busy until `deadline`. Only a name of the exact shape `hook_pipe_name`
+/// makes is opened, through `\\?\` so Win32 does not normalize it, and only
+/// when the server is the process the name says.
+pub(super) fn connect(name: &str, deadline: Instant) -> Option<File> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    // With SECURITY_SQOS_PRESENT, which std adds: the server cannot
+    // impersonate this process.
+    const SECURITY_ANONYMOUS: u32 = 0;
+    const BUSY_RETRY: Duration = Duration::from_millis(5);
+
+    let pid = hook_frame::hook_pipe_pid(name)?;
+    let path = format!(r"\\?\{}", name.strip_prefix(r"\\.\")?);
+    let file = loop {
+        match OpenOptions::new()
+            .write(true)
+            .security_qos_flags(SECURITY_ANONYMOUS)
+            .open(&path)
+        {
+            Ok(file) => break file,
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && Instant::now() + BUSY_RETRY < deadline =>
+            {
+                thread::sleep(BUSY_RETRY);
+            }
+            Err(_) => return None,
+        }
+    };
+    let mut server = 0u32;
+    // SAFETY: `file` is an open pipe client handle; `server` is a valid out pointer.
+    let ok = unsafe { GetNamedPipeServerProcessId(file.as_raw_handle(), &mut server) };
+    (ok != 0 && server == pid).then_some(file)
 }
 
 /// Cancels the operation on `ov`, if still pending, and waits until the OS no
@@ -444,5 +527,27 @@ mod tests {
         ));
         let _first = create_instance(&name, &descriptor, true).unwrap();
         assert!(create_instance(&name, &descriptor, true).is_err());
+    }
+
+    fn listening_pipe(pid: u32) -> (String, OwnedHandle) {
+        let descriptor = user_only_descriptor().unwrap();
+        let nonce = getrandom::u64().unwrap();
+        let name = hook_frame::hook_pipe_name(pid, nonce);
+        let pipe = create_instance(&wide(&name), &descriptor, true).unwrap();
+        (name, pipe)
+    }
+
+    #[test]
+    fn client_connects_when_the_server_is_the_named_process() {
+        let (name, _pipe) = listening_pipe(std::process::id());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(connect(&name, deadline).is_some());
+    }
+
+    #[test]
+    fn rnf_11_client_refuses_a_server_that_is_not_the_named_process() {
+        let (name, _pipe) = listening_pipe(std::process::id().wrapping_add(1));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(connect(&name, deadline).is_none());
     }
 }
