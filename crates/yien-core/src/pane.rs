@@ -580,16 +580,28 @@ impl Actor {
         self.step(&Signal::Spawned);
     }
 
-    /// Spawns the plan filled with `fill`, off the runtime's threads.
+    /// Spawns the plan filled with `fill`, off the runtime's threads, and
+    /// registers the session for the quit path in the same step, so the
+    /// shutdown never misses it. Once the app quits nothing is spawned.
     async fn spawn(
         &self,
         fill: &Fill<'_>,
         cols: u16,
         rows: u16,
     ) -> Result<Result<yien_pty::PtySession, PtyError>, tokio::task::JoinError> {
+        let Some(spawning) = self.ctx.consoles.begin() else {
+            return Ok(Err(PtyError::Closed));
+        };
         let spec = self.plan.spec(fill, &self.cwd, cols, rows);
         let backend = Arc::clone(&self.ctx.backend);
-        tokio::task::spawn_blocking(move || backend.spawn(spec)).await
+        tokio::task::spawn_blocking(move || {
+            let session = backend.spawn(spec);
+            if let Ok(session) = &session {
+                spawning.add(session.control().closer());
+            }
+            session
+        })
+        .await
     }
 
     /// Once the pipe has refused an event, the queued ones are older than
@@ -1136,6 +1148,7 @@ mod tests {
                 hooks: Some(Arc::new(crate::hooks::Hooks::detached())),
                 attention: Arc::default(),
                 ui_size: Arc::new(watch::Sender::new(None)),
+                consoles: Arc::default(),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);

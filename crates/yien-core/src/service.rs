@@ -15,6 +15,7 @@ use yien_agent::{HookError, HookEvent};
 use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo};
 use yien_pty::PtyBackend;
 
+use crate::consoles::Consoles;
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
@@ -38,6 +39,8 @@ pub(crate) struct Ctx {
     pub attention: Arc<AtomicU64>,
     /// The last size the UI reported for any pane, `None` until it does.
     pub ui_size: Arc<watch::Sender<Option<(u16, u16)>>>,
+    /// Every session's closer, for the quit path.
+    pub consoles: Arc<Consoles>,
 }
 
 /// Hook events waiting for one pane's actor. Beyond this the pane's channel

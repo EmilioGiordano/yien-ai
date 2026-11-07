@@ -8,7 +8,7 @@ mod panic_log;
 
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, SendError, SessionStore};
 use yien_platform::LogGuard;
@@ -71,6 +71,18 @@ fn main() -> ExitCode {
         if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
             tracing::warn!("the session was not saved on quit: {error}");
         }
+        let started = Instant::now();
+        match quitting.shutdown(QUIT_SHUTDOWN_TIMEOUT) {
+            Ok(closed) => tracing::info!(
+                closed,
+                elapsed = ?started.elapsed(),
+                "panes closed on quit"
+            ),
+            Err(error) => tracing::warn!(
+                elapsed = ?started.elapsed(),
+                "panes not all closed on quit: {error}"
+            ),
+        }
         if let Some(file) = &settings_file {
             let _ = std::fs::remove_file(file);
         }
@@ -88,6 +100,10 @@ const UI_WAIT: Duration = Duration::from_secs(2);
 
 /// The longest the quit path waits to save the session.
 const QUIT_SAVE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The longest the quit path waits for every pane's program and pseudo
+/// terminal to close, after the save.
+const QUIT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The saved session under YIEN's data dir; `None` (nothing saved) when the
 /// data dir cannot be found.

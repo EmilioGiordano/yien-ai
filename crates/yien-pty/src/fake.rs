@@ -2,8 +2,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::{
     ChildControl, ExitStatus, INPUT_QUEUE_CAPACITY, OUTPUT_QUEUE_CAPACITY, PtyBackend, PtyControl,
@@ -43,6 +43,7 @@ pub struct FakePty {
     spawned: Arc<Mutex<Vec<FakeChild>>>,
     refuse: Arc<AtomicBool>,
     batch: Arc<AtomicBool>,
+    stall: Arc<AtomicBool>,
 }
 
 impl FakePty {
@@ -85,6 +86,24 @@ impl FakePty {
         self.batch.store(batch, Ordering::SeqCst);
     }
 
+    /// Makes the following children never confirm that their pseudo terminal
+    /// closed, as a console stuck in `ClosePseudoConsole` would. They are
+    /// still killed.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_pty::{FakePty, PtyBackend, PtyError, SpawnSpec};
+    /// let backend = FakePty::new();
+    /// backend.stall_closes(true);
+    /// let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
+    /// let closed = session.into_parts().0.close(Duration::from_millis(10));
+    /// assert!(matches!(closed, Err(PtyError::CloseTimedOut)));
+    /// assert!(backend.take_spawned()[0].was_killed());
+    /// ```
+    pub fn stall_closes(&self, stall: bool) {
+        self.stall.store(stall, Ordering::SeqCst);
+    }
+
     /// The children spawned since the last call, oldest first.
     ///
     /// ```
@@ -120,6 +139,10 @@ impl PtyBackend for FakePty {
             events: events_tx,
             exited: AtomicBool::new(false),
             killed: AtomicBool::new(false),
+            close_asked: AtomicBool::new(false),
+            stall: self.stall.load(Ordering::SeqCst),
+            closed: Mutex::new(false),
+            closed_changed: Condvar::new(),
         });
         let child = FakeChild {
             spec,
@@ -130,7 +153,7 @@ impl PtyBackend for FakePty {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(child);
-        let control = PtyControl::new(input, Box::new(FakeControl(state)));
+        let control = PtyControl::new(input, Arc::new(FakeControl(state)));
         Ok(PtySession::new(control, events))
     }
 }
@@ -140,6 +163,11 @@ struct FakeState {
     events: SyncSender<PtyEvent>,
     exited: AtomicBool,
     killed: AtomicBool,
+    close_asked: AtomicBool,
+    /// Never confirm the close (see [`FakePty::stall_closes`]).
+    stall: bool,
+    closed: Mutex<bool>,
+    closed_changed: Condvar,
 }
 
 impl FakeState {
@@ -172,6 +200,38 @@ impl ChildControl for FakeControl {
 
     fn pid(&self) -> Option<u32> {
         None
+    }
+
+    fn start_close(&self) -> Result<(), PtyError> {
+        self.kill()?;
+        self.0.close_asked.store(true, Ordering::SeqCst);
+        if !self.0.stall {
+            *self.0.closed.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            self.0.closed_changed.notify_all();
+        }
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        *self.0.closed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait_closed(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut closed = self.0.closed.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*closed {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            closed = self
+                .0
+                .closed_changed
+                .wait_timeout(closed, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
     }
 }
 
@@ -286,6 +346,23 @@ impl FakeChild {
     /// ```
     pub fn was_killed(&self) -> bool {
         self.state.killed.load(Ordering::SeqCst)
+    }
+
+    /// Whether the session was asked to close its pseudo terminal, through
+    /// a close or by being dropped.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_pty::{FakePty, PtyBackend, SpawnSpec};
+    /// let backend = FakePty::new();
+    /// let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
+    /// let child = backend.take_spawned().remove(0);
+    /// assert!(!child.was_closed());
+    /// session.control().closer().close(Duration::from_secs(1)).unwrap();
+    /// assert!(child.was_closed());
+    /// ```
+    pub fn was_closed(&self) -> bool {
+        self.state.close_asked.load(Ordering::SeqCst)
     }
 }
 
