@@ -10,13 +10,17 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc;
-use yien_proto::{ClientMsg, Command, CoreMsg, Direction, PaneId, ProjectId, TabId};
+use yien_proto::{
+    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId, TabId,
+};
 
 use crate::actions::{
     CLOSE_PANE_KEYS, CONTEXT, CONTEXT_BAR_KEYS, ClosePane, FOCUS_KEYS, FocusDown, FocusLeft,
-    FocusRight, FocusUp, GrowPane, NEXT_TAB_KEYS, NextTab, PreviousTab, SPLIT_DOWN_KEYS,
-    SPLIT_RIGHT_KEYS, ShrinkPane, SplitDown, SplitRight, SwapDown, SwapLeft, SwapRight, SwapUp,
-    TAB_BAR_KEYS, THEME_KEYS, ToggleContextBar, ToggleMaximize, ToggleTabBar, ToggleTheme,
+    FocusRight, FocusUp, GrowPane, JUMP_KEYS, JumpToNeedsYou, NEW_CLAUDE_TAB_KEYS, NEW_TAB_KEYS,
+    NEXT_TAB_KEYS, NewClaudeTab, NewTab, NextTab, PreviousTab, SPLIT_CLAUDE_KEYS, SPLIT_DOWN_KEYS,
+    SPLIT_RIGHT_KEYS, ShrinkPane, SplitDown, SplitRight, SplitRightClaude, SwapDown, SwapLeft,
+    SwapRight, SwapUp, TAB_BAR_KEYS, THEME_KEYS, ToggleContextBar, ToggleMaximize, ToggleTabBar,
+    ToggleTheme,
 };
 use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
@@ -36,6 +40,10 @@ const HALF_GUTTER: f32 = 3.0;
 const RESIZE_STEP: f32 = 0.05;
 /// Events applied in one go; the rest wait for the next turn of the loop.
 const MAX_BATCH: usize = 1024;
+/// The profile the Claude shortcuts start.
+const CLAUDE_PROFILE: &str = "claude";
+/// The profile a plain split or tab starts.
+const SHELL_PROFILE: &str = "shell";
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -51,6 +59,8 @@ pub(crate) struct Shell {
     keyboard_on: Option<PaneId>,
     /// The last error from the core, shown in the status bar.
     notice: Option<String>,
+    /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
+    split_menu: Option<(PaneId, Orientation)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -106,6 +116,7 @@ impl Shell {
             terminals: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            split_menu: None,
             _subscriptions: vec![activation],
         }
     }
@@ -285,25 +296,96 @@ impl Shell {
         }
     }
 
-    fn split(&mut self, orientation: yien_proto::Orientation, cx: &mut Context<Self>) {
+    fn split(&mut self, orientation: Orientation, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
+            self.split_pane(pane, orientation, None, cx);
+        }
+    }
+
+    /// Splits `pane` and starts `profile` in the new one, the shell when
+    /// `None` (RF-PAN-18).
+    fn split_pane(
+        &mut self,
+        pane: PaneId,
+        orientation: Orientation,
+        profile: Option<ProfileId>,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_menu = None;
+        self.command(
+            Command::SplitPane {
+                pane,
+                orientation,
+                profile,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane() {
+            let claude = Some(ProfileId::new(CLAUDE_PROFILE));
+            self.split_pane(pane, Orientation::Horizontal, claude, cx);
+        }
+    }
+
+    fn toggle_split_menu(
+        &mut self,
+        pane: PaneId,
+        orientation: Orientation,
+        cx: &mut Context<Self>,
+    ) {
+        let open = Some((pane, orientation));
+        self.split_menu = if self.split_menu == open { None } else { open };
+        cx.notify();
+    }
+
+    /// Opens a tab in the selected tab's project, running `profile`.
+    fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(project) = self.workspace.selected_project().map(|p| p.id) {
             self.command(
-                Command::SplitPane {
-                    pane,
-                    orientation,
-                    profile: None,
+                Command::NewTab {
+                    project,
+                    name: None,
+                    profile: profile.map(ProfileId::new),
                 },
                 cx,
             );
         }
     }
 
+    fn new_tab(&mut self, _: &NewTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_with(None, cx);
+    }
+
+    fn new_claude_tab(&mut self, _: &NewClaudeTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_with(Some(CLAUDE_PROFILE), cx);
+    }
+
+    /// Focuses the next pane that needs the user, oldest first (RF-ATN-05).
+    /// The core selects its tab; the red stays until the agent moves on
+    /// (RF-ATN-04).
+    fn jump(&mut self, cx: &mut Context<Self>) {
+        match self.workspace.next_waiting(self.focused_pane()) {
+            Some(pane) => self.command(Command::FocusPane { pane }, cx),
+            None => {
+                self.notice = Some("Nobody is waiting for you.".to_owned());
+                cx.notify();
+            }
+        }
+    }
+
+    fn jump_to_needs_you(&mut self, _: &JumpToNeedsYou, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump(cx);
+    }
+
     fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(yien_proto::Orientation::Horizontal, cx);
+        self.split(Orientation::Horizontal, cx);
     }
 
     fn split_down(&mut self, _: &SplitDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(yien_proto::Orientation::Vertical, cx);
+        self.split(Orientation::Vertical, cx);
     }
 
     fn close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
@@ -437,7 +519,7 @@ impl Shell {
                             .child("YIEN"),
                     )
                     .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_need_count())
+                    .child(self.render_need_count(cx))
                     .child(
                         icon_button("toggle-theme", assets::THEME, &t)
                             .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
@@ -466,8 +548,9 @@ impl Shell {
             )
     }
 
-    /// The global "needs you" counter (RF-ATN-03). Red only while someone waits.
-    fn render_need_count(&self) -> impl IntoElement {
+    /// The global "needs you" counter (RF-ATN-03). Red only while someone
+    /// waits; a click jumps to the pane waiting longest (RF-ATN-05).
+    fn render_need_count(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let waiting = self.workspace.needs_you_panes();
         let text = match waiting {
@@ -477,8 +560,12 @@ impl Shell {
         };
         h_flex()
             .id("need-count")
-            .role(Role::Status)
-            .aria_label(text.clone())
+            .role(Role::Button)
+            .aria_label(format!(
+                "{text}. Go to the next that needs you ({JUMP_KEYS})"
+            ))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.jump(cx)))
             .flex_none()
             .items_center()
             .gap(px(6.0))
@@ -796,7 +883,24 @@ impl Shell {
                     .flex_none()
                     .text_color(state_color)
                     .child(pane.state.label()),
-            );
+            )
+            .when(pane.signal_lost, |h| {
+                h.child(
+                    div()
+                        .id(("signal-lost", pane.id.get()))
+                        .role(Role::Status)
+                        .aria_label("Signal lost: the agent's state cannot be told")
+                        .flex_none()
+                        .text_color(t.ochre)
+                        .child("signal lost"),
+                )
+            })
+            .child(self.split_button(pane, Orientation::Horizontal, cx))
+            .child(self.split_button(pane, Orientation::Vertical, cx));
+        let menu = self
+            .split_menu
+            .filter(|(p, _)| *p == pane.id)
+            .map(|(_, orientation)| self.render_split_menu(pane.id, orientation, cx));
         let exited = pane.exited.then(|| {
             let id = pane.id;
             let what = match pane.exit_code {
@@ -841,6 +945,7 @@ impl Shell {
             .id(("pane", pane.id.get()))
             .role(Role::Group)
             .aria_label(format!("{} pane, {}", pane.name, pane.state.label()))
+            .relative()
             .size_full()
             .overflow_hidden()
             .rounded(px(8.0))
@@ -858,6 +963,126 @@ impl Shell {
             .child(head)
             .children(exited)
             .child(body)
+            .children(menu)
+    }
+
+    /// A pane head button that opens the profile chooser for a split
+    /// (RF-PAN-18), as in the prototype.
+    fn split_button(
+        &self,
+        pane: &PaneView,
+        orientation: Orientation,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.theme;
+        let (key, icon, label, keys) = match orientation {
+            Orientation::Horizontal => (
+                "split-right",
+                assets::SPLIT_RIGHT,
+                "Split right",
+                SPLIT_RIGHT_KEYS,
+            ),
+            Orientation::Vertical => (
+                "split-down",
+                assets::SPLIT_DOWN,
+                "Split down",
+                SPLIT_DOWN_KEYS,
+            ),
+        };
+        let id = pane.id;
+        let open = self.split_menu == Some((id, orientation));
+        let hover = t.term_raised;
+        div()
+            .id((key, id.get()))
+            .occlude()
+            .role(Role::Button)
+            .aria_label(format!(
+                "{label} {}, choose a profile ({keys} for the shell)",
+                pane.name
+            ))
+            .aria_expanded(open)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(20.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .when(open, |b| b.bg(t.term_raised))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_split_menu(id, orientation, cx);
+            }))
+            .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// The profiles a split can start, under the pane head (RF-PAN-18).
+    fn render_split_menu(
+        &self,
+        pane: PaneId,
+        orientation: Orientation,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.theme;
+        let hover = t.term_raised;
+        let options: Vec<AnyElement> = self
+            .workspace
+            .profiles()
+            .iter()
+            .enumerate()
+            .map(|(at, profile)| {
+                let hint = match (profile.id.as_str(), orientation) {
+                    (CLAUDE_PROFILE, Orientation::Horizontal) => SPLIT_CLAUDE_KEYS,
+                    (SHELL_PROFILE, Orientation::Horizontal) => SPLIT_RIGHT_KEYS,
+                    (SHELL_PROFILE, Orientation::Vertical) => SPLIT_DOWN_KEYS,
+                    _ => "",
+                };
+                let id = profile.id.clone();
+                h_flex()
+                    .id(("split-profile", at))
+                    .role(Role::MenuItem)
+                    .aria_label(format!("Start {}", profile.name))
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.split_pane(pane, orientation, Some(id.clone()), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(t.term_text)
+                            .child(profile.name.clone()),
+                    )
+                    .child(div().flex_none().text_color(t.term_faint).child(hint))
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .id(("split-menu", pane.get()))
+            .occlude()
+            .role(Role::Menu)
+            .aria_label("Start in the new pane")
+            .absolute()
+            .top(px(32.0))
+            .right(px(8.0))
+            .w(px(240.0))
+            .p(px(4.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(t.term_strong)
+            .bg(t.term_bg)
+            .text_size(px(12.5))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.split_menu = None;
+                cx.notify();
+            }))
+            .children(options)
     }
 
     fn render_context_bar(&self) -> impl IntoElement {
@@ -972,7 +1197,9 @@ impl Shell {
                 )
             })
             .child(div().ml_auto().child(format!(
-                "{SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
+                "{JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
+                 {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
+                 {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
                  {CONTEXT_BAR_KEYS} context bar · {NEXT_TAB_KEYS} next tab · {THEME_KEYS} theme"
             )))
@@ -1005,6 +1232,10 @@ impl Render for Shell {
             .on_action(cx.listener(Self::swap_up))
             .on_action(cx.listener(Self::swap_down))
             .on_action(cx.listener(Self::toggle_maximize))
+            .on_action(cx.listener(Self::jump_to_needs_you))
+            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_claude_tab))
+            .on_action(cx.listener(Self::split_right_claude))
             .size_full()
             .bg(t.panel)
             .text_color(t.text)
