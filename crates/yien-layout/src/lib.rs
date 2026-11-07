@@ -314,14 +314,21 @@ impl Tree {
         const MIN: f32 = 0.05;
 
         if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
-            let at = children.iter().position(|&c| c == node).unwrap();
+            let Some(at) = children.iter().position(|&c| c == node) else {
+                return false;
+            };
             let others: f32 = flex
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != at)
                 .map(|(_, f)| f)
                 .sum();
-            let target = (flex[at] + delta).clamp(MIN, 1.0 - MIN * (flex.len() - 1) as f32);
+            let upper = 1.0 - MIN * (flex.len() - 1) as f32;
+            // f32::clamp panics when min > max, which happens past 20 siblings.
+            if !delta.is_finite() || upper < MIN {
+                return false;
+            }
+            let target = (flex[at] + delta).clamp(MIN, upper);
             let applied = target - flex[at];
             if others <= 0.0 {
                 return false;
@@ -450,7 +457,9 @@ impl Tree {
             return false;
         };
         let remaining = if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
-            let at = children.iter().position(|&c| c == node).unwrap();
+            let Some(at) = children.iter().position(|&c| c == node) else {
+                return false;
+            };
             children.remove(at);
             let freed = flex.remove(at);
             let total: f32 = flex.iter().sum();
@@ -481,19 +490,27 @@ impl Tree {
 
     fn insert_beside(&mut self, target_node: NodeId, pane: PaneId, zone: DropZone) {
         let orientation = zone.orientation();
-        let parent = self.nodes[target_node].parent;
-        let same_axis = parent.is_some_and(|p| {
-            matches!(&self.nodes[p].kind, Kind::Branch { orientation: o, .. } if *o == orientation)
-        });
+        // The target's slot in a parent branch laid out on the same axis, if any.
+        let same_axis = self.nodes[target_node]
+            .parent
+            .and_then(|p| match &self.nodes[p].kind {
+                Kind::Branch {
+                    orientation: o,
+                    children,
+                    ..
+                } if *o == orientation => children
+                    .iter()
+                    .position(|&c| c == target_node)
+                    .map(|at| (p, at)),
+                _ => None,
+            });
 
-        if same_axis {
-            let parent = parent.unwrap();
+        if let Some((parent, at)) = same_axis {
             let leaf = self.alloc(Node {
                 parent: Some(parent),
                 kind: Kind::Leaf(pane),
             });
             if let Kind::Branch { children, flex, .. } = &mut self.nodes[parent].kind {
-                let at = children.iter().position(|&c| c == target_node).unwrap();
                 let half = flex[at] / 2.0;
                 flex[at] = half;
                 let slot = if zone.before() { at } else { at + 1 };
@@ -539,7 +556,11 @@ impl Tree {
             };
             let mut offset = 0.0;
             // Every child but the last: the last one has no boundary after it.
-            for (i, share) in flex.iter().enumerate().take(children.len() - 1) {
+            for (i, share) in flex
+                .iter()
+                .enumerate()
+                .take(children.len().saturating_sub(1))
+            {
                 let rect = child_rect(*node_rect, *orientation, *share, offset, false);
                 offset += span_of(rect, *orientation);
                 let hit = match orientation {
@@ -598,14 +619,19 @@ impl Tree {
             return false;
         }
         let extent = span_of(branch_rect, *orientation);
-        if extent <= 0.0 {
+        if extent <= 0.0 || !delta.is_finite() {
             return false;
         }
 
         const MIN: f32 = 0.05;
         let (a, b) = (id.after, id.after + 1);
-        // Clamped so neither neighbour is squeezed out of existence.
-        let applied = (delta / extent).max(MIN - flex[a]).min(flex[b] - MIN);
+        // Clamped so neither neighbour is squeezed out of existence. Both may
+        // already sit below MIN after many splits; then there is no room to move.
+        let (lo, hi) = (MIN - flex[a], flex[b] - MIN);
+        if lo > hi {
+            return false;
+        }
+        let applied = (delta / extent).clamp(lo, hi);
         if applied.abs() < f32::EPSILON {
             return false;
         }
@@ -1271,6 +1297,57 @@ mod tests {
         }
         assert_eq!(t.panes(), vec![0]);
         assert_eq!(t.layout(AREA)[&0], AREA);
+    }
+
+    // --- external input that must never panic or corrupt the tree ---
+
+    #[test]
+    fn resize_in_a_crowded_branch_does_not_panic() {
+        // Past 20 siblings the minimum shares no longer fit, which used to make
+        // f32::clamp panic.
+        let mut t = Tree::new();
+        for _ in 0..24 {
+            t.split(0, Orientation::Horizontal).unwrap();
+        }
+        assert_eq!(t.len(), 25);
+        assert!(!t.resize(0, 0.1));
+        let total: f32 = t.layout(AREA).values().map(|r| r.w * r.h).sum();
+        assert_close(total, AREA.w * AREA.h);
+    }
+
+    #[test]
+    fn non_finite_deltas_are_refused() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let id = t.dividers(AREA, 6.0)[0].id;
+        for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!t.resize(0, delta));
+            assert!(!t.drag_divider(id, delta, AREA));
+        }
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 50.0);
+        assert_close(l[&b].w, 50.0);
+    }
+
+    #[test]
+    fn dragging_between_squeezed_panes_never_inverts_them() {
+        // Each split halves the last pane, so the final two end up far below
+        // the minimum share and there is no room left to move their boundary.
+        let mut t = Tree::new();
+        let mut last = 0;
+        for _ in 0..6 {
+            last = t.split(last, Orientation::Horizontal).unwrap();
+        }
+        let mut dividers = t.dividers(AREA, 1.0);
+        dividers.sort_by(|a, b| a.rect.x.partial_cmp(&b.rect.x).unwrap());
+        let squeezed = dividers.last().unwrap().id;
+
+        for delta in [1000.0, -1000.0] {
+            t.drag_divider(squeezed, delta, AREA);
+            for (pane, r) in t.layout(AREA) {
+                assert!(r.w > 0.0, "pane {pane} has width {}", r.w);
+            }
+        }
     }
 }
 
