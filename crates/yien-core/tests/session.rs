@@ -607,3 +607,27 @@ fn rf_ses_02_restored_panes_start_at_the_sizes_the_ui_sends() {
         assert_eq!((child.spec().cols, child.spec().rows), (cols, 27));
     }
 }
+
+#[test]
+fn rf_ses_03_a_restored_claude_terminated_before_it_starts_relaunches_fresh() {
+    let (store, claude, session) = first_run();
+    let mut again = Run::configured(
+        store,
+        CoreConfig {
+            size_wait: TIMEOUT * 2,
+            ui_wait: TIMEOUT * 2,
+            ..CoreConfig::default()
+        },
+    );
+    again.snapshot();
+    again.command(Command::TerminatePane { pane: claude });
+    again.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane, code: None } if *pane == claude => Some(()),
+        _ => None,
+    });
+    again.command(Command::RelaunchPane { pane: claude });
+    let child = again.children(1).pop().unwrap();
+    let launch = args(&child);
+    assert!(!launch.iter().any(|a| a == "--resume"), "{launch:?}");
+    assert!(!launch.contains(&session), "{launch:?}");
+}
