@@ -1,9 +1,9 @@
 //! The three blocking loops behind a session, written over plain `Read`,
-//! `Write` and an exit probe so they are testable without a real PTY.
+//! `Write` and a blocking exit wait so they are testable without a real PTY.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,14 +12,24 @@ use crate::{Drain, ExitStatus, PtyEvent, WriterMsg};
 
 /// Plan §4.1: the reader takes up to 64 KB per read.
 pub(crate) const READ_BUFFER: usize = 64 * 1024;
-const EXIT_POLL: Duration = Duration::from_millis(25);
 const DRAIN_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Default)]
 struct ReaderState {
     /// When the reader last entered `read()`; `None` while it holds bytes.
     parked_since: Option<Instant>,
+    /// Time spent in `read()` before the current park.
+    parked_before: Duration,
     eof: bool,
+}
+
+impl ReaderState {
+    fn parked_total(&self, now: Instant) -> Duration {
+        self.parked_before
+            + self
+                .parked_since
+                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
+    }
 }
 
 /// What the reader tells the waiter.
@@ -48,7 +58,12 @@ pub(crate) fn run_reader(
     loop {
         shared.lock().parked_since = Some(Instant::now());
         let read = reader.read(&mut buf);
-        shared.lock().parked_since = None;
+        {
+            let mut state = shared.lock();
+            let now = Instant::now();
+            state.parked_before = state.parked_total(now);
+            state.parked_since = None;
+        }
         match read {
             Ok(0) => break,
             Ok(n) => {
@@ -63,38 +78,39 @@ pub(crate) fn run_reader(
     shared.lock().eof = true;
 }
 
-/// Polls `probe` until the child exits, then waits for its output to end and
-/// sends [`PtyEvent::Exited`].
+/// Blocks in `wait` until the child exits, then waits for its output to end
+/// and sends [`PtyEvent::Exited`].
 ///
-/// Quiet time only counts while the reader is parked in `read()`: a reader
+/// `Exited` is only sent while the reader is parked in `read()` (or at end of
+/// stream), so every byte read before it is already queued. Both the quiet
+/// window and the cap count only time the reader spends parked: a reader
 /// stuck in a full channel still holds bytes the consumer has not seen.
 pub(crate) fn run_waiter(
-    mut probe: impl FnMut() -> io::Result<Option<ExitStatus>>,
+    wait: impl FnOnce() -> io::Result<ExitStatus>,
     events: SyncSender<PtyEvent>,
     shared: Arc<ReaderShared>,
     exited: Arc<AtomicBool>,
     drain: Drain,
 ) {
-    let status = loop {
-        match probe() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(EXIT_POLL),
-            Err(_) => break ExitStatus { code: None },
-        }
-    };
+    let status = wait().unwrap_or(ExitStatus { code: None });
     exited.store(true, Ordering::SeqCst);
-    let exit_seen = Instant::now();
+    let parked_at_exit = shared.lock().parked_total(Instant::now());
     loop {
         let state = shared.lock();
         let now = Instant::now();
-        let quiet = state.parked_since.is_some_and(|since| {
-            now.saturating_duration_since(since.max(exit_seen)) >= drain.quiet
-        });
-        if state.eof || quiet || now.saturating_duration_since(exit_seen) >= drain.cap {
-            // Sent with the lock held, so bytes the reader returns with after
-            // this decision cannot overtake the exit.
-            let _ = events.send(PtyEvent::Exited(status));
-            return;
+        let quiet = state
+            .parked_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= drain.quiet);
+        let capped = state.parked_since.is_some()
+            && state.parked_total(now).saturating_sub(parked_at_exit) >= drain.cap;
+        if state.eof || quiet || capped {
+            // Tried with the lock held, so the reader cannot queue bytes
+            // between this decision and the exit; on a full channel the lock
+            // is released and the decision taken again.
+            match events.try_send(PtyEvent::Exited(status)) {
+                Ok(()) | Err(TrySendError::Disconnected(_)) => return,
+                Err(TrySendError::Full(_)) => {}
+            }
         }
         drop(state);
         thread::sleep(DRAIN_POLL);
@@ -138,15 +154,13 @@ mod tests {
         }
     }
 
-    /// Exits once `flag` is set.
-    fn probe_on(
-        flag: Arc<AtomicBool>,
-        code: u32,
-    ) -> impl FnMut() -> io::Result<Option<ExitStatus>> {
+    /// Returns once `flag` is set, as `Child::wait` does on exit.
+    fn wait_on(flag: Arc<AtomicBool>, code: u32) -> impl FnOnce() -> io::Result<ExitStatus> {
         move || {
-            Ok(flag
-                .load(Ordering::SeqCst)
-                .then_some(ExitStatus::from_code(code)))
+            while !flag.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(ExitStatus::from_code(code))
         }
     }
 
@@ -166,9 +180,9 @@ mod tests {
             thread::spawn(move || run_reader(reader, tx, shared));
         }
         {
-            let probe = probe_on(Arc::clone(&child_exit), 0);
+            let wait = wait_on(Arc::clone(&child_exit), 0);
             let exited = Arc::clone(&exited);
-            thread::spawn(move || run_waiter(probe, tx, shared, exited, drain));
+            thread::spawn(move || run_waiter(wait, tx, shared, exited, drain));
         }
         Pump {
             events,
@@ -308,7 +322,28 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_error_ends_the_session_with_an_unknown_status() {
+    fn a_consumer_behind_for_longer_than_the_cap_gets_every_byte_before_exited() {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let drain = Drain {
+            quiet: Duration::from_millis(30),
+            cap: Duration::from_millis(80),
+        };
+        let pump = start(reader, 1, drain);
+        for chunk in [&b"one "[..], b"two ", b"three"] {
+            writer.write_all(chunk).unwrap();
+            thread::sleep(Duration::from_millis(10));
+        }
+        pump.child_exit.store(true, Ordering::SeqCst);
+        // Several caps long, while the reader is stuck in `send`.
+        thread::sleep(Duration::from_millis(400));
+
+        let (out, _) = until_exit(&pump.events);
+        assert_eq!(out, b"one two three");
+        drop(writer);
+    }
+
+    #[test]
+    fn a_failed_wait_ends_the_session_with_an_unknown_status() {
         let (tx, events) = sync_channel(4);
         let shared = Arc::new(ReaderShared::default());
         shared.lock().eof = true;
