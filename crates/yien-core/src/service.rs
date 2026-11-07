@@ -7,13 +7,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::mpsc;
-use yien_proto::{ClientMsg, Command, CoreMsg, PaneId};
+use yien_agent::{HookError, HookEvent};
+use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo};
 use yien_pty::PtyBackend;
 
-use crate::launch::{self, LaunchPlan};
+use crate::hooks::{self, Hooks};
+use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
 use crate::report::Reports;
 use crate::workspace::{Effect, Workspace};
@@ -27,14 +30,29 @@ pub(crate) struct Ctx {
     pub events: mpsc::Sender<CoreMsg>,
     pub reports: Arc<Reports>,
     pub engine: EngineFactory,
+    /// The hook pipe, when it runs.
+    pub hooks: Option<Arc<Hooks>>,
+    /// Numbers panes as they enter "needs you", for the jump order
+    /// (RF-ATN-05).
+    pub attention: Arc<AtomicU64>,
 }
 
-/// How the handle reaches a pane without going through the service: its
-/// input queue and its frame slot.
+/// Hook events waiting for one pane's actor. Beyond this the pane's channel
+/// counts as lost (see [`hooks::route`]).
+pub(crate) const PANE_HOOK_QUEUE: usize = 64;
+
+/// A decoded hook, or the error of an authentic frame that did not decode.
+pub(crate) type HookItem = Result<HookEvent, HookError>;
+
+/// How the handle and the hook pipe reach a pane without going through the
+/// service: its input queue, its frame slot and its hook queue.
 #[derive(Debug, Clone)]
 pub(crate) struct PaneLink {
     pub input: mpsc::Sender<PaneInput>,
     pub frame: Arc<FrameSlot>,
+    pub hooks: mpsc::Sender<HookItem>,
+    /// Set when a hook was refused by a full queue.
+    pub hooks_lost: Arc<AtomicBool>,
 }
 
 /// Every running pane's link, shared by the service and the handles.
@@ -63,10 +81,16 @@ struct Service {
     links: Links,
 }
 
-pub(crate) async fn run(ctx: Ctx, links: Links, mut commands: mpsc::Receiver<ClientMsg>) {
+pub(crate) async fn run(
+    ctx: Ctx,
+    links: Links,
+    mut commands: mpsc::Receiver<ClientMsg>,
+    hooks_error: Option<String>,
+) {
     let reports = Arc::clone(&ctx.reports);
+    let profiles = profile_list(&ctx.config);
     let mut service = Service {
-        ws: Workspace::new(),
+        ws: Workspace::new().with_profiles(profiles),
         ctx,
         panes: HashMap::new(),
         links,
@@ -74,6 +98,16 @@ pub(crate) async fn run(ctx: Ctx, links: Links, mut commands: mpsc::Receiver<Cli
     service
         .emit(CoreMsg::WorkspaceSnapshot(service.ws.snapshot()))
         .await;
+    if let Some(reason) = hooks_error {
+        service
+            .emit(CoreMsg::Error {
+                pane: None,
+                message: format!(
+                    "Claude Code state detection is off: {reason}. Claude panes still run,                      without the red mark."
+                ),
+            })
+            .await;
+    }
     loop {
         tokio::select! {
             msg = commands.recv() => match msg {
@@ -115,6 +149,8 @@ impl Service {
     fn start_pane(&mut self, pane: PaneId, plan: LaunchPlan, cwd: String, size: (u16, u16)) {
         let (tx, cmds) = mpsc::channel(PANE_COMMANDS);
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
+        let (hooks_tx, hooks) = mpsc::channel(PANE_HOOK_QUEUE);
+        let hooks_lost = Arc::new(AtomicBool::new(false));
         let (slot, visible, seen) = self.panes.get(&pane).map_or_else(
             || (Arc::default(), false, false),
             |h| (Arc::clone(&h.slot), h.visible, h.seen),
@@ -127,6 +163,8 @@ impl Service {
             slot: Arc::clone(&slot),
             visible,
             seen,
+            hooks,
+            hooks_lost: Arc::clone(&hooks_lost),
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -134,6 +172,8 @@ impl Service {
             PaneLink {
                 input: input_tx,
                 frame: Arc::clone(&slot),
+                hooks: hooks_tx,
+                hooks_lost,
             },
         );
         self.panes.insert(
@@ -151,6 +191,7 @@ impl Service {
     }
 
     fn stop_pane(&mut self, pane: PaneId) {
+        hooks::revoke(self.ctx.hooks.as_deref(), pane);
         self.panes.remove(&pane);
         links(&self.links).remove(&pane);
     }
@@ -257,6 +298,31 @@ impl Service {
             }
         }
     }
+}
+
+/// The profiles new panes can be started with: the shell first, then each
+/// agent profile in the configured order.
+fn profile_list(config: &CoreConfig) -> Vec<ProfileInfo> {
+    let shell_name = config
+        .profiles
+        .iter()
+        .find(|p| p.id == SHELL_PROFILE)
+        .map_or_else(|| "Shell".to_owned(), |p| p.name.clone());
+    let mut list = vec![ProfileInfo {
+        id: ProfileId::new(SHELL_PROFILE),
+        name: shell_name,
+    }];
+    list.extend(
+        config
+            .profiles
+            .iter()
+            .filter(|p| p.id != SHELL_PROFILE && p.detect.is_some())
+            .map(|p| ProfileInfo {
+                id: ProfileId::new(p.id.clone()),
+                name: p.name.clone(),
+            }),
+    );
+    list
 }
 
 fn command_pane(command: &Command) -> Option<PaneId> {
