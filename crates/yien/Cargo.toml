@@ -12,6 +12,8 @@ yien-proto = { workspace = true }
 yien-core = { workspace = true }
 yien-pty = { workspace = true }
 yien-ui = { workspace = true }
+yien-platform = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

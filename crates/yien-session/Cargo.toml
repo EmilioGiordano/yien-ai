@@ -1,0 +1,25 @@
+[package]
+name = "yien-session"
+description = "The YIEN saved session: model, invariants, versioned JSON snapshots, generations and resume policy."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# A `Store` over a directory, built only on `std::fs`, for use before `yien-platform` exists.
+fs = []
+
+[dependencies]
+yien-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -424,6 +424,17 @@ fn rf_pan_14_mouse_modes_are_reported() {
 }
 
 #[test]
+fn rf_pan_14_the_frame_carries_the_modes() {
+    let mut e = engine(10, 3);
+    assert_eq!(e.frame().modes, e.modes());
+    e.feed(b"\x1b[?2004h\x1b[?1h\x1b[?1002h\x1b[?1006h");
+    let modes = e.frame().modes;
+    assert!(modes.bracketed_paste && modes.app_cursor);
+    assert_eq!(modes.mouse, MouseTracking::Drag);
+    assert_eq!(modes, e.modes());
+}
+
+#[test]
 fn feed_reports_signals_title_and_bell() {
     let mut e = engine(20, 3);
     let out = e.feed(b"\x1b]0;agent\x07\x1b]133;D;2\x07\x07");

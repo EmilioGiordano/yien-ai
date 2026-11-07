@@ -12,6 +12,7 @@ yien-proto = { workspace = true }
 yien-input = { workspace = true }
 gpui-kit = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

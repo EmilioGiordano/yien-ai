@@ -359,6 +359,7 @@ impl VtEngine for AlacrittyEngine {
             history_len: self.term.history_size(),
             background: self.color_at(257),
             cursor_color: self.color_at(258),
+            modes: self.modes(),
         }
     }
 

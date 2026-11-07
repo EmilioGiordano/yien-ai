@@ -2,9 +2,10 @@
 //! pane that owns its PTY session, terminal engine and agent state machine.
 //!
 //! The UI talks to it only through `yien-proto` messages (ADR-03): it sends
-//! [`ClientMsg`] through a [`CoreHandle`] and receives [`CoreMsg`]. The core
-//! runs on its own tokio runtime (ADR-14), so the UI's executor never waits
-//! on it.
+//! [`ClientMsg`] through a [`CoreHandle`] and receives [`CoreMsg`]. Frames
+//! are the exception: [`CoreMsg::PaneFrameReady`] says a pane has a new
+//! frame, and [`CoreHandle::take_frame`] takes the latest one. The core runs
+//! on its own tokio runtime (ADR-14), so the UI's executor never waits on it.
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -15,7 +16,9 @@
 //! let (core, mut events) = Core::start(Arc::new(PortablePty::new()), CoreConfig::default())?;
 //! core.try_send(ClientMsg::Command(Command::NewProject { root: "C:/Code/yien".into(), name: None }))?;
 //! while let Some(event) = events.blocking_recv() {
-//!     if let CoreMsg::PaneFrame { pane, frame } = event {
+//!     if let CoreMsg::PaneFrameReady { pane } = event
+//!         && let Some(frame) = core.take_frame(pane)
+//!     {
 //!         println!("pane {}: {}", pane.get(), frame.text());
 //!     }
 //! }
@@ -27,19 +30,29 @@
 mod convert;
 mod launch;
 mod pane;
+mod report;
 mod service;
 mod shell;
 mod workspace;
 
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use yien_agent::Profile;
+use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, TabId};
 use yien_pty::PtyBackend;
 use yien_vt::VtConfig;
+
+use crate::pane::{EngineFactory, PaneInput};
+use crate::service::{Links, links};
 
 pub use shell::{ShellCommand, default_shell};
 
@@ -48,8 +61,13 @@ pub use shell::{ShellCommand, default_shell};
 /// drops nothing).
 pub const COMMAND_QUEUE: usize = 1024;
 
-/// Events waiting for the UI. Frames are skipped while it is full; every
-/// other event waits for room.
+/// Input chunks waiting for one pane whose program is not reading; beyond
+/// this [`CoreHandle::try_send`] reports [`SendError::Busy`] for that pane's
+/// input only. Commands and the other panes are not held up.
+pub const PANE_INPUT_QUEUE: usize = 256;
+
+/// Events waiting for the UI; the core waits for room. Frames do not queue
+/// here: each pane has at most one [`CoreMsg::PaneFrameReady`] waiting.
 pub const EVENT_QUEUE: usize = 4096;
 
 /// The longest a pane waits between two frames while its screen changes.
@@ -193,6 +211,16 @@ impl Core {
         backend: Arc<dyn PtyBackend>,
         config: CoreConfig,
     ) -> Result<(CoreHandle, mpsc::Receiver<CoreMsg>), CoreError> {
+        Self::start_with(backend, config, pane::alacritty)
+    }
+
+    /// [`Core::start`] with another terminal engine, for tests that inject
+    /// faults.
+    pub(crate) fn start_with(
+        backend: Arc<dyn PtyBackend>,
+        config: CoreConfig,
+        engine: EngineFactory,
+    ) -> Result<(CoreHandle, mpsc::Receiver<CoreMsg>), CoreError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.worker_threads.max(1))
             .thread_name("yien-core")
@@ -205,10 +233,14 @@ impl Core {
             backend,
             config: Arc::new(config),
             events,
+            reports: Arc::default(),
+            engine,
         };
-        runtime.spawn(service::run(ctx, command_rx));
+        let panes: Links = Arc::new(Mutex::new(HashMap::new()));
+        runtime.spawn(service::run(ctx, Arc::clone(&panes), command_rx));
         let handle = CoreHandle {
             commands,
+            panes,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -230,6 +262,7 @@ impl Drop for RuntimeGuard {
 #[derive(Clone)]
 pub struct CoreHandle {
     commands: mpsc::Sender<ClientMsg>,
+    panes: Links,
     _runtime: Arc<RuntimeGuard>,
 }
 
@@ -242,18 +275,91 @@ impl fmt::Debug for CoreHandle {
 impl CoreHandle {
     /// Queues a message without waiting. Safe to call from any thread,
     /// including the UI's.
+    ///
+    /// [`ClientMsg::Input`] and [`ClientMsg::Report`] go straight to their
+    /// pane's queue: [`SendError::Busy`] then means that pane's program is not
+    /// reading ([`PANE_INPUT_QUEUE`]). Input for a pane that no longer exists
+    /// is dropped, like any event about it.
     pub fn try_send(&self, msg: ClientMsg) -> Result<(), SendError> {
-        self.commands.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(msg) => SendError::Busy(msg),
-            mpsc::error::TrySendError::Closed(msg) => SendError::Stopped(msg),
-        })
+        let (pane, input) = match split_input(msg) {
+            Ok(routed) => routed,
+            Err(msg) => {
+                return self.commands.try_send(msg).map_err(|e| match e {
+                    TrySendError::Full(msg) => SendError::Busy(msg),
+                    TrySendError::Closed(msg) => SendError::Stopped(msg),
+                });
+            }
+        };
+        if self.commands.is_closed() {
+            return Err(SendError::Stopped(input.into_msg(pane)));
+        }
+        let sent = links(&self.panes)
+            .get(&pane)
+            .map(|link| link.input.try_send(input));
+        match sent {
+            Some(Err(TrySendError::Full(input))) => Err(SendError::Busy(input.into_msg(pane))),
+            Some(Ok(()) | Err(TrySendError::Closed(_))) | None => Ok(()),
+        }
     }
 
     /// Queues a message, waiting for room. Works on any executor.
     pub async fn send(&self, msg: ClientMsg) -> Result<(), SendError> {
-        self.commands
-            .send(msg)
-            .await
-            .map_err(|e| SendError::Stopped(e.0))
+        let (pane, input) = match split_input(msg) {
+            Ok(routed) => routed,
+            Err(msg) => {
+                return self
+                    .commands
+                    .send(msg)
+                    .await
+                    .map_err(|e| SendError::Stopped(e.0));
+            }
+        };
+        if self.commands.is_closed() {
+            return Err(SendError::Stopped(input.into_msg(pane)));
+        }
+        let tx = links(&self.panes).get(&pane).map(|l| l.input.clone());
+        if let Some(tx) = tx {
+            let _ = tx.send(input).await;
+        }
+        Ok(())
+    }
+
+    /// Takes the latest frame of `pane`, the one announced by
+    /// [`CoreMsg::PaneFrameReady`]. `None` when it was already taken or the
+    /// pane is gone. Frames are "last one wins" (plan §4.2): an untaken frame
+    /// is replaced by newer ones, and the next notice comes only after a take.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use yien_core::{Core, CoreConfig};
+    /// # use yien_proto::PaneId;
+    /// # let (core, _events) = Core::start(Arc::new(yien_pty::FakePty::new()), CoreConfig::default())?;
+    /// assert!(core.take_frame(PaneId::new(99)).is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn take_frame(&self, pane: PaneId) -> Option<Frame> {
+        let slot = links(&self.panes).get(&pane).map(|l| Arc::clone(&l.frame));
+        slot?.take()
+    }
+}
+
+/// Splits input for a pane from the messages the service handles.
+fn split_input(msg: ClientMsg) -> Result<(PaneId, PaneInput), ClientMsg> {
+    match msg {
+        ClientMsg::Input { pane, bytes } => Ok((
+            pane,
+            PaneInput {
+                bytes: bytes.into_vec(),
+                user: true,
+            },
+        )),
+        ClientMsg::Report { pane, bytes } => Ok((
+            pane,
+            PaneInput {
+                bytes: bytes.into_vec(),
+                user: false,
+            },
+        )),
+        msg => Err(msg),
     }
 }

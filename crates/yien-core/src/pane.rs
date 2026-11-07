@@ -1,18 +1,20 @@
 //! One actor per pane: the only owner of its terminal engine and agent state
 //! machine (ADR-06). A blocking reader thread feeds the engine from the PTY;
-//! the actor writes to the PTY, coalesces frames and runs the state machine.
+//! the actor writes to the PTY, publishes frames and runs the state machine.
 
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::Instant;
 use yien_agent::{Effect as AgentEffect, Machine, Signal, evaluate_screen};
-use yien_proto::frame::{SelectionKind, Side, ViewportPoint};
-use yien_proto::{AgentState, CoreMsg, PaneId};
+use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
+use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
-use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtEngine, VtOutput};
+use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput};
 
 use crate::convert;
 use crate::launch::LaunchPlan;
@@ -31,13 +33,21 @@ const READER_QUEUE: usize = 64;
 /// event receiver never disconnects while its control lives.
 const READER_POLL: Duration = Duration::from_millis(200);
 
+/// Replies the actor may hold for a child that does not read its input.
+/// Beyond this it stops taking the child's output, which stalls the child
+/// instead of growing the backlog.
+const REPLY_BACKLOG: usize = 64;
+
+/// Commands a pane actor may have waiting. The actor never waits on the
+/// service, so a full queue only holds the service back briefly.
+pub(crate) const PANE_COMMANDS: usize = 256;
+
+const READER_LOST: &str = "This pane stopped reading its program after an internal error. \
+                           Relaunch it to start the program again.";
+
 /// What the service asks of a pane actor.
 #[derive(Debug)]
 pub(crate) enum PaneCmd {
-    Write {
-        bytes: Vec<u8>,
-        user: bool,
-    },
     Resize {
         cols: u16,
         rows: u16,
@@ -63,15 +73,90 @@ pub(crate) enum PaneCmd {
     Terminate,
 }
 
+/// Bytes for a pane's program, sent by the handle straight to the actor.
+#[derive(Debug)]
+pub(crate) struct PaneInput {
+    pub bytes: Vec<u8>,
+    /// False for reports YIEN generates (focus, mouse): they are not the
+    /// user acting on the pane.
+    pub user: bool,
+}
+
+impl PaneInput {
+    /// The message this input came from, to hand back when it is refused.
+    pub fn into_msg(self, pane: PaneId) -> ClientMsg {
+        let bytes = InputBytes::new(self.bytes);
+        if self.user {
+            ClientMsg::Input { pane, bytes }
+        } else {
+            ClientMsg::Report { pane, bytes }
+        }
+    }
+}
+
+/// Builds a pane's terminal engine.
+pub(crate) type EngineFactory = fn(&VtConfig, u16, u16) -> Box<dyn VtEngine>;
+
+/// The engine every pane runs outside tests.
+pub(crate) fn alacritty(config: &VtConfig, cols: u16, rows: u16) -> Box<dyn VtEngine> {
+    Box::new(AlacrittyEngine::new(config.clone(), cols, rows))
+}
+
 enum ReaderMsg {
     Output { out: VtOutput, sync: Option<u64> },
     Exited(Option<u32>),
 }
 
-type Engine = Arc<Mutex<AlacrittyEngine>>;
+type Engine = Arc<Mutex<Box<dyn VtEngine>>>;
 
-fn lock(engine: &Engine) -> MutexGuard<'_, AlacrittyEngine> {
+fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
     engine.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The latest frame of a pane the UI has not taken yet: a newer one replaces
+/// it (plan §4.2, "last one wins"). The UI is told once per frame it takes.
+#[derive(Debug, Default)]
+pub(crate) struct FrameSlot(Mutex<SlotState>);
+
+#[derive(Debug, Default)]
+struct SlotState {
+    frame: Option<Frame>,
+    notified: bool,
+}
+
+impl FrameSlot {
+    fn state(&self) -> MutexGuard<'_, SlotState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stores `frame`. `notify` tells the UI and says whether the notice got
+    /// through. Returns whether a notice is still owed.
+    fn put(&self, frame: Frame, notify: impl FnOnce() -> bool) -> bool {
+        let mut state = self.state();
+        state.frame = Some(frame);
+        Self::settle(&mut state, notify)
+    }
+
+    /// Sends a notice still owed. Returns whether one is still owed.
+    fn retry(&self, notify: impl FnOnce() -> bool) -> bool {
+        Self::settle(&mut self.state(), notify)
+    }
+
+    /// Runs under the slot's lock, so a take cannot fall between the notice
+    /// and its record and leave a frame nobody is told about.
+    fn settle(state: &mut SlotState, notify: impl FnOnce() -> bool) -> bool {
+        if state.frame.is_some() && !state.notified {
+            state.notified = notify();
+        }
+        state.frame.is_some() && !state.notified
+    }
+
+    /// Takes the frame waiting, if any. The next frame is notified again.
+    pub fn take(&self) -> Option<Frame> {
+        let mut state = self.state();
+        state.notified = false;
+        state.frame.take()
+    }
 }
 
 /// Bytes waiting for the PTY's input queue. Replies to terminal queries go
@@ -92,11 +177,34 @@ impl Outbox {
     fn clear(&mut self) {
         *self = Self::default();
     }
+
+    /// Replies go before a pending resize: a full resize queue must not hold
+    /// back the answer the child is blocked on.
+    fn drain(&mut self, control: &PtyControl) -> Result<(), Blocked> {
+        write_all(control, &mut self.replies)?;
+        if let Some((cols, rows)) = self.resize {
+            match control.resize(cols, rows) {
+                Ok(()) | Err(PtyError::InvalidSize { .. }) => self.resize = None,
+                Err(PtyError::ResizeQueueFull) => return Err(Blocked::Full),
+                Err(_) => return Err(Blocked::Closed),
+            }
+        }
+        write_all(control, &mut self.input)
+    }
 }
 
 struct Session {
     control: PtyControl,
     reader: mpsc::Receiver<ReaderMsg>,
+    exited: bool,
+}
+
+pub(crate) struct PaneSetup {
+    pub id: PaneId,
+    pub plan: LaunchPlan,
+    pub cwd: String,
+    pub size: (u16, u16),
+    pub slot: Arc<FrameSlot>,
 }
 
 struct Actor {
@@ -104,7 +212,7 @@ struct Actor {
     plan: LaunchPlan,
     cwd: String,
     ctx: Ctx,
-    report: mpsc::UnboundedSender<(PaneId, PaneEvent)>,
+    slot: Arc<FrameSlot>,
     engine: Engine,
     session: Option<Session>,
     machine: Machine,
@@ -114,33 +222,30 @@ struct Actor {
     dirty: bool,
     visible: bool,
     last_frame: Option<Instant>,
+    notice_owed: bool,
     sync: Option<(u64, Instant)>,
     wake_at: Option<Instant>,
 }
 
-/// Starts the actor of `pane`; it ends when `cmds` closes, terminating the
-/// program.
+/// Starts the actor of a pane; it ends when `cmds` closes, terminating the
+/// program. A panic in it is reported as [`PaneEvent::Crashed`].
 pub(crate) fn spawn(
-    id: PaneId,
-    plan: LaunchPlan,
-    cwd: String,
+    setup: PaneSetup,
     ctx: Ctx,
-    cmds: mpsc::UnboundedReceiver<PaneCmd>,
-    report: mpsc::UnboundedSender<(PaneId, PaneEvent)>,
+    cmds: mpsc::Receiver<PaneCmd>,
+    input: mpsc::Receiver<PaneInput>,
 ) {
-    let (cols, rows) = ctx.config.initial_size;
-    let engine = Arc::new(Mutex::new(AlacrittyEngine::new(
-        ctx.config.vt.clone(),
-        cols,
-        rows,
-    )));
-    let machine = Machine::new(plan.machine.clone());
+    let (cols, rows) = setup.size;
+    let engine = Arc::new(Mutex::new((ctx.engine)(&ctx.config.vt, cols, rows)));
+    let machine = Machine::new(setup.plan.machine.clone());
+    let id = setup.id;
+    let reports = Arc::clone(&ctx.reports);
     let actor = Actor {
         id,
-        plan,
-        cwd,
+        plan: setup.plan,
+        cwd: setup.cwd,
         ctx,
-        report: report.clone(),
+        slot: setup.slot,
         engine,
         session: None,
         machine,
@@ -150,22 +255,25 @@ pub(crate) fn spawn(
         dirty: false,
         visible: false,
         last_frame: None,
+        notice_owed: false,
         sync: None,
         wake_at: None,
     };
-    let task = tokio::spawn(actor.run(cmds));
+    let task = tokio::spawn(actor.run(cmds, input));
     tokio::spawn(async move {
         if let Err(e) = task.await
             && e.is_panic()
         {
-            let _ = report.send((id, PaneEvent::Crashed));
+            reports.push(id, PaneEvent::Crashed);
         }
     });
 }
 
 enum Wake {
     Cmd(Option<PaneCmd>),
+    Input(PaneInput),
     Reader(Option<ReaderMsg>),
+    Noticed { owed: bool },
     Timer,
 }
 
@@ -184,50 +292,81 @@ async fn sleep_until(at: Option<Instant>) {
 }
 
 impl Actor {
-    async fn run(mut self, mut cmds: mpsc::UnboundedReceiver<PaneCmd>) {
+    async fn run(
+        mut self,
+        mut cmds: mpsc::Receiver<PaneCmd>,
+        mut input: mpsc::Receiver<PaneInput>,
+    ) {
         self.start().await;
         loop {
             let deadline = self.next_deadline();
+            // At most one refused chunk is held; the rest waits in the
+            // bounded input queue, where the handle sees it full.
+            let take_input = self.outbox.input.is_empty();
+            let take_output = self.outbox.replies.len() < REPLY_BACKLOG;
+            let (slot, pane) = (&self.slot, self.id);
             let wake = tokio::select! {
                 cmd = cmds.recv() => Wake::Cmd(cmd),
-                msg = recv_reader(&mut self.session) => Wake::Reader(msg),
+                Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
+                msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
+                room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
+                    owed: match room {
+                        Ok(permit) => slot.retry(|| {
+                            permit.send(CoreMsg::PaneFrameReady { pane });
+                            true
+                        }),
+                        Err(_) => false,
+                    },
+                },
                 () = sleep_until(deadline) => Wake::Timer,
             };
             match wake {
                 Wake::Cmd(None) => break,
                 Wake::Cmd(Some(cmd)) => self.on_cmd(cmd).await,
+                Wake::Input(input) => self.on_input(input),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
+                Wake::Noticed { owed } => self.notice_owed = owed,
                 Wake::Timer => {}
             }
             self.on_timers();
         }
     }
 
-    fn send(&self, event: PaneEvent) {
-        let _ = self.report.send((self.id, event));
+    fn report(&self, event: PaneEvent) {
+        self.ctx.reports.push(self.id, event);
     }
 
     fn now(&self) -> Duration {
         self.ctx.config.clock.now()
     }
 
+    /// Starts a session on a fresh engine: modes, screen and pending sync
+    /// updates of the last run do not leak into the next, and a reader still
+    /// feeding the old engine cannot reach this one.
     async fn start(&mut self) {
         self.session = None;
         self.outbox.clear();
         self.retry_at = None;
+        self.sync = None;
         let size = lock(&self.engine).size();
+        self.engine = Arc::new(Mutex::new((self.ctx.engine)(
+            &self.ctx.config.vt,
+            size.cols,
+            size.rows,
+        )));
+        self.dirty = true;
         let spec = self.plan.spec(self.id, &self.cwd, size.cols, size.rows);
         let backend = Arc::clone(&self.ctx.backend);
         let spawned = tokio::task::spawn_blocking(move || backend.spawn(spec)).await;
         let session = match spawned {
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
-                self.send(PaneEvent::SpawnFailed(spawn_message(&self.plan, &e)));
+                self.report(PaneEvent::Failed(spawn_message(&self.plan, &e)));
                 return;
             }
             Err(_) => {
-                self.send(PaneEvent::SpawnFailed(format!(
+                self.report(PaneEvent::Failed(format!(
                     "Could not start {}. Relaunch the pane to try again.",
                     self.plan.program
                 )));
@@ -237,32 +376,33 @@ impl Actor {
         let (control, events) = session.into_parts();
         let (tx, reader) = mpsc::channel(READER_QUEUE);
         let engine = Arc::clone(&self.engine);
+        let feed = move |bytes: &[u8]| {
+            let mut engine = lock(&engine);
+            let out = engine.feed(bytes);
+            let sync = engine.sync_pending().then(|| engine.sync_generation());
+            ReaderMsg::Output { out, sync }
+        };
         let thread = std::thread::Builder::new()
             .name(format!("yien-pane-{}", self.id.get()))
-            .spawn(move || read_loop(events, engine, tx));
+            .spawn(move || read_loop(events, feed, tx));
         if thread.is_err() {
-            self.send(PaneEvent::SpawnFailed(
+            self.report(PaneEvent::Failed(
                 "Could not start the pane's reader. Close other panes and relaunch this one."
                     .to_owned(),
             ));
             return;
         }
-        self.session = Some(Session { control, reader });
-        self.send(PaneEvent::Started);
+        self.session = Some(Session {
+            control,
+            reader,
+            exited: false,
+        });
+        self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
     }
 
     async fn on_cmd(&mut self, cmd: PaneCmd) {
         match cmd {
-            PaneCmd::Write { bytes, user } => {
-                if user {
-                    self.step(&Signal::Input);
-                }
-                if self.session.is_some() && !bytes.is_empty() {
-                    self.outbox.input.push_back(bytes);
-                    self.flush();
-                }
-            }
             PaneCmd::Resize { cols, rows } => {
                 let size = {
                     let mut engine = lock(&self.engine);
@@ -295,14 +435,7 @@ impl Actor {
             }
             PaneCmd::CopySelection => {
                 let text = lock(&self.engine).selection_text();
-                let _ = self
-                    .ctx
-                    .events
-                    .send(CoreMsg::SelectionText {
-                        pane: self.id,
-                        text,
-                    })
-                    .await;
+                self.report(PaneEvent::Selection(text));
             }
             PaneCmd::View { visible, seen } => {
                 if visible && !self.visible {
@@ -324,7 +457,21 @@ impl Actor {
                 if let Some(s) = &self.session {
                     let _ = s.control.kill();
                 }
+                // A reader held back by a full reply backlog must get through
+                // to `Exited`.
+                self.outbox.clear();
+                self.retry_at = None;
             }
+        }
+    }
+
+    fn on_input(&mut self, input: PaneInput) {
+        if input.user {
+            self.step(&Signal::Input);
+        }
+        if self.session.is_some() && !input.bytes.is_empty() {
+            self.outbox.input.push_back(input.bytes);
+            self.flush();
         }
     }
 
@@ -341,19 +488,29 @@ impl Actor {
                 }
             }
             ReaderMsg::Exited(code) => {
+                if let Some(s) = &mut self.session {
+                    s.exited = true;
+                }
                 self.step(&Signal::Exited {
                     code: convert::exit_code_to_agent(code),
                 });
-                self.send(PaneEvent::Exited(code));
+                self.report(PaneEvent::Exited(code));
             }
         }
     }
 
+    /// The reader ended. After `Exited` that is the end of the session; before
+    /// it, the reader died and the program can no longer be shown or answered.
     fn on_reader_gone(&mut self) {
-        if let Some(s) = self.session.take() {
-            drop(s);
-            self.outbox.clear();
-            self.retry_at = None;
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        self.outbox.clear();
+        self.retry_at = None;
+        if !session.exited {
+            let _ = session.control.kill();
+            self.step(&Signal::Exited { code: None });
+            self.report(PaneEvent::Failed(READER_LOST.to_owned()));
         }
     }
 
@@ -363,14 +520,14 @@ impl Actor {
             self.flush();
         }
         if let Some(title) = out.title {
-            self.send(PaneEvent::Title(match title {
+            self.report(PaneEvent::Title(match title {
                 TitleChange::Set(t) => Some(t),
                 TitleChange::Reset => None,
             }));
         }
         for signal in &out.signals {
             if let yien_vt::OscSignal::Cwd(dir) = signal {
-                self.send(PaneEvent::Cwd(dir.clone()));
+                self.report(PaneEvent::Cwd(dir.clone()));
             }
             if let Some(osc) = convert::osc_signal(signal) {
                 self.step(&Signal::Osc(osc));
@@ -383,51 +540,23 @@ impl Actor {
         self.dirty = true;
     }
 
-    /// Writes what the outbox holds until the PTY's queue refuses; refused
-    /// bytes stay first in line for the retry.
+    /// Writes what the outbox holds, replies first, then the resize, then the
+    /// input, until the PTY's queue refuses; refused bytes stay first in line
+    /// for the retry.
     fn flush(&mut self) {
         let Some(session) = &self.session else {
             self.outbox.clear();
             self.retry_at = None;
             return;
         };
-        if let Some((cols, rows)) = self.outbox.resize {
-            match session.control.resize(cols, rows) {
-                Ok(()) | Err(PtyError::InvalidSize { .. }) => self.outbox.resize = None,
-                Err(PtyError::ResizeQueueFull) => {
-                    self.retry_at = Some(Instant::now() + RETRY_AFTER);
-                    return;
-                }
-                Err(_) => {
-                    self.outbox.clear();
-                    self.retry_at = None;
-                    return;
-                }
+        self.retry_at = match self.outbox.drain(&session.control) {
+            Ok(()) => None,
+            Err(Blocked::Full) => Some(Instant::now() + RETRY_AFTER),
+            Err(Blocked::Closed) => {
+                self.outbox.clear();
+                None
             }
-        }
-        loop {
-            let (queue, bytes) = if let Some(b) = self.outbox.replies.pop_front() {
-                (&mut self.outbox.replies, b)
-            } else if let Some(b) = self.outbox.input.pop_front() {
-                (&mut self.outbox.input, b)
-            } else {
-                break;
-            };
-            match session.control.write(bytes) {
-                Ok(()) => {}
-                Err(PtyError::InputQueueFull(returned)) => {
-                    queue.push_front(returned.into_bytes());
-                    self.retry_at = Some(Instant::now() + RETRY_AFTER);
-                    return;
-                }
-                Err(_) => {
-                    self.outbox.clear();
-                    self.retry_at = None;
-                    break;
-                }
-            }
-        }
-        self.retry_at = None;
+        };
     }
 
     fn step(&mut self, signal: &Signal) {
@@ -441,7 +570,7 @@ impl Actor {
                     let state = convert::agent_state(to);
                     if state != self.state {
                         self.state = state;
-                        self.send(PaneEvent::State(state));
+                        self.report(PaneEvent::State(state));
                     }
                 }
                 AgentEffect::CheckScreen => {
@@ -452,7 +581,7 @@ impl Actor {
                     let verdict = evaluate_screen(&self.plan.screen, &rows);
                     self.step(&Signal::Screen(verdict));
                 }
-                AgentEffect::SessionId(id) => self.send(PaneEvent::SessionId(id)),
+                AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId(id)),
                 AgentEffect::MarkRed
                 | AgentEffect::ClearRed
                 | AgentEffect::Notify
@@ -520,17 +649,46 @@ impl Actor {
             self.step(&Signal::Tick);
         }
         if self.frame_due().is_some_and(|at| at <= now) {
-            let frame = lock(&self.engine).frame();
-            self.last_frame = Some(now);
-            match self.ctx.events.try_send(CoreMsg::PaneFrame {
-                pane: self.id,
-                frame,
-            }) {
-                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => self.dirty = false,
-                Err(mpsc::error::TrySendError::Full(_)) => {}
-            }
+            self.publish(now);
         }
     }
+
+    /// Puts the current screen in the pane's slot and tells the UI, unless it
+    /// was already told about a frame it has not taken. With the event queue
+    /// full the notice is owed and sent as soon as there is room.
+    fn publish(&mut self, now: Instant) {
+        let frame = lock(&self.engine).frame();
+        self.last_frame = Some(now);
+        self.dirty = false;
+        let (events, pane) = (&self.ctx.events, self.id);
+        self.notice_owed = self.slot.put(frame, || {
+            match events.try_send(CoreMsg::PaneFrameReady { pane }) {
+                Ok(()) | Err(TrySendError::Closed(_)) => true,
+                Err(TrySendError::Full(_)) => false,
+            }
+        });
+    }
+}
+
+enum Blocked {
+    Full,
+    Closed,
+}
+
+/// Writes `queue` in order until the PTY refuses; a refused chunk goes back
+/// to the front.
+fn write_all(control: &PtyControl, queue: &mut VecDeque<Vec<u8>>) -> Result<(), Blocked> {
+    while let Some(bytes) = queue.pop_front() {
+        match control.write(bytes) {
+            Ok(()) => {}
+            Err(PtyError::InputQueueFull(returned)) => {
+                queue.push_front(returned.into_bytes());
+                return Err(Blocked::Full);
+            }
+            Err(_) => return Err(Blocked::Closed),
+        }
+    }
+    Ok(())
 }
 
 fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
@@ -548,21 +706,20 @@ fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
 
 /// The pane's reader thread: feeds the engine and posts what it produced.
 /// Blocks on the actor when it falls behind, which stalls the child instead
-/// of dropping output.
+/// of dropping output. A panic in `feed` ends it like a closed PTY: the actor
+/// sees the channel close before `Exited` and fails the pane.
 fn read_loop(
     events: std::sync::mpsc::Receiver<PtyEvent>,
-    engine: Engine,
+    mut feed: impl FnMut(&[u8]) -> ReaderMsg,
     tx: mpsc::Sender<ReaderMsg>,
 ) {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
         let msg = match events.recv_timeout(READER_POLL) {
-            Ok(PtyEvent::Output(bytes)) => {
-                let mut engine = lock(&engine);
-                let out = engine.feed(&bytes);
-                let sync = engine.sync_pending().then(|| engine.sync_generation());
-                ReaderMsg::Output { out, sync }
-            }
+            Ok(PtyEvent::Output(bytes)) => match catch_unwind(AssertUnwindSafe(|| feed(&bytes))) {
+                Ok(msg) => msg,
+                Err(_) => return,
+            },
             Ok(PtyEvent::Exited(status)) => ReaderMsg::Exited(status.code),
             Err(RecvTimeoutError::Timeout) => {
                 if tx.is_closed() {
@@ -575,5 +732,105 @@ fn read_loop(
         if tx.blocking_send(msg).is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::sync_channel;
+
+    use yien_pty::ExitStatus;
+
+    use super::*;
+
+    fn output(text: &str) -> ReaderMsg {
+        ReaderMsg::Output {
+            out: VtOutput {
+                replies: text.as_bytes().to_vec(),
+                ..VtOutput::default()
+            },
+            sync: None,
+        }
+    }
+
+    fn reader(
+        feed: impl FnMut(&[u8]) -> ReaderMsg + Send + 'static,
+    ) -> (
+        std::sync::mpsc::SyncSender<PtyEvent>,
+        mpsc::Receiver<ReaderMsg>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (events_tx, events) = sync_channel(8);
+        let (tx, rx) = mpsc::channel(8);
+        let thread = std::thread::spawn(move || read_loop(events, feed, tx));
+        (events_tx, rx, thread)
+    }
+
+    #[test]
+    fn the_reader_posts_output_then_the_exit() {
+        let (events, mut rx, thread) = reader(|b| output(std::str::from_utf8(b).unwrap()));
+        events.send(PtyEvent::Output(b"hi".to_vec())).unwrap();
+        events
+            .send(PtyEvent::Exited(ExitStatus::from_code(4)))
+            .unwrap();
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(ReaderMsg::Output { out, .. }) if out.replies == b"hi"
+        ));
+        assert!(matches!(
+            rx.blocking_recv(),
+            Some(ReaderMsg::Exited(Some(4)))
+        ));
+        drop(events);
+        assert!(rx.blocking_recv().is_none());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_disconnected_pty_closes_the_reader_without_an_exit() {
+        let (events, mut rx, thread) = reader(|_| output(""));
+        drop(events);
+        assert!(rx.blocking_recv().is_none());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_panic_while_feeding_closes_the_reader_without_an_exit() {
+        let (events, mut rx, thread) = reader(|_| panic!("engine bug"));
+        events.send(PtyEvent::Output(b"boom".to_vec())).unwrap();
+        events.send(PtyEvent::Exited(ExitStatus::from_code(0))).ok();
+        assert!(rx.blocking_recv().is_none());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_notice_is_sent_once_per_taken_frame() {
+        let slot = FrameSlot::default();
+        let frame = alacritty(&VtConfig::default(), 4, 1).frame();
+        let mut sent = 0;
+        assert!(!slot.put(frame.clone(), || {
+            sent += 1;
+            true
+        }));
+        assert!(!slot.put(frame.clone(), || unreachable!("already told")));
+        assert!(slot.take().is_some());
+        assert!(slot.take().is_none());
+        assert!(!slot.put(frame, || {
+            sent += 1;
+            true
+        }));
+        assert_eq!(sent, 2);
+    }
+
+    #[test]
+    fn a_refused_notice_stays_owed_until_it_gets_through() {
+        let slot = FrameSlot::default();
+        let frame = alacritty(&VtConfig::default(), 4, 1).frame();
+        assert!(slot.put(frame, || false));
+        assert!(slot.retry(|| false));
+        assert!(!slot.retry(|| true));
+        assert!(!slot.retry(|| unreachable!("already told")));
+        assert!(slot.take().is_some());
+        assert!(!slot.retry(|| unreachable!("nothing to tell")));
     }
 }

@@ -57,8 +57,27 @@ pub(crate) enum PaneEvent {
     SessionId(String),
     Started,
     Exited(Option<u32>),
-    SpawnFailed(String),
+    /// The program could not start or can no longer be shown; the actor
+    /// still runs and can relaunch it.
+    Failed(String),
+    /// The actor itself died; a relaunch starts a new one.
     Crashed,
+    Selection(Option<String>),
+}
+
+impl PaneEvent {
+    /// A detail of the pane rather than a step of its program's lifecycle;
+    /// only the latest value of each matters.
+    pub fn is_detail(&self) -> bool {
+        matches!(
+            self,
+            PaneEvent::State(_)
+                | PaneEvent::Title(_)
+                | PaneEvent::Cwd(_)
+                | PaneEvent::SessionId(_)
+                | PaneEvent::Selection(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +270,7 @@ impl Workspace {
                 tab.maximized = None;
                 let cwd = tab.dir.clone();
                 self.add_pane(new, tab_id, plan, cwd, &mut fx);
+                self.emit_pane(new, &mut fx);
                 self.focus(new, &mut fx)?;
             }
             Command::ClosePane { pane } => self.close_pane(pane, &mut fx)?,
@@ -380,6 +400,7 @@ impl Workspace {
         }
         self.add_pane(pane, tab_id, plan, dir, fx);
         self.emit_tab(tab_id, fx);
+        self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
         Ok(())
     }
@@ -409,7 +430,6 @@ impl Workspace {
                 seen: false,
             },
         );
-        self.emit_pane(pane, fx);
         fx.push(Effect::Spawn {
             pane,
             plan: Box::new(plan),
@@ -564,17 +584,28 @@ impl Workspace {
                 p.running = false;
                 p.exit_code = code;
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code }));
+                self.emit_pane(pane, &mut fx);
             }
-            PaneEvent::SpawnFailed(message) => {
+            PaneEvent::Failed(message) => {
                 p.running = false;
+                p.exit_code = None;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message,
                 }));
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code: None }));
+                self.emit_pane(pane, &mut fx);
+            }
+            PaneEvent::Selection(text) => {
+                fx.push(Effect::Emit(CoreMsg::SelectionText { pane, text }));
             }
             PaneEvent::Crashed => {
                 p.running = false;
+                p.exit_code = None;
+                // The new actor a relaunch starts knows nothing: the next
+                // refresh sends it the view again.
+                p.visible = false;
+                p.seen = false;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message: "This pane stopped after an internal error. Relaunch it to start \
@@ -582,6 +613,7 @@ impl Workspace {
                         .to_owned(),
                 }));
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code: None }));
+                self.emit_pane(pane, &mut fx);
             }
         }
         fx
@@ -793,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_pan_01_closing_the_last_pane_closes_its_tab() {
+    fn rf_pan_20_closing_the_last_pane_closes_its_tab() {
         let mut ws = Workspace::new();
         let (tab, pane) = project(&mut ws);
         let fx = run(&mut ws, Command::ClosePane { pane });
@@ -1002,6 +1034,62 @@ mod tests {
         ));
         let fx = ws.set_window_focus(false);
         assert!(matches!(fx[..], [Effect::View { seen: false, .. }]));
+    }
+
+    #[test]
+    fn rf_pan_19_a_crashed_pane_gets_its_view_again_after_the_relaunch() {
+        let mut ws = Workspace::new();
+        ws.set_window_focus(true);
+        let (_, a) = project(&mut ws);
+        assert!(ws.panes[&a].visible && ws.panes[&a].seen);
+        let fx = ws.on_pane_event(a, PaneEvent::Crashed);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::View { .. })));
+        assert!(fx.iter().any(
+            |e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a && !p.running)
+        ));
+        let fx = run(&mut ws, Command::RelaunchPane { pane: a });
+        let relaunch = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Relaunch { pane } if *pane == a));
+        let view = fx.iter().position(
+            |e| matches!(e, Effect::View { pane, visible: true, seen: true } if *pane == a),
+        );
+        assert!(
+            relaunch.is_some() && view.is_some() && relaunch < view,
+            "{fx:?}"
+        );
+    }
+
+    #[test]
+    fn an_exit_updates_the_pane() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        let fx = ws.on_pane_event(a, PaneEvent::Exited(Some(2)));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a && !p.running && p.exit_code == Some(2)
+        )));
+    }
+
+    #[test]
+    fn a_new_tab_is_announced_before_its_pane_and_started_before_both() {
+        let mut ws = Workspace::new();
+        let fx = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/p".into(),
+                name: None,
+            },
+        );
+        let spawn = fx.iter().position(|e| matches!(e, Effect::Spawn { .. }));
+        let tab = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::TabUpdated(_))));
+        let pane = fx
+            .iter()
+            .position(|e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(_))));
+        assert!(spawn.is_some() && spawn < tab && tab < pane, "{fx:?}");
     }
 
     #[test]

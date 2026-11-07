@@ -415,8 +415,12 @@ mod tests {
 
     #[test]
     fn claude_settings_match_the_golden_json() {
+        // Compared as values: serde_json's `preserve_order`, enabled by other
+        // workspace crates, changes the rendered key order.
         let json = render_claude_settings("D:/yien/yien-hook.exe").unwrap();
-        assert_eq!(json, GOLDEN_SETTINGS);
+        let rendered: Value = serde_json::from_str(&json).unwrap();
+        let golden: Value = serde_json::from_str(GOLDEN_SETTINGS).unwrap();
+        assert_eq!(rendered, golden);
     }
 
     #[test]

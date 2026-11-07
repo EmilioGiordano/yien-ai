@@ -38,15 +38,30 @@ use crate::theme::{Theme, ThemeKind, sync_component_theme};
 /// to the core and `events` brings its events back; closing the window quits,
 /// which drops `client` and lets the core end its panes.
 ///
+/// `on_quit` runs once when the app quits, including at Windows logoff or
+/// shutdown, where gpui ends the process without returning from `run`.
+///
 /// ```no_run
 /// # fn connect() -> (Box<dyn yien_ui::CoreClient>, tokio::sync::mpsc::Receiver<yien_proto::CoreMsg>) { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events);
+/// yien_ui::run(client, events, || println!("bye"));
 /// ```
-pub fn run(client: Box<dyn CoreClient>, events: mpsc::Receiver<CoreMsg>) {
+pub fn run(
+    client: Box<dyn CoreClient>,
+    events: mpsc::Receiver<CoreMsg>,
+    on_quit: impl FnOnce() + 'static,
+) {
     gpui_kit::application()
         .with_assets(assets::YienAssets)
         .run(move |cx| {
+            let mut on_quit = Some(on_quit);
+            cx.on_app_quit(move |_| {
+                if let Some(on_quit) = on_quit.take() {
+                    on_quit();
+                }
+                async {}
+            })
+            .detach();
             gpui_kit::init(cx);
             actions::bind_keys(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
@@ -65,7 +80,7 @@ pub fn run(client: Box<dyn CoreClient>, events: mpsc::Receiver<CoreMsg>) {
             match opened {
                 Ok(_) => cx.activate(true),
                 Err(error) => {
-                    eprintln!("yien: could not open the main window: {error:#}");
+                    tracing::error!("could not open the main window: {error:#}");
                     cx.quit();
                 }
             }
