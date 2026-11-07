@@ -8845,6 +8845,7 @@ dependencies = [
  "yien-platform",
  "yien-proto",
  "yien-pty",
+ "yien-session",
  "yien-vt",
 ]
 

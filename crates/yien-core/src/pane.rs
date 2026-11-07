@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::Instant;
-use yien_agent::{Effect as AgentEffect, Machine, Signal, evaluate_screen};
+use yien_agent::{Effect as AgentEffect, Machine, SessionEndReason, Signal, evaluate_screen};
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
@@ -214,6 +214,8 @@ pub(crate) struct PaneSetup {
     pub hooks: mpsc::Receiver<HookItem>,
     /// Set by the hook pipe when it had to refuse an event for this pane.
     pub hooks_lost: Arc<AtomicBool>,
+    /// The agent session the first launch resumes (RF-SES-03).
+    pub resume: Option<String>,
 }
 
 struct Actor {
@@ -244,6 +246,9 @@ struct Actor {
     signal_lost: bool,
     /// When the pane entered "needs you", while it is there (RF-ATN-05).
     needs_since: Option<u64>,
+    /// The session the next launch resumes; only the first launch after a
+    /// restore does, so a relaunch starts a new session.
+    resume: Option<String>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -286,6 +291,7 @@ pub(crate) fn spawn(
         hooks_missing: false,
         signal_lost: false,
         needs_since: None,
+        resume: setup.resume,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -401,7 +407,10 @@ impl Actor {
             size.rows,
         )));
         self.dirty = true;
-        let session_id = if self.plan.preassigns_session() {
+        let resume = self.resume.take().filter(|_| self.plan.can_resume());
+        let session_id = if resume.is_some() {
+            resume.clone()
+        } else if self.plan.preassigns_session() {
             launch::new_uuid()
         } else {
             None
@@ -413,6 +422,7 @@ impl Actor {
         let fill = Fill {
             pane: self.id,
             session_id: session_id.as_deref(),
+            resume: resume.as_deref(),
             hooks: hooks
                 .as_deref()
                 .zip(token.as_ref())
@@ -714,6 +724,11 @@ impl Actor {
                     self.step(&Signal::Screen(verdict));
                 }
                 AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId(id)),
+                // `/exit` and `/logout` are the user ending the session (RN-04);
+                // `other` also comes when YIEN itself stops the program.
+                AgentEffect::SessionEnded(
+                    SessionEndReason::PromptInputExit | SessionEndReason::Logout,
+                ) => self.report(PaneEvent::EndedByUser),
                 AgentEffect::MarkRed
                 | AgentEffect::ClearRed
                 | AgentEffect::Notify
@@ -1040,6 +1055,7 @@ mod tests {
                 seen: false,
                 hooks: hooks_rx,
                 hooks_lost: Arc::clone(&hooks_lost),
+                resume: None,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {

@@ -14,6 +14,10 @@ use crate::CoreError;
 use crate::convert;
 use crate::launch::LaunchPlan;
 
+mod session;
+
+pub(crate) use session::{Disk, folders};
+
 /// Any area works for neighbour lookups; this one keeps the tree's epsilon
 /// small relative to the smallest pane.
 const AREA: Rect = Rect {
@@ -33,6 +37,8 @@ pub(crate) enum Effect {
         pane: PaneId,
         plan: Box<LaunchPlan>,
         cwd: String,
+        /// The agent session the launch resumes (RF-SES-03).
+        resume: Option<String>,
     },
     /// Stop a pane's actor; its program is terminated.
     Stop { pane: PaneId },
@@ -58,6 +64,9 @@ pub(crate) enum PaneEvent {
     Title(Option<String>),
     Cwd(String),
     SessionId(String),
+    /// The user ended the agent session (`/exit`, `/logout`); it is not
+    /// resumed on restore (RN-04).
+    EndedByUser,
     Started,
     Exited(Option<u32>),
     /// The program could not start or can no longer be shown; the actor
@@ -125,6 +134,12 @@ impl Tab {
 #[derive(Debug, Clone)]
 struct Pane {
     tab: TabId,
+    /// The profile's id, as the saved session records it.
+    profile: String,
+    /// The folder the pane's program started in.
+    launch_cwd: String,
+    /// The user ended the pane's agent session (RN-04).
+    ended_explicitly: bool,
     custom_name: Option<String>,
     default_name: String,
     profile_name: String,
@@ -155,6 +170,11 @@ pub(crate) struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether any tab is open.
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
     }
 
     /// The profiles the snapshot lists for new panes.
@@ -370,7 +390,11 @@ impl Workspace {
                 fx.push(Effect::Relaunch { pane });
             }
             Command::TerminatePane { pane } => {
-                self.tab_of(pane)?;
+                let p = self
+                    .panes
+                    .get_mut(&pane)
+                    .ok_or(CoreError::UnknownPane(pane))?;
+                p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
         }
@@ -452,6 +476,9 @@ impl Workspace {
             pane,
             Pane {
                 tab,
+                profile: plan.profile.clone(),
+                launch_cwd: cwd.clone(),
+                ended_explicitly: false,
                 custom_name: None,
                 default_name: plan.default_name.clone(),
                 profile_name: plan.profile_name.clone(),
@@ -471,6 +498,7 @@ impl Workspace {
             pane,
             plan: Box::new(plan),
             cwd,
+            resume: None,
         });
     }
 
@@ -619,8 +647,10 @@ impl Workspace {
             }
             PaneEvent::SessionId(id) => {
                 p.session_id = Some(id);
+                p.ended_explicitly = false;
                 self.emit_pane(pane, &mut fx);
             }
+            PaneEvent::EndedByUser => p.ended_explicitly = true,
             PaneEvent::Started => {
                 p.running = true;
                 p.exit_code = None;
@@ -1373,6 +1403,36 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn rf_ses_02_any_workspace_survives_a_save_and_restore(
+            ops in proptest::collection::vec(op(), 1..60)
+        ) {
+            let mut ws = Workspace::new();
+            for op in &ops {
+                if let Some(command) = command_for(&ws, op) {
+                    let _ = ws.apply(command, &resolve);
+                }
+            }
+            let saved = ws.to_session();
+            let mut store = yien_session::MemStore::new();
+            yien_session::save(&mut store, &saved).unwrap();
+            let loaded = yien_session::load(&store).restored.unwrap().snapshot;
+            let disk = Disk { existing: folders(&loaded).into_iter().collect(), home: None };
+            let mut back = Workspace::new();
+            let (fx, notes) = back.restore(&loaded, &resolve, &disk);
+            prop_assert!(notes.is_empty(), "{:?}", notes);
+            prop_assert_eq!(back.check(), Ok(()));
+            prop_assert_eq!(back.to_session(), saved);
+            let mut expected = ws.snapshot();
+            for tab in &mut expected.tabs {
+                tab.maximized = None;
+            }
+            prop_assert_eq!(back.snapshot(), expected);
+            let mut started = spawned(&fx);
+            started.sort_unstable();
+            prop_assert_eq!(started, ws.panes.keys().copied().collect::<Vec<_>>());
+        }
+
         #[test]
         fn workspace_commands_keep_the_invariants(ops in proptest::collection::vec(op(), 1..60)) {
             let mut ws = Workspace::new();

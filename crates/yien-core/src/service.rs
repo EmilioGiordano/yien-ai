@@ -18,6 +18,7 @@ use yien_pty::PtyBackend;
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
+use crate::persist::{self, Opened, Writer};
 use crate::report::Reports;
 use crate::workspace::{Effect, Workspace};
 use crate::{CoreConfig, CoreError, PANE_INPUT_QUEUE};
@@ -86,6 +87,8 @@ struct Service {
     ctx: Ctx,
     panes: HashMap<PaneId, PaneHandle>,
     links: Links,
+    /// Saves the workspace; `None` without a session store.
+    writer: Option<Arc<Writer>>,
 }
 
 pub(crate) async fn run(
@@ -93,15 +96,34 @@ pub(crate) async fn run(
     links: Links,
     mut commands: mpsc::Receiver<ClientMsg>,
     hooks_error: Option<String>,
+    writer: Option<Arc<Writer>>,
 ) {
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
+    let opened = match ctx.config.session.clone() {
+        Some(store) => tokio::task::spawn_blocking(move || persist::open(&store))
+            .await
+            .unwrap_or_default(),
+        None => Opened::default(),
+    };
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
         ctx,
         panes: HashMap::new(),
         links,
+        writer,
     };
+    let mut notices = opened.notices;
+    let mut restored = Vec::new();
+    if let Some(snapshot) = &opened.snapshot {
+        let config = Arc::clone(&service.ctx.config);
+        let resolve = |profile: Option<&yien_proto::ProfileId>| {
+            launch::resolve(profile, &config.profiles, &config.shell)
+        };
+        let (fx, notes) = service.ws.restore(snapshot, &resolve, &opened.disk);
+        restored = fx;
+        notices.extend(notes);
+    }
     service
         .emit(CoreMsg::WorkspaceSnapshot(service.ws.snapshot()))
         .await;
@@ -116,6 +138,23 @@ pub(crate) async fn run(
             })
             .await;
     }
+    if !notices.is_empty() {
+        service
+            .emit(CoreMsg::Error {
+                pane: None,
+                message: notices.join(" "),
+            })
+            .await;
+    }
+    service.execute(restored).await;
+    if !service.ws.has_tabs()
+        && let Some(root) = service.ctx.config.start_project.clone()
+    {
+        service
+            .on_command(Command::NewProject { root, name: None })
+            .await;
+    }
+    service.publish();
     loop {
         tokio::select! {
             msg = commands.recv() => match msg {
@@ -129,12 +168,20 @@ pub(crate) async fn run(
                         service.execute(fx).await;
                     }
                 }
+                service.publish();
             }
         }
     }
 }
 
 impl Service {
+    /// Hands the workspace to the writer; it writes only what changed.
+    fn publish(&self) {
+        if let Some(writer) = &self.writer {
+            writer.update(self.ws.to_session());
+        }
+    }
+
     async fn emit(&self, msg: CoreMsg) {
         let _ = self.ctx.events.send(msg).await;
     }
@@ -154,7 +201,14 @@ impl Service {
         }
     }
 
-    fn start_pane(&mut self, pane: PaneId, plan: LaunchPlan, cwd: String, size: (u16, u16)) {
+    fn start_pane(
+        &mut self,
+        pane: PaneId,
+        plan: LaunchPlan,
+        cwd: String,
+        size: (u16, u16),
+        resume: Option<String>,
+    ) {
         let (tx, cmds) = mpsc::channel(PANE_COMMANDS);
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
         let (hooks_tx, hooks) = mpsc::channel(PANE_HOOK_QUEUE);
@@ -173,6 +227,7 @@ impl Service {
             seen,
             hooks,
             hooks_lost: Arc::clone(&hooks_lost),
+            resume,
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -216,7 +271,7 @@ impl Service {
         }
         if let Some(h) = self.panes.get(&pane) {
             let (plan, cwd, size) = (h.plan.clone(), h.cwd.clone(), h.size);
-            self.start_pane(pane, plan, cwd, size);
+            self.start_pane(pane, plan, cwd, size, None);
         }
     }
 
@@ -277,7 +332,10 @@ impl Service {
             launch::resolve(profile, &config.profiles, &config.shell)
         };
         match self.ws.apply(command, &resolve) {
-            Ok(fx) => self.execute(fx).await,
+            Ok(fx) => {
+                self.execute(fx).await;
+                self.publish();
+            }
             Err(e) => self.error(pane, &e).await,
         }
     }
@@ -286,9 +344,14 @@ impl Service {
         for effect in effects {
             match effect {
                 Effect::Emit(msg) => self.emit(msg).await,
-                Effect::Spawn { pane, plan, cwd } => {
+                Effect::Spawn {
+                    pane,
+                    plan,
+                    cwd,
+                    resume,
+                } => {
                     let size = self.ctx.config.initial_size;
-                    self.start_pane(pane, *plan, cwd, size);
+                    self.start_pane(pane, *plan, cwd, size, resume);
                 }
                 Effect::Stop { pane } => self.stop_pane(pane),
                 Effect::Relaunch { pane } => self.relaunch(pane).await,

@@ -31,6 +31,7 @@ mod convert;
 mod hooks;
 mod launch;
 mod pane;
+mod persist;
 mod report;
 mod service;
 mod shell;
@@ -57,6 +58,7 @@ use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
 
 pub use hooks::HookConfig;
+pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
 pub use shell::{ShellCommand, default_shell};
 
 /// Commands waiting for the core; beyond this [`CoreHandle::try_send`]
@@ -145,6 +147,11 @@ pub struct CoreConfig {
     /// The Claude Code hook pipe (ADR-09). `None` runs without it: Claude
     /// panes launch without hook settings and show "signal lost".
     pub hooks: Option<HookConfig>,
+    /// Where the workspace is restored from at start and saved to after
+    /// every change (RF-SES-01, RF-SES-02). `None` keeps nothing.
+    pub session: Option<SessionStore>,
+    /// The folder opened as a project when no session is restored.
+    pub start_project: Option<String>,
 }
 
 impl Default for CoreConfig {
@@ -159,6 +166,8 @@ impl Default for CoreConfig {
             initial_size: (80, 24),
             worker_threads: 2,
             hooks: None,
+            session: None,
+            start_project: None,
         }
     }
 }
@@ -218,6 +227,11 @@ impl Core {
     /// With [`CoreConfig::hooks`] set it also writes the hook settings file
     /// and opens the hook pipe. Neither failing stops the core: the reason
     /// comes as a [`CoreMsg::Error`] after the snapshot.
+    ///
+    /// With [`CoreConfig::session`] set, the saved session is restored before
+    /// the first snapshot, every agent pane resuming its session (RF-SES-03),
+    /// and the workspace is saved [`SAVE_DEBOUNCE`] after each change. When
+    /// nothing is restored, [`CoreConfig::start_project`] is opened.
     pub fn start(
         backend: Arc<dyn PtyBackend>,
         config: CoreConfig,
@@ -251,6 +265,10 @@ impl Core {
                 }
             },
         };
+        let writer = config
+            .session
+            .clone()
+            .and_then(|store| persist::Writer::start(store, SAVE_DEBOUNCE, events.clone()));
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),
@@ -265,11 +283,13 @@ impl Core {
             Arc::clone(&panes),
             command_rx,
             hooks_error,
+            writer.clone(),
         ));
         let handle = CoreHandle {
             commands,
             panes,
             hooks,
+            writer,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -301,6 +321,7 @@ pub struct CoreHandle {
         )
     )]
     hooks: Option<Arc<hooks::Hooks>>,
+    writer: Option<Arc<persist::Writer>>,
     _runtime: Arc<RuntimeGuard>,
 }
 
@@ -360,6 +381,26 @@ impl CoreHandle {
             let _ = tx.send(input).await;
         }
         Ok(())
+    }
+
+    /// Writes the workspace as it is now, for the app's quit path: waits at
+    /// most `timeout` for a save already running, and ignores every change
+    /// after it, so programs ending as the app exits are not saved. Blocks the
+    /// caller only for that write. `Ok(false)` when nothing changed since the
+    /// last save or no session store is set.
+    ///
+    /// ```
+    /// # use std::{sync::Arc, time::Duration};
+    /// # use yien_core::{Core, CoreConfig};
+    /// let (core, _events) = Core::start(Arc::new(yien_pty::FakePty::new()), CoreConfig::default())?;
+    /// assert!(!core.save_session(Duration::from_secs(1))?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn save_session(&self, timeout: Duration) -> Result<bool, SessionSaveError> {
+        match &self.writer {
+            Some(writer) => writer.save_now(timeout),
+            None => Ok(false),
+        }
     }
 
     /// Takes the latest frame of `pane`, the one announced by
