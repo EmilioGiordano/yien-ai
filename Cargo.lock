@@ -8845,6 +8845,7 @@ dependencies = [
  "yien-platform",
  "yien-proto",
  "yien-pty",
+ "yien-session",
  "yien-vt",
 ]
 
@@ -8890,6 +8891,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "yien-agent",
  "yien-proto",
+ "yien-session",
 ]
 
 [[package]]

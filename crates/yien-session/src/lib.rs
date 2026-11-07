@@ -76,4 +76,4 @@ pub use restore::{ResumeAction, missing_dirs, resume_plan};
 #[cfg(feature = "fs")]
 pub use store::FsStore;
 pub use store::{MemStore, Store, StoreError};
-pub use validate::{Problem, RATIO_EPSILON, validate};
+pub use validate::{MAX_ID, Problem, RATIO_EPSILON, validate};

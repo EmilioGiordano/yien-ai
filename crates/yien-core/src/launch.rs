@@ -20,8 +20,13 @@ const NEW_UUID: &str = "{new_uuid}";
 /// templates; [`LaunchPlan::spec`] fills them for one launch.
 #[derive(Debug, Clone)]
 pub(crate) struct LaunchPlan {
+    /// The profile's id (`claude`, `shell`), as the saved session records it.
+    pub profile: String,
     pub program: String,
     pub args: Vec<String>,
+    /// The arguments that resume `{session_id}` instead of `args`; empty
+    /// when the profile cannot resume (RN-05).
+    pub resume_args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub machine: MachineConfig,
     pub screen: Vec<ScreenRule>,
@@ -38,6 +43,9 @@ pub(crate) struct Fill<'a> {
     pub pane: PaneId,
     /// `{new_uuid}`: the session id assigned to this launch.
     pub session_id: Option<&'a str>,
+    /// `{session_id}`: the session this launch resumes. When set, the plan's
+    /// resume arguments replace its launch arguments.
+    pub resume: Option<&'a str>,
     /// The hook values, when the hook pipe runs and a token was issued.
     pub hooks: Option<HookFill<'a>>,
 }
@@ -51,6 +59,11 @@ pub(crate) struct HookFill<'a> {
 }
 
 impl LaunchPlan {
+    /// Whether the profile can resume a session by its exact id.
+    pub fn can_resume(&self) -> bool {
+        !self.resume_args.is_empty()
+    }
+
     /// Whether a launch needs a session id assigned in advance.
     pub fn preassigns_session(&self) -> bool {
         self.args.iter().any(|a| a.contains(NEW_UUID))
@@ -68,7 +81,11 @@ impl LaunchPlan {
     pub fn spec(&self, fill: &Fill<'_>, cwd: &str, cols: u16, rows: u16) -> SpawnSpec {
         let mut args: Vec<String> = Vec::new();
         let mut last_was_flag = false;
-        for template in &self.args {
+        let templates = match fill.resume {
+            Some(_) if self.can_resume() => &self.resume_args,
+            _ => &self.args,
+        };
+        for template in templates {
             match fill_template(template, fill) {
                 Some(arg) => {
                     last_was_flag = arg.starts_with('-') && arg == *template;
@@ -120,7 +137,7 @@ fn fill_template(template: &str, fill: &Fill<'_>) -> Option<String> {
     let values: [(&str, Option<&str>); 6] = [
         ("{pane_id}", Some(&pane)),
         (NEW_UUID, fill.session_id),
-        ("{session_id}", None),
+        ("{session_id}", fill.resume),
         ("{hooks_settings_file}", hooks.map(|h| h.settings_file)),
         ("{hook_pipe}", hooks.map(|h| h.pipe)),
         ("{hook_token}", hooks.map(|h| h.token)),
@@ -170,8 +187,10 @@ pub(crate) fn resolve(
     let Some(found) = found else {
         if id == SHELL_PROFILE {
             return Ok(LaunchPlan {
+                profile: SHELL_PROFILE.to_owned(),
                 program: shell.program.clone(),
                 args: shell.args.clone(),
+                resume_args: Vec::new(),
                 env: Vec::new(),
                 machine: MachineConfig::unprofiled(),
                 screen: Vec::new(),
@@ -203,8 +222,10 @@ pub(crate) fn resolve(
         ),
     };
     Ok(LaunchPlan {
+        profile: found.id.clone(),
         program,
         args,
+        resume_args: found.launch.resume.clone(),
         env,
         machine: rule.machine_config(),
         screen: rule.screen.clone(),
@@ -274,6 +295,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(42),
             session_id: Some("3f2a0c1e-0000-4000-8000-000000000000"),
+            resume: None,
             hooks: Some(HOOKS),
         };
         let spec = plan.spec(&fill, "C:/Code", 100, 30);
@@ -296,6 +318,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(7),
             session_id: Some("s-1"),
+            resume: None,
             hooks: None,
         };
         let spec = claude().spec(&fill, "C:/Code", 80, 24);
@@ -312,6 +335,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(7),
             session_id: None,
+            resume: None,
             hooks: Some(HOOKS),
         };
         let spec = claude().spec(&fill, "", 80, 24);
@@ -324,6 +348,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(1),
             session_id: None,
+            resume: None,
             hooks: Some(HOOKS),
         };
         let spec = plan.spec(&fill, "C:/Code", 80, 24);
@@ -337,6 +362,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(1),
             session_id: Some("s-1"),
+            resume: None,
             hooks: Some(HOOKS),
         };
         for id in [None, Some("claude"), Some("codex")] {
@@ -356,6 +382,55 @@ mod tests {
                 assert!(!spec.env_remove.iter().any(|k| k == kept), "{id:?} {kept}");
             }
         }
+    }
+
+    #[test]
+    fn rf_ses_03_a_resume_launch_passes_the_exact_session_and_the_hooks() {
+        let plan = claude();
+        assert!(plan.can_resume());
+        let fill = Fill {
+            pane: PaneId::new(3),
+            session_id: Some("unused"),
+            resume: Some("4f1c-9a"),
+            hooks: Some(HOOKS),
+        };
+        let spec = plan.spec(&fill, "C:/Code", 80, 24);
+        assert_eq!(
+            args(&spec),
+            ["--resume", "4f1c-9a", "--settings", HOOKS.settings_file]
+        );
+        assert_eq!(env(&spec, HOOK_TOKEN_ENV), Some("feedface"));
+        let fill = Fill {
+            resume: None,
+            ..fill
+        };
+        assert_eq!(args(&plan.spec(&fill, "", 80, 24))[0], "--session-id");
+    }
+
+    #[test]
+    fn rn_05_a_profile_without_resume_arguments_launches_fresh() {
+        let plan = resolve(None, &builtin_profiles().unwrap(), &shell()).unwrap();
+        assert!(!plan.can_resume());
+        assert_eq!(plan.profile, SHELL_PROFILE);
+        let fill = Fill {
+            pane: PaneId::new(3),
+            session_id: None,
+            resume: Some("4f1c"),
+            hooks: None,
+        };
+        assert_eq!(
+            plan.spec(&fill, "", 80, 24).args,
+            plan.spec(
+                &Fill {
+                    resume: None,
+                    ..fill
+                },
+                "",
+                80,
+                24
+            )
+            .args
+        );
     }
 
     #[test]
@@ -407,6 +482,7 @@ mod tests {
         let fill = Fill {
             pane: PaneId::new(1),
             session_id: None,
+            resume: None,
             hooks: None,
         };
         let spec = plan.spec(&fill, "C:/Code", 0, 30);

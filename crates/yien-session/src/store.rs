@@ -55,6 +55,30 @@ pub trait Store {
     fn rename(&mut self, from: &str, to: &str) -> Result<(), StoreError>;
 }
 
+/// A boxed store, so the store can be picked at run time and still be passed to
+/// [`save`](crate::save) and [`load`](crate::load).
+///
+/// ```
+/// use yien_session::{MemStore, SessionSnapshot, Store, load, save};
+///
+/// let mut store: Box<dyn Store + Send> = Box::new(MemStore::new());
+/// save(&mut store, &SessionSnapshot::new(1, Vec::new())).unwrap();
+/// assert!(load(&store).restored.is_some());
+/// ```
+impl<S: Store + ?Sized> Store for Box<S> {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read(name)
+    }
+
+    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        (**self).write_atomic(name, bytes)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), StoreError> {
+        (**self).rename(from, to)
+    }
+}
+
 /// An in-memory [`Store`] for tests, able to simulate a crash.
 ///
 /// ```

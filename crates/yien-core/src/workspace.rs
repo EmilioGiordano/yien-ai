@@ -14,6 +14,11 @@ use crate::CoreError;
 use crate::convert;
 use crate::launch::LaunchPlan;
 
+mod session;
+
+use session::Kept;
+pub(crate) use session::{Disk, folders};
+
 /// Any area works for neighbour lookups; this one keeps the tree's epsilon
 /// small relative to the smallest pane.
 const AREA: Rect = Rect {
@@ -33,6 +38,8 @@ pub(crate) enum Effect {
         pane: PaneId,
         plan: Box<LaunchPlan>,
         cwd: String,
+        /// The agent session the launch resumes (RF-SES-03).
+        resume: Option<String>,
     },
     /// Stop a pane's actor; its program is terminated.
     Stop { pane: PaneId },
@@ -58,6 +65,9 @@ pub(crate) enum PaneEvent {
     Title(Option<String>),
     Cwd(String),
     SessionId(String),
+    /// The user ended the agent session (`/exit`, `/logout`); it is not
+    /// resumed on restore (RN-04).
+    EndedByUser,
     Started,
     Exited(Option<u32>),
     /// The program could not start or can no longer be shown; the actor
@@ -104,6 +114,9 @@ struct Tab {
     leaves: HashMap<yien_layout::PaneId, PaneId>,
     focused: PaneId,
     maximized: Option<PaneId>,
+    /// The saved folder when a restore had to open the tab elsewhere; saved
+    /// again in its place, so a folder that is only offline is not lost.
+    kept_dir: Option<String>,
 }
 
 impl Tab {
@@ -125,6 +138,15 @@ impl Tab {
 #[derive(Debug, Clone)]
 struct Pane {
     tab: TabId,
+    /// The profile's id, as the saved session records it.
+    profile: String,
+    /// The folder the pane's program started in.
+    launch_cwd: String,
+    /// The user ended the pane's agent session (RN-04).
+    ended_explicitly: bool,
+    /// What the saved session said, when a restore had to launch the pane
+    /// differently (missing folder, unknown profile); saved again instead.
+    kept: Option<Kept>,
     custom_name: Option<String>,
     default_name: String,
     profile_name: String,
@@ -157,15 +179,20 @@ impl Workspace {
         Self::default()
     }
 
+    /// How many tabs are open.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
     /// The profiles the snapshot lists for new panes.
     pub fn with_profiles(mut self, profiles: Vec<ProfileInfo>) -> Self {
         self.profiles = profiles;
         self
     }
 
-    fn next(&mut self) -> u64 {
-        self.next_id += 1;
-        self.next_id
+    fn next(&mut self) -> Result<u64, CoreError> {
+        self.next_id = self.next_id.checked_add(1).ok_or(CoreError::OutOfIds)?;
+        Ok(self.next_id)
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
@@ -244,7 +271,7 @@ impl Workspace {
         match command {
             Command::NewProject { root, name } => {
                 let plan = resolve(None)?;
-                let id = ProjectId::new(self.next());
+                let id = ProjectId::new(self.next()?);
                 let name = name
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or_else(|| folder_name(&root));
@@ -282,7 +309,7 @@ impl Workspace {
             } => {
                 let tab_id = self.tab_of(pane)?;
                 let plan = resolve(profile.as_ref())?;
-                let new = PaneId::new(self.next());
+                let new = PaneId::new(self.next()?);
                 let tab = self.tab_mut(tab_id)?;
                 let leaf = tab.leaf_of(pane).ok_or(CoreError::UnknownPane(pane))?;
                 let new_leaf = tab
@@ -370,7 +397,11 @@ impl Workspace {
                 fx.push(Effect::Relaunch { pane });
             }
             Command::TerminatePane { pane } => {
-                self.tab_of(pane)?;
+                let p = self
+                    .panes
+                    .get_mut(&pane)
+                    .ok_or(CoreError::UnknownPane(pane))?;
+                p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
         }
@@ -406,8 +437,8 @@ impl Workspace {
         plan: LaunchPlan,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
-        let tab_id = TabId::new(self.next());
-        let pane = PaneId::new(self.next());
+        let tab_id = TabId::new(self.next()?);
+        let pane = PaneId::new(self.next()?);
         let p = self
             .projects
             .iter_mut()
@@ -429,6 +460,7 @@ impl Workspace {
             leaves,
             focused: pane,
             maximized: None,
+            kept_dir: None,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
@@ -452,6 +484,10 @@ impl Workspace {
             pane,
             Pane {
                 tab,
+                profile: plan.profile.clone(),
+                launch_cwd: cwd.clone(),
+                ended_explicitly: false,
+                kept: None,
                 custom_name: None,
                 default_name: plan.default_name.clone(),
                 profile_name: plan.profile_name.clone(),
@@ -471,6 +507,7 @@ impl Workspace {
             pane,
             plan: Box::new(plan),
             cwd,
+            resume: None,
         });
     }
 
@@ -619,8 +656,10 @@ impl Workspace {
             }
             PaneEvent::SessionId(id) => {
                 p.session_id = Some(id);
+                p.ended_explicitly = false;
                 self.emit_pane(pane, &mut fx);
             }
+            PaneEvent::EndedByUser => p.ended_explicitly = true,
             PaneEvent::Started => {
                 p.running = true;
                 p.exit_code = None;
@@ -1244,6 +1283,24 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_ids_fail_the_command_instead_of_reusing_one() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.next_id = u64::MAX;
+        let before = ws.snapshot();
+        let split = Command::SplitPane {
+            pane: a,
+            orientation: Orientation::Horizontal,
+            profile: None,
+        };
+        assert!(matches!(
+            ws.apply(split, &resolve),
+            Err(CoreError::OutOfIds)
+        ));
+        assert_eq!(ws.snapshot(), before);
+    }
+
+    #[test]
     fn stale_pane_events_are_ignored() {
         let mut ws = Workspace::new();
         assert!(
@@ -1373,6 +1430,36 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn rf_ses_02_any_workspace_survives_a_save_and_restore(
+            ops in proptest::collection::vec(op(), 1..60)
+        ) {
+            let mut ws = Workspace::new();
+            for op in &ops {
+                if let Some(command) = command_for(&ws, op) {
+                    let _ = ws.apply(command, &resolve);
+                }
+            }
+            let saved = ws.to_session();
+            let mut store = yien_session::MemStore::new();
+            yien_session::save(&mut store, &saved).unwrap();
+            let loaded = yien_session::load(&store).restored.unwrap().snapshot;
+            let disk = Disk { existing: folders(&loaded).into_iter().collect(), home: None };
+            let mut back = Workspace::new();
+            let (fx, notes) = back.restore(&loaded, &resolve, &disk);
+            prop_assert!(notes.is_empty(), "{:?}", notes);
+            prop_assert_eq!(back.check(), Ok(()));
+            prop_assert_eq!(back.to_session(), saved);
+            let mut expected = ws.snapshot();
+            for tab in &mut expected.tabs {
+                tab.maximized = None;
+            }
+            prop_assert_eq!(back.snapshot(), expected);
+            let mut started = spawned(&fx);
+            started.sort_unstable();
+            prop_assert_eq!(started, ws.panes.keys().copied().collect::<Vec<_>>());
+        }
+
         #[test]
         fn workspace_commands_keep_the_invariants(ops in proptest::collection::vec(op(), 1..60)) {
             let mut ws = Workspace::new();
