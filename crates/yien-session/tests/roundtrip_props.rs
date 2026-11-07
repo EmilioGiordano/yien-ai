@@ -4,7 +4,8 @@ use proptest::prelude::*;
 use yien_proto::{PaneId, ProjectId, TabId};
 use yien_session::{
     AgentRecord, LayoutRecord, MemStore, Orientation, PaneRecord, ProfileId, ProjectRecord,
-    SessionRef, SessionSnapshot, TabRecord, deserialize, load, save, serialize, validate,
+    Selection, SessionRef, SessionSnapshot, TabRecord, deserialize, load, save, serialize,
+    validate,
 };
 
 #[derive(Debug, Clone)]
@@ -13,6 +14,7 @@ struct PaneSeed {
     cwd: String,
     agent: Option<(String, Option<String>, bool)>,
     last_command: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,9 +24,12 @@ struct TabSeed {
     panes: Vec<PaneSeed>,
     shape: Vec<u32>,
     focus: usize,
+    branch: Option<String>,
+    worktree: Option<String>,
+    archived: bool,
 }
 
-type ProjectSeed = (String, String, Vec<TabSeed>);
+type ProjectSeed = (String, String, Option<String>, Vec<TabSeed>);
 
 fn text() -> impl Strategy<Value = String> {
     "\\PC{0,12}"
@@ -36,12 +41,14 @@ fn pane_seed() -> impl Strategy<Value = PaneSeed> {
         text(),
         proptest::option::of((text(), proptest::option::of(text()), any::<bool>())),
         proptest::option::of(text()),
+        proptest::option::of(text()),
     )
-        .prop_map(|(profile, cwd, agent, last_command)| PaneSeed {
+        .prop_map(|(profile, cwd, agent, last_command, name)| PaneSeed {
             profile,
             cwd,
             agent,
             last_command,
+            name,
         })
 }
 
@@ -52,18 +59,33 @@ fn tab_seed() -> impl Strategy<Value = TabSeed> {
         prop::collection::vec(pane_seed(), 1..7),
         prop::collection::vec(any::<u32>(), 1..24),
         any::<usize>(),
+        (
+            proptest::option::of(text()),
+            proptest::option::of(text()),
+            any::<bool>(),
+        ),
     )
-        .prop_map(|(title, dir, panes, shape, focus)| TabSeed {
-            title,
-            dir,
-            panes,
-            shape,
-            focus,
-        })
+        .prop_map(
+            |(title, dir, panes, shape, focus, (branch, worktree, archived))| TabSeed {
+                title,
+                dir,
+                panes,
+                shape,
+                focus,
+                branch,
+                worktree,
+                archived,
+            },
+        )
 }
 
 fn project_seed() -> impl Strategy<Value = ProjectSeed> {
-    (text(), text(), prop::collection::vec(tab_seed(), 0..4))
+    (
+        text(),
+        text(),
+        proptest::option::of(text()),
+        prop::collection::vec(tab_seed(), 0..4),
+    )
 }
 
 /// A random tree over `panes`, in order, drawing its shape from `shape`.
@@ -105,7 +127,9 @@ fn layout(panes: &[PaneId], shape: &mut impl Iterator<Item = u32>) -> LayoutReco
     }
 }
 
-fn build((saved_at, id_base, projects): (u64, u64, Vec<ProjectSeed>)) -> SessionSnapshot {
+fn build(
+    (saved_at, id_base, projects, pick): (u64, u64, Vec<ProjectSeed>, (bool, bool, usize)),
+) -> SessionSnapshot {
     let mut next_id = id_base;
     let mut fresh = || {
         next_id = next_id.wrapping_add(1);
@@ -113,10 +137,11 @@ fn build((saved_at, id_base, projects): (u64, u64, Vec<ProjectSeed>)) -> Session
     };
     let projects = projects
         .into_iter()
-        .map(|(name, root, tabs)| ProjectRecord {
+        .map(|(name, root, setup_script, tabs)| ProjectRecord {
             id: ProjectId::new(fresh()),
             name,
             root,
+            setup_script,
             tabs: tabs
                 .into_iter()
                 .map(|seed| {
@@ -133,6 +158,7 @@ fn build((saved_at, id_base, projects): (u64, u64, Vec<ProjectSeed>)) -> Session
                                 ended_explicitly: ended,
                             }),
                             last_command: p.last_command,
+                            name: p.name,
                         })
                         .collect();
                     let ids: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
@@ -143,13 +169,28 @@ fn build((saved_at, id_base, projects): (u64, u64, Vec<ProjectSeed>)) -> Session
                         dir: seed.dir,
                         layout: layout(&ids, &mut shape),
                         focused: ids[seed.focus % ids.len()],
+                        branch: seed.branch,
+                        worktree: seed.worktree,
+                        archived: seed.archived,
                         panes,
                     }
                 })
                 .collect(),
         })
-        .collect();
-    SessionSnapshot::new(saved_at, projects)
+        .collect::<Vec<ProjectRecord>>();
+    let mut snapshot = SessionSnapshot::new(saved_at, projects);
+    let (with_project, with_tab, at) = pick;
+    if let Some(project) = snapshot.projects.get(at % snapshot.projects.len().max(1)) {
+        snapshot.selected = Selection {
+            project: with_project.then_some(project.id),
+            tab: project
+                .tabs
+                .get(at % project.tabs.len().max(1))
+                .filter(|_| with_tab)
+                .map(|t| t.id),
+        };
+    }
+    snapshot
 }
 
 fn snapshot() -> impl Strategy<Value = SessionSnapshot> {
@@ -157,6 +198,7 @@ fn snapshot() -> impl Strategy<Value = SessionSnapshot> {
         any::<u64>(),
         any::<u64>(),
         prop::collection::vec(project_seed(), 0..4),
+        (any::<bool>(), any::<bool>(), any::<usize>()),
     )
         .prop_map(build)
 }
