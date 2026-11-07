@@ -71,6 +71,11 @@ actions!(
         /// Focuses the next pane that needs the user, the one waiting
         /// longest first (RF-ATN-05).
         JumpToNeedsYou,
+        /// Turns every toast and taskbar flash off or back on (RF-ATN-11).
+        ToggleNotificationsMuted,
+        /// Turns the selected tab's toasts and taskbar flashes off or back
+        /// on (RF-ATN-11).
+        ToggleTabMuted,
         /// Opens a tab with the shell in the selected tab's project.
         NewTab,
         /// Opens a tab with Claude Code in the selected tab's project

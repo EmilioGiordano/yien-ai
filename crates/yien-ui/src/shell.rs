@@ -1117,6 +1117,30 @@ impl Shell {
         }
     }
 
+    /// Toasts and flashes only; the red mark, the counter and the badge stay
+    /// (RF-ATN-16). The core saves the choice and confirms it.
+    fn toggle_notifications_muted(
+        &mut self,
+        _: &ToggleNotificationsMuted,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let muted = !self.workspace.notifications_muted();
+        self.workspace.set_notifications_muted(muted);
+        self.notice = Some(mute_notice(muted, "Notifications"));
+        self.command(Command::SetNotificationsMuted { muted }, cx);
+        cx.notify();
+    }
+
+    fn toggle_tab_muted(&mut self, _: &ToggleTabMuted, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((tab, muted)) = self.workspace.selected_tab().map(|t| (t.id, !t.muted)) else {
+            return;
+        };
+        self.notice = Some(mute_notice(muted, "This tab's notifications"));
+        self.command(Command::SetTabMuted { tab, muted }, cx);
+        cx.notify();
+    }
+
     fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
         self.move_palette(-1, cx);
     }
@@ -2371,6 +2395,15 @@ impl Shell {
     }
 }
 
+/// What the status bar says after a mute toggle.
+fn mute_notice(muted: bool, what: &str) -> String {
+    if muted {
+        format!("{what} muted. The red mark and the counter stay.")
+    } else {
+        format!("{what} on again.")
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window);
@@ -2403,6 +2436,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
             .on_action(cx.listener(Self::toggle_project_fold))
+            .on_action(cx.listener(Self::toggle_notifications_muted))
+            .on_action(cx.listener(Self::toggle_tab_muted))
             .on_action(cx.listener(Self::add_project))
             .on_action(cx.listener(Self::close_project))
             .on_action(cx.listener(Self::confirm_accept))

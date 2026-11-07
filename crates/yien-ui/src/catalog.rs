@@ -93,6 +93,18 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-j"]
     ),
     command!(
+        "notifications.mute",
+        "notifications: mute / unmute notifications",
+        ToggleNotificationsMuted,
+        []
+    ),
+    command!(
+        "notifications.mute_tab",
+        "notifications: mute / unmute notifications for this tab",
+        ToggleTabMuted,
+        []
+    ),
+    command!(
         "tab.new",
         "tab: new tab with the shell",
         NewTab,
