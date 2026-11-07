@@ -33,11 +33,19 @@ const REPO_OVERRIDES: &[&str] = &[
 ];
 
 /// `-c` settings on every call that stop git from starting programs a repository
-/// can name: fsmonitor, any transport (and so ssh), credential helpers, askpass.
+/// can name: fsmonitor, any transport (and so ssh or `uploadpack`), credential
+/// helpers, askpass. A repo-local `protocol.<name>.allow` beats `protocol.allow`,
+/// so each built-in protocol is also denied by name; command scope wins over the repo.
 /// An empty `credential.helper` resets the helper list (git 2.9+).
 const NO_PROGRAMS: &[&str] = &[
     "core.fsmonitor=false",
     "protocol.allow=never",
+    "protocol.file.allow=never",
+    "protocol.ssh.allow=never",
+    "protocol.git.allow=never",
+    "protocol.http.allow=never",
+    "protocol.https.allow=never",
+    "protocol.ext.allow=never",
     "core.sshCommand=",
     "credential.helper=",
     "core.askPass=",
@@ -440,10 +448,88 @@ mod tests {
             std::ffi::OsStr::new("GIT_NO_LAZY_FETCH"),
             Some(std::ffi::OsStr::new("1"))
         )));
-        assert!(args.iter().any(|a| a == "protocol.allow=never"));
+        let status_at = args.iter().position(|a| a == "status").unwrap();
+        for name in ["", "file.", "ssh.", "git.", "http.", "https.", "ext."] {
+            let setting = format!("protocol.{name}allow=never");
+            let at = args.iter().position(|a| *a == setting);
+            let at = at.unwrap_or_else(|| panic!("{setting} missing"));
+            assert_eq!(args[at - 1], "-c");
+            assert!(at < status_at);
+        }
         let at = args.iter().position(|a| a == "filter.x.clean=").unwrap();
         assert_eq!(args[at - 1], "-c");
-        assert!(at < args.iter().position(|a| a == "status").unwrap());
+        assert!(at < status_at);
+    }
+
+    /// Runs a setup command isolated from the user's global and system git config.
+    fn setup_git(dir: &Path, config: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Git before 2.44 ignores `GIT_NO_LAZY_FETCH`; the per-protocol denials must
+    /// hold on their own against a repo that allows `file` and names an `uploadpack`.
+    #[test]
+    fn rnf_14_repo_protocol_allow_cannot_reopen_lazy_fetch() {
+        if !git_available() {
+            eprintln!("git not found, skipping");
+            return;
+        }
+        let sandbox =
+            std::env::temp_dir().join(format!("yien-git-protocol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let root = sandbox.join("r");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = sandbox.join("gitconfig");
+        std::fs::write(&config, "").unwrap();
+        let git = |args: &[&str]| setup_git(&root, &config, args);
+
+        git(&["init", "-q", "-b", "main"]);
+        let lines: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(root.join("a.txt"), &lines).unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let old = git(&["rev-parse", "HEAD:a.txt"]);
+        git(&["mv", "a.txt", "moved.txt"]);
+        std::fs::write(root.join("moved.txt"), format!("{lines}extra\n")).unwrap();
+        git(&["add", "moved.txt"]);
+        std::fs::remove_file(root.join(".git/objects").join(&old[..2]).join(&old[2..])).unwrap();
+
+        let marker = sandbox.join("uploadpack.marker");
+        let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let uploadpack = format!("echo hit > '{}'; false", slash(&marker));
+        let url = slash(&root);
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.url", url.as_str()),
+            ("remote.origin.promisor", "true"),
+            ("protocol.file.allow", "always"),
+            ("remote.origin.uploadpack", uploadpack.as_str()),
+        ] {
+            git(&["config", key, value]);
+        }
+
+        let mut cmd =
+            Git::new().command(&root, &[], &["status", "--porcelain=v2", "--branch", "-z"]);
+        cmd.env_remove("GIT_NO_LAZY_FETCH");
+        let result = run_command(cmd, Duration::from_secs(20), MAX_OUTPUT);
+        let ran = marker.exists();
+        let _ = std::fs::remove_dir_all(&sandbox);
+        assert!(!matches!(result, Err(GitError::Timeout(_))), "{result:?}");
+        assert!(!ran, "the repository's uploadpack ran");
     }
 
     #[test]
