@@ -22,7 +22,7 @@ use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::fonts::Fonts;
 use crate::layout::neighbor;
-use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView};
+use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
 
@@ -164,9 +164,11 @@ impl Shell {
         }
         if changed {
             self.sync_terminals(window, cx);
-            ready.extend(self.visible_panes());
         }
-        self.take_frames(ready, cx);
+        let take = frames_to_take(&ready, changed, &self.visible_panes(), |p| {
+            self.terminals.contains_key(&p)
+        });
+        self.take_frames(take, cx);
         if changed {
             self.sync_focus(window, cx);
             cx.notify();
@@ -268,7 +270,10 @@ impl Shell {
     fn select_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.select_tab(id) {
             self.command(Command::SelectTab { tab: id }, cx);
-            self.take_frames(self.visible_panes(), cx);
+            let take = frames_to_take(&BTreeSet::new(), true, &self.visible_panes(), |p| {
+                self.terminals.contains_key(&p)
+            });
+            self.take_frames(take, cx);
             self.sync_focus(window, cx);
             cx.notify();
         }

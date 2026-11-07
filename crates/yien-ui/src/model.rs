@@ -4,7 +4,7 @@
 //! events (ADR-03). Events may arrive in any order and may name things the
 //! UI has already dropped; updates tolerate both.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{LayoutNode, PaneId, PaneInfo, ProjectId, ProjectInfo, TabId, TabInfo};
 
@@ -211,6 +211,10 @@ pub struct WorkspaceView {
     panes: HashMap<PaneId, PaneView>,
     selected: Option<TabId>,
     folded: HashSet<ProjectId>,
+    /// Closed tabs and panes, so a late update cannot bring them back. Ids
+    /// are never reused.
+    closed_tabs: HashSet<TabId>,
+    closed_panes: HashSet<PaneId>,
 }
 
 impl WorkspaceView {
@@ -249,8 +253,12 @@ impl WorkspaceView {
     }
 
     /// A tab was added or changed. A tab its project does not list yet is
-    /// appended to it, so it shows before the project update arrives.
+    /// appended to it, so it shows before the project update arrives. An
+    /// update for a closed tab is ignored.
     pub fn tab_updated(&mut self, info: &TabInfo) {
+        if self.closed_tabs.contains(&info.id) {
+            return;
+        }
         if let Some(project) = self.projects.iter_mut().find(|p| p.id == info.project)
             && !project.tabs.contains(&info.id)
         {
@@ -277,9 +285,11 @@ impl WorkspaceView {
                 .or_else(|| i.checked_sub(1).and_then(|j| project.tabs.get(j)))
                 .copied();
         }
+        self.closed_tabs.insert(id);
         let gone = tab.layout.panes();
         for pane in &gone {
             self.panes.remove(pane);
+            self.closed_panes.insert(*pane);
         }
         if self.selected == Some(id) {
             let fallback = || {
@@ -305,8 +315,12 @@ impl WorkspaceView {
         }
     }
 
-    /// A pane was added or its details changed.
+    /// A pane was added or its details changed. An update for a closed pane,
+    /// or for a pane of a tab the view does not hold, is ignored.
     pub fn pane_updated(&mut self, info: &PaneInfo) {
+        if self.closed_panes.contains(&info.id) || !self.tabs.contains_key(&info.tab) {
+            return;
+        }
         let mut pane = PaneView::from_info(info);
         if !info.running && self.panes.get(&info.id).is_some_and(|p| p.exited) {
             pane.exited = true;
@@ -317,6 +331,7 @@ impl WorkspaceView {
     /// A pane closed.
     pub fn pane_closed(&mut self, id: PaneId) {
         self.panes.remove(&id);
+        self.closed_panes.insert(id);
     }
 
     /// A pane's agent state changed. `false` when the pane is unknown.
@@ -489,6 +504,25 @@ impl WorkspaceView {
     fn tabs_in_order(&self) -> impl Iterator<Item = &TabView> {
         self.projects.iter().flat_map(|p| self.tabs_of(p))
     }
+}
+
+/// The panes whose frame to take after a batch of events: every pane that
+/// announced one and, when the workspace changed, every pane now drawn, since
+/// a pane that just came into view or got its view may hold a frame whose
+/// notice came earlier. Only panes with a view are taken: the core sends no
+/// new notice until a frame is taken, so taking one with nothing to draw it
+/// would lose it.
+pub(crate) fn frames_to_take(
+    ready: &BTreeSet<PaneId>,
+    changed: bool,
+    visible: &[PaneId],
+    has_view: impl Fn(PaneId) -> bool,
+) -> Vec<PaneId> {
+    let mut panes = ready.clone();
+    if changed {
+        panes.extend(visible.iter().copied());
+    }
+    panes.into_iter().filter(|p| has_view(*p)).collect()
 }
 
 #[cfg(test)]
@@ -694,6 +728,22 @@ mod tests {
         view.set_active(Some(TabId::new(99)));
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
         assert_eq!(view.needs_you_panes(), 1);
+
+        view.pane_closed(PaneId::new(101));
+        view.pane_updated(&pane(101, 10, P::Working));
+        assert!(!view.pane_state(PaneId::new(101), NEEDS));
+
+        assert_eq!(view.tab_closed(TabId::new(11)), vec![PaneId::new(110)]);
+        view.tab_updated(&tab(11, 1, &[110]));
+        view.pane_updated(&pane(110, 11, P::Working));
+        assert!(view.tab(TabId::new(11)).is_none());
+        assert!(!view.pane_state(PaneId::new(110), NEEDS));
+        let first = &view.projects()[0];
+        assert_eq!(first.tabs, vec![TabId::new(10)]);
+        assert_eq!(view.working_panes(), 0);
+
+        view.pane_updated(&pane(300, 99, P::Idle));
+        assert!(!view.pane_state(PaneId::new(300), NEEDS));
     }
 
     #[test]
@@ -771,5 +821,37 @@ mod tests {
             Some(TabId::new(10))
         );
         assert!(view.tab_of(PaneId::new(5)).is_none());
+    }
+
+    #[test]
+    fn a_frame_announced_before_its_view_exists_is_taken_once_it_is_drawn() {
+        let pane = PaneId::new(120);
+        let mut views: HashSet<PaneId> = HashSet::new();
+        let ready = BTreeSet::from([pane]);
+        assert!(frames_to_take(&ready, false, &[], |p| views.contains(&p)).is_empty());
+
+        views.insert(pane);
+        let hidden = frames_to_take(&BTreeSet::new(), true, &[PaneId::new(100)], |p| {
+            views.contains(&p)
+        });
+        assert!(hidden.is_empty());
+
+        let shown = frames_to_take(&BTreeSet::new(), true, &[pane], |p| views.contains(&p));
+        assert_eq!(shown, vec![pane]);
+    }
+
+    #[test]
+    fn a_tab_switch_takes_every_pane_it_shows_and_each_once() {
+        let views: HashSet<PaneId> = [100, 101, 110].map(PaneId::new).into();
+        let ready = BTreeSet::from([PaneId::new(100), PaneId::new(110)]);
+        let visible = [PaneId::new(100), PaneId::new(101)];
+        assert_eq!(
+            frames_to_take(&ready, true, &visible, |p| views.contains(&p)),
+            vec![PaneId::new(100), PaneId::new(101), PaneId::new(110)]
+        );
+        assert_eq!(
+            frames_to_take(&BTreeSet::new(), false, &visible, |p| views.contains(&p)),
+            Vec::<PaneId>::new()
+        );
     }
 }
