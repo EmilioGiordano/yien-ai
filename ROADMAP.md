@@ -32,7 +32,8 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
 | M4 Claude: profiles, signals, pure state machine, hook settings and payload decoding (`yien-agent`) | `feat/agent-state-machine` | done on the branch, in review; no UI yet |
-| M4 Claude: `yien-hook`, hook pipe, red mark, counter | `feat/` | pending |
+| M4 Claude: `yien-hook` binary, hook pipe server, frame format | `feat/hook-pipe` | done on the branch, in review: Windows transport tested end to end; not yet wired into panes (no env injection when spawning `claude`) |
+| M4 Claude: red mark, counter, wiring hooks into panes | `feat/` | pending |
 
 ## Decisions taken on the way
 
@@ -66,6 +67,11 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/agent-state-machine`: diverges from 04 §4.5: a `SessionStart` with `source = compact` or `resume` during a turn keeps the state and the red mark; `startup`, `clear` and the rest go to Idle as 04 says.
 - `feat/agent-state-machine`: a hook payload that is too large or malformed falls back to the event name `yien-hook` got in argv, with no payload fields (`decode_claude_hook_or_event`), instead of `Ambiguous`.
 - `feat/agent-state-machine`, open: parallel tool calls (a `PostToolUse` from another tool clears a pending or confirmed red; S6 fixtures decide); no warning channel for unknown profile keys (plan §7.4); value errors in profiles name the field path, not the line; no `.yrec` fixtures for the Claude version ranges (RNF-23); Codex and OpenCode resume arguments unverified (S7, S8); `AgentState` not yet in `yien-proto`; Windows hook shell and quoting unverified (S6).
+- `feat/hook-pipe`: the hook pipe server is the `yien_platform::hook_pipe` module, not a separate `yien-hooks` crate: plan §3.2 has no such crate, gives the IPC transport to `yien-platform`, and only `yien-pty` and `yien-platform` may use `unsafe`. `yien-hook` is a new layer-4 binary crate that depends on `yien-proto` only (no async runtime, no `unsafe`; it opens the pipe with `std::fs::OpenOptions` and `SECURITY_ANONYMOUS`).
+- `feat/hook-pipe`: the frame lives in `yien_proto::hook_frame`, hand-written with no dependency: magic `YH`, version 1, token length (1..=128), event length (0..=64, ASCII letters, digits, `_`), payload length u32 LE (≤ 4 MiB, pinned to `yien_agent::MAX_HOOK_PAYLOAD` by a test), then the bytes. The env variables are `YIEN_HOOK_PIPE` and `YIEN_HOOK_TOKEN`; `yien-hook` ignores a pipe name outside `\\.\pipe\yien-hook-`, so a tampered environment cannot make it write to a file.
+- `feat/hook-pipe`: `yien-hook` does all its work on a thread and exits 0 after 1 s whatever happened, writing nothing to stdout or stderr. Stdin above 4 MiB is drained and sent as an empty payload, so the server falls back to the argv event.
+- `feat/hook-pipe`: the server names each pipe `\\.\pipe\yien-hook-<pid>-<16 random hex>`, creates the first instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` (no squatting), uses `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL with one entry for the current user's SID. Overlapped I/O: one connection thread per client (at most 64), 2 s for the whole frame, sizes checked before allocating and the token (256-bit, from `getrandom`, compared in constant time) before reading the payload. An authentic frame whose payload does not decode even with the argv fallback is still delivered, as an `Err`, so the core can feed it as `Signal::Ambiguous`. A client that connects, writes and closes before `ConnectNamedPipe` returns (`ERROR_NO_DATA`) is still read: its bytes are delivered if buffered, otherwise it counts as a truncated frame.
+- `feat/hook-pipe`: outside Windows `HookPipeServer::start` returns `Unsupported` and `yien-hook` sends nothing; the end-to-end tests are Windows only. A unix socket comes with Linux and macOS support.
 
 ## In flight
 
