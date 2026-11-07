@@ -14,7 +14,7 @@ Read `AGENTS.md` first; it is the rulebook. The briefs in `.claude/agents/` are 
 From the main checkout, with `main` up to date:
 
 ```
-git worktree add -b <type>/<topic> C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai-wt\<topic> main
+git worktree add -b <type>/<topic> C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic> main
 ```
 
 If another running branch touches the same files, do not start this one in parallel; say so.

@@ -11,11 +11,11 @@ YIEN is a Windows-first desktop agent IDE written in Rust: projects, vertical ta
 The specs are **not in git**. `docs/` and `design/` are gitignored and do not exist in a worktree. Use the absolute paths:
 
 ```
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai\docs\02-ers.md                 what the system does (RF, RNF, RN, CU ids)
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai\docs\05-plan-de-ingenieria.md   engineering decisions (ADR-xx), milestones, test strategy
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai\docs\04-stack-y-arquitectura.md stack rationale, state machine, profiles, platform layer
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai\docs\01-vision.md               principles and identity
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai\design\prototipo-navegacion.html the UI prototype
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/02-ers.md                 what the system does (RF, RNF, RN, CU ids)
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/05-plan-de-ingenieria.md   engineering decisions (ADR-xx), milestones, test strategy
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/04-stack-y-arquitectura.md stack rationale, state machine, profiles, platform layer
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/01-vision.md               principles and identity
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/design/prototipo-navegacion.html the UI prototype
 ```
 
 Behaviour comes from the ERS. Engineering choices come from the plan (05), which overrides 04 where they differ. If the code needs to contradict either, stop and report; do not silently diverge.
@@ -61,7 +61,7 @@ feat/pane-layout-drag    fix/conpty-startup-deadlock    spike/s2-conpty-host
 Parallel work means one branch, one worktree and one implementer per feature. Worktrees live outside the repo:
 
 ```
-C:\Users\giord\Desktop\Code-Projects\Self-Tools\yien-ai-wt\<topic>
+C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic>
 ```
 
 - Each worktree has its own `target/`. cargo runs only inside the worktree the agent was given.
