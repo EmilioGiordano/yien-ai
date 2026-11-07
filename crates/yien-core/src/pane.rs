@@ -666,7 +666,10 @@ impl Actor {
                 }
             }
             PaneCmd::Relaunch => {
-                self.pending = None;
+                // A relaunch starts a new session, even before the first start.
+                if self.pending.take().is_some() {
+                    self.resume = None;
+                }
                 if let Some(old) = self.session.take() {
                     let _ = old.control.kill();
                 }
@@ -674,6 +677,7 @@ impl Actor {
             }
             PaneCmd::Terminate => {
                 if self.pending.take().is_some() {
+                    self.resume = None;
                     self.report(PaneEvent::Exited(None));
                     return;
                 }
