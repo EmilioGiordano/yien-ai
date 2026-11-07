@@ -930,9 +930,13 @@ fn while_the_ui_has_reported_nothing_a_new_pane_keeps_waiting() {
     assert_eq!((child.spec().cols, child.spec().rows), (101, 29));
 }
 
+/// Long enough that the test thread's command lands first on a loaded
+/// machine, short enough to watch the deadline pass.
+const START_WAIT: Duration = Duration::from_millis(1500);
+
 #[test]
 fn a_pane_terminated_before_it_starts_never_starts() {
-    let mut h = waiting(Duration::from_millis(300), Duration::from_millis(300));
+    let mut h = waiting(START_WAIT, START_WAIT);
     let (_, _, pane) = h.pending_project();
     h.command(Command::TerminatePane { pane });
     h.wait_for(|m| match m {
@@ -942,17 +946,17 @@ fn a_pane_terminated_before_it_starts_never_starts() {
         } if *p == pane => Some(()),
         _ => None,
     });
-    h.assert_nothing_spawned_for(Duration::from_millis(800));
+    h.assert_nothing_spawned_for(START_WAIT + Duration::from_millis(500));
     h.command(Command::RelaunchPane { pane });
     h.child();
 }
 
 #[test]
 fn a_tab_closed_before_its_pane_starts_spawns_nothing() {
-    let mut h = waiting(Duration::from_millis(300), Duration::from_millis(300));
+    let mut h = waiting(START_WAIT, START_WAIT);
     let (_, tab, _) = h.pending_project();
     h.command(Command::CloseTab { tab });
-    h.assert_nothing_spawned_for(Duration::from_millis(800));
+    h.assert_nothing_spawned_for(START_WAIT + Duration::from_millis(500));
 }
 
 #[test]
