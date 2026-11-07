@@ -3,6 +3,7 @@
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use gpui_kit::{App, Hsla, Rgba, rgb, rgba};
 
+use crate::git::FileMark;
 use crate::model::AgentState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -110,6 +111,16 @@ impl Theme {
             AgentState::Error => self.ochre,
             AgentState::Done | AgentState::Working => self.ai,
             AgentState::Idle => self.faint,
+        }
+    }
+
+    /// The colour of a changed file's letter. Never red, conflicts included (RN-01).
+    pub(crate) fn mark_color(&self, mark: FileMark) -> Rgba {
+        match mark {
+            FileMark::Modified => self.muted,
+            FileMark::Added | FileMark::Renamed | FileMark::Copied => self.ai,
+            FileMark::Deleted | FileMark::Conflicted => self.ochre,
+            FileMark::Untracked => self.faint,
         }
     }
 
