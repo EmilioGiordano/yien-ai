@@ -971,3 +971,23 @@ fn rf_pan_19_a_relaunch_starts_at_once_at_the_last_size() {
     let again = h.child();
     assert_eq!((again.spec().cols, again.spec().rows), (70, 20));
 }
+
+#[test]
+fn a_pane_relaunched_before_it_starts_takes_the_last_size_the_ui_reported() {
+    let mut h = waiting(TIMEOUT * 2, TIMEOUT * 2);
+    let (project, _, first) = h.pending_project();
+    h.resize(first, 111, 33);
+    h.child();
+    h.command(Command::NewTab {
+        project,
+        name: None,
+        profile: None,
+    });
+    let pane = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) if t.focused != first => Some(t.focused),
+        _ => None,
+    });
+    h.command(Command::RelaunchPane { pane });
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (111, 33));
+}
