@@ -57,7 +57,10 @@ pub(crate) fn resume_failed(
     elapsed: Duration,
     screen: &[&str],
 ) -> Option<ResumeFailure> {
+    // A resumed conversation can quote the message; the CLI's own one ends
+    // it with an error code, so a clean exit (`/exit`) never counts.
     let said_not_found = elapsed <= MESSAGE_GRACE
+        && code != Some(0)
         && screen
             .iter()
             .any(|line| NOT_FOUND_MESSAGES.iter().any(|m| line.contains(m)));
@@ -81,8 +84,8 @@ mod tests {
     }
 
     #[test]
-    fn rf_ses_11_the_not_found_message_is_a_failure_whatever_the_code() {
-        for code in [Some(1), Some(0), None] {
+    fn rf_ses_11_the_not_found_message_with_an_error_exit_is_a_failure() {
+        for code in [Some(1), None] {
             assert_eq!(
                 resume_failed(code, secs(2), &["", NOT_FOUND, ""]),
                 Some(ResumeFailure::NotFound),
@@ -92,13 +95,18 @@ mod tests {
     }
 
     #[test]
+    fn rf_ses_11_a_clean_exit_over_a_quoted_message_is_the_session_ending() {
+        assert_eq!(resume_failed(Some(0), secs(2), &[NOT_FOUND]), None);
+    }
+
+    #[test]
     fn rf_ses_11_a_slow_start_still_counts_the_message_up_to_its_grace() {
         assert_eq!(
             resume_failed(Some(1), MESSAGE_GRACE, &[NOT_FOUND]),
             Some(ResumeFailure::NotFound)
         );
         let late = MESSAGE_GRACE + Duration::from_millis(1);
-        assert_eq!(resume_failed(Some(0), late, &[NOT_FOUND]), None);
+        assert_eq!(resume_failed(Some(1), late, &[NOT_FOUND]), None);
     }
 
     #[test]
