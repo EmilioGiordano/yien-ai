@@ -433,12 +433,14 @@ impl Actor {
             h.registry.revoke(self.id);
             self.hook_serial = None;
             self.hooks_missing = true;
-            self.report(PaneEvent::Notice(batch_without_hooks(&self.plan)));
             let fill = Fill {
                 hooks: None,
                 ..fill
             };
             spawned = self.spawn(&fill, size.cols, size.rows).await;
+            if matches!(spawned, Ok(Ok(_))) {
+                self.report(PaneEvent::Notice(batch_without_hooks(&self.plan)));
+            }
         }
         let session = match spawned {
             Ok(Ok(session)) => session,
