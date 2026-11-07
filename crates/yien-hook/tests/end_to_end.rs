@@ -189,6 +189,32 @@ fn rn_02_hook_exits_zero_quickly_without_a_server() {
 }
 
 #[test]
+fn rn_02_hook_exits_zero_while_stdin_stays_open() {
+    let pipe = start();
+    let token = pipe.registry.issue(PaneId::new(5)).unwrap();
+    let started = Instant::now();
+    let mut child = Command::new(HOOK)
+        .arg("Stop")
+        .env(HOOK_PIPE_ENV, pipe.server.name())
+        .env(HOOK_TOKEN_ENV, token.as_str())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Kept open and never closed: the hook never sees EOF.
+    let stdin = child.stdin.take().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_silent_success(&out);
+    assert!(
+        started.elapsed() < HOOK_EXIT_BOUND,
+        "took {:?}",
+        started.elapsed()
+    );
+    drop(stdin);
+}
+
+#[test]
 fn pipe_variable_outside_the_pipe_namespace_is_ignored() {
     let dir = std::env::temp_dir().join(format!("yien-hook-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -208,9 +234,9 @@ fn pipe_variable_outside_the_pipe_namespace_is_ignored() {
 #[test]
 fn slow_client_is_cut_off_at_the_read_timeout() {
     let pipe = start();
+    let started = Instant::now();
     let mut client = raw_client(pipe.server.name());
     client.write_all(b"YH").unwrap();
-    let started = Instant::now();
     wait_until("the timeout", || pipe.server.stats().rejected == 1);
     assert!(started.elapsed() + Duration::from_millis(100) >= READ_TIMEOUT);
     assert_eq!(
