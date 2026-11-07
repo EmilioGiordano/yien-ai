@@ -284,7 +284,7 @@ impl Store for UnreadableFile {
 fn filled_store() -> MemStore {
     let mut store = MemStore::new();
     for minute in 0..=5 {
-        save(&mut store, &sample(minute * MINUTE)).unwrap();
+        assert!(save(&mut store, &sample(minute * MINUTE)).is_ok());
     }
     store
 }
