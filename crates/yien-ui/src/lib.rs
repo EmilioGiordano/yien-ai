@@ -11,10 +11,13 @@
 mod actions;
 mod assets;
 mod bridge;
+mod catalog;
 mod fonts;
 mod grid;
 mod layout;
+mod matcher;
 mod model;
+mod palette;
 mod shell;
 mod terminal;
 mod theme;

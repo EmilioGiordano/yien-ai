@@ -124,8 +124,8 @@ impl Theme {
     }
 }
 
-/// Points gpui-component, which paints the title bar and its window buttons, at
-/// the same palette.
+/// Points gpui-component, which paints the title bar, its window buttons and
+/// the palette's text input, at the same palette.
 pub(crate) fn sync_component_theme(theme: &Theme, cx: &mut App) {
     let mode = match theme.kind {
         ThemeKind::Sumi => ThemeMode::Dark,
@@ -149,6 +149,10 @@ pub(crate) fn sync_component_theme(theme: &Theme, cx: &mut App) {
         colors.danger_hover = c(theme.ochre);
         colors.danger_active = c(theme.ochre);
         colors.danger_foreground = c(theme.bg);
+        colors.caret = c(theme.text);
+        let mut selection = c(theme.ai);
+        selection.a = 0.3;
+        colors.selection = selection;
     });
 }
 
