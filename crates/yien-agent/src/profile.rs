@@ -467,7 +467,9 @@ impl Profile {
         };
         let declares = |s: Source| r.sources.contains(&s);
         match (declares(Source::Hooks), r.hooks) {
-            (true, None) => return Err(invalid(at("hooks"), "required when sources has \"hooks\"")),
+            (true, None) => {
+                return Err(invalid(at("hooks"), "required when sources has \"hooks\""));
+            }
             (false, Some(_)) => {
                 return Err(invalid(at("hooks"), "set, but sources lacks \"hooks\""));
             }
@@ -562,9 +564,7 @@ fn lower_bound(rule: &Rule) -> Option<Version> {
 pub fn builtin_profiles() -> Result<Vec<Profile>, ProfileError> {
     BUILTIN_SOURCES
         .iter()
-        .map(|(file, text)| {
-            Profile::from_toml(text).map_err(|e| invalid(*file, e.to_string()))
-        })
+        .map(|(file, text)| Profile::from_toml(text).map_err(|e| invalid(*file, e.to_string())))
         .collect()
 }
 
@@ -674,7 +674,10 @@ pattern = '\[y/N\]'
         let p = Profile::from_toml(text).unwrap();
         assert_eq!(p.kind, AgentKind::Custom);
         let detect = p.detect.as_ref().unwrap();
-        assert_eq!(detect.parse_version("mine v1.4"), Some(Version::new(1, 4, 0)));
+        assert_eq!(
+            detect.parse_version("mine v1.4"),
+            Some(Version::new(1, 4, 0))
+        );
         assert_eq!(detect.parse_version("no version"), None);
         let rule = &p.rules[0];
         assert_eq!(rule.watchdog, Some(Duration::from_secs(30)));
@@ -754,19 +757,34 @@ sources = []
             (MINIMAL.replace("\"x\"", "\"Bad Id\""), "id"),
             (MINIMAL.replace("\"X\"", "\"  \""), "name"),
             (MINIMAL.replace("[[rules]]\nsources = []\n", ""), "rules"),
-            (MINIMAL.replace("sources = []", "sources = [\"hooks\"]"), "rules[0].hooks"),
             (
-                MINIMAL.replace("sources = []", "sources = []\nhooks = \"claude-command-v1\""),
+                MINIMAL.replace("sources = []", "sources = [\"hooks\"]"),
                 "rules[0].hooks",
             ),
-            (MINIMAL.replace("sources = []", "sources = []\nversions = \"~1\""), "rules[0].versions"),
-            (MINIMAL.replace("sources = []", "sources = []\nwatchdog_secs = 0"), "rules[0].watchdog_secs"),
+            (
+                MINIMAL.replace(
+                    "sources = []",
+                    "sources = []\nhooks = \"claude-command-v1\"",
+                ),
+                "rules[0].hooks",
+            ),
+            (
+                MINIMAL.replace("sources = []", "sources = []\nversions = \"~1\""),
+                "rules[0].versions",
+            ),
+            (
+                MINIMAL.replace("sources = []", "sources = []\nwatchdog_secs = 0"),
+                "rules[0].watchdog_secs",
+            ),
             (
                 MINIMAL.replace("[[rules]]", "[launch]\nargs = [\"{nope}\"]\n[[rules]]"),
                 "launch.args[0]",
             ),
             (
-                MINIMAL.replace("[[rules]]", "[launch]\nresume = [\"--continue\"]\n[[rules]]"),
+                MINIMAL.replace(
+                    "[[rules]]",
+                    "[launch]\nresume = [\"--continue\"]\n[[rules]]",
+                ),
                 "launch.resume",
             ),
             (
@@ -774,7 +792,9 @@ sources = []
                 "detect.command",
             ),
             (
-                format!("{MINIMAL}[[rules.screen]]\nconfirms = \"needs_you\"\nbottom_rows = 3\npattern = \"x\"\n"),
+                format!(
+                    "{MINIMAL}[[rules.screen]]\nconfirms = \"needs_you\"\nbottom_rows = 3\npattern = \"x\"\n"
+                ),
                 "rules[0].screen",
             ),
         ];
@@ -792,11 +812,19 @@ sources = []
     #[test]
     fn bad_screen_rules_are_errors() {
         let base = MINIMAL.replace("sources = []", "sources = [\"screen\"]");
-        for (rows, pattern) in [("0", "x"), ("201", "x"), ("3", "(unclosed"), ("3", "a{99999}{99999}")] {
+        for (rows, pattern) in [
+            ("0", "x"),
+            ("201", "x"),
+            ("3", "(unclosed"),
+            ("3", "a{99999}{99999}"),
+        ] {
             let text = format!(
                 "{base}[[rules.screen]]\nconfirms = \"needs_you\"\nbottom_rows = {rows}\npattern = '{pattern}'\n"
             );
-            assert!(matches!(err(&text), ProfileError::Invalid { .. }), "{rows} {pattern}");
+            assert!(
+                matches!(err(&text), ProfileError::Invalid { .. }),
+                "{rows} {pattern}"
+            );
         }
     }
 

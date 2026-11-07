@@ -52,9 +52,7 @@ const CLAUDE_NOTIFICATION_MATCHER: &str =
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HookError {
     /// The `yien-hook` path cannot be embedded in a shell command safely.
-    #[error(
-        "the yien-hook path is empty or contains a quote, $, backtick or control character"
-    )]
+    #[error("the yien-hook path is empty or contains a quote, $, backtick or control character")]
     UnsafeHookPath,
     /// The payload exceeds [`MAX_HOOK_PAYLOAD`].
     #[error("hook payload of {len} bytes exceeds the {max} byte limit")]
@@ -380,7 +378,10 @@ mod tests {
             assert_eq!(decode_claude_hook(&bytes).map(|_| ()), expected, "{id:?}");
         }
         let missing = br#"{"hook_event_name":"SessionStart"}"#;
-        assert_eq!(decode_claude_hook(missing), Err(HookError::InvalidSessionId));
+        assert_eq!(
+            decode_claude_hook(missing),
+            Err(HookError::InvalidSessionId)
+        );
     }
 
     #[test]

@@ -167,7 +167,15 @@ mod tests {
 
     #[test]
     fn malformed_versions_are_errors() {
-        for bad in ["", "a.b", "1..2", "1.2.3.4", "-1", "1.2.x", "99999999999999999999"] {
+        for bad in [
+            "",
+            "a.b",
+            "1..2",
+            "1.2.3.4",
+            "-1",
+            "1.2.x",
+            "99999999999999999999",
+        ] {
             assert!(bad.parse::<Version>().is_err(), "{bad:?} parsed");
         }
     }
