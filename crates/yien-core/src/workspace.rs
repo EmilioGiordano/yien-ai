@@ -183,9 +183,9 @@ impl Workspace {
         self
     }
 
-    fn next(&mut self) -> u64 {
-        self.next_id += 1;
-        self.next_id
+    fn next(&mut self) -> Result<u64, CoreError> {
+        self.next_id = self.next_id.checked_add(1).ok_or(CoreError::OutOfIds)?;
+        Ok(self.next_id)
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
@@ -264,7 +264,7 @@ impl Workspace {
         match command {
             Command::NewProject { root, name } => {
                 let plan = resolve(None)?;
-                let id = ProjectId::new(self.next());
+                let id = ProjectId::new(self.next()?);
                 let name = name
                     .filter(|n| !n.trim().is_empty())
                     .unwrap_or_else(|| folder_name(&root));
@@ -302,7 +302,7 @@ impl Workspace {
             } => {
                 let tab_id = self.tab_of(pane)?;
                 let plan = resolve(profile.as_ref())?;
-                let new = PaneId::new(self.next());
+                let new = PaneId::new(self.next()?);
                 let tab = self.tab_mut(tab_id)?;
                 let leaf = tab.leaf_of(pane).ok_or(CoreError::UnknownPane(pane))?;
                 let new_leaf = tab
@@ -430,8 +430,8 @@ impl Workspace {
         plan: LaunchPlan,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
-        let tab_id = TabId::new(self.next());
-        let pane = PaneId::new(self.next());
+        let tab_id = TabId::new(self.next()?);
+        let pane = PaneId::new(self.next()?);
         let p = self
             .projects
             .iter_mut()
@@ -1271,6 +1271,24 @@ mod tests {
             e,
             Effect::Emit(CoreMsg::PaneUpdated(p)) if p.signal_lost
         )));
+    }
+
+    #[test]
+    fn exhausted_ids_fail_the_command_instead_of_reusing_one() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.next_id = u64::MAX;
+        let before = ws.snapshot();
+        let split = Command::SplitPane {
+            pane: a,
+            orientation: Orientation::Horizontal,
+            profile: None,
+        };
+        assert!(matches!(
+            ws.apply(split, &resolve),
+            Err(CoreError::OutOfIds)
+        ));
+        assert_eq!(ws.snapshot(), before);
     }
 
     #[test]

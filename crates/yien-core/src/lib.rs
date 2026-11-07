@@ -199,6 +199,9 @@ pub enum CoreError {
     /// Swapping or moving panes across tabs.
     #[error("panes {} and {} are in different tabs; move panes only within a tab", .0.get(), .1.get())]
     DifferentTabs(PaneId, PaneId),
+    /// Every id has been handed out; only a damaged saved session gets here.
+    #[error("YIEN has run out of ids for new tabs and panes; restart YIEN")]
+    OutOfIds,
     /// A project folder that is not a folder.
     #[error("{0} is not a folder; choose an existing folder for the project")]
     NotADirectory(String),
