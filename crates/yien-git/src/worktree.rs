@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Git, GitError, Head};
+use crate::{Git, GitError, Head, parse_status};
 
 /// One entry of `git worktree list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,26 +23,38 @@ pub struct Worktree {
     pub prunable: bool,
 }
 
+/// How many ignored entries [`WorktreeState::ignored_examples`] names at most.
+pub const IGNORED_EXAMPLES: usize = 3;
+
 /// What would be lost, or left unpushed, if a worktree were removed now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorktreeState {
-    /// Changed and untracked files; removing deletes them.
+    /// Changed and untracked files, each untracked file counted; removing
+    /// with `--force` deletes them, and without it git keeps the worktree.
     pub changed: u32,
-    /// Commits of its branch not on its upstream, or, without an upstream,
-    /// not on any other branch or remote. The branch keeps them.
+    /// Ignored files and folders (`.env`, `node_modules/`); every removal
+    /// deletes them, `--force` or not. A wholly ignored folder counts once.
+    pub ignored: u32,
+    /// Up to [`IGNORED_EXAMPLES`] of the ignored entries, to name them.
+    pub ignored_examples: Vec<String>,
+    /// Commits not on the upstream, or, without one, on no other branch or
+    /// remote. On a branch, the branch keeps them; detached, they are lost.
     pub unpushed: u32,
+    /// HEAD is detached: its unpushed commits become unreachable on removal.
+    pub detached: bool,
 }
 
 impl WorktreeState {
-    /// Whether removing it needs a second confirmation (RN-08).
+    /// Whether removing it would delete or strand anything, so it needs a
+    /// second confirmation (RN-08).
     ///
     /// ```
-    /// let state = yien_git::WorktreeState { changed: 0, unpushed: 2 };
+    /// let state = yien_git::WorktreeState { ignored: 1, ..Default::default() };
     /// assert!(state.has_work());
     /// assert!(!yien_git::WorktreeState::default().has_work());
     /// ```
     pub fn has_work(&self) -> bool {
-        self.changed > 0 || self.unpushed > 0
+        self.changed > 0 || self.ignored > 0 || self.unpushed > 0
     }
 }
 
@@ -224,14 +236,32 @@ impl Git {
         let args = ["worktree", "add", "-q", "-b", branch, "--", &path_arg, base];
         match self.run_write(dir, &overrides, &args) {
             Ok(_) => Ok(()),
+            // Another add took the name or the folder since the checks
+            // above; tell which by looking, not by git's wording.
             Err(GitError::Failed { message, .. }) if message.contains("already exists") => {
-                Err(if message.contains("branch") {
-                    WorktreeError::BranchExists(branch.to_owned())
-                } else {
+                Err(if path.exists() {
                     WorktreeError::PathTaken(path.to_owned())
+                } else {
+                    WorktreeError::BranchExists(branch.to_owned())
                 })
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether the branch `branch` exists in the repository containing `dir`.
+    ///
+    /// ```no_run
+    /// let git = yien_git::Git::new();
+    /// assert!(git.has_branch(std::path::Path::new("."), "main")?);
+    /// # Ok::<(), yien_git::GitError>(())
+    /// ```
+    pub fn has_branch(&self, dir: &Path, branch: &str) -> Result<bool, GitError> {
+        let full = format!("refs/heads/{branch}");
+        match self.run(dir, &["rev-parse", "--verify", "--quiet", &full]) {
+            Ok(_) => Ok(true),
+            Err(GitError::Failed { .. }) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
@@ -246,12 +276,10 @@ impl Git {
             Ok(_) | Err(GitError::Failed { .. }) => return Err(invalid()),
             Err(e) => return Err(e.into()),
         }
-        let full = format!("refs/heads/{branch}");
-        match self.run(dir, &["rev-parse", "--verify", "--quiet", &full]) {
-            Ok(_) => Err(WorktreeError::BranchExists(branch.to_owned())),
-            Err(GitError::Failed { .. }) => Ok(()),
-            Err(e) => Err(e.into()),
+        if self.has_branch(dir, branch)? {
+            return Err(WorktreeError::BranchExists(branch.to_owned()));
         }
+        Ok(())
     }
 
     fn check_base(&self, dir: &Path, base: &str) -> Result<(), WorktreeError> {
@@ -283,8 +311,33 @@ impl Git {
     /// # Ok::<(), yien_git::GitError>(())
     /// ```
     pub fn worktree_state(&self, path: &Path) -> Result<WorktreeState, GitError> {
-        let status = self.status(path)?;
-        let changed = u32::try_from(status.files.len()).unwrap_or(u32::MAX);
+        let overrides = self.repo_filter_overrides(path)?;
+        let args = [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=dirty",
+        ];
+        let status = parse_status(&self.run_with(path, &overrides, &args)?)?;
+        let changed = count(status.files.len());
+        let listed = self.run(
+            path,
+            &[
+                "ls-files",
+                "-z",
+                "-o",
+                "-i",
+                "--exclude-standard",
+                "--directory",
+            ],
+        )?;
+        let ignored_paths: Vec<String> = listed
+            .split(|&b| b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
         let ahead = status
             .upstream
             .as_ref()
@@ -303,7 +356,13 @@ impl Git {
                 String::from_utf8_lossy(&out).trim().parse().unwrap_or(0)
             }
         };
-        Ok(WorktreeState { changed, unpushed })
+        Ok(WorktreeState {
+            changed,
+            ignored: count(ignored_paths.len()),
+            ignored_examples: ignored_paths.into_iter().take(IGNORED_EXAMPLES).collect(),
+            unpushed,
+            detached: matches!(status.head, Head::Detached { .. }),
+        })
     }
 
     /// Removes the linked worktree at `path`, from the repository containing
@@ -355,6 +414,10 @@ impl Git {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// Reads `git worktree list --porcelain -z`: records of NUL-terminated

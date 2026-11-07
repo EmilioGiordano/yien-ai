@@ -31,4 +31,6 @@ pub use porcelain::{AheadBehind, ChangedFile, FileStatus, Head, Status, Upstream
 pub use repo::{GitInfo, Repo};
 pub use runner::{DEFAULT_TIMEOUT, Git, MAX_OUTPUT};
 pub use watch::{Change, DEFAULT_INTERVAL, DEFAULT_REFRESH, GitWatcher, WatchOptions};
-pub use worktree::{Worktree, WorktreeError, WorktreeState, branch_slug, default_worktree_path};
+pub use worktree::{
+    IGNORED_EXAMPLES, Worktree, WorktreeError, WorktreeState, branch_slug, default_worktree_path,
+};
