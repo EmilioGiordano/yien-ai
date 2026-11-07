@@ -46,7 +46,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{Claim, Instance, InstanceError, ShowRequest};
 use crate::hook_pipe::HookPipeError;
-use crate::hook_pipe::windows::{SecurityDescriptor, current_user_sid, user_only_descriptor};
+use crate::hook_pipe::windows::{
+    SecurityDescriptor, current_default_owner_sid, current_user_sid, user_only_descriptor,
+};
 
 /// The request bytes: show and take the foreground, or only show.
 const ACTIVATE: u8 = b'A';
@@ -58,7 +60,9 @@ const CONNECT_WAIT: Duration = Duration::from_secs(2);
 
 /// How long the running instance waits for a connected client's byte; a
 /// client that never writes is dropped after it.
-const READ_WAIT_MS: u32 = 1000;
+/// Shorter in tests, so a silent client is dropped well inside the 2 s a
+/// later start waits for the pipe.
+const READ_WAIT_MS: u32 = if cfg!(test) { 250 } else { 1000 };
 
 /// Pause after a failed connect, so a repeating failure cannot spin.
 const BACKOFF: Duration = Duration::from_millis(50);
@@ -357,9 +361,23 @@ fn ask_to_show(key: &str, session: u32) -> bool {
 
 /// Whether the pipe's owner is the user this process runs as.
 fn owned_by_us(pipe: HANDLE) -> bool {
-    let Ok(ours) = current_user_sid() else {
+    let Ok(user) = current_user_sid() else {
         return false;
     };
+    let default_owner = current_default_owner_sid().ok();
+    pipe_owner(pipe).is_some_and(|owner| owner_is_ours(&owner, &user, default_owner.as_deref()))
+}
+
+/// Whether a pipe owned by `owner` is this user's own. YIEN names the user
+/// as owner; a pipe made without naming one gets the token's default owner,
+/// which for an elevated token is BUILTIN\Administrators rather than the
+/// user, and is accepted too.
+fn owner_is_ours(owner: &str, user: &str, default_owner: Option<&str>) -> bool {
+    owner == user || default_owner == Some(owner)
+}
+
+/// The SID that owns `pipe`, as text.
+fn pipe_owner(pipe: HANDLE) -> Option<String> {
     let mut owner: PSID = null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: `pipe` is a live handle; the out pointers are valid; the
@@ -377,12 +395,12 @@ fn owned_by_us(pipe: HANDLE) -> bool {
         )
     };
     if status != ERROR_SUCCESS {
-        return false;
+        return None;
     }
     let mut text: *mut u16 = null_mut();
     // SAFETY: `owner` points into `descriptor`, still alive; `text` is an
     // out pointer freed below.
-    let same = if unsafe { ConvertSidToStringSidW(owner, &mut text) } != 0 {
+    let owner = if unsafe { ConvertSidToStringSidW(owner, &mut text) } != 0 {
         // SAFETY: on success `text` is a NUL-terminated UTF-16 string.
         let owner = unsafe {
             let mut n = 0;
@@ -393,13 +411,13 @@ fn owned_by_us(pipe: HANDLE) -> bool {
         };
         // SAFETY: allocated with LocalAlloc by ConvertSidToStringSidW.
         unsafe { LocalFree(text.cast()) };
-        owner == ours
+        Some(owner)
     } else {
-        false
+        None
     };
     // SAFETY: allocated with LocalAlloc by GetSecurityInfo.
     unsafe { LocalFree(descriptor) };
-    same
+    owner
 }
 
 /// Whether whoever started this process wanted its window in front: a
@@ -492,9 +510,31 @@ mod tests {
 
     #[test]
     fn a_pipe_this_process_created_is_owned_by_its_user() {
-        let pipe =
-            create_pipe("test-owner", own_session() ^ 0x5a5a, &descriptor().unwrap()).unwrap();
+        let key = format!("test-owner-{}", std::process::id());
+        let pipe = create_pipe(&key, own_session() ^ 0x5a5a, &descriptor().unwrap()).unwrap();
+        // Named in the descriptor, so the same elevated or not.
+        assert_eq!(
+            pipe_owner(pipe.as_raw_handle()),
+            Some(current_user_sid().unwrap())
+        );
         assert!(owned_by_us(pipe.as_raw_handle()));
+    }
+
+    #[test]
+    fn rf_ses_14_an_elevated_start_knows_its_own_pipe() {
+        const USER: &str = "S-1-5-21-1-2-3-1001";
+        const ADMINS: &str = "S-1-5-32-544";
+        // The owner YIEN names, elevated (default owner Administrators) or not.
+        assert!(owner_is_ours(USER, USER, Some(ADMINS)));
+        assert!(owner_is_ours(USER, USER, Some(USER)));
+        // A pipe owned by Administrators (`O:BA`), seen from an elevated
+        // start: its own token would have made it so.
+        assert!(owner_is_ours(ADMINS, USER, Some(ADMINS)));
+        // The same pipe seen from a start that is not elevated, or another
+        // user's pipe: not ours.
+        assert!(!owner_is_ours(ADMINS, USER, Some(USER)));
+        assert!(!owner_is_ours("S-1-5-21-1-2-3-1002", USER, Some(USER)));
+        assert!(!owner_is_ours(ADMINS, USER, None));
     }
 
     #[test]
