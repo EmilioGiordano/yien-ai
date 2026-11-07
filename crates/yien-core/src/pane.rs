@@ -353,6 +353,7 @@ impl Actor {
         if let Some(s) = self.session.take() {
             drop(s);
             self.outbox.clear();
+            self.retry_at = None;
         }
     }
 
@@ -387,6 +388,7 @@ impl Actor {
     fn flush(&mut self) {
         let Some(session) = &self.session else {
             self.outbox.clear();
+            self.retry_at = None;
             return;
         };
         if let Some((cols, rows)) = self.outbox.resize {
@@ -398,6 +400,7 @@ impl Actor {
                 }
                 Err(_) => {
                     self.outbox.clear();
+                    self.retry_at = None;
                     return;
                 }
             }
@@ -419,6 +422,7 @@ impl Actor {
                 }
                 Err(_) => {
                     self.outbox.clear();
+                    self.retry_at = None;
                     break;
                 }
             }
@@ -486,8 +490,11 @@ impl Actor {
 
     fn on_timers(&mut self) {
         let now = Instant::now();
-        if self.retry_at.is_some_and(|at| at <= now) && !self.outbox.is_empty() {
-            self.flush();
+        if self.retry_at.is_some_and(|at| at <= now) {
+            self.retry_at = None;
+            if !self.outbox.is_empty() {
+                self.flush();
+            }
         }
         if let Some((generation, at)) = self.sync
             && at <= now
