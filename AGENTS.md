@@ -102,7 +102,9 @@ fix/answer conpty cursor query at startup
 test/cover layout swap invariants
 ```
 
-Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`, `build`. The type must match what the diff does.
+Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`, `build`. The type must match what the diff does. These are commit types; branch types are listed under "Branches" and need not match.
+
+A new dependency, or a change that makes the ERS or the plan wrong, goes in the report and the PR body: for a dependency, its purpose, the alternative rejected and its licence. The orchestrator records it in `docs/` (dependency registry, ERS, plan), which is not in git.
 
 ## Pull requests
 
