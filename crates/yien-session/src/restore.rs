@@ -207,6 +207,7 @@ mod tests {
             branch: None,
             worktree: None,
             archived: false,
+            muted: false,
             name: None,
         };
         let snapshot = SessionSnapshot::new(

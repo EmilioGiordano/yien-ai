@@ -112,6 +112,7 @@ impl Workspace {
             },
             worktree: None,
             archived: false,
+            muted: false,
             name: tab.custom_name.clone(),
             layout,
             panes,

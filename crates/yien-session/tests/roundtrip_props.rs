@@ -27,6 +27,7 @@ struct TabSeed {
     branch: Option<String>,
     worktree: Option<String>,
     archived: bool,
+    muted: bool,
     name: Option<String>,
 }
 
@@ -64,20 +65,24 @@ fn tab_seed() -> impl Strategy<Value = TabSeed> {
             proptest::option::of(text()),
             proptest::option::of(text()),
             any::<bool>(),
+            any::<bool>(),
             proptest::option::of(text()),
         ),
     )
         .prop_map(
-            |(title, dir, panes, shape, focus, (branch, worktree, archived, name))| TabSeed {
-                title,
-                dir,
-                panes,
-                shape,
-                focus,
-                branch,
-                worktree,
-                archived,
-                name,
+            |(title, dir, panes, shape, focus, (branch, worktree, archived, muted, name))| {
+                TabSeed {
+                    title,
+                    dir,
+                    panes,
+                    shape,
+                    focus,
+                    branch,
+                    worktree,
+                    archived,
+                    muted,
+                    name,
+                }
             },
         )
 }
@@ -178,6 +183,7 @@ fn build(
                             branch: seed.branch,
                             worktree: seed.worktree,
                             archived: seed.archived,
+                            muted: seed.muted,
                             name: seed.name,
                             panes,
                         }
