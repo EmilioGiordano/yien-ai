@@ -602,10 +602,6 @@ impl Workspace {
             PaneEvent::Crashed => {
                 p.running = false;
                 p.exit_code = None;
-                // The new actor a relaunch starts knows nothing: the next
-                // refresh sends it the view again.
-                p.visible = false;
-                p.seen = false;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message: "This pane stopped after an internal error. Relaunch it to start \
@@ -1037,25 +1033,19 @@ mod tests {
     }
 
     #[test]
-    fn rf_pan_19_a_crashed_pane_gets_its_view_again_after_the_relaunch() {
+    fn rf_pan_19_a_crash_keeps_the_view_the_pane_had() {
         let mut ws = Workspace::new();
         ws.set_window_focus(true);
         let (_, a) = project(&mut ws);
-        assert!(ws.panes[&a].visible && ws.panes[&a].seen);
         let fx = ws.on_pane_event(a, PaneEvent::Crashed);
         assert!(!fx.iter().any(|e| matches!(e, Effect::View { .. })));
         assert!(fx.iter().any(
             |e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a && !p.running)
         ));
+        assert!(ws.panes[&a].visible && ws.panes[&a].seen);
         let fx = run(&mut ws, Command::RelaunchPane { pane: a });
-        let relaunch = fx
-            .iter()
-            .position(|e| matches!(e, Effect::Relaunch { pane } if *pane == a));
-        let view = fx.iter().position(
-            |e| matches!(e, Effect::View { pane, visible: true, seen: true } if *pane == a),
-        );
         assert!(
-            relaunch.is_some() && view.is_some() && relaunch < view,
+            matches!(fx[..], [Effect::Relaunch { pane }] if pane == a),
             "{fx:?}"
         );
     }

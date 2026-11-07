@@ -205,6 +205,10 @@ pub(crate) struct PaneSetup {
     pub cwd: String,
     pub size: (u16, u16),
     pub slot: Arc<FrameSlot>,
+    /// The view the workspace last sent, so a restarted actor draws and
+    /// counts as seen without waiting for the next change.
+    pub visible: bool,
+    pub seen: bool,
 }
 
 struct Actor {
@@ -237,7 +241,10 @@ pub(crate) fn spawn(
 ) {
     let (cols, rows) = setup.size;
     let engine = Arc::new(Mutex::new((ctx.engine)(&ctx.config.vt, cols, rows)));
-    let machine = Machine::new(setup.plan.machine.clone());
+    let mut machine = Machine::new(setup.plan.machine.clone());
+    if setup.seen {
+        machine = machine.step(&Signal::Seen(true), ctx.config.clock.now()).0;
+    }
     let id = setup.id;
     let reports = Arc::clone(&ctx.reports);
     let actor = Actor {
@@ -253,7 +260,7 @@ pub(crate) fn spawn(
         outbox: Outbox::default(),
         retry_at: None,
         dirty: false,
-        visible: false,
+        visible: setup.visible,
         last_frame: None,
         notice_owed: false,
         sync: None,
