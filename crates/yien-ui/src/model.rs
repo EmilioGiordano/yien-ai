@@ -1,14 +1,16 @@
 //! The view model the window draws: projects, their tabs and each tab's panes.
 //!
-//! Plain data keyed by `yien-proto` ids, so the core can fill it later without
-//! the UI knowing where it came from (ADR-03).
+//! Plain data keyed by `yien-proto` ids, kept up to date from the core's
+//! events (ADR-03). Events may arrive in any order and may name things the
+//! UI has already dropped; updates tolerate both.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use yien_layout::{Rect, Tree};
-use yien_proto::{PaneId, ProjectId, TabId};
+use yien_proto::{LayoutNode, PaneId, PaneInfo, ProjectId, ProjectInfo, TabId, TabInfo};
 
-/// What the agent in a pane is doing (RF-AGE-05).
+use crate::layout::{Rect, pane_rects};
+
+/// What the agent in a pane is doing, as the window shows it (RF-AGE-05).
 ///
 /// Anything the detector cannot tell is [`AgentState::Idle`], never
 /// [`AgentState::NeedsYou`] (RN-02), so `Idle` is the default.
@@ -64,26 +66,73 @@ impl AgentState {
     }
 }
 
-/// One pane of a tab, as its title bar shows it.
+impl From<yien_proto::AgentState> for AgentState {
+    fn from(state: yien_proto::AgentState) -> Self {
+        use yien_proto::AgentState as P;
+        match state {
+            P::Idle => Self::Idle,
+            P::Working => Self::Working,
+            P::NeedsYou(_) => Self::NeedsYou,
+            P::Done => Self::Done,
+            P::Error(_) => Self::Error,
+        }
+    }
+}
+
+/// One pane, as its title bar shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneView {
     /// The pane's id in the protocol.
     pub id: PaneId,
-    /// The leaf that holds this pane in its tab's [`TabView::layout`].
-    pub leaf: yien_layout::PaneId,
     /// What runs in it: `claude`, `pwsh`, `cargo test`.
     pub name: String,
-    /// The profile it was started with: `Claude Code`, `PowerShell`.
+    /// The profile it was started with: `Claude Code`, `Shell`.
     pub profile: String,
     /// What its agent is doing.
     pub state: AgentState,
+    /// Whether its program is running.
+    pub running: bool,
+    /// The exit code once it stopped, when the OS reported one.
+    pub exit_code: Option<u32>,
+    /// Its program ran and stopped, or could not start (RF-PAN-19). A pane
+    /// still starting is not running but has not exited either.
+    pub exited: bool,
+}
+
+impl PaneView {
+    /// A pane the layout names before its details arrive.
+    fn placeholder(id: PaneId) -> Self {
+        Self {
+            id,
+            name: "terminal".to_owned(),
+            profile: String::new(),
+            state: AgentState::Idle,
+            running: true,
+            exit_code: None,
+            exited: false,
+        }
+    }
+
+    fn from_info(info: &PaneInfo) -> Self {
+        Self {
+            id: info.id,
+            name: info.name.clone(),
+            profile: info.profile.clone(),
+            state: info.state.into(),
+            running: info.running,
+            exit_code: info.exit_code,
+            exited: !info.running && info.exit_code.is_some(),
+        }
+    }
 }
 
 /// One tab: a working directory, maybe a branch, and its panes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TabView {
     /// The tab's id in the protocol.
     pub id: TabId,
+    /// The project it belongs to.
+    pub project: ProjectId,
     /// The name in the tab bar.
     pub name: String,
     /// The working directory every pane starts in (RF-ESP-04).
@@ -91,44 +140,40 @@ pub struct TabView {
     /// The git branch checked out in `dir`, when it is a repository (RF-ESP-04).
     pub branch: Option<String>,
     /// How the panes split the tab.
-    pub layout: Tree,
-    /// One per leaf of `layout`.
-    pub panes: Vec<PaneView>,
+    pub layout: LayoutNode,
     /// The pane that has the keyboard.
     pub focused: PaneId,
+    /// The pane shown alone, if any (RF-PAN-04).
+    pub maximized: Option<PaneId>,
 }
 
 impl TabView {
-    /// The tab's state: that of its most urgent pane.
-    pub fn state(&self) -> AgentState {
-        self.panes
-            .iter()
-            .map(|p| p.state)
-            .min_by_key(|s| s.urgency())
-            .unwrap_or_default()
+    fn from_info(info: &TabInfo) -> Self {
+        Self {
+            id: info.id,
+            project: info.project,
+            name: info.name.clone(),
+            dir: info.dir.clone(),
+            branch: info.branch.clone(),
+            layout: info.layout.clone(),
+            focused: info.focused,
+            maximized: info.maximized,
+        }
     }
 
-    /// How many of its panes need the user.
-    pub fn needs_you_panes(&self) -> usize {
-        self.panes.iter().filter(|p| p.state.needs_you()).count()
-    }
-
-    /// Each pane with its rectangle as fractions of the pane area, in tree order.
-    pub fn pane_rects(&self) -> Vec<(&PaneView, Rect)> {
-        let rects = self.layout.layout(Rect::new(0.0, 0.0, 1.0, 1.0));
-        self.layout
-            .panes()
-            .into_iter()
-            .filter_map(|leaf| {
-                let pane = self.panes.iter().find(|p| p.leaf == leaf)?;
-                Some((pane, *rects.get(&leaf)?))
-            })
-            .collect()
+    /// Each visible pane with its rectangle as fractions of the pane area, in
+    /// tree order. A maximized pane fills the area alone.
+    pub(crate) fn rects(&self) -> Vec<(PaneId, Rect)> {
+        let all = pane_rects(&self.layout);
+        match self.maximized {
+            Some(max) if all.iter().any(|(p, _)| *p == max) => vec![(max, Rect::FULL)],
+            _ => all,
+        }
     }
 }
 
 /// One project in the tab bar, with its tabs nested under it (RF-ESP-02).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
     /// The project's id in the protocol.
     pub id: ProjectId,
@@ -137,113 +182,161 @@ pub struct ProjectView {
     /// The folder it was registered from.
     pub root: String,
     /// Its tabs, in tab-bar order.
-    pub tabs: Vec<TabView>,
-}
-
-impl ProjectView {
-    /// How many of its tabs have a pane that needs the user.
-    pub fn needs_you_tabs(&self) -> usize {
-        self.tabs.iter().filter(|t| t.state().needs_you()).count()
-    }
-}
-
-/// Why a [`WorkspaceView`] could not be built.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ViewError {
-    /// Two projects share an id.
-    #[error("project {} appears twice", .0.get())]
-    DuplicateProject(ProjectId),
-    /// Two tabs share an id.
-    #[error("tab {} appears twice", .0.get())]
-    DuplicateTab(TabId),
-    /// Two panes share an id.
-    #[error("pane {} appears twice", .0.get())]
-    DuplicatePane(PaneId),
-    /// A tab's panes are not exactly the leaves of its layout.
-    #[error("the panes of tab {} do not match its layout", .0.get())]
-    LayoutMismatch(TabId),
-    /// A tab's focused pane is not one of its panes.
-    #[error("tab {} focuses a pane it does not hold", .0.get())]
-    UnknownFocus(TabId),
+    pub tabs: Vec<TabId>,
 }
 
 /// Everything the window shows, and which tab is selected.
 ///
 /// ```
-/// use yien_layout::Tree;
-/// use yien_proto::{PaneId, ProjectId, TabId};
-/// use yien_ui::{AgentState, PaneView, ProjectView, TabView, WorkspaceView};
+/// use yien_proto::{LayoutNode, PaneId, ProjectId, ProjectInfo, TabId, TabInfo, WorkspaceSnapshot};
+/// use yien_ui::WorkspaceView;
 ///
-/// let pane = PaneView {
-///     id: PaneId::new(1),
-///     leaf: 0,
-///     name: "claude".into(),
-///     profile: "Claude Code".into(),
-///     state: AgentState::NeedsYou,
+/// let snapshot = WorkspaceSnapshot {
+///     projects: vec![ProjectInfo { id: ProjectId::new(1), name: "yien".into(), root: "C:/yien".into(), tabs: vec![TabId::new(2)] }],
+///     tabs: vec![TabInfo {
+///         id: TabId::new(2), project: ProjectId::new(1), name: "Tab 1".into(), dir: "C:/yien".into(),
+///         branch: None, layout: LayoutNode::Pane(PaneId::new(3)), focused: PaneId::new(3), maximized: None,
+///     }],
+///     panes: vec![],
+///     active_tab: Some(TabId::new(2)),
 /// };
-/// let tab = TabView {
-///     id: TabId::new(1),
-///     name: "main".into(),
-///     dir: "C:/Code/yien".into(),
-///     branch: Some("main".into()),
-///     layout: Tree::new(),
-///     panes: vec![pane],
-///     focused: PaneId::new(1),
-/// };
-/// let project = ProjectView {
-///     id: ProjectId::new(1),
-///     name: "yien".into(),
-///     root: "C:/Code/yien".into(),
-///     tabs: vec![tab],
-/// };
-/// let view = WorkspaceView::new(vec![project]).unwrap();
-/// assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(1)));
-/// assert_eq!(view.needs_you_panes(), 1);
+/// let view = WorkspaceView::from_snapshot(&snapshot);
+/// assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(2)));
+/// assert_eq!(view.pane_count(), 1);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkspaceView {
     projects: Vec<ProjectView>,
+    tabs: HashMap<TabId, TabView>,
+    panes: HashMap<PaneId, PaneView>,
     selected: Option<TabId>,
     folded: HashSet<ProjectId>,
 }
 
 impl WorkspaceView {
-    /// Checks the ids and layouts, and selects the first tab.
-    pub fn new(projects: Vec<ProjectView>) -> Result<Self, ViewError> {
-        let mut project_ids = HashSet::new();
-        let mut tab_ids = HashSet::new();
-        let mut pane_ids = HashSet::new();
-        for project in &projects {
-            if !project_ids.insert(project.id) {
-                return Err(ViewError::DuplicateProject(project.id));
-            }
-            for tab in &project.tabs {
-                if !tab_ids.insert(tab.id) {
-                    return Err(ViewError::DuplicateTab(tab.id));
-                }
-                for pane in &tab.panes {
-                    if !pane_ids.insert(pane.id) {
-                        return Err(ViewError::DuplicatePane(pane.id));
-                    }
-                }
-                let mut leaves = tab.layout.panes();
-                let mut held: Vec<_> = tab.panes.iter().map(|p| p.leaf).collect();
-                leaves.sort_unstable();
-                held.sort_unstable();
-                if leaves != held {
-                    return Err(ViewError::LayoutMismatch(tab.id));
-                }
-                if !tab.panes.iter().any(|p| p.id == tab.focused) {
-                    return Err(ViewError::UnknownFocus(tab.id));
-                }
-            }
+    /// The workspace as the core's first event describes it.
+    pub fn from_snapshot(snapshot: &yien_proto::WorkspaceSnapshot) -> Self {
+        let mut view = Self::default();
+        for project in &snapshot.projects {
+            view.project_updated(project);
         }
-        let selected = projects.iter().flat_map(|p| &p.tabs).map(|t| t.id).next();
-        Ok(Self {
-            projects,
-            selected,
-            folded: HashSet::new(),
-        })
+        for tab in &snapshot.tabs {
+            view.tab_updated(tab);
+        }
+        for pane in &snapshot.panes {
+            view.pane_updated(pane);
+        }
+        view.set_active(snapshot.active_tab);
+        if view.selected.is_none() {
+            let first = view.tabs_in_order().next().map(|t| t.id);
+            view.selected = first;
+        }
+        view
+    }
+
+    /// A project was added or changed. Its tab order is the core's.
+    pub fn project_updated(&mut self, info: &ProjectInfo) {
+        let project = ProjectView {
+            id: info.id,
+            name: info.name.clone(),
+            root: info.root.clone(),
+            tabs: info.tabs.clone(),
+        };
+        match self.projects.iter_mut().find(|p| p.id == info.id) {
+            Some(existing) => *existing = project,
+            None => self.projects.push(project),
+        }
+    }
+
+    /// A tab was added or changed. A tab its project does not list yet is
+    /// appended to it, so it shows before the project update arrives.
+    pub fn tab_updated(&mut self, info: &TabInfo) {
+        if let Some(project) = self.projects.iter_mut().find(|p| p.id == info.project)
+            && !project.tabs.contains(&info.id)
+        {
+            project.tabs.push(info.id);
+        }
+        self.tabs.insert(info.id, TabView::from_info(info));
+    }
+
+    /// A tab closed with its panes. Returns the panes that went with it. If
+    /// it was selected, a neighbour in the same project is selected instead.
+    pub fn tab_closed(&mut self, id: TabId) -> Vec<PaneId> {
+        let order: Vec<TabId> = self.tabs_in_order().map(|t| t.id).collect();
+        let Some(tab) = self.tabs.remove(&id) else {
+            return Vec::new();
+        };
+        let mut sibling = None;
+        if let Some(project) = self.projects.iter_mut().find(|p| p.id == tab.project)
+            && let Some(i) = project.tabs.iter().position(|t| *t == id)
+        {
+            project.tabs.remove(i);
+            sibling = project
+                .tabs
+                .get(i)
+                .or_else(|| i.checked_sub(1).and_then(|j| project.tabs.get(j)))
+                .copied();
+        }
+        let gone = tab.layout.panes();
+        for pane in &gone {
+            self.panes.remove(pane);
+        }
+        if self.selected == Some(id) {
+            let fallback = || {
+                let at = order.iter().position(|t| *t == id).unwrap_or(0);
+                order
+                    .iter()
+                    .filter(|t| **t != id)
+                    .nth(at.saturating_sub(1))
+                    .copied()
+            };
+            self.selected = sibling.or_else(fallback);
+        }
+        gone
+    }
+
+    /// The core changed the selected tab. An unknown tab is ignored.
+    pub fn set_active(&mut self, tab: Option<TabId>) {
+        match tab {
+            Some(id) => {
+                self.select_tab(id);
+            }
+            None => self.selected = None,
+        }
+    }
+
+    /// A pane was added or its details changed.
+    pub fn pane_updated(&mut self, info: &PaneInfo) {
+        let mut pane = PaneView::from_info(info);
+        if !info.running && self.panes.get(&info.id).is_some_and(|p| p.exited) {
+            pane.exited = true;
+        }
+        self.panes.insert(info.id, pane);
+    }
+
+    /// A pane closed.
+    pub fn pane_closed(&mut self, id: PaneId) {
+        self.panes.remove(&id);
+    }
+
+    /// A pane's agent state changed. `false` when the pane is unknown.
+    pub fn pane_state(&mut self, id: PaneId, state: yien_proto::AgentState) -> bool {
+        self.panes
+            .get_mut(&id)
+            .map(|p| p.state = state.into())
+            .is_some()
+    }
+
+    /// A pane's program exited. `false` when the pane is unknown.
+    pub fn pane_exited(&mut self, id: PaneId, code: Option<u32>) -> bool {
+        self.panes
+            .get_mut(&id)
+            .map(|p| {
+                p.running = false;
+                p.exit_code = code;
+                p.exited = true;
+            })
+            .is_some()
     }
 
     /// Every project, in tab-bar order.
@@ -251,28 +344,51 @@ impl WorkspaceView {
         &self.projects
     }
 
+    /// The tabs of a project that the UI knows, in tab-bar order.
+    pub fn tabs_of<'a>(&'a self, project: &'a ProjectView) -> impl Iterator<Item = &'a TabView> {
+        project.tabs.iter().filter_map(|id| self.tabs.get(id))
+    }
+
+    /// A tab by id.
+    pub fn tab(&self, id: TabId) -> Option<&TabView> {
+        self.tabs.get(&id)
+    }
+
+    /// A pane's details; a placeholder while they have not arrived.
+    pub fn pane(&self, id: PaneId) -> PaneView {
+        self.panes
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| PaneView::placeholder(id))
+    }
+
+    /// Every pane of every tab, in tab-bar and tree order.
+    pub fn all_panes(&self) -> Vec<PaneId> {
+        self.tabs_in_order()
+            .flat_map(|t| t.layout.panes())
+            .collect()
+    }
+
+    /// The tab a pane belongs to.
+    pub fn tab_of(&self, pane: PaneId) -> Option<&TabView> {
+        self.tabs_in_order()
+            .find(|t| t.layout.panes().contains(&pane))
+    }
+
     /// The selected tab, if there is any tab at all.
     pub fn selected_tab(&self) -> Option<&TabView> {
-        let id = self.selected?;
-        self.tabs().find(|t| t.id == id)
+        self.tabs.get(&self.selected?)
     }
 
     /// The project of the selected tab.
     pub fn selected_project(&self) -> Option<&ProjectView> {
-        let id = self.selected?;
-        self.projects
-            .iter()
-            .find(|p| p.tabs.iter().any(|t| t.id == id))
+        let tab = self.selected_tab()?;
+        self.projects.iter().find(|p| p.id == tab.project)
     }
 
     /// Selects a tab and unfolds its project. `false` when no tab has that id.
     pub fn select_tab(&mut self, id: TabId) -> bool {
-        let Some(project) = self
-            .projects
-            .iter()
-            .find(|p| p.tabs.iter().any(|t| t.id == id))
-            .map(|p| p.id)
-        else {
+        let Some(project) = self.tabs.get(&id).map(|t| t.project) else {
             return false;
         };
         self.selected = Some(id);
@@ -280,33 +396,17 @@ impl WorkspaceView {
         true
     }
 
-    /// Selects a project's first tab. `false` when the project is unknown or
-    /// has no tabs.
-    pub fn select_project(&mut self, id: ProjectId) -> bool {
-        let first = self
-            .projects
-            .iter()
-            .find(|p| p.id == id)
-            .and_then(|p| p.tabs.first())
-            .map(|t| t.id);
-        first.is_some_and(|tab| self.select_tab(tab))
+    /// A project's first tab, if it has one.
+    pub fn first_tab_of(&self, id: ProjectId) -> Option<TabId> {
+        let project = self.projects.iter().find(|p| p.id == id)?;
+        self.tabs_of(project).next().map(|t| t.id)
     }
 
-    /// Moves the selection to the next tab in tab-bar order, wrapping around.
-    pub fn select_next_tab(&mut self) -> bool {
-        self.step(1)
-    }
-
-    /// Moves the selection to the previous tab in tab-bar order, wrapping around.
-    pub fn select_previous_tab(&mut self) -> bool {
-        self.step(-1)
-    }
-
-    fn step(&mut self, by: isize) -> bool {
-        let ids: Vec<TabId> = self.tabs().map(|t| t.id).collect();
-        let Some(len) = isize::try_from(ids.len()).ok().filter(|&n| n > 0) else {
-            return false;
-        };
+    /// The tab `by` steps from the selected one in tab-bar order, wrapping
+    /// around; the first tab when nothing is selected.
+    pub fn tab_after(&self, by: isize) -> Option<TabId> {
+        let ids: Vec<TabId> = self.tabs_in_order().map(|t| t.id).collect();
+        let len = isize::try_from(ids.len()).ok().filter(|&n| n > 0)?;
         let at = self
             .selected
             .and_then(|s| ids.iter().position(|&id| id == s))
@@ -315,10 +415,7 @@ impl WorkspaceView {
             Some(i) => (i + by).rem_euclid(len),
             None => 0,
         };
-        usize::try_from(next)
-            .ok()
-            .and_then(|i| ids.get(i).copied())
-            .is_some_and(|id| self.select_tab(id))
+        usize::try_from(next).ok().and_then(|i| ids.get(i).copied())
     }
 
     /// Folds or unfolds a project in the tab bar (RF-ESP-17). `false` when the
@@ -338,239 +435,309 @@ impl WorkspaceView {
         self.folded.contains(&id)
     }
 
+    /// A tab's state: that of its most urgent pane.
+    pub fn tab_state(&self, tab: &TabView) -> AgentState {
+        tab.layout
+            .panes()
+            .into_iter()
+            .map(|p| self.pane(p).state)
+            .min_by_key(|s| s.urgency())
+            .unwrap_or_default()
+    }
+
+    /// How many of a project's tabs have a pane that needs the user.
+    pub fn needs_you_tabs_of(&self, project: &ProjectView) -> usize {
+        self.tabs_of(project)
+            .filter(|t| self.tab_state(t).needs_you())
+            .count()
+    }
+
     /// Panes whose agent needs the user: the global counter (RF-ATN-03).
     pub fn needs_you_panes(&self) -> usize {
-        self.tabs().map(TabView::needs_you_panes).sum()
+        self.count_panes(AgentState::NeedsYou)
     }
 
     /// Tabs with at least one pane that needs the user.
     pub fn needs_you_tabs(&self) -> usize {
-        self.projects.iter().map(ProjectView::needs_you_tabs).sum()
+        self.tabs_in_order()
+            .filter(|t| self.tab_state(t).needs_you())
+            .count()
     }
 
     /// Panes whose agent is working.
     pub fn working_panes(&self) -> usize {
-        self.tabs()
-            .flat_map(|t| &t.panes)
-            .filter(|p| p.state == AgentState::Working)
-            .count()
+        self.count_panes(AgentState::Working)
     }
 
     /// How many tabs there are.
     pub fn tab_count(&self) -> usize {
-        self.tabs().count()
+        self.tabs_in_order().count()
     }
 
     /// How many panes there are.
     pub fn pane_count(&self) -> usize {
-        self.tabs().map(|t| t.panes.len()).sum()
+        self.all_panes().len()
     }
 
-    fn tabs(&self) -> impl Iterator<Item = &TabView> {
-        self.projects.iter().flat_map(|p| &p.tabs)
+    fn count_panes(&self, state: AgentState) -> usize {
+        self.all_panes()
+            .into_iter()
+            .filter(|p| self.pane(*p).state == state)
+            .count()
+    }
+
+    fn tabs_in_order(&self) -> impl Iterator<Item = &TabView> {
+        self.projects.iter().flat_map(|p| self.tabs_of(p))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use yien_layout::Orientation;
+    use yien_proto::{AgentState as P, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot};
 
     use super::*;
 
-    fn pane(id: u64, leaf: yien_layout::PaneId, state: AgentState) -> PaneView {
-        PaneView {
-            id: PaneId::new(id),
-            leaf,
-            name: format!("pane-{id}"),
-            profile: "Claude Code".into(),
-            state,
+    fn layout(panes: &[u64]) -> LayoutNode {
+        match panes {
+            [one] => LayoutNode::Pane(PaneId::new(*one)),
+            many => LayoutNode::Split {
+                orientation: Orientation::Horizontal,
+                children: many
+                    .iter()
+                    .map(|p| LayoutChild {
+                        flex: 1.0,
+                        node: LayoutNode::Pane(PaneId::new(*p)),
+                    })
+                    .collect(),
+            },
         }
     }
 
-    fn tab(id: u64, states: &[AgentState]) -> TabView {
-        let mut layout = Tree::new();
-        let mut leaves = vec![0];
-        for _ in 1..states.len() {
-            let last = *leaves.last().unwrap();
-            leaves.push(layout.split(last, Orientation::Horizontal).unwrap());
-        }
-        let panes: Vec<_> = leaves
-            .iter()
-            .zip(states)
-            .enumerate()
-            .map(|(i, (&leaf, &state))| pane(id * 100 + i as u64, leaf, state))
-            .collect();
-        TabView {
+    fn tab(id: u64, project: u64, panes: &[u64]) -> TabInfo {
+        TabInfo {
             id: TabId::new(id),
+            project: ProjectId::new(project),
             name: format!("tab-{id}"),
             dir: format!("C:/Code/tab-{id}"),
-            branch: Some(format!("feat/tab-{id}")),
-            layout,
-            focused: panes[0].id,
-            panes,
+            branch: None,
+            layout: layout(panes),
+            focused: PaneId::new(panes[0]),
+            maximized: None,
         }
     }
 
-    fn project(id: u64, tabs: Vec<TabView>) -> ProjectView {
-        ProjectView {
+    fn project(id: u64, tabs: &[u64]) -> ProjectInfo {
+        ProjectInfo {
             id: ProjectId::new(id),
             name: format!("project-{id}"),
             root: format!("C:/Code/project-{id}"),
-            tabs,
+            tabs: tabs.iter().map(|t| TabId::new(*t)).collect(),
         }
     }
 
-    use super::AgentState::{Done, Error, Idle, NeedsYou, Working};
+    fn pane(id: u64, tab: u64, state: P) -> PaneInfo {
+        PaneInfo {
+            id: PaneId::new(id),
+            tab: TabId::new(tab),
+            name: format!("pane-{id}"),
+            profile: "Shell".into(),
+            title: None,
+            cwd: None,
+            state,
+            running: true,
+            exit_code: None,
+            session_id: None,
+        }
+    }
 
+    const NEEDS: P = P::NeedsYou(NeedsReason::Permission);
+
+    /// project 1: tab 10 (panes 100 needs, 101 idle), tab 11 (110 working);
+    /// project 2: tab 20 (200 done); project 3: empty.
     fn demo() -> WorkspaceView {
-        WorkspaceView::new(vec![
-            project(1, vec![tab(1, &[NeedsYou, Idle]), tab(2, &[Working])]),
-            project(2, vec![tab(3, &[Done]), tab(4, &[NeedsYou, NeedsYou])]),
-            project(3, vec![]),
-            project(4, vec![tab(5, &[Error])]),
-        ])
-        .unwrap()
+        WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[10, 11]), project(2, &[20]), project(3, &[])],
+            tabs: vec![
+                tab(10, 1, &[100, 101]),
+                tab(11, 1, &[110]),
+                tab(20, 2, &[200]),
+            ],
+            panes: vec![
+                pane(100, 10, NEEDS),
+                pane(101, 10, P::Idle),
+                pane(110, 11, P::Working),
+                pane(200, 20, P::Done),
+            ],
+            active_tab: Some(TabId::new(10)),
+        })
+    }
+
+    fn tab_names(view: &WorkspaceView) -> Vec<Vec<String>> {
+        view.projects()
+            .iter()
+            .map(|p| view.tabs_of(p).map(|t| t.name.clone()).collect())
+            .collect()
     }
 
     #[test]
     fn rf_esp_02_projects_keep_their_tabs_nested_in_order() {
         let view = demo();
-        let names: Vec<Vec<&str>> = view
-            .projects()
-            .iter()
-            .map(|p| p.tabs.iter().map(|t| t.name.as_str()).collect())
-            .collect();
         assert_eq!(
-            names,
-            vec![
-                vec!["tab-1", "tab-2"],
-                vec!["tab-3", "tab-4"],
-                vec![],
-                vec!["tab-5"]
-            ]
+            tab_names(&view),
+            vec![vec!["tab-10", "tab-11"], vec!["tab-20"], vec![]]
         );
-        assert_eq!(view.tab_count(), 5);
-        assert_eq!(view.pane_count(), 7);
+        assert_eq!(view.tab_count(), 3);
+        assert_eq!(view.pane_count(), 4);
     }
 
     #[test]
-    fn rf_esp_04_a_tab_carries_its_directory_and_optional_branch() {
-        let mut no_branch = tab(9, &[Idle]);
-        no_branch.branch = None;
-        let view = WorkspaceView::new(vec![project(1, vec![tab(1, &[Idle]), no_branch])]).unwrap();
-        let tabs = &view.projects()[0].tabs;
-        assert_eq!(tabs[0].dir, "C:/Code/tab-1");
-        assert_eq!(tabs[0].branch.as_deref(), Some("feat/tab-1"));
-        assert_eq!(tabs[1].branch, None);
-    }
-
-    #[test]
-    fn the_first_tab_is_selected_even_after_an_empty_project() {
-        let view = WorkspaceView::new(vec![project(1, vec![]), project(2, vec![tab(7, &[Idle])])])
-            .unwrap();
-        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(7)));
-        assert_eq!(
-            view.selected_project().map(|p| p.id),
-            Some(ProjectId::new(2))
-        );
-    }
-
-    #[test]
-    fn a_workspace_without_tabs_selects_nothing() {
-        let mut view = WorkspaceView::new(vec![project(1, vec![])]).unwrap();
-        assert!(view.selected_tab().is_none());
-        assert!(view.selected_project().is_none());
-        assert!(!view.select_next_tab());
-        assert!(!view.select_project(ProjectId::new(1)));
-        assert_eq!(view.needs_you_panes(), 0);
-    }
-
-    #[test]
-    fn a_tab_shows_its_most_urgent_pane() {
-        assert_eq!(tab(1, &[Idle, Working, Done]).state(), Done);
-        assert_eq!(tab(1, &[Working, Error]).state(), Error);
-        assert_eq!(tab(1, &[Done, NeedsYou, Error]).state(), NeedsYou);
-        assert_eq!(tab(1, &[Idle]).state(), Idle);
-    }
-
-    #[test]
-    fn rn_02_an_unknown_state_is_idle_not_needs_you() {
-        assert_eq!(AgentState::default(), Idle);
-        assert!(!AgentState::default().needs_you());
-        let mut empty = tab(1, &[Idle]);
-        empty.panes.clear();
-        assert_eq!(empty.state(), Idle);
-    }
-
-    #[test]
-    fn rf_atn_02_a_pane_that_needs_you_marks_its_tab_and_project() {
+    fn the_snapshot_selects_the_core_active_tab() {
         let view = demo();
-        let first = &view.projects()[0];
-        assert!(first.tabs[0].state().needs_you());
-        assert!(!first.tabs[1].state().needs_you());
-        assert_eq!(first.needs_you_tabs(), 1);
-        assert_eq!(view.projects()[1].needs_you_tabs(), 1);
-        assert_eq!(view.projects()[3].needs_you_tabs(), 0);
-    }
-
-    #[test]
-    fn rf_atn_03_the_counter_counts_agents_not_tabs() {
-        let view = demo();
-        assert_eq!(view.needs_you_panes(), 3);
-        assert_eq!(view.needs_you_tabs(), 2);
-        assert_eq!(view.working_panes(), 1);
-    }
-
-    #[test]
-    fn rf_atn_03_nobody_waiting_counts_zero() {
-        let view =
-            WorkspaceView::new(vec![project(1, vec![tab(1, &[Working, Done, Error])])]).unwrap();
-        assert_eq!(view.needs_you_panes(), 0);
-        assert_eq!(view.needs_you_tabs(), 0);
-    }
-
-    #[test]
-    fn selecting_a_tab_in_another_project_moves_the_project() {
-        let mut view = demo();
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
         assert_eq!(
             view.selected_project().map(|p| p.id),
             Some(ProjectId::new(1))
         );
-        assert!(view.select_tab(TabId::new(4)));
-        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(4)));
-        assert_eq!(
-            view.selected_project().map(|p| p.id),
-            Some(ProjectId::new(2))
-        );
     }
 
     #[test]
-    fn selecting_an_unknown_tab_or_project_changes_nothing() {
+    fn rn_02_an_unknown_state_is_idle_not_needs_you() {
+        assert_eq!(AgentState::default(), AgentState::Idle);
+        assert!(!AgentState::default().needs_you());
+        assert_eq!(AgentState::from(P::Idle), AgentState::Idle);
+        let view = demo();
+        assert_eq!(view.pane(PaneId::new(999)).state, AgentState::Idle);
+    }
+
+    #[test]
+    fn rf_atn_03_the_counter_counts_agents_not_tabs() {
         let mut view = demo();
-        assert!(!view.select_tab(TabId::new(99)));
-        assert!(!view.select_project(ProjectId::new(99)));
-        assert!(!view.select_project(ProjectId::new(3)));
-        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(1)));
+        assert!(view.pane_state(PaneId::new(200), NEEDS));
+        assert_eq!(view.needs_you_panes(), 2);
+        assert_eq!(view.needs_you_tabs(), 2);
+        assert_eq!(view.working_panes(), 1);
+        let first = view.projects()[0].clone();
+        assert_eq!(view.needs_you_tabs_of(&first), 1);
     }
 
     #[test]
-    fn selecting_a_project_selects_its_first_tab() {
+    fn a_tab_shows_its_most_urgent_pane() {
+        let view = demo();
+        let state = |id| view.tab_state(view.tab(TabId::new(id)).unwrap());
+        assert_eq!(state(10), AgentState::NeedsYou);
+        assert_eq!(state(11), AgentState::Working);
+        assert_eq!(state(20), AgentState::Done);
+    }
+
+    #[test]
+    fn a_tab_update_before_its_project_update_still_shows() {
         let mut view = demo();
-        assert!(view.select_project(ProjectId::new(4)));
-        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(5)));
+        view.tab_updated(&tab(12, 1, &[120]));
+        assert_eq!(view.projects()[0].tabs.last(), Some(&TabId::new(12)));
+        assert_eq!(view.pane(PaneId::new(120)).name, "terminal");
+        view.pane_updated(&pane(120, 12, P::Idle));
+        assert_eq!(view.pane(PaneId::new(120)).name, "pane-120");
+        view.project_updated(&project(1, &[12, 10, 11]));
+        assert_eq!(tab_names(&view)[0], vec!["tab-12", "tab-10", "tab-11"]);
     }
 
     #[test]
-    fn rf_nav_09_next_and_previous_walk_every_tab_and_wrap() {
+    fn rf_pan_01_a_split_arrives_as_a_tab_update_with_the_new_layout() {
+        let mut view = demo();
+        let mut split = tab(11, 1, &[110, 111]);
+        split.focused = PaneId::new(111);
+        view.tab_updated(&split);
+        view.pane_updated(&pane(111, 11, P::Idle));
+        let t = view.tab(TabId::new(11)).unwrap();
+        assert_eq!(t.focused, PaneId::new(111));
+        assert_eq!(t.rects().len(), 2);
+        assert_eq!(view.pane_count(), 5);
+    }
+
+    #[test]
+    fn closing_the_selected_tab_selects_a_neighbour_and_drops_its_panes() {
+        let mut view = demo();
+        let gone = view.tab_closed(TabId::new(10));
+        assert_eq!(gone, vec![PaneId::new(100), PaneId::new(101)]);
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(11)));
+        assert_eq!(view.needs_you_panes(), 0);
+        assert_eq!(view.projects()[0].tabs, vec![TabId::new(11)]);
+    }
+
+    #[test]
+    fn closing_the_last_tab_of_a_project_falls_back_to_another_project() {
+        let mut view = demo();
+        view.set_active(Some(TabId::new(20)));
+        view.tab_closed(TabId::new(20));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(11)));
+    }
+
+    #[test]
+    fn closing_the_only_tab_selects_nothing() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[10])],
+            tabs: vec![tab(10, 1, &[100])],
+            panes: vec![],
+            active_tab: Some(TabId::new(10)),
+        });
+        view.tab_closed(TabId::new(10));
+        assert!(view.selected_tab().is_none());
+        assert_eq!(view.tab_after(1), None);
+    }
+
+    #[test]
+    fn stale_events_change_nothing() {
+        let mut view = demo();
+        assert!(view.tab_closed(TabId::new(99)).is_empty());
+        assert!(!view.pane_state(PaneId::new(99), NEEDS));
+        assert!(!view.pane_exited(PaneId::new(99), Some(1)));
+        view.set_active(Some(TabId::new(99)));
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
+        assert_eq!(view.needs_you_panes(), 1);
+    }
+
+    #[test]
+    fn rf_pan_19_an_exited_pane_keeps_its_code() {
+        let mut view = demo();
+        assert!(view.pane_exited(PaneId::new(110), Some(3)));
+        let p = view.pane(PaneId::new(110));
+        assert!(!p.running);
+        assert!(p.exited);
+        assert_eq!(p.exit_code, Some(3));
+    }
+
+    #[test]
+    fn rf_pan_19_a_pane_still_starting_has_not_exited() {
+        let mut view = demo();
+        let mut starting = pane(110, 11, P::Idle);
+        starting.running = false;
+        view.pane_updated(&starting);
+        assert!(!view.pane(PaneId::new(110)).exited);
+    }
+
+    #[test]
+    fn rf_pan_19_an_update_after_a_failed_start_keeps_the_exit_and_a_relaunch_clears_it() {
+        let mut view = demo();
+        assert!(view.pane_exited(PaneId::new(110), None));
+        let mut stopped = pane(110, 11, P::Idle);
+        stopped.running = false;
+        view.pane_updated(&stopped);
+        assert!(view.pane(PaneId::new(110)).exited);
+        view.pane_updated(&pane(110, 11, P::Idle));
+        assert!(!view.pane(PaneId::new(110)).exited);
+    }
+
+    #[test]
+    fn rf_nav_09_tab_after_walks_every_tab_and_wraps() {
         let mut view = demo();
         let mut seen = Vec::new();
-        for _ in 0..5 {
-            assert!(view.select_next_tab());
-            seen.push(view.selected_tab().unwrap().id.get());
+        for _ in 0..3 {
+            let next = view.tab_after(1).unwrap();
+            view.select_tab(next);
+            seen.push(next.get());
         }
-        assert_eq!(seen, vec![2, 3, 4, 5, 1]);
-        assert!(view.select_previous_tab());
-        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(5)));
+        assert_eq!(seen, vec![11, 20, 10]);
+        assert_eq!(view.tab_after(-1), Some(TabId::new(20)));
     }
 
     #[test]
@@ -579,70 +746,30 @@ mod tests {
         let second = ProjectId::new(2);
         assert!(view.toggle_fold(second));
         assert!(view.is_folded(second));
-        assert_eq!(view.projects()[1].needs_you_tabs(), 1);
-        assert!(view.select_tab(TabId::new(3)));
-        assert!(!view.is_folded(second));
-        assert!(view.toggle_fold(second));
-        assert!(view.toggle_fold(second));
+        assert!(view.select_tab(TabId::new(20)));
         assert!(!view.is_folded(second));
         assert!(!view.toggle_fold(ProjectId::new(99)));
+        assert_eq!(view.first_tab_of(ProjectId::new(3)), None);
+        assert_eq!(view.first_tab_of(second), Some(TabId::new(20)));
     }
 
     #[test]
-    fn duplicate_ids_are_rejected() {
-        let err = WorkspaceView::new(vec![project(1, vec![]), project(1, vec![])]).unwrap_err();
-        assert_eq!(err, ViewError::DuplicateProject(ProjectId::new(1)));
-
-        let err = WorkspaceView::new(vec![
-            project(1, vec![tab(1, &[Idle])]),
-            project(2, vec![tab(1, &[Idle])]),
-        ])
-        .unwrap_err();
-        assert_eq!(err, ViewError::DuplicateTab(TabId::new(1)));
-
-        let mut clash = tab(2, &[Idle]);
-        clash.panes[0].id = PaneId::new(100);
-        clash.focused = PaneId::new(100);
-        let err = WorkspaceView::new(vec![project(1, vec![tab(1, &[Idle]), clash])]).unwrap_err();
-        assert_eq!(err, ViewError::DuplicatePane(PaneId::new(100)));
+    fn rf_pan_04_a_maximized_pane_fills_the_tab_alone() {
+        let mut info = tab(10, 1, &[100, 101]);
+        info.maximized = Some(PaneId::new(101));
+        let t = TabView::from_info(&info);
+        assert_eq!(t.rects(), vec![(PaneId::new(101), Rect::FULL)]);
+        info.maximized = Some(PaneId::new(7));
+        assert_eq!(TabView::from_info(&info).rects().len(), 2);
     }
 
     #[test]
-    fn panes_must_match_the_layout_leaves() {
-        let mut missing = tab(1, &[Idle, Idle]);
-        missing.panes.pop();
-        let err = WorkspaceView::new(vec![project(1, vec![missing])]).unwrap_err();
-        assert_eq!(err, ViewError::LayoutMismatch(TabId::new(1)));
-
-        let mut stray = tab(1, &[Idle]);
-        stray.panes[0].leaf = 42;
-        let err = WorkspaceView::new(vec![project(1, vec![stray])]).unwrap_err();
-        assert_eq!(err, ViewError::LayoutMismatch(TabId::new(1)));
-    }
-
-    #[test]
-    fn the_focused_pane_must_belong_to_the_tab() {
-        let mut lost = tab(1, &[Idle]);
-        lost.focused = PaneId::new(7);
-        let err = WorkspaceView::new(vec![project(1, vec![lost])]).unwrap_err();
-        assert_eq!(err, ViewError::UnknownFocus(TabId::new(1)));
-        assert_eq!(err.to_string(), "tab 1 focuses a pane it does not hold");
-    }
-
-    #[test]
-    fn pane_rects_cover_the_area_in_tree_order() {
-        let mut t = tab(1, &[NeedsYou, Idle]);
-        let below = t
-            .layout
-            .split(t.panes[1].leaf, Orientation::Vertical)
-            .unwrap();
-        t.panes.push(pane(199, below, Working));
-        let rects = t.pane_rects();
-        let ids: Vec<u64> = rects.iter().map(|(p, _)| p.id.get()).collect();
-        assert_eq!(ids, vec![100, 101, 199]);
-        let area: f32 = rects.iter().map(|(_, r)| r.w * r.h).sum();
-        assert!((area - 1.0).abs() < 1e-5);
-        assert_eq!(rects[0].1, Rect::new(0.0, 0.0, 0.5, 1.0));
-        assert_eq!(rects[2].1, Rect::new(0.5, 0.5, 0.5, 0.5));
+    fn the_tab_of_a_pane_is_found_through_layouts() {
+        let view = demo();
+        assert_eq!(
+            view.tab_of(PaneId::new(101)).map(|t| t.id),
+            Some(TabId::new(10))
+        );
+        assert!(view.tab_of(PaneId::new(5)).is_none());
     }
 }
