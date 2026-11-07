@@ -364,7 +364,8 @@ impl Workspace {
             Command::RenameTab { tab, name } => {
                 let t = self.tab_mut(tab)?;
                 let name = name.trim();
-                t.custom_name = (!name.is_empty()).then(|| name.to_owned());
+                t.custom_name =
+                    (!name.is_empty() && name != t.default_name).then(|| name.to_owned());
                 self.emit_tab(tab, &mut fx);
             }
             Command::NewTab {
@@ -1629,6 +1630,18 @@ mod tests {
             },
         );
         assert_eq!(name(&ws), "Tab 1");
+        run(
+            &mut ws,
+            Command::RenameTab {
+                tab,
+                name: "Tab 1".into(),
+            },
+        );
+        let saved = ws.to_session();
+        assert_eq!(
+            saved.projects[0].tabs[0].name, None,
+            "the automatic name is not pinned as the tab's own"
+        );
         let unknown = Command::RenameTab {
             tab: TabId::new(99),
             name: "x".into(),
