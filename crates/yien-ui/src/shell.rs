@@ -2278,14 +2278,14 @@ impl Shell {
     fn render_context_bar(&self) -> impl IntoElement {
         let t = self.theme;
         let Some(tab) = self.workspace.selected_tab() else {
-            // With no project open there is no branch to speak of.
+            // With no tab selected there is no branch to speak of.
             return self.context_bar_frame().child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(px(12.5))
                     .text_color(t.faint)
-                    .child("No project"),
+                    .child(no_tab_label(&self.workspace)),
             );
         };
         let git = ContextGit::new(
@@ -2555,6 +2555,16 @@ impl Shell {
     }
 }
 
+/// What the context bar says with no tab selected: whether there is no
+/// project at all, or projects whose tabs are all closed.
+fn no_tab_label(workspace: &WorkspaceView) -> &'static str {
+    if workspace.has_no_projects() {
+        "No project"
+    } else {
+        "No tab is open"
+    }
+}
+
 /// What the status bar says after a mute toggle.
 fn mute_notice(muted: bool, what: &str) -> String {
     if muted {
@@ -2725,8 +2735,26 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::MOUSE_COMMANDS;
+    use super::{MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
+    use crate::model::WorkspaceView;
+    use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
+
+    #[test]
+    fn the_context_bar_says_no_project_only_when_there_is_none() {
+        assert_eq!(no_tab_label(&WorkspaceView::default()), "No project");
+        let tabs_closed = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(1),
+                name: "yien".to_owned(),
+                root: "C:/Code/yien".to_owned(),
+                tabs: vec![],
+                collapsed: false,
+            }],
+            ..WorkspaceSnapshot::default()
+        });
+        assert_eq!(no_tab_label(&tabs_closed), "No tab is open");
+    }
 
     #[test]
     fn rf_nav_02_every_mouse_control_has_a_palette_command() {
