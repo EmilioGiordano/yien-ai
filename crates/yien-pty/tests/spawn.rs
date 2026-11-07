@@ -1,6 +1,11 @@
 //! Real children through `PortablePty`: ConPTY on Windows, `openpty` on unix.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test helpers outside #[test] fns are not covered by clippy.toml's in-test allowances"
+)]
 
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -148,6 +153,13 @@ fn a_failing_command_reports_its_exit_code() {
     let mut driver = Driver::new(backend().spawn(run("exit 3")).unwrap());
     assert_eq!(driver.until_exit(), ExitStatus::from_code(3));
     driver.session.kill().unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn exit_code_259_is_an_exit_not_still_running() {
+    let mut driver = Driver::new(backend().spawn(run("exit 259")).unwrap());
+    assert_eq!(driver.until_exit(), ExitStatus::from_code(259));
 }
 
 #[test]
