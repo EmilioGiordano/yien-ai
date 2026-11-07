@@ -635,6 +635,18 @@ mod tests {
     }
 
     #[test]
+    fn rnf_14_claude_hooks_come_from_a_per_pane_settings_file() {
+        let profiles = builtin_profiles().unwrap();
+        let claude = &profiles[0];
+        for args in [&claude.launch.args, &claude.launch.resume] {
+            let at = args.iter().position(|a| a == "--settings").unwrap();
+            assert_eq!(args[at + 1], "{hooks_settings_file}");
+        }
+        let json = crate::hooks::render_claude_settings("D:/yien/yien-hook.exe").unwrap();
+        assert!(!json.contains(".claude"));
+    }
+
+    #[test]
     fn rn_02_codex_and_opencode_never_declare_a_red_capable_source_alone() {
         // Without hooks or OSC 7501 their machines never reach "working", so
         // they never mark red; S7 and S8 decide richer sources.
