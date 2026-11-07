@@ -171,7 +171,12 @@ mod tests {
     fn path_order_and_extension_order_decide() {
         let path = path(&["C:/a", "C:/b"]);
         let exists = files(&["C:/a/x.cmd", "C:/a/x.exe", "C:/b/x.exe"]);
-        let found = find(OsStr::new("x"), Some(&path), Some(OsStr::new(".EXE;.CMD")), exists);
+        let found = find(
+            OsStr::new("x"),
+            Some(&path),
+            Some(OsStr::new(".EXE;.CMD")),
+            exists,
+        );
         assert_eq!(found, Some(PathBuf::from("C:/a").join("x.exe")));
     }
 
@@ -191,11 +196,17 @@ mod tests {
     fn paths_and_missing_programs_are_left_alone() {
         let path = path(&["C:/w"]);
         let any = |_: &Path| true;
-        assert_eq!(find(OsStr::new("C:/x/claude.exe"), Some(&path), None, any), None);
+        assert_eq!(
+            find(OsStr::new("C:/x/claude.exe"), Some(&path), None, any),
+            None
+        );
         assert_eq!(find(OsStr::new("sub/claude"), Some(&path), None, any), None);
         assert_eq!(find(OsStr::new(""), Some(&path), None, any), None);
         assert_eq!(find(OsStr::new("claude"), None, None, any), None);
-        assert_eq!(find(OsStr::new("claude"), Some(&path), None, files(&[])), None);
+        assert_eq!(
+            find(OsStr::new("claude"), Some(&path), None, files(&[])),
+            None
+        );
     }
 
     #[test]
