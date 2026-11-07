@@ -19,25 +19,11 @@ Work only in the worktree and on the branch you are given. cargo runs there and 
 
 ## While writing code
 
-- Layer rule: layers 0–1 never see the OS or a window; `yien-ui` never depends on `yien-core`; `unsafe` only in `yien-pty` and `yien-platform`, with a `// SAFETY:` line.
-- No `unwrap`, `expect`, `panic!`, unchecked indexing or unchecked arithmetic on external input in library code.
-- No blocking call on a tokio worker, no lock held across `.await` or I/O, never two pane locks at once.
-- Pure logic stays pure and returns effects; adapters do the I/O.
-- Every behaviour you add gets a test. A test for a requirement starts with its id (`rf_ses_04_...`).
-- Files with escape literals (`\x1b`, `\r\n`) are written with Write or Edit, never a heredoc.
+Follow `AGENTS.md` "The layer rule", "Rules the plan fixed", "Tests" and "Gotchas". Every behaviour you add gets a test.
 
 ## Validation
 
-On the crates you touched first, then the workspace:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace   # or cargo test --workspace
-cargo deny check
-```
-
-If `fmt` flags files outside your change, format only yours and name the others.
+Run the commands in `AGENTS.md` "Commands", on the crates you touched first, then the workspace. One that does not exist yet is `n/a`. If `fmt` flags files outside your change, format only yours and name the others.
 
 Never run the app or anything that opens a window, and never send input to the desktop. List what a human must check.
 
@@ -57,7 +43,9 @@ Push, create or switch branches, merge, rebase, `reset --hard`, `git clean`, `br
 Branch: <name>   Worktree: <path>
 Requirements covered: <ids>
 Commits: <hash type/message> per line
-Checks: fmt <pass|fail>, clippy <pass|fail>, tests <n passed / n failed>, deny <pass|fail>
+Checks: <command: pass | fail | n/a> per command
+New dependencies: <crate, purpose, alternative rejected, licence>
+Spec impact: <ERS or plan sections this change makes wrong, or none>
 Decisions: <choice and reason, one per line>
 Needs a human: <what only a real window can show>
 Open: <anything unfinished, uncommitted or doubtful>
