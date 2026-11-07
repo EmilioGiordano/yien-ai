@@ -112,15 +112,6 @@ impl Service {
         }
     }
 
-    /// Input normally goes from the handle straight to the pane; this path
-    /// serves a message that reached the service anyway.
-    async fn write(&self, pane: PaneId, input: PaneInput) {
-        let tx = links(&self.links).get(&pane).map(|l| l.input.clone());
-        if let Some(tx) = tx {
-            let _ = tx.send(input).await;
-        }
-    }
-
     fn start_pane(&mut self, pane: PaneId, plan: LaunchPlan, cwd: String, size: (u16, u16)) {
         let (tx, cmds) = mpsc::channel(PANE_COMMANDS);
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
@@ -183,20 +174,8 @@ impl Service {
     async fn on_client(&mut self, msg: ClientMsg) {
         match msg {
             ClientMsg::Command(command) => self.on_command(command).await,
-            ClientMsg::Input { pane, bytes } => {
-                let input = PaneInput {
-                    bytes: bytes.into_vec(),
-                    user: true,
-                };
-                self.write(pane, input).await;
-            }
-            ClientMsg::Report { pane, bytes } => {
-                let input = PaneInput {
-                    bytes: bytes.into_vec(),
-                    user: false,
-                };
-                self.write(pane, input).await;
-            }
+            // The handle sends input straight to the pane's own queue.
+            ClientMsg::Input { .. } | ClientMsg::Report { .. } => {}
             ClientMsg::ResizePane { pane, cols, rows } => {
                 if let Some(handle) = self.panes.get_mut(&pane) {
                     handle.size = (cols, rows);
