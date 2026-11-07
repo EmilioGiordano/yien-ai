@@ -786,3 +786,20 @@ fn rf_pan_20_input_queued_before_terminate_is_dropped() {
     }
     assert_eq!(received, yien_pty::INPUT_QUEUE_CAPACITY);
 }
+
+#[test]
+fn a_pane_shown_for_the_first_time_draws_at_once() {
+    let mut h = Harness::start();
+    let (_, mut pane, mut child) = h.project();
+    for _ in 0..5 {
+        let start = Instant::now();
+        child.output(b"first frame");
+        h.frame_with(pane, "first frame");
+        assert!(
+            start.elapsed() < Duration::from_millis(300),
+            "first frame took {:?}",
+            start.elapsed()
+        );
+        (pane, child) = h.split(pane, None);
+    }
+}

@@ -610,19 +610,21 @@ impl Actor {
         });
     }
 
-    fn frame_due(&self) -> Option<Instant> {
+    /// A pane that never drew is due at `now`, the caller's own instant: a
+    /// fresh `Instant::now()` here would always land after it and never be due.
+    fn frame_due(&self, now: Instant) -> Option<Instant> {
         if !(self.dirty && self.visible) {
             return None;
         }
         Some(match self.last_frame {
             Some(t) => t + self.ctx.config.frame_interval,
-            None => Instant::now(),
+            None => now,
         })
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         [
-            self.frame_due(),
+            self.frame_due(Instant::now()),
             self.sync.map(|(_, at)| at),
             self.retry_at,
             self.wake_at,
@@ -663,7 +665,7 @@ impl Actor {
             self.wake_at = None;
             self.step(&Signal::Tick);
         }
-        if self.frame_due().is_some_and(|at| at <= now) {
+        if self.frame_due(now).is_some_and(|at| at <= now) {
             self.publish(now);
         }
     }
