@@ -26,6 +26,7 @@ use crate::git::ContextGit;
 use crate::layout::neighbor;
 use crate::model::{
     AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
+    typed_tab_name,
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
@@ -595,7 +596,7 @@ impl Shell {
         }
         self.split_menu = None;
         self.confirm = None;
-        self.renaming = None;
+        self.finish_rename(true, window, cx);
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
@@ -811,7 +812,7 @@ impl Shell {
             return;
         }
         self.split_menu = None;
-        self.renaming = None;
+        self.finish_rename(true, window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         self.confirm = Some(ConfirmClose {
@@ -957,6 +958,7 @@ impl Shell {
         if self.confirm.is_some() {
             return;
         }
+        self.finish_rename(true, window, cx);
         self.split_menu = None;
         self.tab_bar_open = true;
         if self.workspace.is_folded(project) {
@@ -993,8 +995,9 @@ impl Shell {
         let Some(renaming) = self.renaming.take() else {
             return;
         };
-        if keep {
-            let name = renaming.input.read(cx).value().trim().to_owned();
+        let current = self.workspace.tab(renaming.tab).map(|t| t.name.as_str());
+        let typed = renaming.input.read(cx).value();
+        if let Some(name) = keep.then(|| typed_tab_name(&typed, current)).flatten() {
             self.command(
                 Command::RenameTab {
                     tab: renaming.tab,

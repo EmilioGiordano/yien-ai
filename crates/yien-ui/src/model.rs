@@ -758,6 +758,15 @@ impl WorkspaceView {
     }
 }
 
+/// The name to send when a tab rename ends with `typed` in the field: `None`
+/// when it is the name the tab already shows, so keeping it unchanged never
+/// turns the automatic name into the tab's own. Empty brings back the
+/// automatic name (RF-ESP-16).
+pub(crate) fn typed_tab_name(typed: &str, current: Option<&str>) -> Option<String> {
+    let typed = typed.trim();
+    (Some(typed) != current).then(|| typed.to_owned())
+}
+
 /// The panes whose frame to take after a batch of events: every pane that
 /// announced one and, when the workspace changed, every pane now drawn, since
 /// a pane that just came into view or got its view may hold a frame whose
@@ -1363,6 +1372,17 @@ mod tests {
         claude.exit_code = Some(0);
         view.pane_updated(&claude);
         assert_eq!(view.busy_panes_of(ProjectId::new(2)), 0, "an exited agent");
+    }
+
+    #[test]
+    fn rf_esp_16_an_unchanged_name_is_not_sent() {
+        assert_eq!(typed_tab_name(" Tab 1 ", Some("Tab 1")), None);
+        assert_eq!(
+            typed_tab_name("review", Some("Tab 1")),
+            Some("review".into())
+        );
+        assert_eq!(typed_tab_name("  ", Some("review")), Some(String::new()));
+        assert_eq!(typed_tab_name("x", None), Some("x".into()));
     }
 
     #[test]
