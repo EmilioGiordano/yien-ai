@@ -4,24 +4,37 @@
 //! defined here, so the same core can run in process or as a separate host.
 //!
 //! ```
-//! use yien_proto::{PaneId, PROTO_VERSION};
+//! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 1);
-//! assert_eq!(PaneId::new(7).get(), 7);
+//! assert_eq!(PROTO_VERSION, 3);
+//! let split = ClientMsg::Command(Command::SplitPane {
+//!     pane: PaneId::new(7),
+//!     orientation: Orientation::Horizontal,
+//!     profile: None,
+//! });
+//! assert!(matches!(split, ClientMsg::Command(_)));
 //! ```
 
 #![forbid(unsafe_code)]
 
 pub mod hook_frame;
+pub mod frame;
+mod msg;
 
 use serde::{Deserialize, Serialize};
+
+pub use msg::{
+    AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason, InputBytes,
+    LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProjectInfo, TabInfo,
+    WorkspaceSnapshot,
+};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
 ///
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 3;
 
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {
@@ -74,17 +87,6 @@ id_newtype! {
     PaneId
 }
 
-/// The command catalog (ADR-19): every action the palette, the keymap and the
-/// future CLI can trigger. Empty until the first commands land in M2.
-///
-/// ```
-/// fn handle(command: yien_proto::Command) {
-///     match command {}
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Command {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_catalog_rejects_any_command() {
+    fn the_catalog_rejects_unknown_commands() {
         assert!(serde_json::from_str::<Command>("\"Anything\"").is_err());
     }
 }
