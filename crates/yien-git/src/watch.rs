@@ -237,6 +237,46 @@ mod tests {
     const MS: Duration = Duration::from_millis(1);
 
     #[test]
+    fn dropping_the_watcher_from_its_own_callback_stops_it() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = std::env::temp_dir().join(format!("yien-git-selfdrop-{}", std::process::id()));
+        let repo = Repo {
+            root: dir.clone(),
+            git_dir: dir.clone(),
+            common_dir: dir.clone(),
+            linked_worktree: false,
+            main_worktree: None,
+        };
+        let slot: Arc<Mutex<Option<GitWatcher>>> = Arc::new(Mutex::new(None));
+        let (tx, rx) = mpsc::channel();
+        let options = WatchOptions {
+            interval: 10 * MS,
+            refresh: Some(30 * MS),
+        };
+        let in_callback = Arc::clone(&slot);
+        let watcher = GitWatcher::spawn(&repo, options, move |_| {
+            let dropped = in_callback.lock().unwrap().take().is_some();
+            let _ = tx.send(dropped);
+        })
+        .unwrap();
+        *slot.lock().unwrap() = Some(watcher);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if rx.recv_timeout(remaining).unwrap() {
+                break;
+            }
+        }
+        // The thread ended: its callback, and with it the sender, is gone.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
     fn change_is_reported_once_it_settles() {
         let t0 = Instant::now();
         let mut p = Poller::new(1, t0, 50 * MS, None);
