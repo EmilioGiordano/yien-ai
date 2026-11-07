@@ -238,9 +238,15 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        // The child opens its working folder as it starts, after spawn returns.
-        std::thread::sleep(Duration::from_millis(500));
-        let busy = wait_until_free(&inner, Duration::from_millis(300));
+        // The child opens its working folder as it starts, after spawn returns;
+        // moving the folder before that would only make its start fail.
+        std::thread::sleep(Duration::from_secs(1));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut busy = probe(&inner);
+        while busy == Probe::Free && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            busy = probe(&inner);
+        }
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(busy, Probe::Busy);
