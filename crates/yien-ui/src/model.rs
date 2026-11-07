@@ -7,8 +7,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SHELL_PROFILE,
-    TabGit, TabId, TabInfo, same_folder,
+    LayoutNode, NeedsReason, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
+    SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -82,6 +82,13 @@ impl From<yien_proto::AgentState> for AgentState {
     }
 }
 
+fn needs_reason(state: yien_proto::AgentState) -> Option<NeedsReason> {
+    match state {
+        yien_proto::AgentState::NeedsYou(reason) => Some(reason),
+        _ => None,
+    }
+}
+
 /// One pane, as its title bar shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneView {
@@ -95,6 +102,8 @@ pub struct PaneView {
     pub profile_id: ProfileId,
     /// What its agent is doing.
     pub state: AgentState,
+    /// Why its agent needs the user, while it does.
+    pub needs_reason: Option<NeedsReason>,
     /// Whether its program is running.
     pub running: bool,
     /// The exit code once it stopped, when the OS reported one.
@@ -118,6 +127,7 @@ impl PaneView {
             profile: String::new(),
             profile_id: ProfileId::new(""),
             state: AgentState::Idle,
+            needs_reason: None,
             running: true,
             exit_code: None,
             exited: false,
@@ -133,6 +143,7 @@ impl PaneView {
             profile: info.profile.clone(),
             profile_id: info.profile_id.clone(),
             state: info.state.into(),
+            needs_reason: needs_reason(info.state),
             running: info.running,
             exit_code: info.exit_code,
             exited: !info.running && info.exit_code.is_some(),
@@ -156,6 +167,7 @@ impl PaneView {
     ///     profile: "Shell".into(),
     ///     profile_id: yien_proto::ProfileId::new("shell"),
     ///     state: AgentState::Idle,
+    ///     needs_reason: None,
     ///     running: true,
     ///     exit_code: None,
     ///     exited: false,
@@ -467,6 +479,7 @@ impl WorkspaceView {
             .get_mut(&id)
             .map(|p| {
                 p.state = state.into();
+                p.needs_reason = needs_reason(state);
                 if !p.state.needs_you() {
                     p.needs_you_since = None;
                 }
