@@ -21,7 +21,8 @@ pub const MAX_HOOK_PAYLOAD: usize = 4 * 1024 * 1024;
 /// inside its session. A pane inheriting them (YIEN started from a Claude
 /// Code session) would make the Claude Code started in it take itself for a
 /// subprocess of that session. The user's own configuration (`ANTHROPIC_*`,
-/// `CLAUDE_CONFIG_DIR`, ...) is not among them.
+/// `CLAUDE_CONFIG_DIR`, ...) is not among them, nor is an IDE's link
+/// (`CLAUDE_CODE_SSE_PORT`), which belongs to the terminal, not a session.
 ///
 /// ```
 /// assert!(yien_agent::CLAUDE_SESSION_MARKERS.contains(&"CLAUDECODE"));
@@ -34,7 +35,6 @@ pub const CLAUDE_SESSION_MARKERS: &[&str] = &[
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_HOST_SESSION_ID",
     "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_SSE_PORT",
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_PID",
