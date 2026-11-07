@@ -25,9 +25,11 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::Duration;
 
+mod console;
 #[cfg(any(test, feature = "fake"))]
 mod fake;
 mod portable;
@@ -369,6 +371,13 @@ pub enum PtyError {
     /// The OS refused to terminate the child.
     #[error("could not terminate the child")]
     Kill(#[source] std::io::Error),
+    /// No thread could be started to close the pseudo terminal.
+    #[error("could not start closing the pseudo terminal")]
+    Close(#[source] std::io::Error),
+    /// The pseudo terminal did not close in the time allowed; it goes on
+    /// closing in the background.
+    #[error("the pseudo terminal did not close in time")]
+    CloseTimedOut,
 }
 
 /// Input refused by a full queue, given back to the caller.
@@ -439,9 +448,16 @@ impl fmt::Debug for WriterMsg {
 pub(crate) trait ChildControl: Send + Sync {
     fn kill(&self) -> Result<(), PtyError>;
     fn pid(&self) -> Option<u32>;
+    /// Terminates the child and starts closing the pseudo console. Never
+    /// blocks; later calls only terminate again.
+    fn start_close(&self) -> Result<(), PtyError>;
+    /// Whether the console is closed and the child has exited.
+    fn is_closed(&self) -> bool;
+    /// Waits until [`ChildControl::is_closed`] holds, at most `timeout`.
+    fn wait_closed(&self, timeout: Duration) -> bool;
     /// Called from `Drop`, which must never block.
-    fn kill_on_drop(&self) {
-        let _ = self.kill();
+    fn close_on_drop(&self) {
+        let _ = self.start_close();
     }
 }
 
@@ -455,7 +471,8 @@ pub(crate) fn check_size(cols: u16, rows: u16) -> Result<(), PtyError> {
 /// The input side of a session: write, resize, kill. `Send + Sync`, so it can
 /// live apart from the event receiver (see [`PtySession::into_parts`]).
 ///
-/// Dropping it terminates the child if it is still running.
+/// Dropping it terminates the child if it is still running and closes the
+/// pseudo terminal in the background.
 ///
 /// ```no_run
 /// use yien_pty::{PortablePty, PtyBackend, SpawnSpec};
@@ -467,11 +484,11 @@ pub(crate) fn check_size(cols: u16, rows: u16) -> Result<(), PtyError> {
 /// ```
 pub struct PtyControl {
     input: SyncSender<WriterMsg>,
-    child: Box<dyn ChildControl>,
+    child: Arc<dyn ChildControl>,
 }
 
 impl PtyControl {
-    pub(crate) fn new(input: SyncSender<WriterMsg>, child: Box<dyn ChildControl>) -> Self {
+    pub(crate) fn new(input: SyncSender<WriterMsg>, child: Arc<dyn ChildControl>) -> Self {
         Self { input, child }
     }
 
@@ -537,11 +554,134 @@ impl PtyControl {
     pub fn pid(&self) -> Option<u32> {
         self.child.pid()
     }
+
+    /// A handle that closes this session from anywhere, even after the
+    /// control is gone. See [`PtyCloser`].
+    ///
+    /// ```no_run
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// let closer = session.control().closer();
+    /// std::thread::spawn(move || closer.close(std::time::Duration::from_secs(1)));
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn closer(&self) -> PtyCloser {
+        PtyCloser {
+            child: Arc::clone(&self.child),
+        }
+    }
+
+    /// Terminates the child, closes the pseudo terminal and waits at most
+    /// `timeout` for both. See [`PtyCloser::close`].
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// let (control, events) = session.into_parts();
+    /// drop(events);
+    /// control.close(Duration::from_secs(1))?;
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn close(self, timeout: Duration) -> Result<(), PtyError> {
+        let closer = self.closer();
+        drop(self);
+        closer.close(timeout)
+    }
 }
 
 impl Drop for PtyControl {
+    /// Terminates the child and closes the pseudo terminal in the background.
     fn drop(&mut self) {
-        self.child.kill_on_drop();
+        self.child.close_on_drop();
+    }
+}
+
+/// Closes a session from any thread: terminates its child and closes its
+/// pseudo terminal, and says when both are done. Cheap to clone; dropping it
+/// does nothing.
+///
+/// On Windows closing the pseudo console can wait until its output is read,
+/// so keep reading the session's events, or drop the receiver, until the
+/// close is done. A closer works even while the writer is stuck in a write
+/// the child never reads.
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use yien_pty::{PortablePty, PtyBackend, SpawnSpec};
+///
+/// let (control, events) = PortablePty::new().spawn(SpawnSpec::new("sh"))?.into_parts();
+/// drop(events);
+/// let closer = control.closer();
+/// closer.start()?;
+/// assert!(closer.wait(Duration::from_secs(1)));
+/// # Ok::<(), yien_pty::PtyError>(())
+/// ```
+#[derive(Clone)]
+pub struct PtyCloser {
+    child: Arc<dyn ChildControl>,
+}
+
+impl PtyCloser {
+    /// Terminates the child and starts closing the pseudo terminal on a
+    /// thread of its own. Never blocks. Calling it again only terminates
+    /// again.
+    ///
+    /// ```no_run
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// session.control().closer().start()?;
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn start(&self) -> Result<(), PtyError> {
+        self.child.start_close()
+    }
+
+    /// Waits at most `timeout` until the pseudo terminal is closed and the
+    /// child has exited. `false` when the time ran out.
+    ///
+    /// ```no_run
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// let closer = session.control().closer();
+    /// closer.start()?;
+    /// let done = closer.wait(std::time::Duration::from_millis(500));
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn wait(&self, timeout: Duration) -> bool {
+        self.child.wait_closed(timeout)
+    }
+
+    /// Whether the pseudo terminal is closed and the child has exited.
+    ///
+    /// ```no_run
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// assert!(!session.control().closer().is_closed());
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn is_closed(&self) -> bool {
+        self.child.is_closed()
+    }
+
+    /// [`PtyCloser::start`], then [`PtyCloser::wait`];
+    /// [`PtyError::CloseTimedOut`] when the time ran out.
+    ///
+    /// ```no_run
+    /// # let session = yien_pty::PtyBackend::spawn(&yien_pty::PortablePty::new(), yien_pty::SpawnSpec::new("sh"))?;
+    /// session.control().closer().close(std::time::Duration::from_secs(1))?;
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
+    pub fn close(&self, timeout: Duration) -> Result<(), PtyError> {
+        self.start()?;
+        if self.wait(timeout) {
+            Ok(())
+        } else {
+            Err(PtyError::CloseTimedOut)
+        }
+    }
+}
+
+impl fmt::Debug for PtyCloser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PtyCloser")
+            .field("pid", &self.child.pid())
+            .finish_non_exhaustive()
     }
 }
 

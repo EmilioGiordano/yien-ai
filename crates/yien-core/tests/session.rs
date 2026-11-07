@@ -501,6 +501,35 @@ fn rf_ses_01_nothing_after_the_quit_save_reaches_the_store() {
 }
 
 #[test]
+fn rf_ses_01_the_quit_shutdown_leaves_the_saved_session_as_it_was() {
+    let store = Shared::default();
+    let mut run = Run::start(&store);
+    let first = run.first_pane();
+    run.split(first, None);
+    run.children(2);
+    run.save();
+    let saved = store.file("workspace.json").unwrap();
+    assert_eq!(run.core.shutdown(TIMEOUT).unwrap(), 2);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(store.file("workspace.json").unwrap(), saved);
+}
+
+#[test]
+fn rf_ses_01_nothing_after_the_shutdown_reaches_the_store_even_without_the_quit_save() {
+    let store = Shared::default();
+    let mut run = Run::start(&store);
+    let first = run.first_pane();
+    wait_until(|| store.saved().is_some());
+    run.core.shutdown(TIMEOUT).unwrap();
+    // A write already under way when saving stopped may still land.
+    std::thread::sleep(Duration::from_millis(300));
+    let saved = store.file("workspace.json").unwrap();
+    run.split(first, None);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(store.file("workspace.json").unwrap(), saved);
+}
+
+#[test]
 fn rf_ses_01_a_quit_before_the_restore_leaves_the_file_as_it_was() {
     let (store, _, _) = first_run();
     let before = store.file("workspace.json").unwrap();

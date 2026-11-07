@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
+use std::time::Duration;
 
-use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::console::Console;
 use crate::pump::{ReaderShared, run_reader, run_waiter, run_writer};
 use crate::{
     ChildControl, Drain, ExitStatus, INPUT_QUEUE_CAPACITY, OUTPUT_QUEUE_CAPACITY, PtyBackend,
@@ -77,10 +79,13 @@ fn command(spec: &SpawnSpec) -> CommandBuilder {
     cmd
 }
 
+type Master = Box<dyn MasterPty + Send>;
+
 struct PortableChild {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pid: Option<u32>,
     exited: Arc<AtomicBool>,
+    console: Arc<Console<Master>>,
 }
 
 impl ChildControl for PortableChild {
@@ -110,6 +115,22 @@ impl ChildControl for PortableChild {
 
     fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    fn start_close(&self) -> Result<(), PtyError> {
+        let killed = self.kill();
+        self.console
+            .close_in_background()
+            .map_err(PtyError::Close)?;
+        killed
+    }
+
+    fn is_closed(&self) -> bool {
+        self.console.is_closed()
+    }
+
+    fn wait_closed(&self, timeout: Duration) -> bool {
+        self.console.wait(timeout)
     }
 }
 
@@ -154,21 +175,29 @@ impl PtyBackend for PortablePty {
         let (input, input_rx) = sync_channel(INPUT_QUEUE_CAPACITY);
         let shared = Arc::new(ReaderShared::default());
 
-        // The writer owns the master, so the pseudo console closes on this
-        // thread once every sender is gone: ClosePseudoConsole can block.
-        let master = pair.master;
-        thread::Builder::new()
-            .name("yien-pty-writer".into())
-            .spawn(move || {
-                run_writer(
-                    writer,
-                    |cols, rows| {
-                        let _ = master.resize(pty_size(cols, rows));
-                    },
-                    input_rx,
-                )
-            })
-            .map_err(|e| fail(PtyError::Setup(e.into())))?;
+        // The console is never closed on the writer alone: a writer stuck in a
+        // write the child never reads would keep it open. Whoever gets there
+        // first, the writer after its last message or a close, drops the
+        // master off the caller's thread, since ClosePseudoConsole can block.
+        let console = Arc::new(Console::new(pair.master));
+        {
+            let console = Arc::clone(&console);
+            thread::Builder::new()
+                .name("yien-pty-writer".into())
+                .spawn(move || {
+                    run_writer(
+                        writer,
+                        |cols, rows| {
+                            console.with_master(|m| {
+                                let _ = m.resize(pty_size(cols, rows));
+                            });
+                        },
+                        input_rx,
+                    );
+                    console.close();
+                })
+                .map_err(|e| fail(PtyError::Setup(e.into())))?;
+        }
         {
             let (events_tx, shared) = (events_tx.clone(), Arc::clone(&shared));
             thread::Builder::new()
@@ -179,9 +208,14 @@ impl PtyBackend for PortablePty {
         {
             let exited = Arc::clone(&exited);
             let drain = self.drain;
+            let console = Arc::clone(&console);
             // Not `try_wait`: it reports exit code 259 (STILL_ACTIVE) and a
             // failed status query as "still running" on Windows.
-            let wait = move || child.wait().map(|s| ExitStatus::from_code(s.exit_code()));
+            let wait = move || {
+                let status = child.wait();
+                console.mark_exited();
+                status.map(|s| ExitStatus::from_code(s.exit_code()))
+            };
             thread::Builder::new()
                 .name("yien-pty-waiter".into())
                 .spawn(move || run_waiter(wait, events_tx, shared, exited, drain))
@@ -190,10 +224,11 @@ impl PtyBackend for PortablePty {
 
         let control = PtyControl::new(
             input,
-            Box::new(PortableChild {
+            Arc::new(PortableChild {
                 killer: Mutex::new(killer),
                 pid,
                 exited,
+                console,
             }),
         );
         Ok(PtySession::new(control, events))

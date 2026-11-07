@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+mod consoles;
 mod convert;
 mod git;
 mod hooks;
@@ -55,6 +56,7 @@ use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, TabId};
 use yien_pty::PtyBackend;
 use yien_vt::VtConfig;
 
+use crate::consoles::Consoles;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
 
@@ -234,6 +236,25 @@ pub enum SendError {
     Stopped(ClientMsg),
 }
 
+/// Why [`CoreHandle::shutdown`] did not close every pane in time.
+///
+/// ```
+/// let err = yien_core::ShutdownError::TimedOut { open: 1, total: 3 };
+/// assert_eq!(err.to_string(), "1 of 3 panes did not close in time");
+/// ```
+#[derive(Debug, thiserror::Error)]
+pub enum ShutdownError {
+    /// Some panes' programs or pseudo terminals were still closing when the
+    /// time ran out; they go on closing in the background.
+    #[error("{open} of {total} panes did not close in time")]
+    TimedOut {
+        /// Panes still closing.
+        open: usize,
+        /// Panes that were open when the shutdown began.
+        total: usize,
+    },
+}
+
 /// Starts the core.
 #[derive(Debug)]
 pub struct Core;
@@ -274,6 +295,7 @@ impl Core {
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         let (events, event_rx) = mpsc::channel(EVENT_QUEUE);
         let panes: Links = Arc::new(Mutex::new(HashMap::new()));
+        let consoles = Arc::new(Consoles::default());
         let (hooks, hooks_error) = match &config.hooks {
             None => (None, None),
             Some(hook_config) => match hooks::start(hook_config, Arc::clone(&panes)) {
@@ -297,6 +319,7 @@ impl Core {
             hooks: hooks.clone(),
             attention: Arc::new(AtomicU64::new(0)),
             ui_size: Arc::new(tokio::sync::watch::Sender::new(None)),
+            consoles: Arc::clone(&consoles),
         };
         runtime.spawn(service::run(
             ctx,
@@ -310,6 +333,7 @@ impl Core {
             panes,
             hooks,
             writer,
+            consoles,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -342,6 +366,7 @@ pub struct CoreHandle {
     )]
     hooks: Option<Arc<hooks::Hooks>>,
     writer: Option<Arc<persist::Writer>>,
+    consoles: Arc<Consoles>,
     _runtime: Arc<RuntimeGuard>,
 }
 
@@ -421,6 +446,57 @@ impl CoreHandle {
         match &self.writer {
             Some(writer) => writer.save_now(timeout),
             None => Ok(false),
+        }
+    }
+
+    /// Terminates every pane's program and closes its pseudo terminal, for
+    /// the app's quit path after [`CoreHandle::save_session`]. Saving stops
+    /// first, so programs ending now never reach the saved session. A
+    /// program being started at that moment is closed and waited for like
+    /// the others, and no program starts afterwards.
+    ///
+    /// The closes run on threads of their own, without the core's runtime;
+    /// the caller waits at most `timeout` for all of them together, and
+    /// panes still closing then go on in the background. Returns how many
+    /// panes were closed.
+    ///
+    /// ```
+    /// # use std::{sync::Arc, time::Duration};
+    /// # use yien_core::{Core, CoreConfig};
+    /// let (core, _events) = Core::start(Arc::new(yien_pty::FakePty::new()), CoreConfig::default())?;
+    /// core.save_session(Duration::from_millis(1500))?;
+    /// assert_eq!(core.shutdown(Duration::from_secs(1))?, 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn shutdown(&self, timeout: Duration) -> Result<usize, ShutdownError> {
+        let deadline = Instant::now() + timeout;
+        if let Some(writer) = &self.writer {
+            writer.stop();
+        }
+        let mut open = self.consoles.shut();
+        for closer in &open {
+            if let Err(e) = closer.start() {
+                tracing::warn!("a pane did not start closing: {e}");
+            }
+        }
+        // Spawns under way at the shut register afterwards and close at once.
+        let late = self
+            .consoles
+            .wait_spawns(deadline.saturating_duration_since(Instant::now()));
+        open.extend(late.closers);
+        let total = open.len() + late.spawning;
+        let still_open = late.spawning
+            + open
+                .iter()
+                .filter(|c| !c.wait(deadline.saturating_duration_since(Instant::now())))
+                .count();
+        if still_open == 0 {
+            Ok(total)
+        } else {
+            Err(ShutdownError::TimedOut {
+                open: still_open,
+                total,
+            })
         }
     }
 
