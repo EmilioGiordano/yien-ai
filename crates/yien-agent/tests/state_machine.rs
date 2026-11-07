@@ -569,13 +569,49 @@ fn session_start_from_needs_you_clears_red() {
 }
 
 #[test]
-fn session_start_mid_turn_goes_idle_as_04_states() {
-    // 04 §4.5: "cualquiera | SessionStart -> inactivo", compaction included.
+fn rnf_08_compact_mid_turn_keeps_the_turn() {
+    for source in [SessionStartSource::Compact, SessionStartSource::Resume] {
+        let mut p = Pane::working_claude();
+        p.at(ms(0)).send(hook(HookEvent::SessionStart {
+            session_id: Some("s2".into()),
+            source,
+        }));
+        assert_eq!(p.state(), AgentState::Working);
+        assert_eq!(p.fx, vec![Effect::SessionId("s2".into())]);
+        p.send(hook(HookEvent::PermissionRequest));
+        p.at(ms(300)).send(Signal::Tick);
+        assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+        p.send(hook(HookEvent::SessionStart {
+            session_id: Some("s3".into()),
+            source,
+        }));
+        assert!(p.state().is_red(), "compaction keeps the red mark");
+        p.send(hook(HookEvent::PostToolUse))
+            .send(hook(HookEvent::Stop));
+        assert_eq!(p.state(), AgentState::Done);
+    }
+}
+
+#[test]
+fn session_start_startup_or_clear_mid_turn_goes_idle() {
+    for source in [SessionStartSource::Startup, SessionStartSource::Clear] {
+        let mut p = Pane::working_claude();
+        p.send(hook(HookEvent::SessionStart {
+            session_id: Some("s2".into()),
+            source,
+        }));
+        assert_eq!(p.state(), AgentState::Idle);
+    }
+}
+
+#[test]
+fn session_start_compact_outside_a_turn_goes_idle() {
     let mut p = Pane::working_claude();
-    p.send(hook(HookEvent::SessionStart {
-        session_id: Some("s1".into()),
-        source: SessionStartSource::Compact,
-    }));
+    p.send(hook(HookEvent::Stop))
+        .send(hook(HookEvent::SessionStart {
+            session_id: Some("s2".into()),
+            source: SessionStartSource::Compact,
+        }));
     assert_eq!(p.state(), AgentState::Idle);
 }
 
