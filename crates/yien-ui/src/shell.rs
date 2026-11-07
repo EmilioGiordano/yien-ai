@@ -38,6 +38,8 @@ use crate::palette::{
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
 
+mod worktrees;
+
 const TAB_BAR_WIDTH: f32 = 264.0;
 /// The palette's width and its gap below the window top, as the prototype's.
 const PALETTE_WIDTH: f32 = 620.0;
@@ -81,6 +83,10 @@ pub(crate) struct Shell {
     confirm: Option<ConfirmClose>,
     /// The tab whose name is being edited in place (RF-ESP-16).
     renaming: Option<Renaming>,
+    /// The prompt for a new worktree tab's branch (RF-ESP-05).
+    worktree_prompt: Option<worktrees::Prompt>,
+    /// The question before closing the last tab on a worktree (RF-ESP-07).
+    worktree_close: Option<worktrees::Closing>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
     _subscriptions: Vec<Subscription>,
@@ -188,6 +194,8 @@ impl Shell {
             palette: None,
             confirm: None,
             renaming: None,
+            worktree_prompt: None,
+            worktree_close: None,
             alerts: Alerts::new(os),
             _subscriptions: vec![activation],
         }
@@ -257,7 +265,7 @@ impl Shell {
                 CoreMsg::Error { message, .. } | CoreMsg::Notice { message } => {
                     self.notice = Some(message);
                 }
-                CoreMsg::WorktreeChecked { .. } => continue,
+                CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
             }
             changed = true;
         }
@@ -366,11 +374,16 @@ impl Shell {
             self.renaming = None;
             self.give_back_keyboard(window, cx);
         }
+        self.drop_stale_worktree_question(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
-        self.palette.is_some() || self.confirm.is_some() || self.renaming.is_some()
+        self.palette.is_some()
+            || self.confirm.is_some()
+            || self.renaming.is_some()
+            || self.worktree_prompt.is_some()
+            || self.worktree_close.is_some()
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that changes.
@@ -560,8 +573,12 @@ impl Shell {
         self.split(Orientation::Vertical, cx);
     }
 
-    fn close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.focused_pane() {
+    /// Closes the focused pane; closing the last tab on a worktree asks
+    /// first whether to keep the worktree (RF-ESP-07).
+    fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.focused_pane()
+            && !self.ask_before_closing(pane, window, cx)
+        {
             self.command(Command::ClosePane { pane }, cx);
         }
     }
@@ -1651,7 +1668,10 @@ impl Shell {
         div()
             .id(("tab", id.get()))
             .role(Role::Tab)
-            .aria_label(format!("{}, {}", tab.name, state.label()))
+            .aria_label(match tab.worktree {
+                Some(_) => format!("{}, worktree, {}", tab.name, state.label()),
+                None => format!("{}, {}", tab.name, state.label()),
+            })
             .aria_selected(active)
             .relative()
             .flex()
@@ -1686,7 +1706,16 @@ impl Shell {
                     .items_center()
                     .gap(px(8.0))
                     .child(glyph(state, &t))
-                    .child(self.render_tab_name(tab)),
+                    .child(self.render_tab_name(tab))
+                    .when(tab.worktree.is_some(), |row| {
+                        row.child(
+                            svg()
+                                .flex_none()
+                                .path(assets::BRANCH)
+                                .size(px(12.0))
+                                .text_color(t.ai),
+                        )
+                    }),
             )
             .when(second_line, |row| {
                 row.child(
@@ -2389,7 +2418,7 @@ impl Shell {
                     .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
                 "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
                  {JUMP_KEYS} next that needs you · {ADD_PROJECT_KEYS} add project · \
-                 {NEW_CLAUDE_TAB_KEYS} Claude tab · \
+                 {NEW_CLAUDE_TAB_KEYS} Claude tab · {NEW_WORKTREE_TAB_KEYS} worktree tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
                  {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
@@ -2438,6 +2467,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::jump_to_needs_you))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_claude_tab))
+            .on_action(cx.listener(Self::new_worktree_tab))
+            .on_action(cx.listener(Self::worktree_prompt_confirm))
+            .on_action(cx.listener(Self::worktree_prompt_cancel))
+            .on_action(cx.listener(Self::worktree_keep))
+            .on_action(cx.listener(Self::worktree_remove))
+            .on_action(cx.listener(Self::worktree_remove_anyway))
+            .on_action(cx.listener(Self::worktree_cancel))
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
             .on_action(cx.listener(Self::toggle_project_fold))
@@ -2485,6 +2521,8 @@ impl Render for Shell {
             .child(self.render_status_bar())
             .children(self.render_palette(cx))
             .children(self.render_confirm(cx))
+            .children(self.render_worktree_prompt(cx))
+            .children(self.render_worktree_close(cx))
     }
 }
 
@@ -2546,6 +2584,8 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
+    ("worktree prompt buttons", "tab.new_worktree"),
+    ("worktree question buttons", "pane.close"),
 ];
 
 #[cfg(test)]

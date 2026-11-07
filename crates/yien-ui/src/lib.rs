@@ -23,6 +23,7 @@ mod palette;
 mod shell;
 mod terminal;
 mod theme;
+mod worktree;
 
 use std::rc::Rc;
 

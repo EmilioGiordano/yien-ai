@@ -12,6 +12,7 @@ use yien_proto::{
 };
 
 use crate::layout::{Rect, pane_rects};
+use crate::worktree::Question;
 
 /// What the agent in a pane is doing, as the window shows it (RF-AGE-05).
 ///
@@ -206,6 +207,9 @@ pub struct TabView {
     pub maximized: Option<PaneId>,
     /// Its toasts and taskbar flashes are muted (RF-ATN-11).
     pub muted: bool,
+    /// The linked worktree the tab was opened on, which is `dir`; its row
+    /// carries a worktree mark (RF-ESP-05).
+    pub worktree: Option<String>,
 }
 
 impl TabView {
@@ -220,6 +224,7 @@ impl TabView {
             focused: info.focused,
             maximized: info.maximized,
             muted: info.muted,
+            worktree: info.worktree.clone(),
         }
     }
 
@@ -587,6 +592,33 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// The question to ask before closing `pane`, when that closes the last
+    /// tab on a worktree (RF-ESP-07): the pane is its tab's only one, the tab
+    /// is on a worktree, and no other tab works in that folder. `None` closes
+    /// at once.
+    pub(crate) fn worktree_question(&self, pane: PaneId) -> Option<Question> {
+        let tab = self.tab_of(pane)?;
+        let worktree = tab.worktree.as_deref()?;
+        if tab.layout.panes().len() > 1 {
+            return None;
+        }
+        let shared = self.tabs.values().any(|t| {
+            t.id != tab.id
+                && (same_folder(&t.dir, worktree)
+                    || t.worktree
+                        .as_deref()
+                        .is_some_and(|w| same_folder(w, worktree)))
+        });
+        (!shared).then(|| {
+            Question::new(
+                tab.id,
+                tab.name.clone(),
+                worktree.to_owned(),
+                tab.branch.clone(),
+            )
+        })
+    }
+
     /// The tab a pane belongs to.
     pub fn tab_of(&self, pane: PaneId) -> Option<&TabView> {
         self.tabs_in_order()
@@ -672,6 +704,15 @@ impl WorkspaceView {
         self.last_project
             .filter(|id| self.projects.iter().any(|p| p.id == *id))
             .or_else(|| self.projects.first().map(|p| p.id))
+    }
+
+    /// The branch of the project's main working copy, as a tab on it last
+    /// saw it: where a new worktree's branch starts by default (RF-ESP-05).
+    pub fn main_branch_of(&self, id: ProjectId) -> Option<&str> {
+        let project = self.project(id)?;
+        self.tabs_of(project)
+            .filter(|t| t.worktree.is_none())
+            .find_map(|t| t.branch.as_deref())
     }
 
     /// Every tab, the most recently selected first; tabs never selected
@@ -917,6 +958,47 @@ mod tests {
             .iter()
             .map(|p| view.tabs_of(p).map(|t| t.name.clone()).collect())
             .collect()
+    }
+
+    #[test]
+    fn rf_esp_07_closing_the_last_pane_of_the_last_tab_on_a_worktree_asks() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        wt.branch = Some("feat/x".into());
+        view.tab_updated(&wt);
+        let shown = view.tab(TabId::new(30)).unwrap();
+        assert_eq!(shown.worktree.as_deref(), Some("C:/Code/app-wt/feat-x"));
+        assert!(view.tab(TabId::new(10)).unwrap().worktree.is_none());
+
+        let q = view.worktree_question(PaneId::new(300)).unwrap();
+        assert_eq!(q.tab, TabId::new(30));
+        assert_eq!(q.worktree, "C:/Code/app-wt/feat-x");
+        assert_eq!(q.branch.as_deref(), Some("feat/x"));
+        assert!(
+            view.worktree_question(PaneId::new(110)).is_none(),
+            "not a worktree tab"
+        );
+
+        // Another pane in the tab: closing one pane closes no tab.
+        let mut split = wt.clone();
+        split.layout = layout(&[300, 301]);
+        view.tab_updated(&split);
+        assert!(view.worktree_question(PaneId::new(300)).is_none());
+        view.tab_updated(&wt);
+
+        assert_eq!(view.main_branch_of(ProjectId::new(1)), None);
+        let mut main = tab(10, 1, &[100, 101]);
+        main.branch = Some("main".into());
+        view.tab_updated(&main);
+        assert_eq!(view.main_branch_of(ProjectId::new(1)), Some("main"));
+
+        // Another tab in the same folder keeps the worktree in use.
+        let mut other = tab(31, 1, &[310]);
+        other.dir = r"c:\code\app-wt\feat-x\".into();
+        view.tab_updated(&other);
+        assert!(view.worktree_question(PaneId::new(300)).is_none());
     }
 
     #[test]
