@@ -1,4 +1,5 @@
-//! Runs the `git` CLI read-only, with a timeout, no console window and capped output.
+//! Runs the `git` CLI with a timeout, no console window and capped output;
+//! read-only except for the worktree add and remove.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -51,9 +52,17 @@ const NO_PROGRAMS: &[&str] = &[
     "core.askPass=",
 ];
 
+/// A hooks folder that cannot hold a hook, so `post-checkout` and
+/// `reference-transaction` never run during a worktree add or remove.
+const NO_HOOKS: &str = if cfg!(windows) {
+    "core.hooksPath=NUL"
+} else {
+    "core.hooksPath=/dev/null"
+};
+
 /// How to run git: which program and how long to wait for it.
 ///
-/// Every call is read-only: no optional locks (so `status` never takes
+/// Every call but the worktree add and remove is read-only: no optional locks (so `status` never takes
 /// `index.lock` from the user's own git), no fsmonitor program, no prompts.
 ///
 /// ```no_run
@@ -133,7 +142,26 @@ impl Git {
         config: &[String],
         args: &[&str],
     ) -> Result<Vec<u8>, GitError> {
-        let cmd = self.command(dir, config, args);
+        self.finish(self.command(dir, config, args), args)
+    }
+
+    /// Runs one of the few calls that write (`worktree add` and `remove`):
+    /// like [`Git::run_with`], and no hook of the repository runs, nor a
+    /// git-lfs download during the checkout.
+    pub(crate) fn run_write(
+        &self,
+        dir: &Path,
+        config: &[String],
+        args: &[&str],
+    ) -> Result<Vec<u8>, GitError> {
+        let mut config = config.to_vec();
+        config.push(NO_HOOKS.to_owned());
+        let mut cmd = self.command(dir, &config, args);
+        cmd.env("GIT_LFS_SKIP_SMUDGE", "1");
+        self.finish(cmd, args)
+    }
+
+    fn finish(&self, cmd: Command, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let subcommand = args.first().copied().unwrap_or_default();
         let output = match run_command(cmd, self.timeout, MAX_OUTPUT) {
             Ok(output) => output,
