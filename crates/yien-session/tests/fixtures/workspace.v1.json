@@ -1,16 +1,21 @@
 {
   "schema_version": 1,
   "saved_at": 1000,
+  "selected": { "project": 10, "tab": 21 },
   "projects": [
     {
       "id": 10,
       "name": "yien",
       "root": "C:/code/yien",
+      "setup_script": "scripts/setup.ps1",
       "tabs": [
         {
           "id": 20,
           "title": "main",
           "dir": "C:/code/yien",
+          "branch": "main",
+          "worktree": null,
+          "archived": false,
           "layout": {
             "type": "split",
             "orientation": "horizontal",
@@ -23,6 +28,7 @@
           "panes": [
             {
               "id": 1,
+              "name": null,
               "profile": "claude",
               "cwd": "C:/code/yien",
               "agent": {
@@ -34,6 +40,7 @@
             },
             {
               "id": 2,
+              "name": "build",
               "profile": "pwsh",
               "cwd": "C:/code/yien/crates",
               "agent": null,
@@ -46,10 +53,14 @@
           "id": 21,
           "title": "other",
           "dir": "C:/code/other",
+          "branch": "feat/other",
+          "worktree": "C:/code/other",
+          "archived": true,
           "layout": { "type": "leaf", "pane": 3 },
           "panes": [
             {
               "id": 3,
+              "name": null,
               "profile": "codex",
               "cwd": "C:/code/other",
               "agent": {

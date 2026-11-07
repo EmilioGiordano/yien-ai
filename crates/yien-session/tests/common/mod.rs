@@ -4,12 +4,31 @@
 
 use yien_proto::{PaneId, ProjectId, TabId};
 use yien_session::{
-    AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, SessionRef,
-    SessionSnapshot, TabRecord,
+    AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, Selection,
+    SessionRef, SessionSnapshot, TabRecord,
 };
 
-/// One project with a split tab (an agent pane beside a shell) and a single-pane tab.
+/// [`basic`] with every optional field of plan §6.1 filled in.
 pub fn sample(saved_at: u64) -> SessionSnapshot {
+    let mut s = basic(saved_at);
+    s.selected = Selection {
+        project: Some(ProjectId::new(10)),
+        tab: Some(TabId::new(21)),
+    };
+    let project = &mut s.projects[0];
+    project.setup_script = Some("scripts/setup.ps1".into());
+    project.tabs[0].branch = Some("main".into());
+    project.tabs[0].panes[1].name = Some("build".into());
+    let other = &mut project.tabs[1];
+    other.branch = Some("feat/other".into());
+    other.worktree = Some("C:/code/other".into());
+    other.archived = true;
+    s
+}
+
+/// One project with a split tab (an agent pane beside a shell) and a single-pane tab,
+/// with the optional fields of plan §6.1 left at their defaults.
+pub fn basic(saved_at: u64) -> SessionSnapshot {
     let agent = PaneRecord {
         id: PaneId::new(1),
         profile: ProfileId::new("claude"),
@@ -20,6 +39,7 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
             ended_explicitly: false,
         }),
         last_command: None,
+        name: None,
     };
     let shell = PaneRecord {
         id: PaneId::new(2),
@@ -27,6 +47,7 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
         cwd: "C:/code/yien/crates".into(),
         agent: None,
         last_command: Some("cargo test".into()),
+        name: None,
     };
     let ended = PaneRecord {
         id: PaneId::new(3),
@@ -38,6 +59,7 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
             ended_explicitly: true,
         }),
         last_command: None,
+        name: None,
     };
     SessionSnapshot::new(
         saved_at,
@@ -45,6 +67,7 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
             id: ProjectId::new(10),
             name: "yien".into(),
             root: "C:/code/yien".into(),
+            setup_script: None,
             tabs: vec![
                 TabRecord {
                     id: TabId::new(20),
@@ -59,6 +82,9 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
                         ratios: vec![0.625, 0.375],
                     },
                     focused: shell.id,
+                    branch: None,
+                    worktree: None,
+                    archived: false,
                     panes: vec![agent, shell],
                 },
                 TabRecord {
@@ -67,6 +93,9 @@ pub fn sample(saved_at: u64) -> SessionSnapshot {
                     dir: "C:/code/other".into(),
                     layout: LayoutRecord::Leaf { pane: ended.id },
                     focused: ended.id,
+                    branch: None,
+                    worktree: None,
+                    archived: false,
                     panes: vec![ended],
                 },
             ],
