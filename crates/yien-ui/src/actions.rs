@@ -211,7 +211,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", WorktreePromptConfirm, prompt),
         KeyBinding::new("escape", WorktreePromptCancel, prompt),
         KeyBinding::new("enter", WorktreeKeep, close),
-        KeyBinding::new("r", WorktreeRemove, close),
+        KeyBinding::new("alt-r", WorktreeRemove, close),
         KeyBinding::new("ctrl-enter", WorktreeRemoveAnyway, close),
         KeyBinding::new("escape", WorktreeCancel, close),
     ];
@@ -388,10 +388,12 @@ mod tests {
     fn rf_esp_07_the_worktree_question_answers_by_keyboard() {
         let stack = ["Root", CONTEXT, WORKTREE_CLOSE_CONTEXT];
         assert!(first_is("enter", &stack, &WorktreeKeep));
-        assert!(first_is("r", &stack, &WorktreeRemove));
+        assert!(first_is("alt-r", &stack, &WorktreeRemove));
         assert!(first_is("ctrl-enter", &stack, &WorktreeRemoveAnyway));
         assert!(first_is("escape", &stack, &WorktreeCancel));
-        for keys in ["r", "ctrl-enter"] {
+        // A stray letter typed into the question removes nothing.
+        assert_eq!(matches("r", &stack), 0);
+        for keys in ["alt-r", "ctrl-enter"] {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
     }

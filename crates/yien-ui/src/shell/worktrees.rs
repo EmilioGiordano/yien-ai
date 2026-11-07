@@ -359,7 +359,7 @@ impl Shell {
                         })),
                 )
                 .child(
-                    self.dialog_button("worktree-remove", "Remove worktree", "R")
+                    self.dialog_button("worktree-remove", "Remove worktree", "Alt+R")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.worktree_remove(&WorktreeRemove, window, cx);
                         })),
