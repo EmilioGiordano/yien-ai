@@ -250,7 +250,7 @@ fn facts(git: &Git, dir: &Path) -> (TabGit, Option<GitInfo>) {
         Err(GitError::NotARepository) => (TabGit::NoRepository, None),
         Err(e) => {
             // The message can hold paths and git's own words; the log gets the kind only.
-            tracing::debug!("git facts unavailable: {}", error_kind(&e));
+            tracing::debug!("git facts unavailable: {}", e.kind());
             (
                 TabGit::Unavailable {
                     reason: e.to_string(),
@@ -258,21 +258,6 @@ fn facts(git: &Git, dir: &Path) -> (TabGit, Option<GitInfo>) {
                 None,
             )
         }
-    }
-}
-
-fn error_kind(e: &GitError) -> &'static str {
-    match e {
-        GitError::GitNotFound => "git not found",
-        GitError::NotARepository => "not a repository",
-        GitError::UnsafeRepository { .. } => "repository owned by another user",
-        GitError::UnsafeFilter { .. } => "repository filter cannot be switched off",
-        GitError::Timeout(_) => "timeout",
-        GitError::OutputTooLarge(_) => "output too large",
-        GitError::Failed { .. } => "git failed",
-        GitError::Io(_) => "could not run git",
-        GitError::Parse(_) => "unexpected output",
-        _ => "other",
     }
 }
 
