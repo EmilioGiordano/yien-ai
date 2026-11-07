@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use yien_git::{
@@ -16,10 +16,39 @@ use yien_git::{
 mod support {
     use super::*;
 
+    /// How many sandboxes may run git at once in this test binary.
+    const MAX_SANDBOXES: usize = 4;
+
+    static RUNNING: Mutex<usize> = Mutex::new(0);
+    static FREED: Condvar = Condvar::new();
+
+    /// A slot among [`MAX_SANDBOXES`]; dropping it frees the slot.
+    struct Slot;
+
+    impl Slot {
+        fn take() -> Self {
+            let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            while *running >= MAX_SANDBOXES {
+                running = FREED.wait(running).unwrap_or_else(PoisonError::into_inner);
+            }
+            *running += 1;
+            Self
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            *running = running.saturating_sub(1);
+            FREED.notify_one();
+        }
+    }
+
     /// A temp folder holding repositories and an empty global git config, removed on drop.
     pub struct Sandbox {
         pub dir: PathBuf,
         config: PathBuf,
+        _slot: Slot,
     }
 
     impl Sandbox {
@@ -32,6 +61,7 @@ mod support {
                 eprintln!("git not found, skipping");
                 return None;
             }
+            let slot = Slot::take();
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "yien-git-it-{}-{}",
@@ -42,7 +72,11 @@ mod support {
             std::fs::create_dir_all(&dir).unwrap();
             let config = dir.join("gitconfig");
             std::fs::write(&config, "").unwrap();
-            Some(Self { dir, config })
+            Some(Self {
+                dir,
+                config,
+                _slot: slot,
+            })
         }
 
         /// Runs a setup command, isolated from the user's global and system git config.
@@ -100,7 +134,8 @@ mod support {
     }
 
     pub fn git() -> Git {
-        Git::new().with_timeout(Duration::from_secs(20))
+        // Generous: a loaded machine (a build, other test runs) slows git a lot.
+        Git::new().with_timeout(Duration::from_secs(120))
     }
 
     pub fn same(a: &Path, b: &Path) -> bool {
