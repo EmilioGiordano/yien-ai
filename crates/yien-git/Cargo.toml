@@ -1,0 +1,18 @@
+[package]
+name = "yien-git"
+description = "Read-only git facts for a tab: branch, worktree, dirty flag, ahead/behind, changed files, and a cheap change watcher."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
