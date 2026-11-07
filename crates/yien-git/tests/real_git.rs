@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use yien_git::{
     AheadBehind, Change, ChangedFile, FileStatus, Git, GitError, GitWatcher, Head, WatchOptions,
+    WorktreeError, WorktreeState, default_worktree_path,
 };
 
 // Helpers sit in a cfg(test) module so clippy's allow-unwrap-in-tests covers them.
@@ -488,4 +489,240 @@ fn rnf_14_partial_clone_never_fetches() {
         "status hung: {result:?}"
     );
     assert!(!marker.exists(), "the repository's ssh command ran");
+}
+
+/// Whether `branch` exists in the repository at `root`.
+fn has_branch(sb: &Sandbox, root: &Path, branch: &str) -> bool {
+    let full = format!("refs/heads/{branch}");
+    sb.git_may_fail(root, &["rev-parse", "--verify", "--quiet", &full])
+}
+
+#[test]
+fn rf_esp_05_add_list_and_remove_keep_the_branch() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("app");
+    let path = default_worktree_path(&root, "feat/x").unwrap();
+    assert!(same(path.parent().unwrap().parent().unwrap(), &sb.dir));
+
+    git().add_worktree(&root, "feat/x", &path, None).unwrap();
+    assert!(path.join("a.txt").is_file());
+    let list = git().worktrees(&root).unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].main && same(&list[0].path, &root));
+    assert!(same(&list[1].path, &path));
+    assert_eq!(list[1].branch.as_deref(), Some("feat/x"));
+    let info = git().info(&path).unwrap();
+    assert!(info.repo.linked_worktree);
+    assert_eq!(info.status.head.branch(), Some("feat/x"));
+    assert_eq!(
+        git().worktree_state(&path).unwrap(),
+        WorktreeState::default()
+    );
+
+    git().remove_worktree(&root, &path, false).unwrap();
+    assert!(!path.exists());
+    assert_eq!(git().worktrees(&root).unwrap().len(), 1);
+    assert!(has_branch(&sb, &root, "feat/x"), "the branch was deleted");
+}
+
+#[test]
+fn rf_esp_05_a_base_is_where_the_branch_starts() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("based");
+    let first = sb.git(&root, &["rev-parse", "HEAD"]);
+    sb.git(&root, &["tag", "v1"]);
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "second"]);
+
+    let path = sb.dir.join("from-tag");
+    git()
+        .add_worktree(&root, "fix/old", &path, Some("v1"))
+        .unwrap();
+    assert_eq!(sb.git(&path, &["rev-parse", "HEAD"]), first);
+}
+
+#[test]
+fn rf_esp_05_add_failures_are_typed_and_leave_nothing() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("fails");
+    let free = sb.dir.join("free");
+
+    let err = git().add_worktree(&root, "main", &free, None).unwrap_err();
+    assert!(
+        matches!(err, WorktreeError::BranchExists(ref b) if b == "main"),
+        "{err:?}"
+    );
+    for bad in ["bad..name", "-x", "a b", "@{-1}", "", "x.lock"] {
+        let err = git().add_worktree(&root, bad, &free, None).unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::InvalidBranch(_)),
+            "{bad}: {err:?}"
+        );
+    }
+    for base in ["nope", "--orphan", "HEAD~5"] {
+        let err = git()
+            .add_worktree(&root, "feat/a", &free, Some(base))
+            .unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::UnknownBase(_)),
+            "{base}: {err:?}"
+        );
+    }
+    let taken = sb.dir.join("taken");
+    std::fs::create_dir_all(&taken).unwrap();
+    let err = git()
+        .add_worktree(&root, "feat/a", &taken, None)
+        .unwrap_err();
+    assert!(matches!(err, WorktreeError::PathTaken(_)), "{err:?}");
+    let plain = sb.dir.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let err = git()
+        .add_worktree(&plain, "feat/a", &free, None)
+        .unwrap_err();
+    assert!(
+        matches!(err, WorktreeError::Git(GitError::NotARepository)),
+        "{err:?}"
+    );
+
+    assert!(!free.exists());
+    assert!(!has_branch(&sb, &root, "feat/a"));
+    assert_eq!(git().worktrees(&root).unwrap().len(), 1);
+}
+
+#[test]
+fn rn_08_dirty_and_unpushed_work_is_detected_and_kept() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("work");
+    let path = sb.dir.join("work-wt");
+    git().add_worktree(&root, "feat/w", &path, None).unwrap();
+
+    std::fs::write(path.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(path.join("new.txt"), "new\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!(state.changed, 2);
+    assert_eq!(state.unpushed, 0);
+    assert!(state.has_work());
+
+    let err = git().remove_worktree(&root, &path, false).unwrap_err();
+    assert!(matches!(err, WorktreeError::Dirty(_)), "{err:?}");
+    assert!(
+        path.join("new.txt").is_file(),
+        "a refused removal deleted files"
+    );
+
+    sb.git(&path, &["add", "-A"]);
+    sb.git(&path, &["commit", "-q", "-m", "work"]);
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!((state.changed, state.unpushed), (0, 1));
+    let tip = sb.git(&path, &["rev-parse", "HEAD"]);
+
+    std::fs::write(path.join("scratch.txt"), "lost\n").unwrap();
+    git().remove_worktree(&root, &path, true).unwrap();
+    assert!(!path.exists());
+    assert_eq!(sb.git(&root, &["rev-parse", "refs/heads/feat/w"]), tip);
+}
+
+#[test]
+fn rn_08_unpushed_counts_against_the_upstream() {
+    let Some(sb) = Sandbox::new() else { return };
+    let origin = sb.repo("origin");
+    let clone = sb.dir.join("clone");
+    sb.git(
+        &sb.dir,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let path = sb.dir.join("clone-wt");
+    git()
+        .add_worktree(&clone, "feat/u", &path, Some("origin/main"))
+        .unwrap();
+    sb.git(&path, &["branch", "-q", "--set-upstream-to=origin/main"]);
+    std::fs::write(path.join("a.txt"), "x\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "one"]);
+    std::fs::write(path.join("a.txt"), "y\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "two"]);
+    assert_eq!(git().worktree_state(&path).unwrap().unpushed, 2);
+}
+
+#[test]
+fn locked_and_main_worktrees_are_not_removed() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("locks");
+    let path = sb.dir.join("locked-wt");
+    git().add_worktree(&root, "feat/l", &path, None).unwrap();
+    sb.git(&root, &["worktree", "lock", path.to_str().unwrap()]);
+
+    let err = git().remove_worktree(&root, &path, true).unwrap_err();
+    assert!(matches!(err, WorktreeError::Locked(_)), "{err:?}");
+    let err = git().remove_worktree(&root, &root, true).unwrap_err();
+    assert!(matches!(err, WorktreeError::NotLinked(_)), "{err:?}");
+    let err = git()
+        .remove_worktree(&root, &sb.dir.join("elsewhere"), true)
+        .unwrap_err();
+    assert!(matches!(err, WorktreeError::NotLinked(_)), "{err:?}");
+    assert!(path.join("a.txt").is_file());
+    assert!(root.join("a.txt").is_file());
+}
+
+#[test]
+fn rnf_14_worktree_add_and_remove_run_no_repo_hook_or_filter() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("hooks");
+    let hooks = root.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let mut markers = Vec::new();
+    for hook in ["post-checkout", "reference-transaction"] {
+        let marker = sb.dir.join(format!("{hook}.marker"));
+        let script = format!("#!/bin/sh\n{}\n", Sandbox::marker_command(&marker));
+        std::fs::write(hooks.join(hook), script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(hooks.join(hook), mode).unwrap();
+        }
+        markers.push(marker);
+    }
+    let smudge = sb.dir.join("smudge.marker");
+    let smudge_cmd = format!("{}; cat", Sandbox::marker_command(&smudge));
+    sb.git(&root, &["config", "filter.evil.smudge", &smudge_cmd]);
+    std::fs::write(root.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    sb.git(&root, &["add", ".gitattributes"]);
+    sb.git(&root, &["commit", "-q", "-m", "attributes"]);
+    markers.push(smudge);
+    for marker in &markers {
+        let _ = std::fs::remove_file(marker);
+    }
+
+    let path = sb.dir.join("hooks-wt");
+    git().add_worktree(&root, "feat/h", &path, None).unwrap();
+    git().remove_worktree(&root, &path, true).unwrap();
+    for marker in &markers {
+        assert!(!marker.exists(), "{} ran", marker.display());
+    }
+
+    // The same add through plain git runs them, so the test can see a run.
+    let control = sb.dir.join("control-wt");
+    sb.git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/c",
+            control.to_str().unwrap(),
+        ],
+    );
+    for marker in &markers {
+        assert!(
+            marker.exists(),
+            "{} did not run under plain git",
+            marker.display()
+        );
+    }
 }
