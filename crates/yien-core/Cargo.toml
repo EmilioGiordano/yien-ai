@@ -1,0 +1,24 @@
+[package]
+name = "yien-core"
+description = "The YIEN core: projects, tabs and layouts, and one actor per pane running its PTY, terminal engine and agent state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+yien-proto = { workspace = true }
+yien-layout = { workspace = true }
+yien-vt = { workspace = true }
+yien-agent = { workspace = true }
+yien-pty = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+yien-pty = { workspace = true, features = ["fake"] }
+proptest = { workspace = true }
+
+[lints]
+workspace = true
