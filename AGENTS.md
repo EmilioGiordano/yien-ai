@@ -200,6 +200,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 | `yien-platform` | 2 | Notifications, tray, badge, single instance, shutdown, paths, IPC, DPAPI. |
 | `yien-core` | 3 | Pane actors and services. Runs in process or as `--host`. |
 | `yien-ui` | 3 | GPUI: window, bars, terminal element, palette. |
+| `yien` | 4 | The binary: wires the core and the UI together. May depend on every layer; nothing depends on it. |
 | `yien-testkit` | dev | `.yrec` record and replay, fake PTY and clock, acceptance scenarios. |
 
 ## The layer rule
