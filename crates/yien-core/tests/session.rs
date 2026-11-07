@@ -7,12 +7,15 @@
     reason = "test helpers outside #[test] fns are not covered by clippy.toml's in-test allowances"
 )]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
-use yien_core::{Core, CoreConfig, CoreHandle, SessionSaveError, SessionStore, ShellCommand};
+use yien_core::{
+    Core, CoreConfig, CoreHandle, HookConfig, SessionSaveError, SessionStore, ShellCommand,
+};
 use yien_proto::{ClientMsg, Command, CoreMsg, Orientation, PaneId, ProfileId, WorkspaceSnapshot};
 use yien_pty::{FakeChild, FakePty};
 use yien_session::{MemStore, SessionSnapshot, Store, StoreError, load};
@@ -71,6 +74,45 @@ impl Store for Slow {
     }
 }
 
+/// A store whose first read stalls (`delay`) or fails like a crashed load
+/// (`panic`), for what happens before the restore is done.
+#[derive(Clone)]
+struct FirstRead {
+    inner: Shared,
+    delay: Duration,
+    panic: bool,
+    done: Arc<AtomicBool>,
+}
+
+impl FirstRead {
+    fn new(inner: &Shared, delay: Duration, panic: bool) -> Self {
+        Self {
+            inner: inner.clone(),
+            delay,
+            panic,
+            done: Arc::default(),
+        }
+    }
+}
+
+impl Store for FirstRead {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        if !self.done.swap(true, Ordering::SeqCst) {
+            std::thread::sleep(self.delay);
+            assert!(!self.panic, "simulated failure while loading");
+        }
+        self.inner.read(name)
+    }
+
+    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.inner.write_atomic(name, bytes)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), StoreError> {
+        self.inner.rename(from, to)
+    }
+}
+
 struct Run {
     core: CoreHandle,
     events: Receiver<CoreMsg>,
@@ -85,9 +127,14 @@ impl Run {
     }
 
     fn start_on(store: impl Store + Send + 'static) -> Self {
+        Self::start_with(store, None)
+    }
+
+    fn start_with(store: impl Store + Send + 'static, hooks: Option<HookConfig>) -> Self {
         let backend = FakePty::new();
         let config = CoreConfig {
             shell: ShellCommand::new("fake-shell"),
+            hooks,
             session: Some(SessionStore::new(store)),
             start_project: Some(ROOT.to_owned()),
             ..CoreConfig::default()
@@ -209,6 +256,16 @@ fn first_run() -> (Shared, PaneId, String) {
     let launch = args(&child);
     assert_eq!(launch[0], "--session-id");
     let session = launch[1].clone();
+    wait_until(|| {
+        store.saved().is_some_and(|s| {
+            s.projects[0].tabs[0].panes.iter().any(|p| {
+                p.agent
+                    .as_ref()
+                    .and_then(|a| a.session_id.as_ref())
+                    .is_some_and(|id| id.as_str() == session)
+            })
+        })
+    });
     run.save();
     (store, claude, session)
 }
@@ -270,6 +327,11 @@ fn rf_ses_02_a_restart_restores_layout_focus_and_selection() {
         CoreMsg::ActiveTab { tab } if *tab == Some(first_tab) => Some(()),
         _ => None,
     });
+    wait_until(|| {
+        store
+            .saved()
+            .is_some_and(|s| s.selected.tab == Some(first_tab) && s.projects[0].tabs.len() == 2)
+    });
     run.save();
     let saved = store.saved().unwrap();
     drop(run);
@@ -292,7 +354,7 @@ fn rf_ses_02_a_restart_restores_layout_focus_and_selection() {
             Some(std::path::Path::new(ROOT))
         );
     }
-    again.save();
+    wait_until(|| store.saved().is_some_and(|s| s.saved_at != saved.saved_at));
     let mut resaved = store.saved().unwrap();
     resaved.saved_at = saved.saved_at;
     assert_eq!(resaved, saved);
@@ -365,7 +427,7 @@ fn rf_ses_06_a_damaged_file_restores_the_previous_generation() {
         notice.contains("damaged") && notice.contains("workspace.1.json"),
         "{notice}"
     );
-    again.save();
+    wait_until(|| store.file("workspace.damaged.json").is_some());
     assert_eq!(
         store.file("workspace.damaged.json").as_deref(),
         Some(&b"{ not json"[..])
@@ -383,7 +445,7 @@ fn a_session_from_a_newer_yien_is_kept_and_not_restored() {
     assert!(notice.contains("newer YIEN"), "{notice}");
     run.first_pane();
     assert_eq!(store.file("workspace.v99.json").unwrap(), newer);
-    run.save();
+    wait_until(|| store.saved().is_some());
     assert_eq!(store.saved().unwrap().projects[0].root, ROOT);
 }
 
@@ -412,4 +474,90 @@ fn rf_ses_01_the_quit_save_waits_no_longer_than_asked() {
     );
     assert!(started.elapsed() < Duration::from_secs(1));
     wait_until(|| store.0.saved().is_some());
+}
+
+#[test]
+fn rf_ses_01_nothing_after_the_quit_save_reaches_the_store() {
+    let store = Shared::default();
+    let mut run = Run::start(&store);
+    let first = run.first_pane();
+    wait_until(|| store.saved().is_some());
+    run.save();
+    let saved = store.file("workspace.json").unwrap();
+    run.split(first, None);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(store.file("workspace.json").unwrap(), saved);
+    assert!(!run.core.save_session(TIMEOUT).unwrap());
+}
+
+#[test]
+fn rf_ses_01_a_quit_before_the_restore_leaves_the_file_as_it_was() {
+    let (store, _, _) = first_run();
+    let before = store.file("workspace.json").unwrap();
+    let run = Run::start_on(FirstRead::new(&store, Duration::from_millis(500), false));
+    assert!(!run.core.save_session(TIMEOUT).unwrap());
+    run.children(2);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(store.file("workspace.json").unwrap(), before);
+}
+
+#[test]
+fn rf_ses_02_a_session_that_failed_to_load_is_set_aside_before_saving() {
+    let (store, _, _) = first_run();
+    let before = store.file("workspace.json").unwrap();
+    let mut run = Run::start_on(FirstRead::new(&store, Duration::ZERO, true));
+    let notice = run.notice();
+    assert!(notice.contains("workspace.unrestored.json"), "{notice}");
+    run.first_pane();
+    wait_until(|| store.saved().is_some());
+    assert_eq!(store.file("workspace.unrestored.json").unwrap(), before);
+    let fresh = store.saved().unwrap();
+    assert_eq!(fresh.projects[0].tabs[0].panes.len(), 1);
+}
+
+#[test]
+fn rf_ses_03_a_relaunch_after_a_restore_starts_a_new_session() {
+    let (store, claude, session) = first_run();
+    let run = Run::start(&store);
+    let children = run.children(2);
+    let resumed = children
+        .iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    assert_eq!(args(resumed)[0], "--resume");
+    run.command(Command::RelaunchPane { pane: claude });
+    let relaunched = run.children(1).pop().unwrap();
+    let launch = args(&relaunched);
+    assert_eq!(launch[0], "--session-id");
+    assert_ne!(launch[1], session);
+}
+
+#[cfg(windows)]
+#[test]
+fn rf_ses_03_a_resumed_claude_gets_the_hook_settings_and_a_token() {
+    let (store, _, session) = first_run();
+    let hooks = HookConfig {
+        hook_exe: std::env::current_exe().unwrap(),
+        settings_dir: std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("yien-session-hooks-{}", std::process::id())),
+    };
+    let settings = hooks.settings_file();
+    let run = Run::start_with(store, Some(hooks));
+    let children = run.children(2);
+    let child = children
+        .iter()
+        .find(|c| c.spec().program == "claude")
+        .unwrap();
+    let launch = args(child);
+    assert_eq!(launch[..3], ["--resume", session.as_str(), "--settings"]);
+    assert_eq!(std::path::PathBuf::from(&launch[3]), settings);
+    let token = child
+        .spec()
+        .env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "YIEN_HOOK_TOKEN")
+        .map(|(_, v)| v.to_string_lossy().into_owned())
+        .unwrap();
+    assert_eq!(token.len(), 64);
 }
