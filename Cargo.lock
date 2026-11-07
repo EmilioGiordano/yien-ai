@@ -8758,8 +8758,9 @@ dependencies = [
 name = "yien"
 version = "0.0.0"
 dependencies = [
- "yien-layout",
+ "yien-core",
  "yien-proto",
+ "yien-pty",
  "yien-ui",
 ]
 
@@ -8822,8 +8823,8 @@ name = "yien-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-kit",
- "thiserror 2.0.21",
- "yien-layout",
+ "tokio",
+ "yien-input",
  "yien-proto",
 ]
 
