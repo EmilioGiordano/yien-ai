@@ -12,7 +12,7 @@ Invoke as `/yien-integrate [branch...]`; with no argument, every branch with a P
 3. Merge each branch with `--no-ff`, then `scripts/cargo.sh check --workspace --all-targets`. On a break, drop that merge (`git merge --abort` or `git reset --hard HEAD~1`), send the failure back to its implementer, and continue with the rest.
 4. Run the full gate once, in the background, with `scripts/cargo.sh --full`. Map a failing test to its branch by crate and module.
 5. Run the UI validation of each feature against the staging release build.
-6. For each PR, in staging order: `gh pr ready <n>`, a short comment with the gate and UI results, then `gh pr merge <n> --merge`. Never `--delete-branch`. On a conflict with `main`, merge `origin/main` into the PR branch with the staging resolution and push first.
+6. For each PR, in staging order: `gh pr ready <n>`, a short comment with the gate and UI results, then wait for `gh pr checks <n>` to be green on all three systems (watch the run in the background), then `gh pr merge <n> --merge`. Never `--delete-branch`. On a conflict with `main`, merge `origin/main` into the PR branch with the staging resolution and push first.
 7. `git pull --ff-only` on `main`, then check that `git diff staging/<date> main` is empty. If it is not, find out why before doing anything else.
 8. Report to Emilio in Spanish: what was merged, what was held out and why, and what only a human can check.
 

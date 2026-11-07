@@ -19,6 +19,8 @@ yien-vt = { path = "crates/yien-vt" }
 yien-ui = { path = "crates/yien-ui" }
 yien-agent = { path = "crates/yien-agent" }
 yien-core = { path = "crates/yien-core" }
+yien-session = { path = "crates/yien-session" }
+yien-platform = { path = "crates/yien-platform" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -31,6 +33,10 @@ gpui-kit = "=0.7.1"
 portable-pty = "0.9.0"
 regex = "1.13.1"
 tokio = { version = "1.54.1", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "env-filter", "tracing-log"] }
+tracing-appender = "0.2.5"
+dirs = "6.0.0"
 
 [workspace.lints.rust]
 missing_docs = "warn"

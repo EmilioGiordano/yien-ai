@@ -1,0 +1,59 @@
+{
+  "schema_version": 0,
+  "saved_at": 1000,
+  "projects": [
+    {
+      "id": 10,
+      "name": "yien",
+      "root": "C:/code/yien",
+      "tabs": [
+        {
+          "id": 20,
+          "title": "main",
+          "dir": "C:/code/yien",
+          "layout": {
+            "type": "split",
+            "orientation": "horizontal",
+            "children": [
+              { "type": "leaf", "pane": 1 },
+              { "type": "leaf", "pane": 2 }
+            ],
+            "ratios": [0.625, 0.375]
+          },
+          "panes": [
+            {
+              "id": 1,
+              "profile": "claude",
+              "directory": "C:/code/yien",
+              "session": "0b7e2f6a-41c3",
+              "ended": false
+            },
+            {
+              "id": 2,
+              "profile": "pwsh",
+              "directory": "C:/code/yien/crates",
+              "last_command": "cargo test"
+            }
+          ],
+          "focused": 2
+        },
+        {
+          "id": 21,
+          "title": "other",
+          "dir": "C:/code/other",
+          "layout": { "type": "leaf", "pane": 3 },
+          "panes": [
+            {
+              "id": 3,
+              "profile": "codex",
+              "directory": "C:/code/other",
+              "session": "rollout-9",
+              "ended": true
+            }
+          ],
+          "focused": 3
+        }
+      ]
+    }
+  ]
+}

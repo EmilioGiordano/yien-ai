@@ -266,8 +266,13 @@ impl ExitStatus {
 ///
 /// ConPTY keeps the master open after the child exits, so end of output can
 /// only be inferred: the session ends after `quiet` without new bytes, or
-/// after `cap` at most, so a grandchild that keeps writing cannot hold the
-/// session open.
+/// once the reader has waited for bytes for `cap` in total, so a grandchild
+/// that keeps writing cannot hold the session open.
+///
+/// Both count only time the reader spends waiting in `read`, never time it
+/// spends blocked on a consumer that is behind. `cap` therefore does not
+/// bound wall time: a consumer that stops reading delays `Exited` as long as
+/// it stays behind, and every byte read before the exit still comes first.
 ///
 /// ```
 /// use std::time::Duration;
@@ -278,7 +283,8 @@ impl ExitStatus {
 pub struct Drain {
     /// Silence that counts as the end of output.
     pub quiet: Duration,
-    /// Longest wait after exit before [`PtyEvent::Exited`] is sent anyway.
+    /// Time spent waiting in `read` after exit before [`PtyEvent::Exited`] is
+    /// sent anyway.
     pub cap: Duration,
 }
 
