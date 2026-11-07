@@ -1,0 +1,19 @@
+[package]
+name = "yien-pty"
+description = "Runs a child process in a pseudo terminal and moves its bytes in and out without dropping any."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# `FakePty`, a scripted backend for other crates' tests.
+fake = []
+
+[dependencies]
+portable-pty.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
