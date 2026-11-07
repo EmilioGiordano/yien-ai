@@ -2,7 +2,7 @@
 //! agent detection rule (RF-AGE-01, RF-PAN-18), and the placeholders filled
 //! in for each launch.
 
-use yien_agent::{MachineConfig, Profile, ScreenRule, Source};
+use yien_agent::{CLAUDE_SESSION_MARKERS, MachineConfig, Profile, ScreenRule, Source};
 use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV};
 use yien_proto::{PaneId, ProfileId};
 use yien_pty::SpawnSpec;
@@ -63,7 +63,8 @@ impl LaunchPlan {
     /// before it: without hooks Claude starts with `--session-id` but no
     /// `--settings`. The hook variables are always set, empty when this pane
     /// has no token, so a value inherited from the environment that started
-    /// YIEN can never light another pane red.
+    /// YIEN can never light another pane red. Claude Code's session markers
+    /// are never inherited, in any pane.
     pub fn spec(&self, fill: &Fill<'_>, cwd: &str, cols: u16, rows: u16) -> SpawnSpec {
         let mut args: Vec<String> = Vec::new();
         let mut last_was_flag = false;
@@ -86,6 +87,9 @@ impl LaunchPlan {
             .size(cols.max(1), rows.max(1));
         if !cwd.is_empty() {
             spec = spec.cwd(cwd);
+        }
+        for marker in CLAUDE_SESSION_MARKERS {
+            spec = spec.env_remove(*marker);
         }
         let mut hook_vars = [(HOOK_TOKEN_ENV, false), (HOOK_PIPE_ENV, false)];
         for (key, value) in &self.env {
@@ -325,6 +329,33 @@ mod tests {
         let spec = plan.spec(&fill, "C:/Code", 80, 24);
         assert_eq!(env(&spec, HOOK_TOKEN_ENV), Some(""));
         assert_eq!(env(&spec, HOOK_PIPE_ENV), Some(""));
+    }
+
+    #[test]
+    fn no_pane_inherits_the_markers_of_a_claude_session() {
+        let profiles = builtin_profiles().unwrap();
+        let fill = Fill {
+            pane: PaneId::new(1),
+            session_id: Some("s-1"),
+            hooks: Some(HOOKS),
+        };
+        for id in [None, Some("claude"), Some("codex")] {
+            let plan = resolve(id.map(ProfileId::new).as_ref(), &profiles, &shell()).unwrap();
+            let spec = plan.spec(&fill, "", 80, 24);
+            for marker in [
+                "CLAUDECODE",
+                "CLAUDE_CODE_ENTRYPOINT",
+                "CLAUDE_CODE_SESSION_ID",
+            ] {
+                assert!(
+                    spec.env_remove.iter().any(|k| k == marker),
+                    "{id:?} {marker}"
+                );
+            }
+            for kept in ["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "YIEN_HOOK_TOKEN"] {
+                assert!(!spec.env_remove.iter().any(|k| k == kept), "{id:?} {kept}");
+            }
+        }
     }
 
     #[test]

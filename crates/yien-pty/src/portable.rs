@@ -68,6 +68,9 @@ fn command(spec: &SpawnSpec) -> CommandBuilder {
     if let Some(dir) = &spec.cwd {
         cmd.cwd(dir);
     }
+    for key in &spec.env_remove {
+        cmd.env_remove(key);
+    }
     for (key, value) in &spec.env {
         cmd.env(key, value);
     }
@@ -194,5 +197,23 @@ impl PtyBackend for PortablePty {
             }),
         );
         Ok(PtySession::new(control, events))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn removed_variables_are_not_inherited_and_set_ones_still_are() {
+        let spec = SpawnSpec::new("sh")
+            .env_remove("PATH")
+            .env_remove("YIEN_TEST_VAR")
+            .env("YIEN_TEST_VAR", "1");
+        let cmd = command(&spec);
+        assert_eq!(cmd.get_env("PATH"), None);
+        assert_eq!(cmd.get_env("YIEN_TEST_VAR"), Some(OsStr::new("1")));
     }
 }

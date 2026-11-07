@@ -32,8 +32,9 @@ mod signal;
 mod version;
 
 pub use hooks::{
-    CLAUDE_HOOK_EVENTS, HOOK_TIMEOUT_SECS, HOOK_TOKEN_ENV, HookError, HookTemplate,
-    MAX_HOOK_PAYLOAD, decode_claude_hook, decode_claude_hook_or_event, render_claude_settings,
+    CLAUDE_HOOK_EVENTS, CLAUDE_SESSION_MARKERS, HOOK_TIMEOUT_SECS, HOOK_TOKEN_ENV, HookError,
+    HookTemplate, MAX_HOOK_PAYLOAD, decode_claude_hook, decode_claude_hook_or_event,
+    render_claude_settings,
 };
 pub use machine::{
     AgentState, Cause, Effect, ErrorReason, Machine, MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason,
