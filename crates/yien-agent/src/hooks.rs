@@ -24,7 +24,8 @@ pub const HOOK_TIMEOUT_SECS: u64 = 5;
 /// versioned code, not free text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum HookTemplate {
-    /// Claude Code `command` hooks calling `yien-hook <event>`.
+    /// Claude Code `command` hooks in exec form: `yien-hook` spawned with the
+    /// event name as its only argument, no shell.
     #[serde(rename = "claude-command-v1")]
     ClaudeCommandV1,
 }
@@ -36,6 +37,7 @@ pub const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "PermissionRequest",
     "Notification",
     "Stop",
@@ -51,8 +53,10 @@ const CLAUDE_NOTIFICATION_MATCHER: &str =
 /// Why a hook could not be rendered or decoded. Never echoes payload content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HookError {
-    /// The `yien-hook` path cannot be embedded in a shell command safely.
-    #[error("the yien-hook path is empty or contains a quote, $, backtick or control character")]
+    /// The `yien-hook` path is empty or has a character YIEN refuses.
+    #[error(
+        "the yien-hook path is empty or contains a quote, $, backtick, backslash or control character"
+    )]
     UnsafeHookPath,
     /// The payload exceeds [`MAX_HOOK_PAYLOAD`].
     #[error("hook payload of {len} bytes exceeds the {max} byte limit")]
@@ -79,19 +83,21 @@ pub enum HookError {
     InvalidSessionId,
 }
 
-/// Renders the JSON for `claude --settings <file>`: one `command` hook per
-/// event in [`CLAUDE_HOOK_EVENTS`], each running `"<hook_exe>" <event>`.
+/// Renders the JSON for `claude --settings <file>`: one exec-form `command`
+/// hook per event in [`CLAUDE_HOOK_EVENTS`], spawning `hook_exe` with the
+/// event name in `args`. Exec form runs no shell, so nothing depends on
+/// Git Bash or PowerShell; on Windows `hook_exe` must be a real `.exe`.
 ///
-/// `hook_exe` should use forward slashes: Claude Code may run hooks through
-/// a POSIX shell, where a backslash inside double quotes can be eaten.
+/// `hook_exe` uses forward slashes; a backslash is refused so the path has
+/// one canonical form.
 ///
 /// ```
 /// let json = yien_agent::render_claude_settings("C:/YIEN/yien-hook.exe").unwrap();
-/// assert!(json.contains(r#""command": "\"C:/YIEN/yien-hook.exe\" Stop""#));
-/// assert!(yien_agent::render_claude_settings("bad\"path").is_err());
+/// assert!(json.contains(r#""command": "C:/YIEN/yien-hook.exe""#));
+/// assert!(yien_agent::render_claude_settings(r"C:\YIEN\yien-hook.exe").is_err());
 /// ```
 pub fn render_claude_settings(hook_exe: &str) -> Result<String, HookError> {
-    let unsafe_char = |c: char| c == '"' || c == '$' || c == '`' || c.is_control();
+    let unsafe_char = |c: char| c == '"' || c == '$' || c == '`' || c == '\\' || c.is_control();
     if hook_exe.is_empty() || hook_exe.chars().any(unsafe_char) {
         return Err(HookError::UnsafeHookPath);
     }
@@ -99,7 +105,8 @@ pub fn render_claude_settings(hook_exe: &str) -> Result<String, HookError> {
     for event in CLAUDE_HOOK_EVENTS {
         let handler = json!({
             "type": "command",
-            "command": format!("\"{hook_exe}\" {event}"),
+            "command": hook_exe,
+            "args": [event],
             "timeout": HOOK_TIMEOUT_SECS,
         });
         let mut group = Map::new();
@@ -124,6 +131,8 @@ struct RawHook {
     reason: Option<String>,
     #[serde(default)]
     notification_type: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 /// Decodes the JSON a Claude Code hook writes to stdin. Only the fields the
@@ -166,6 +175,8 @@ pub fn decode_claude_hook(payload: &[u8]) -> Result<HookEvent, HookError> {
         "UserPromptSubmit" => HookEvent::UserPromptSubmit,
         "PreToolUse" => HookEvent::PreToolUse,
         "PostToolUse" => HookEvent::PostToolUse,
+        "PostToolUseFailure" => HookEvent::PostToolUseFailure,
+        "PermissionRequest" if raw.agent_id.is_some() => HookEvent::UnattributedPermissionRequest,
         "PermissionRequest" => HookEvent::PermissionRequest,
         "Notification" => HookEvent::Notification(match raw.notification_type.as_deref() {
             Some("permission_prompt") => NotificationKind::PermissionPrompt,
@@ -226,7 +237,8 @@ fn event_without_payload(name: &str) -> Option<HookEvent> {
         "UserPromptSubmit" => HookEvent::UserPromptSubmit,
         "PreToolUse" => HookEvent::PreToolUse,
         "PostToolUse" => HookEvent::PostToolUse,
-        "PermissionRequest" => HookEvent::PermissionRequest,
+        "PostToolUseFailure" => HookEvent::PostToolUseFailure,
+        "PermissionRequest" => HookEvent::UnattributedPermissionRequest,
         "Notification" => HookEvent::Notification(NotificationKind::Other),
         "Stop" => HookEvent::Stop,
         "StopFailure" => HookEvent::StopFailure,
@@ -261,7 +273,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" Notification",
+            "args": [
+              "Notification"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -273,7 +288,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" PermissionRequest",
+            "args": [
+              "PermissionRequest"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -284,7 +302,24 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" PostToolUse",
+            "args": [
+              "PostToolUse"
+            ],
+            "command": "D:/yien/yien-hook.exe",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "PostToolUseFailure"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -295,7 +330,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" PreToolUse",
+            "args": [
+              "PreToolUse"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -306,7 +344,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" SessionEnd",
+            "args": [
+              "SessionEnd"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -317,7 +358,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" SessionStart",
+            "args": [
+              "SessionStart"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -328,7 +372,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" Stop",
+            "args": [
+              "Stop"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -339,7 +386,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" StopFailure",
+            "args": [
+              "StopFailure"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -350,7 +400,10 @@ mod tests {
       {
         "hooks": [
           {
-            "command": "\"D:/yien/yien-hook.exe\" UserPromptSubmit",
+            "args": [
+              "UserPromptSubmit"
+            ],
+            "command": "D:/yien/yien-hook.exe",
             "timeout": 5,
             "type": "command"
           }
@@ -391,7 +444,14 @@ mod tests {
 
     #[test]
     fn unsafe_hook_paths_are_refused() {
-        for bad in ["", "a\"b", "$HOME/yien-hook", "a`b`", "a\nb"] {
+        for bad in [
+            "",
+            "a\"b",
+            "$HOME/yien-hook",
+            "a`b`",
+            "a\nb",
+            r"C:\YIEN\yien-hook.exe",
+        ] {
             assert_eq!(
                 render_claude_settings(bad),
                 Err(HookError::UnsafeHookPath),
@@ -550,6 +610,41 @@ mod tests {
             decode_claude_hook_or_event("Stop", good),
             Ok(HookEvent::PostToolUse),
             "a payload that decodes wins over argv"
+        );
+    }
+
+    #[test]
+    fn rn_02_subagent_permission_request_is_unattributed() {
+        let sub = br#"{"hook_event_name":"PermissionRequest","agent_id":"a1","agent_type":"Explore","tool_name":"Bash"}"#;
+        assert_eq!(
+            decode_claude_hook(sub),
+            Ok(HookEvent::UnattributedPermissionRequest)
+        );
+        let main = br#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+        assert_eq!(decode_claude_hook(main), Ok(HookEvent::PermissionRequest));
+        // `agent_type` alone also appears in a main session run with --agent.
+        let with_agent = br#"{"hook_event_name":"PermissionRequest","agent_type":"reviewer"}"#;
+        assert_eq!(
+            decode_claude_hook(with_agent),
+            Ok(HookEvent::PermissionRequest)
+        );
+    }
+
+    #[test]
+    fn rn_02_unreadable_permission_request_is_unattributed() {
+        let big = vec![b' '; MAX_HOOK_PAYLOAD + 1];
+        assert_eq!(
+            decode_claude_hook_or_event("PermissionRequest", &big),
+            Ok(HookEvent::UnattributedPermissionRequest)
+        );
+    }
+
+    #[test]
+    fn post_tool_use_failure_decodes() {
+        let payload = br#"{"hook_event_name":"PostToolUseFailure","tool_name":"Bash"}"#;
+        assert_eq!(
+            decode_claude_hook(payload),
+            Ok(HookEvent::PostToolUseFailure)
         );
     }
 
