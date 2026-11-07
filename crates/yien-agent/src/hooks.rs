@@ -129,8 +129,9 @@ struct RawHook {
 /// Decodes the JSON a Claude Code hook writes to stdin. Only the fields the
 /// state machine needs are read; the rest (prompts, tool inputs) is skipped.
 ///
-/// A payload that fails to decode should reach the machine as
-/// [`crate::Signal::Ambiguous`].
+/// `yien-hook` should call [`decode_claude_hook_or_event`] instead, so an
+/// oversized payload still yields its event. A payload that fails to decode
+/// either way should reach the machine as [`crate::Signal::Ambiguous`].
 ///
 /// ```
 /// use yien_agent::{HookEvent, decode_claude_hook};
@@ -184,6 +185,54 @@ pub fn decode_claude_hook(payload: &[u8]) -> Result<HookEvent, HookError> {
         _ => return Err(HookError::UnknownEvent),
     };
     Ok(event)
+}
+
+/// Like [`decode_claude_hook`], but when the payload is too large or
+/// malformed and `event_arg` (the event name the settings pass to
+/// `yien-hook` in argv) is a registered event, returns that event as if its
+/// payload were empty: a big `Write` must not drop a working pane to idle.
+///
+/// ```
+/// use yien_agent::{HookEvent, decode_claude_hook_or_event};
+///
+/// assert_eq!(decode_claude_hook_or_event("PreToolUse", b"{\"trunc"), Ok(HookEvent::PreToolUse));
+/// assert!(decode_claude_hook_or_event("Bogus", b"{\"trunc").is_err());
+/// ```
+pub fn decode_claude_hook_or_event(
+    event_arg: &str,
+    payload: &[u8],
+) -> Result<HookEvent, HookError> {
+    let err = match decode_claude_hook(payload) {
+        Ok(event) => return Ok(event),
+        Err(err) => err,
+    };
+    if matches!(
+        err,
+        HookError::TooLarge { .. } | HookError::Malformed { .. }
+    ) && let Some(event) = event_without_payload(event_arg)
+    {
+        return Ok(event);
+    }
+    Err(err)
+}
+
+/// A registered event with none of its payload fields.
+fn event_without_payload(name: &str) -> Option<HookEvent> {
+    Some(match name {
+        "SessionStart" => HookEvent::SessionStart {
+            session_id: None,
+            source: SessionStartSource::Other,
+        },
+        "UserPromptSubmit" => HookEvent::UserPromptSubmit,
+        "PreToolUse" => HookEvent::PreToolUse,
+        "PostToolUse" => HookEvent::PostToolUse,
+        "PermissionRequest" => HookEvent::PermissionRequest,
+        "Notification" => HookEvent::Notification(NotificationKind::Other),
+        "Stop" => HookEvent::Stop,
+        "StopFailure" => HookEvent::StopFailure,
+        "SessionEnd" => HookEvent::SessionEnd(SessionEndReason::Other),
+        _ => return None,
+    })
 }
 
 /// The id goes into `--resume <id>` (RN-05), so it is held to a strict shape.
@@ -448,6 +497,60 @@ mod tests {
             let err = decode_claude_hook(&payload).unwrap_err();
             assert!(!err.to_string().contains(secret), "{err}");
         }
+    }
+
+    #[test]
+    fn oversized_or_malformed_payload_falls_back_to_the_argv_event() {
+        let big = vec![b' '; MAX_HOOK_PAYLOAD + 1];
+        assert_eq!(
+            decode_claude_hook_or_event("PreToolUse", &big),
+            Ok(HookEvent::PreToolUse)
+        );
+        assert_eq!(
+            decode_claude_hook_or_event("Stop", b"{\"hook_event_name\":\"Sto"),
+            Ok(HookEvent::Stop)
+        );
+        assert_eq!(
+            decode_claude_hook_or_event("Notification", b"[]"),
+            Ok(HookEvent::Notification(NotificationKind::Other)),
+            "no payload, so never a needs-you kind"
+        );
+        assert_eq!(
+            decode_claude_hook_or_event("SessionStart", &big),
+            Ok(HookEvent::SessionStart {
+                session_id: None,
+                source: SessionStartSource::Other,
+            })
+        );
+        for event in CLAUDE_HOOK_EVENTS {
+            assert!(decode_claude_hook_or_event(event, &big).is_ok(), "{event}");
+        }
+    }
+
+    #[test]
+    fn argv_fallback_needs_a_registered_event_and_a_broken_payload() {
+        let big = vec![b' '; MAX_HOOK_PAYLOAD + 1];
+        assert!(matches!(
+            decode_claude_hook_or_event("Elicitation", &big),
+            Err(HookError::TooLarge { .. })
+        ));
+        assert_eq!(
+            decode_claude_hook_or_event("Stop", br#"{"hook_event_name":"Mystery"}"#),
+            Err(HookError::UnknownEvent)
+        );
+        assert_eq!(
+            decode_claude_hook_or_event(
+                "SessionStart",
+                br#"{"hook_event_name":"SessionStart","session_id":"a b"}"#
+            ),
+            Err(HookError::InvalidSessionId)
+        );
+        let good = br#"{"hook_event_name":"PostToolUse","session_id":"s"}"#;
+        assert_eq!(
+            decode_claude_hook_or_event("Stop", good),
+            Ok(HookEvent::PostToolUse),
+            "a payload that decodes wins over argv"
+        );
     }
 
     #[test]
