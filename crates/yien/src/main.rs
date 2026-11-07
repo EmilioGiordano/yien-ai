@@ -51,6 +51,8 @@ fn main() -> ExitCode {
         session: session_store(),
         start_project: yien_platform::paths::start_dir()
             .map(|dir| dir.to_string_lossy().into_owned()),
+        size_wait: SIZE_WAIT,
+        ui_wait: UI_WAIT,
         ..CoreConfig::default()
     };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {
@@ -76,6 +78,13 @@ fn main() -> ExitCode {
     });
     ExitCode::SUCCESS
 }
+
+/// How long a new pane waits for its drawn size before its program starts;
+/// the UI sends it on the first paint, well within this.
+const SIZE_WAIT: Duration = Duration::from_millis(400);
+
+/// How long restored panes wait for the window to show and report sizes.
+const UI_WAIT: Duration = Duration::from_secs(2);
 
 /// The longest the quit path waits to save the session.
 const QUIT_SAVE_TIMEOUT: Duration = Duration::from_millis(1500);

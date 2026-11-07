@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{Effect as AgentEffect, Machine, SessionEndReason, Signal, evaluate_screen};
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
@@ -38,6 +38,11 @@ const READER_POLL: Duration = Duration::from_millis(200);
 /// Beyond this it stops taking the child's output, which stalls the child
 /// instead of growing the backlog.
 const REPLY_BACKLOG: usize = 64;
+
+/// How long a pane still waiting for its size gives it to arrive once the
+/// UI has reported its first size for any pane: the UI sends the sizes of
+/// every pane it draws together.
+const UI_SIZE_GRACE: Duration = Duration::from_millis(50);
 
 /// Commands a pane actor may have waiting. The actor never waits on the
 /// service, so a full queue only holds the service back briefly.
@@ -216,6 +221,19 @@ pub(crate) struct PaneSetup {
     pub hooks_lost: Arc<AtomicBool>,
     /// The agent session the first launch resumes (RF-SES-03).
     pub resume: Option<String>,
+    /// Start the program only once the UI's size arrives (see
+    /// [`CoreConfig::size_wait`](crate::CoreConfig::size_wait)).
+    pub wait_for_size: bool,
+}
+
+/// A pane that has not started its program yet because it waits for the
+/// UI's size: Windows 10's in-box ConPTY draws garbled after a resize that
+/// comes right after the spawn.
+struct Pending {
+    created: Instant,
+    ui: watch::Receiver<Option<(u16, u16)>>,
+    /// When the UI first reported a size for any pane, once it has.
+    ui_seen: Option<Instant>,
 }
 
 struct Actor {
@@ -249,6 +267,7 @@ struct Actor {
     /// The session the next launch resumes; only the first launch after a
     /// restore does, so a relaunch starts a new session.
     resume: Option<String>,
+    pending: Option<Pending>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -268,6 +287,17 @@ pub(crate) fn spawn(
     let id = setup.id;
     let reports = Arc::clone(&ctx.reports);
     let hooks = setup.hooks;
+    let waits = !(ctx.config.size_wait.is_zero() && ctx.config.ui_wait.is_zero());
+    let pending = (setup.wait_for_size && waits).then(|| {
+        let ui = ctx.ui_size.subscribe();
+        let created = Instant::now();
+        let ui_seen = ui.borrow().is_some().then_some(created);
+        Pending {
+            created,
+            ui,
+            ui_seen,
+        }
+    });
     let actor = Actor {
         id,
         plan: setup.plan,
@@ -292,6 +322,7 @@ pub(crate) fn spawn(
         signal_lost: false,
         needs_since: None,
         resume: setup.resume,
+        pending,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -311,6 +342,7 @@ enum Wake {
     Hook(HookItem),
     Reader(Option<ReaderMsg>),
     Noticed { owed: bool },
+    UiSize,
     Timer,
 }
 
@@ -318,6 +350,14 @@ async fn recv_reader(session: &mut Option<Session>) -> Option<ReaderMsg> {
     match session {
         Some(s) => s.reader.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Resolves when the UI reports its first size while the pane waits for it.
+async fn ui_size_reported(pending: &mut Option<Pending>) -> bool {
+    match pending {
+        Some(p) if p.ui_seen.is_none() => p.ui.changed().await.is_ok(),
+        _ => std::future::pending().await,
     }
 }
 
@@ -335,7 +375,9 @@ impl Actor {
         mut input: mpsc::Receiver<PaneInput>,
         mut hooks: mpsc::Receiver<HookItem>,
     ) {
-        self.start().await;
+        if self.pending.is_none() {
+            self.start().await;
+        }
         loop {
             let deadline = self.next_deadline();
             // At most one refused chunk is held; the rest waits in the
@@ -345,12 +387,15 @@ impl Actor {
             let (slot, pane) = (&self.slot, self.id);
             // Commands first: input queued before a relaunch or terminate is
             // dropped with the old program, never written to it or the next.
+            // Input sent before the first start waits for the program.
+            let take_input = take_input && self.pending.is_none();
             let wake = tokio::select! {
                 biased;
                 cmd = cmds.recv() => Wake::Cmd(cmd),
                 Some(item) = hooks.recv() => Wake::Hook(item),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
+                true = ui_size_reported(&mut self.pending) => Wake::UiSize,
                 room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
                     owed: match room {
                         Ok(permit) => slot.retry(|| {
@@ -378,9 +423,49 @@ impl Actor {
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
                 Wake::Noticed { owed } => self.notice_owed = owed,
+                Wake::UiSize => {
+                    if let Some(p) = &mut self.pending {
+                        p.ui_seen = Some(Instant::now());
+                    }
+                }
                 Wake::Timer => {}
             }
             self.on_timers();
+            if self.start_due().is_some_and(|at| at <= Instant::now()) {
+                self.start_pending().await;
+            }
+        }
+    }
+
+    /// When a pane still waiting for its size starts anyway: soon after its
+    /// creation when the UI is up, later while it has not reported anything.
+    fn start_due(&self) -> Option<Instant> {
+        let p = self.pending.as_ref()?;
+        let config = &self.ctx.config;
+        let soon = p.created + config.size_wait;
+        let late = p.created + config.size_wait.max(config.ui_wait);
+        Some(match p.ui_seen {
+            Some(at) if at <= p.created => soon,
+            Some(at) => (at + UI_SIZE_GRACE).clamp(soon, late),
+            None => late,
+        })
+    }
+
+    /// Starts a pane whose own size never came, at the last size the UI
+    /// reported for any pane, or at the one it was created with.
+    async fn start_pending(&mut self) {
+        let Some(p) = self.pending.take() else {
+            return;
+        };
+        self.resize_to_reported(&p);
+        self.start().await;
+    }
+
+    /// Takes the last size the UI reported for any pane, if it has.
+    fn resize_to_reported(&self, pending: &Pending) {
+        let reported = *pending.ui.borrow();
+        if let Some((cols, rows)) = reported {
+            lock(&self.engine).resize(cols, rows);
         }
     }
 
@@ -547,6 +632,9 @@ impl Actor {
                 self.outbox.resize = Some((size.cols, size.rows));
                 self.dirty = true;
                 self.flush();
+                if self.pending.take().is_some() {
+                    self.start().await;
+                }
             }
             PaneCmd::Scroll(delta) => {
                 lock(&self.engine).scroll(delta);
@@ -583,12 +671,22 @@ impl Actor {
                 }
             }
             PaneCmd::Relaunch => {
+                // A relaunch starts a new session, even before the first start.
+                if let Some(p) = self.pending.take() {
+                    self.resume = None;
+                    self.resize_to_reported(&p);
+                }
                 if let Some(old) = self.session.take() {
                     let _ = old.control.kill();
                 }
                 self.start().await;
             }
             PaneCmd::Terminate => {
+                if self.pending.take().is_some() {
+                    self.resume = None;
+                    self.report(PaneEvent::Exited(None));
+                    return;
+                }
                 if let Some(s) = &self.session {
                     let _ = s.control.kill();
                 }
@@ -761,6 +859,7 @@ impl Actor {
             self.sync.map(|(_, at)| at),
             self.retry_at,
             self.wake_at,
+            self.start_due(),
         ]
         .into_iter()
         .flatten()
@@ -1036,6 +1135,7 @@ mod tests {
                 engine: alacritty,
                 hooks: Some(Arc::new(crate::hooks::Hooks::detached())),
                 attention: Arc::default(),
+                ui_size: Arc::new(watch::Sender::new(None)),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
@@ -1056,6 +1156,7 @@ mod tests {
                 hooks: hooks_rx,
                 hooks_lost: Arc::clone(&hooks_lost),
                 resume: None,
+                wait_for_size: false,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {

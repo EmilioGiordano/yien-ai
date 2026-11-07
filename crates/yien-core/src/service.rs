@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use yien_agent::{HookError, HookEvent};
 use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo};
 use yien_pty::PtyBackend;
@@ -36,6 +36,8 @@ pub(crate) struct Ctx {
     /// Numbers panes as they enter "needs you", for the jump order
     /// (RF-ATN-05).
     pub attention: Arc<AtomicU64>,
+    /// The last size the UI reported for any pane, `None` until it does.
+    pub ui_size: Arc<watch::Sender<Option<(u16, u16)>>>,
 }
 
 /// Hook events waiting for one pane's actor. Beyond this the pane's channel
@@ -239,6 +241,7 @@ impl Service {
         cwd: String,
         size: (u16, u16),
         resume: Option<String>,
+        wait_for_size: bool,
     ) {
         let (tx, cmds) = mpsc::channel(PANE_COMMANDS);
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
@@ -259,6 +262,7 @@ impl Service {
             hooks,
             hooks_lost: Arc::clone(&hooks_lost),
             resume,
+            wait_for_size,
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -302,7 +306,7 @@ impl Service {
         }
         if let Some(h) = self.panes.get(&pane) {
             let (plan, cwd, size) = (h.plan.clone(), h.cwd.clone(), h.size);
-            self.start_pane(pane, plan, cwd, size, None);
+            self.start_pane(pane, plan, cwd, size, None, false);
         }
     }
 
@@ -315,6 +319,7 @@ impl Service {
                 if let Some(handle) = self.panes.get_mut(&pane) {
                     handle.size = (cols, rows);
                 }
+                self.ctx.ui_size.send_replace(Some((cols, rows)));
                 self.to_pane(pane, PaneCmd::Resize { cols, rows }).await;
             }
             ClientMsg::Scroll { pane, delta } => self.to_pane(pane, PaneCmd::Scroll(delta)).await,
@@ -382,7 +387,7 @@ impl Service {
                     resume,
                 } => {
                     let size = self.ctx.config.initial_size;
-                    self.start_pane(pane, *plan, cwd, size, resume);
+                    self.start_pane(pane, *plan, cwd, size, resume, true);
                 }
                 Effect::Stop { pane } => self.stop_pane(pane),
                 Effect::Relaunch { pane } => self.relaunch(pane).await,
