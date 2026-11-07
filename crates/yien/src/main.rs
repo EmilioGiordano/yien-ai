@@ -33,9 +33,15 @@ impl CoreClient for Client {
 }
 
 fn main() -> ExitCode {
+    // Before anything can load a DLL: portable-pty loads `conpty.dll` by bare
+    // name, which would otherwise pick one up from PATH or the current dir.
+    let dll_search = yien_platform::dll_search::restrict_dll_search();
     let log = start_logging();
     panic_log::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
+    if let Err(error) = dll_search {
+        tracing::error!("{error}");
+    }
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let config = CoreConfig {
