@@ -32,6 +32,17 @@ const REPO_OVERRIDES: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
+/// `-c` settings on every call that stop git from starting programs a repository
+/// can name: fsmonitor, any transport (and so ssh), credential helpers, askpass.
+/// An empty `credential.helper` resets the helper list (git 2.9+).
+const NO_PROGRAMS: &[&str] = &[
+    "core.fsmonitor=false",
+    "protocol.allow=never",
+    "core.sshCommand=",
+    "credential.helper=",
+    "core.askPass=",
+];
+
 /// How to run git: which program and how long to wait for it.
 ///
 /// Every call is read-only: no optional locks (so `status` never takes
@@ -134,13 +145,22 @@ impl Git {
 
     fn command(&self, dir: &Path, config: &[String], args: &[&str]) -> Command {
         let mut cmd = Command::new(&self.program);
-        cmd.arg("-C")
-            .arg(dir)
-            .args(["--no-optional-locks", "-c", "core.fsmonitor=false"]);
-        for setting in config {
+        cmd.arg("-C").arg(dir).arg("--no-optional-locks");
+        for setting in NO_PROGRAMS
+            .iter()
+            .copied()
+            .chain(config.iter().map(String::as_str))
+        {
             cmd.arg("-c").arg(setting);
         }
         cmd.args(args)
+            // A partial clone would fetch a missing object, running the repo's ssh
+            // command or credential helper; no call here needs a transport.
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("GIT_SSH_COMMAND", "")
+            .env("GIT_SSH", "")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
             // Untranslated messages, so they can be recognised in classify_failure.
@@ -416,6 +436,11 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("GIT_NO_LAZY_FETCH"),
+            Some(std::ffi::OsStr::new("1"))
+        )));
+        assert!(args.iter().any(|a| a == "protocol.allow=never"));
         let at = args.iter().position(|a| a == "filter.x.clean=").unwrap();
         assert_eq!(args[at - 1], "-c");
         assert!(at < args.iter().position(|a| a == "status").unwrap());
