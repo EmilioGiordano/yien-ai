@@ -66,6 +66,12 @@ pub enum Problem {
     /// A split's ratios do not match its children or do not sum to 1.
     #[error("tab {}: a split's ratios are not one positive share per child summing to 1", .0.get())]
     BadRatios(TabId),
+    /// The selected project does not exist.
+    #[error("selected project {} does not exist", .0.get())]
+    SelectedProjectMissing(ProjectId),
+    /// The selected tab does not exist, or is not in the selected project.
+    #[error("selected tab {} does not exist in the selected project", .0.get())]
+    SelectedTabMissing(TabId),
     /// The focused pane is not one of the tab's panes.
     #[error("tab {}: focused pane {} is not in the tab", tab.get(), pane.get())]
     FocusedPaneMissing {
@@ -113,10 +119,34 @@ pub fn validate(snapshot: &SessionSnapshot) -> Result<(), Vec<Problem>> {
         }
     }
 
+    check_selection(snapshot, &mut problems);
+
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
+    }
+}
+
+fn check_selection(snapshot: &SessionSnapshot, problems: &mut Vec<Problem>) {
+    let project = match snapshot.selected.project {
+        Some(id) => match snapshot.projects.iter().find(|p| p.id == id) {
+            Some(project) => Some(project),
+            None => {
+                problems.push(Problem::SelectedProjectMissing(id));
+                return;
+            }
+        },
+        None => None,
+    };
+    if let Some(tab) = snapshot.selected.tab {
+        let mut candidates = snapshot
+            .projects
+            .iter()
+            .filter(|p| project.is_none_or(|sel| sel.id == p.id));
+        if !candidates.any(|p| p.tabs.iter().any(|t| t.id == tab)) {
+            problems.push(Problem::SelectedTabMissing(tab));
+        }
     }
 }
 
@@ -186,6 +216,7 @@ mod tests {
             cwd: "C:/code".into(),
             agent: None,
             last_command: None,
+            name: None,
         }
     }
 
@@ -211,6 +242,9 @@ mod tests {
             layout,
             panes,
             focused: PaneId::new(focused),
+            branch: None,
+            worktree: None,
+            archived: false,
         }
     }
 
@@ -223,6 +257,7 @@ mod tests {
                     id: ProjectId::new(id),
                     name: "p".into(),
                     root: "C:/code".into(),
+                    setup_script: None,
                     tabs,
                 })
                 .collect(),
@@ -366,6 +401,43 @@ mod tests {
             vec![tab(1, bad, vec![pane(1), pane(2), pane(3)], 3)],
         )]);
         assert_eq!(problems(&s), vec![Problem::BadRatios(TabId::new(1))]);
+    }
+
+    #[test]
+    fn rf_ses_02_a_selection_must_point_at_an_existing_project_and_tab() {
+        let mut s = snapshot(vec![
+            (1, vec![two_pane_tab(1, 1, 2)]),
+            (2, vec![two_pane_tab(2, 3, 4)]),
+        ]);
+        let pick = |project: Option<u64>, tab: Option<u64>| crate::model::Selection {
+            project: project.map(ProjectId::new),
+            tab: tab.map(TabId::new),
+        };
+        for ok in [
+            pick(None, None),
+            pick(Some(2), None),
+            pick(Some(2), Some(2)),
+            pick(None, Some(1)),
+        ] {
+            s.selected = ok;
+            assert_eq!(validate(&s), Ok(()), "{ok:?}");
+        }
+
+        s.selected = pick(Some(9), Some(1));
+        assert_eq!(
+            problems(&s),
+            vec![Problem::SelectedProjectMissing(ProjectId::new(9))]
+        );
+        s.selected = pick(Some(2), Some(1));
+        assert_eq!(
+            problems(&s),
+            vec![Problem::SelectedTabMissing(TabId::new(1))]
+        );
+        s.selected = pick(None, Some(9));
+        assert_eq!(
+            problems(&s),
+            vec![Problem::SelectedTabMissing(TabId::new(9))]
+        );
     }
 
     #[test]
