@@ -130,8 +130,9 @@ fn hook_event_reaches_the_server_decoded() {
 
 #[test]
 fn stdin_reaches_the_hook_when_its_parent_has_no_console() {
-    // A GUI-subsystem parent such as the release `yien.exe` has no console,
-    // so its console children start detached or with a console of their own.
+    // In production the hook's parent is Claude Code inside a ConPTY pane, so it
+    // inherits the pseudoconsole. This covers a parent with no console of its
+    // own (a GUI-subsystem program): the hook starts detached or with a hidden one.
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let pipe = start();
@@ -146,8 +147,13 @@ fn stdin_reaches_the_hook_when_its_parent_has_no_console() {
             "Stop",
             payload,
         );
-        assert_silent_success(&out);
-        let delivery = pipe.events.recv_timeout(WAIT).unwrap();
+        assert!(out.status.success(), "flags {flags:#x}: {:?}", out.status);
+        assert!(out.stdout.is_empty(), "flags {flags:#x}: wrote to stdout");
+        assert!(out.stderr.is_empty(), "flags {flags:#x}: wrote to stderr");
+        let delivery = pipe
+            .events
+            .recv_timeout(WAIT)
+            .unwrap_or_else(|e| panic!("flags {flags:#x}: no delivery: {e}"));
         assert_eq!(delivery.pane, pane, "flags {flags:#x}");
         assert_eq!(delivery.event, Ok(HookEvent::Stop), "flags {flags:#x}");
         assert_eq!(delivery.payload_len, payload.len(), "flags {flags:#x}");
