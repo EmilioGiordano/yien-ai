@@ -71,6 +71,7 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/core-panes`: swap exchanges the core's leaf-to-pane mapping (no layout change, no respawn); `ResizeSplit` is `Tree::resize(pane, delta)`; `yien-layout` gained `Tree::shape()` so the layout reaches the UI as `LayoutNode`. Closing the last pane of a tab closes the tab; a split focuses the new pane.
 - `feat/core-panes`: agent profiles launch their detected command; launch arguments and env vars that need a placeholder only the hooks pipe or session layer can fill (`{new_uuid}`, `{session_id}`, `{hooks_settings_file}`, `{hook_token}`) are left out, so Claude starts with no arguments for now. The CLI version is not probed, so the newest rule runs unverified.
 - `feat/core-panes`: OSC 133 `B` (typing a command) has no agent meaning; `C` maps to the agent's command start and `D` to its end. `yien-vt` does not parse OSC 7501, so that source stays silent.
+- `feat/core-panes`: the service keeps each pane's launch plan, so relaunching a pane whose actor panicked starts a fresh actor (§4.5, RF-PAN-19).
 - `feat/core-panes`, open: `Effect::Notify`, OSC 52 clipboard and the bell are not forwarded; tab branch is always `None` until `yien-git`; no `tracing`; core tests run on real time (`FakeClock` is `!Sync`); `ResizeSplit` spreads the change over all siblings rather than one divider.
 
 ## In flight
