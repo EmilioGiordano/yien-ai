@@ -1,0 +1,14 @@
+# Specs and design stay local for now
+/docs/
+/design/
+
+# Build output
+/target/
+
+# Per-branch working files
+TASK-*.md
+REPORT-*.md
+
+# Local agent state
+/.claude/settings.local.json
+/.claude/worktrees/
