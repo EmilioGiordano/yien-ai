@@ -8836,6 +8836,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "yien-agent",
  "yien-layout",
  "yien-proto",

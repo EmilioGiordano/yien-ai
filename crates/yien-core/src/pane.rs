@@ -271,6 +271,8 @@ pub(crate) fn spawn(
         if let Err(e) = task.await
             && e.is_panic()
         {
+            let message = panic_message(e.into_panic().as_ref());
+            tracing::error!(pane = id.get(), %message, "pane actor panicked");
             reports.push(id, PaneEvent::Crashed);
         }
     });
@@ -687,6 +689,27 @@ impl Actor {
     }
 }
 
+/// Longest panic message logged, in chars. Messages can quote runtime
+/// strings, so they are capped to limit what reaches the log (plan §5.4).
+const MAX_PANIC_CHARS: usize = 200;
+
+/// The text of a panic payload, capped; a non-text payload is not logged.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match text {
+        Some(text) if text.chars().count() > MAX_PANIC_CHARS => {
+            let mut cut: String = text.chars().take(MAX_PANIC_CHARS).collect();
+            cut.push_str("...");
+            cut
+        }
+        Some(text) => text.to_owned(),
+        None => "<non-string payload>".to_owned(),
+    }
+}
+
 enum Blocked {
     Full,
     Closed,
@@ -818,6 +841,16 @@ mod tests {
         events.send(PtyEvent::Exited(ExitStatus::from_code(0))).ok();
         assert!(rx.blocking_recv().is_none());
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn panic_messages_are_capped_and_only_text_is_kept() {
+        assert_eq!(panic_message(&"boom"), "boom");
+        assert_eq!(panic_message(&String::from("boom")), "boom");
+        assert_eq!(panic_message(&42_u32), "<non-string payload>");
+        let cut = panic_message(&"é".repeat(MAX_PANIC_CHARS + 9));
+        assert_eq!(cut.chars().count(), MAX_PANIC_CHARS + 3);
+        assert!(cut.ends_with("..."));
     }
 
     #[test]
