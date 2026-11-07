@@ -660,3 +660,34 @@ fn rf_ses_03_a_restored_claude_terminated_before_it_starts_relaunches_fresh() {
     assert!(!launch.iter().any(|a| a == "--resume"), "{launch:?}");
     assert!(!launch.contains(&session), "{launch:?}");
 }
+
+#[test]
+fn a_session_whose_projects_were_all_closed_starts_empty() {
+    let store = Shared::default();
+    let mut run = Run::start(&store);
+    let project = run.wait_for(|m| match m {
+        CoreMsg::ProjectUpdated(p) => Some(p.id),
+        _ => None,
+    });
+    run.children(1);
+    run.command(Command::CloseProject { project });
+    run.wait_for(|m| matches!(m, CoreMsg::ProjectClosed { .. }).then_some(()));
+    wait_until(|| store.saved().is_some_and(|s| s.projects.is_empty()));
+    run.save();
+    drop(run);
+
+    let mut next = Run::start(&store);
+    assert!(next.snapshot().projects.is_empty());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        next.backend.take_spawned().is_empty(),
+        "the start folder was opened"
+    );
+    loop {
+        match next.events.try_recv() {
+            Ok(CoreMsg::ProjectUpdated(p)) => panic!("{} was opened", p.root),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+}

@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use yien_proto::CoreMsg;
 
 pub use bridge::{CoreClient, Refused};
-pub use model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView};
+pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
 
 use crate::bridge::Link;
 use crate::fonts::Fonts;

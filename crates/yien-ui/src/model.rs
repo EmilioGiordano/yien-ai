@@ -7,7 +7,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, PaneId, PaneInfo, ProfileInfo, ProjectId, ProjectInfo, TabGit, TabId, TabInfo,
+    LayoutNode, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SHELL_PROFILE,
+    TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -90,6 +91,8 @@ pub struct PaneView {
     pub name: String,
     /// The profile it was started with: `Claude Code`, `Shell`.
     pub profile: String,
+    /// That profile's id: `claude`, `shell`; empty until the details arrive.
+    pub profile_id: ProfileId,
     /// What its agent is doing.
     pub state: AgentState,
     /// Whether its program is running.
@@ -113,6 +116,7 @@ impl PaneView {
             id,
             name: "terminal".to_owned(),
             profile: String::new(),
+            profile_id: ProfileId::new(""),
             state: AgentState::Idle,
             running: true,
             exit_code: None,
@@ -127,6 +131,7 @@ impl PaneView {
             id: info.id,
             name: info.name.clone(),
             profile: info.profile.clone(),
+            profile_id: info.profile_id.clone(),
             state: info.state.into(),
             running: info.running,
             exit_code: info.exit_code,
@@ -134,6 +139,37 @@ impl PaneView {
             needs_you_since: info.needs_you_since,
             signal_lost: info.signal_lost,
         }
+    }
+
+    /// Whether closing it stops work the user may want: an agent or other
+    /// program that runs, or anything working or waiting for the user. A
+    /// shell at its prompt is not busy; a command running inside a shell
+    /// cannot be seen from here and does not count either. A pane whose
+    /// details have not arrived counts as busy, to ask rather than lose work.
+    ///
+    /// ```
+    /// use yien_ui::{AgentState, PaneView};
+    ///
+    /// let shell = PaneView {
+    ///     id: yien_proto::PaneId::new(1),
+    ///     name: "pwsh".into(),
+    ///     profile: "Shell".into(),
+    ///     profile_id: yien_proto::ProfileId::new("shell"),
+    ///     state: AgentState::Idle,
+    ///     running: true,
+    ///     exit_code: None,
+    ///     exited: false,
+    ///     needs_you_since: None,
+    ///     signal_lost: false,
+    /// };
+    /// assert!(!shell.is_busy());
+    /// let claude = PaneView { profile_id: yien_proto::ProfileId::new("claude"), ..shell };
+    /// assert!(claude.is_busy());
+    /// ```
+    pub fn is_busy(&self) -> bool {
+        let agent = self.profile_id.as_str() != SHELL_PROFILE;
+        let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
+        active || (self.running && agent)
     }
 }
 
@@ -183,6 +219,16 @@ impl TabView {
     }
 }
 
+/// Where adding a folder as a project leads (RF-ESP-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderTarget {
+    /// The folder is a project already: select this tab of it.
+    Tab(TabId),
+    /// The folder is a project with no tab left, or a new project; the core
+    /// opens a tab with the shell either way.
+    NewProject,
+}
+
 /// One project in the tab bar, with its tabs nested under it (RF-ESP-02).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectView {
@@ -203,7 +249,10 @@ pub struct ProjectView {
 /// use yien_ui::WorkspaceView;
 ///
 /// let snapshot = WorkspaceSnapshot {
-///     projects: vec![ProjectInfo { id: ProjectId::new(1), name: "yien".into(), root: "C:/yien".into(), tabs: vec![TabId::new(2)] }],
+///     projects: vec![ProjectInfo {
+///         id: ProjectId::new(1), name: "yien".into(), root: "C:/yien".into(), tabs: vec![TabId::new(2)],
+///         collapsed: false,
+///     }],
 ///     tabs: vec![TabInfo {
 ///         id: TabId::new(2), project: ProjectId::new(1), name: "Tab 1".into(), dir: "C:/yien".into(),
 ///         branch: None, layout: LayoutNode::Pane(PaneId::new(3)), focused: PaneId::new(3), maximized: None,
@@ -270,6 +319,11 @@ impl WorkspaceView {
             root: info.root.clone(),
             tabs: info.tabs.clone(),
         };
+        if info.collapsed {
+            self.folded.insert(info.id);
+        } else {
+            self.folded.remove(&info.id);
+        }
         match self.projects.iter_mut().find(|p| p.id == info.id) {
             Some(existing) => *existing = project,
             None => self.projects.push(project),
@@ -331,6 +385,24 @@ impl WorkspaceView {
         gone
     }
 
+    /// A project left the sidebar. The core closes its tabs first; any still
+    /// held go now. Returns the panes that went with them.
+    pub fn project_closed(&mut self, id: ProjectId) -> Vec<PaneId> {
+        let tabs = self
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.tabs.clone())
+            .unwrap_or_default();
+        let gone = tabs.into_iter().flat_map(|t| self.tab_closed(t)).collect();
+        self.projects.retain(|p| p.id != id);
+        self.folded.remove(&id);
+        if self.last_project == Some(id) {
+            self.last_project = None;
+        }
+        gone
+    }
+
     /// Git facts about a tab's folder arrived. `false` for a tab the view
     /// does not hold.
     pub fn tab_git(&mut self, id: TabId, git: TabGit) -> bool {
@@ -358,11 +430,12 @@ impl WorkspaceView {
         }
     }
 
-    /// The core changed the selected tab. An unknown tab is ignored.
+    /// The core changed the selected tab. An unknown tab is ignored. The
+    /// core owns the folds, so this does not unfold the tab's project.
     pub fn set_active(&mut self, tab: Option<TabId>) {
         match tab {
             Some(id) => {
-                self.select_tab(id);
+                self.mark_selected(id);
             }
             None => self.selected = None,
         }
@@ -494,17 +567,63 @@ impl WorkspaceView {
         self.projects.iter().find(|p| p.id == tab.project)
     }
 
-    /// Selects a tab and unfolds its project. `false` when no tab has that id.
+    /// Selects a tab and unfolds its project, as the core will on the
+    /// `SelectTab` that follows. `false` when no tab has that id.
     pub fn select_tab(&mut self, id: TabId) -> bool {
+        if !self.mark_selected(id) {
+            return false;
+        }
+        if let Some(project) = self.tabs.get(&id).map(|t| t.project) {
+            self.folded.remove(&project);
+        }
+        true
+    }
+
+    fn mark_selected(&mut self, id: TabId) -> bool {
         let Some(project) = self.tabs.get(&id).map(|t| t.project) else {
             return false;
         };
         self.selected = Some(id);
-        self.folded.remove(&project);
         self.recent.retain(|t| *t != id);
         self.recent.insert(0, id);
         self.last_project = Some(project);
         true
+    }
+
+    /// Whether there is no project at all: the window then invites the user
+    /// to add one.
+    pub fn has_no_projects(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    /// Where adding `root` as a project leads: a folder that is a project
+    /// already, compared as [`same_folder`] does, goes to its most recently
+    /// selected tab (RF-ESP-01).
+    pub fn folder_target(&self, root: &str) -> FolderTarget {
+        let Some(project) = self.projects.iter().find(|p| same_folder(&p.root, root)) else {
+            return FolderTarget::NewProject;
+        };
+        self.tabs_by_recent()
+            .iter()
+            .find(|t| t.project == project.id)
+            .map_or(FolderTarget::NewProject, |t| FolderTarget::Tab(t.id))
+    }
+
+    /// How many panes of a project closing it would stop while they work
+    /// ([`PaneView::is_busy`]).
+    pub fn busy_panes_of(&self, id: ProjectId) -> usize {
+        let Some(project) = self.projects.iter().find(|p| p.id == id) else {
+            return 0;
+        };
+        self.tabs_of(project)
+            .flat_map(|t| t.layout.panes())
+            .filter(|p| self.pane(*p).is_busy())
+            .count()
+    }
+
+    /// A project by id.
+    pub fn project(&self, id: ProjectId) -> Option<&ProjectView> {
+        self.projects.iter().find(|p| p.id == id)
     }
 
     /// The project a new tab opens in: the selected tab's; with no tab
@@ -563,16 +682,19 @@ impl WorkspaceView {
         usize::try_from(next).ok().and_then(|i| ids.get(i).copied())
     }
 
-    /// Folds or unfolds a project in the tab bar (RF-ESP-17). `false` when the
+    /// Folds or unfolds a project in the tab bar (RF-ESP-17), ahead of the
+    /// core's confirmation. Returns whether it is folded now; `None` when the
     /// project is unknown.
-    pub fn toggle_fold(&mut self, id: ProjectId) -> bool {
+    pub fn toggle_fold(&mut self, id: ProjectId) -> Option<bool> {
         if !self.projects.iter().any(|p| p.id == id) {
-            return false;
+            return None;
         }
-        if !self.folded.remove(&id) {
+        if self.folded.remove(&id) {
+            Some(false)
+        } else {
             self.folded.insert(id);
+            Some(true)
         }
-        true
     }
 
     /// Whether a project's tabs are hidden in the tab bar.
@@ -636,6 +758,15 @@ impl WorkspaceView {
     }
 }
 
+/// The name to send when a tab rename ends with `typed` in the field: `None`
+/// when it is the name the tab already shows, so keeping it unchanged never
+/// turns the automatic name into the tab's own. Empty brings back the
+/// automatic name (RF-ESP-16).
+pub(crate) fn typed_tab_name(typed: &str, current: Option<&str>) -> Option<String> {
+    let typed = typed.trim();
+    (Some(typed) != current).then(|| typed.to_owned())
+}
+
 /// The panes whose frame to take after a batch of events: every pane that
 /// announced one and, when the workspace changed, every pane now drawn, since
 /// a pane that just came into view or got its view may hold a frame whose
@@ -696,6 +827,7 @@ mod tests {
             name: format!("project-{id}"),
             root: format!("C:/Code/project-{id}"),
             tabs: tabs.iter().map(|t| TabId::new(*t)).collect(),
+            collapsed: false,
         }
     }
 
@@ -705,6 +837,7 @@ mod tests {
             tab: TabId::new(tab),
             name: format!("pane-{id}"),
             profile: "Shell".into(),
+            profile_id: yien_proto::ProfileId::new("shell"),
             title: None,
             cwd: None,
             state,
@@ -1138,13 +1271,118 @@ mod tests {
     fn rf_esp_17_folding_hides_tabs_and_selecting_unfolds() {
         let mut view = demo();
         let second = ProjectId::new(2);
-        assert!(view.toggle_fold(second));
+        assert_eq!(view.toggle_fold(second), Some(true));
         assert!(view.is_folded(second));
         assert!(view.select_tab(TabId::new(20)));
         assert!(!view.is_folded(second));
-        assert!(!view.toggle_fold(ProjectId::new(99)));
+        assert_eq!(view.toggle_fold(second), Some(true));
+        assert_eq!(view.toggle_fold(second), Some(false));
+        assert_eq!(view.toggle_fold(ProjectId::new(99)), None);
         assert_eq!(view.first_tab_of(ProjectId::new(3)), None);
         assert_eq!(view.first_tab_of(second), Some(TabId::new(20)));
+    }
+
+    #[test]
+    fn rf_esp_17_a_folded_project_still_shows_its_red_mark() {
+        let mut view = demo();
+        let first = ProjectId::new(1);
+        let mut info = project(1, &[10, 11]);
+        info.collapsed = true;
+        view.project_updated(&info);
+        assert!(view.is_folded(first));
+        let head = view.project(first).unwrap().clone();
+        assert_eq!(view.needs_you_tabs_of(&head), 1);
+        assert_eq!(view.needs_you_panes(), 1);
+
+        view.set_active(Some(TabId::new(11)));
+        assert!(view.is_folded(first), "the core decides when it unfolds");
+        info.collapsed = false;
+        view.project_updated(&info);
+        assert!(!view.is_folded(first));
+    }
+
+    #[test]
+    fn rf_esp_01_adding_a_folder_that_is_a_project_selects_its_latest_tab() {
+        let mut view = demo();
+        let spelled = "C:/Code//project-1/";
+        assert_eq!(
+            view.folder_target(spelled),
+            FolderTarget::Tab(TabId::new(10))
+        );
+        view.select_tab(TabId::new(11));
+        view.select_tab(TabId::new(20));
+        assert_eq!(
+            view.folder_target(spelled),
+            FolderTarget::Tab(TabId::new(11))
+        );
+        assert_eq!(
+            view.folder_target("C:/Code/project-3"),
+            FolderTarget::NewProject,
+            "a project with no tab gets one from the core"
+        );
+        assert_eq!(
+            view.folder_target("C:/Code/elsewhere"),
+            FolderTarget::NewProject
+        );
+    }
+
+    #[test]
+    fn closing_the_last_project_leaves_the_empty_state() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[10])],
+            tabs: vec![tab(10, 1, &[100])],
+            panes: vec![pane(100, 10, P::Idle)],
+            active_tab: Some(TabId::new(10)),
+            profiles: vec![],
+        });
+        assert!(!view.has_no_projects());
+        assert_eq!(view.tab_closed(TabId::new(10)), vec![PaneId::new(100)]);
+        assert!(view.project_closed(ProjectId::new(1)).is_empty());
+        view.set_active(None);
+        assert!(view.has_no_projects());
+        assert!(view.selected_tab().is_none());
+        assert_eq!(view.project_for_new_tab(), None);
+        assert_eq!(view.pane_count(), 0);
+    }
+
+    #[test]
+    fn a_closed_project_takes_tabs_the_core_has_not_closed_yet() {
+        let mut view = demo();
+        let gone = view.project_closed(ProjectId::new(1));
+        assert_eq!(gone.len(), 3);
+        assert_eq!(view.projects().len(), 2);
+        assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(20)));
+        view.tab_updated(&tab(10, 1, &[100]));
+        assert!(view.tab(TabId::new(10)).is_none());
+    }
+
+    #[test]
+    fn only_agents_and_work_in_progress_ask_before_a_project_closes() {
+        let mut view = demo();
+        // 100 needs you and 110 works; 101 is a shell at its prompt.
+        assert_eq!(view.busy_panes_of(ProjectId::new(1)), 2);
+        assert_eq!(view.busy_panes_of(ProjectId::new(2)), 0);
+        assert_eq!(view.busy_panes_of(ProjectId::new(3)), 0);
+
+        let mut claude = pane(200, 20, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(view.busy_panes_of(ProjectId::new(2)), 1);
+        claude.running = false;
+        claude.exit_code = Some(0);
+        view.pane_updated(&claude);
+        assert_eq!(view.busy_panes_of(ProjectId::new(2)), 0, "an exited agent");
+    }
+
+    #[test]
+    fn rf_esp_16_an_unchanged_name_is_not_sent() {
+        assert_eq!(typed_tab_name(" Tab 1 ", Some("Tab 1")), None);
+        assert_eq!(
+            typed_tab_name("review", Some("Tab 1")),
+            Some("review".into())
+        );
+        assert_eq!(typed_tab_name("  ", Some("review")), Some(String::new()));
+        assert_eq!(typed_tab_name("x", None), Some("x".into()));
     }
 
     #[test]

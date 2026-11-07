@@ -1033,3 +1033,58 @@ fn a_pane_waiting_to_start_never_starts_after_the_shutdown() {
     assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 0);
     h.assert_nothing_spawned_for(wait + Duration::from_millis(500));
 }
+
+#[test]
+fn closing_a_project_terminates_its_panes() {
+    let mut h = Harness::start();
+    let (project, _, first) = h.pending_project();
+    let first_child = h.child();
+    let (_, second_child) = h.split(first, None);
+    h.command(Command::CloseProject { project });
+    let closed = h.wait_for(|m| match m {
+        CoreMsg::ProjectClosed { project } => Some(*project),
+        _ => None,
+    });
+    assert_eq!(closed, project);
+    wait_until(|| first_child.was_killed() && second_child.was_killed());
+}
+
+#[test]
+fn a_project_closed_before_its_pane_starts_spawns_nothing() {
+    let mut h = waiting(START_WAIT, START_WAIT);
+    let (project, _, _) = h.pending_project();
+    h.command(Command::CloseProject { project });
+    h.assert_nothing_spawned_for(START_WAIT + Duration::from_millis(500));
+}
+
+#[test]
+fn rf_esp_01_re_adding_a_project_whose_folder_is_gone_selects_it() {
+    let gone = std::env::temp_dir().join(format!("yien-gone-{}", std::process::id()));
+    std::fs::create_dir_all(&gone).unwrap();
+    let root = gone.to_string_lossy().into_owned();
+    let mut h = Harness::start();
+    h.command(Command::NewProject {
+        root: root.clone(),
+        name: None,
+    });
+    let tab = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.id),
+        _ => None,
+    });
+    h.command(Command::NewProject {
+        root: env!("CARGO_MANIFEST_DIR").into(),
+        name: None,
+    });
+    h.wait_for(|m| match m {
+        CoreMsg::ActiveTab { tab: Some(t) } if *t != tab => Some(()),
+        _ => None,
+    });
+    std::fs::remove_dir_all(&gone).unwrap();
+    h.command(Command::NewProject { root, name: None });
+    let answer = h.wait_for(|m| match m {
+        CoreMsg::ActiveTab { tab: Some(t) } if *t == tab => Some(Ok(())),
+        CoreMsg::Error { message, .. } => Some(Err(message.clone())),
+        _ => None,
+    });
+    assert_eq!(answer, Ok(()));
+}

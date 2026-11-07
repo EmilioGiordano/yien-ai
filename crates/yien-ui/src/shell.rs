@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::base::{h_flex, v_flex};
@@ -12,17 +13,21 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc;
 use yien_proto::{
-    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId, TabId,
+    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
+    SHELL_PROFILE, TabId,
 };
 
 use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
-use crate::catalog::{CATALOG, profile_splits, shortcut};
+use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
 use crate::fonts::Fonts;
 use crate::git::ContextGit;
 use crate::layout::neighbor;
-use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
+use crate::model::{
+    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
+    typed_tab_name,
+};
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, switcher_entries,
@@ -35,6 +40,7 @@ const TAB_BAR_WIDTH: f32 = 264.0;
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+const CONFIRM_WIDTH: f32 = 440.0;
 const CONTEXT_BAR_WIDTH: f32 = 380.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
@@ -46,8 +52,6 @@ const RESIZE_STEP: f32 = 0.05;
 const MAX_BATCH: usize = 1024;
 /// The profile the Claude shortcuts start.
 const CLAUDE_PROFILE: &str = "claude";
-/// The profile a plain split or tab starts.
-const SHELL_PROFILE: &str = "shell";
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -70,7 +74,25 @@ pub(crate) struct Shell {
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
+    /// The question asked before closing a project that has work running.
+    confirm: Option<ConfirmClose>,
+    /// The tab whose name is being edited in place (RF-ESP-16).
+    renaming: Option<Renaming>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A tab name being edited in its row.
+struct Renaming {
+    tab: TabId,
+    input: Entity<InputState>,
+    _input_events: Subscription,
+}
+
+/// A project about to close, and how many panes that would stop.
+struct ConfirmClose {
+    project: ProjectId,
+    name: String,
+    focus: FocusHandle,
 }
 
 /// The palette's model and the widgets drawing it.
@@ -136,6 +158,8 @@ impl Shell {
             split_menu: None,
             menu_closed: None,
             palette: None,
+            confirm: None,
+            renaming: None,
             _subscriptions: vec![activation],
         }
     }
@@ -164,6 +188,11 @@ impl Shell {
                     self.workspace = WorkspaceView::from_snapshot(&snapshot);
                 }
                 CoreMsg::ProjectUpdated(info) => self.workspace.project_updated(&info),
+                CoreMsg::ProjectClosed { project } => {
+                    for pane in self.workspace.project_closed(project) {
+                        ready.remove(&pane);
+                    }
+                }
                 CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
@@ -198,6 +227,7 @@ impl Shell {
             changed = true;
         }
         if changed {
+            self.drop_stale_questions(window, cx);
             self.sync_terminals(window, cx);
         }
         let take = frames_to_take(&ready, changed, &self.visible_panes(), |p| {
@@ -248,10 +278,34 @@ impl Shell {
         }
     }
 
+    /// A question about a project that is gone no longer applies.
+    fn drop_stale_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = self
+            .confirm
+            .as_ref()
+            .is_some_and(|c| self.workspace.project(c.project).is_none());
+        if gone {
+            self.confirm = None;
+            self.give_back_keyboard(window, cx);
+        }
+        let renamed_gone = self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| self.workspace.tab(r.tab).is_none());
+        if renamed_gone {
+            self.renaming = None;
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    /// Whether an overlay holds the keyboard; closing it gives it back.
+    fn overlay_has_keyboard(&self) -> bool {
+        self.palette.is_some() || self.confirm.is_some() || self.renaming.is_some()
+    }
+
     /// Moves the keyboard to the selected tab's focused pane when that changes.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The palette keeps the keyboard while open; closing it syncs again.
-        if self.palette.is_some() {
+        if self.overlay_has_keyboard() {
             return;
         }
         let target = keyboard_pane(&self.workspace);
@@ -318,8 +372,16 @@ impl Shell {
         }
     }
 
+    /// Folds or unfolds a project at once; the core saves it and confirms.
     fn toggle_fold(&mut self, id: ProjectId, cx: &mut Context<Self>) {
-        if self.workspace.toggle_fold(id) {
+        if let Some(collapsed) = self.workspace.toggle_fold(id) {
+            self.command(
+                Command::SetProjectCollapsed {
+                    project: id,
+                    collapsed,
+                },
+                cx,
+            );
             cx.notify();
         }
     }
@@ -532,6 +594,8 @@ impl Shell {
             return;
         }
         self.split_menu = None;
+        self.confirm = None;
+        self.finish_rename(true, window, cx);
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
@@ -584,6 +648,12 @@ impl Shell {
         if self.palette.take().is_none() {
             return;
         }
+        self.give_back_keyboard(window, cx);
+    }
+
+    /// Gives the keyboard to the pane the core says is focused, or to the
+    /// window when no tab is open, after an overlay held it.
+    fn give_back_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = match keyboard_after_close(&self.workspace) {
             KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
             KeyboardTo::Window => None,
@@ -657,6 +727,316 @@ impl Shell {
             self.notice = Some(format!("{} has not exited.", pane.name));
             cx.notify();
         }
+    }
+
+    /// Asks for a folder with the system's picker, which runs off the UI
+    /// thread, and registers it as a project (RF-ESP-01). Cancel does nothing.
+    fn add_project(&mut self, _: &AddProject, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match chosen.await {
+                Ok(Ok(Some(paths))) => Ok(paths.into_iter().next()),
+                Ok(Ok(None)) | Err(_) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+            };
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.folder_picked(picked, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A folder that is a project already selects that project; any other
+    /// becomes a new project with a shell tab, selected by the core.
+    fn folder_picked(
+        &mut self,
+        picked: Result<Option<PathBuf>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = match picked {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                self.notice = Some(format!("The folder picker failed: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(root) = path.to_str() else {
+            self.notice = Some(format!(
+                "{} cannot be a project: its name is not valid Unicode.",
+                path.display()
+            ));
+            cx.notify();
+            return;
+        };
+        match self.workspace.folder_target(root) {
+            FolderTarget::Tab(tab) => self.select_tab(tab, window, cx),
+            FolderTarget::NewProject => self.command(
+                Command::NewProject {
+                    root: root.to_owned(),
+                    name: None,
+                },
+                cx,
+            ),
+        }
+    }
+
+    /// Closes the selected tab's project, or the one selected last.
+    fn close_project(&mut self, _: &CloseProject, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.project_for_new_tab() {
+            Some(project) => self.request_close(project, window, cx),
+            None => {
+                self.notice = Some("There is no project to close.".to_owned());
+                cx.notify();
+            }
+        }
+    }
+
+    /// Closes a project at once when only idle shells would stop; otherwise
+    /// asks first, saying how many panes would stop.
+    fn request_close(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.workspace.project(project).map(|p| p.name.clone()) else {
+            return;
+        };
+        let busy = self.workspace.busy_panes_of(project);
+        if busy == 0 {
+            self.command(Command::CloseProject { project }, cx);
+            return;
+        }
+        self.split_menu = None;
+        self.finish_rename(true, window, cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.confirm = Some(ConfirmClose {
+            project,
+            name,
+            focus,
+        });
+        cx.notify();
+    }
+
+    /// While the question is open, a window command closes it and goes no
+    /// further, so a key cannot act on a workspace hidden behind it.
+    fn close_on_window_commands(
+        &self,
+        dialog: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        CATALOG
+            .iter()
+            .filter(|spec| spec.scope == Scope::Window)
+            .fold(dialog, |dialog, spec| {
+                dialog.on_boxed_action(
+                    &*(spec.action)(),
+                    cx.listener(|this, _: &dyn Action, window, cx| {
+                        this.confirm_cancel(&ConfirmCancel, window, cx);
+                    }),
+                )
+            })
+    }
+
+    fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(confirm) = self.confirm.take() {
+            self.command(
+                Command::CloseProject {
+                    project: confirm.project,
+                },
+                cx,
+            );
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() {
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    /// The question before closing a project that has work running, over
+    /// the window like the palette. Enter closes it, Escape keeps it.
+    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let confirm = self.confirm.as_ref()?;
+        let t = self.theme;
+        let hover = t.hover;
+        let detail = match self.workspace.busy_panes_of(confirm.project) {
+            0 => "Nothing in it is running any more. Nothing on disk is deleted.".to_owned(),
+            1 => "1 pane is still running an agent or a program; closing the project stops \
+                  it. Nothing on disk is deleted."
+                .to_owned(),
+            n => format!(
+                "{n} panes are still running an agent or a program; closing the project \
+                 stops them. Nothing on disk is deleted."
+            ),
+        };
+        let button = |id: &'static str, label: &'static str, keys: &'static str| {
+            h_flex()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(format!("{label} ({keys})"))
+                .items_center()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(t.line)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(label)
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(t.faint)
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(keys),
+                )
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .items_start()
+                .bg(rgba(0x0000_0059))
+                .child(
+                    v_flex()
+                        .id("confirm-close-project")
+                        .role(Role::Dialog)
+                        .aria_label(format!("Close {}?", confirm.name))
+                        .track_focus(&confirm.focus)
+                        .key_context(CONFIRM_CONTEXT)
+                        .mt(px(PALETTE_TOP))
+                        .w(px(CONFIRM_WIDTH))
+                        .max_w(relative(0.8))
+                        .gap(px(10.0))
+                        .p(px(16.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(t.line)
+                        .bg(t.raised)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.confirm_cancel(&ConfirmCancel, window, cx);
+                        }))
+                        .map(|dialog| self.close_on_window_commands(dialog, cx))
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("Close {}?", confirm.name)),
+                        )
+                        .child(div().text_size(px(13.0)).text_color(t.muted).child(detail))
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .pt(px(4.0))
+                                .text_size(px(13.0))
+                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.confirm_cancel(&ConfirmCancel, window, cx);
+                                    }),
+                                ))
+                                .child(
+                                    button("confirm-accept", "Close project", "Enter")
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .border_color(t.muted)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_accept(&ConfirmAccept, window, cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    fn rename_tab(&mut self, _: &RenameTab, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.selected_tab().map(|t| t.id) {
+            Some(tab) => self.start_rename(tab, window, cx),
+            None => {
+                self.notice = Some("There is no tab to rename.".to_owned());
+                cx.notify();
+            }
+        }
+    }
+
+    /// Turns the tab's name in its row into a field holding the name, all
+    /// selected. The tab bar opens and the project unfolds to show it.
+    fn start_rename(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, project)) = self.workspace.tab(tab).map(|t| (t.name.clone(), t.project))
+        else {
+            return;
+        };
+        if self.confirm.is_some() {
+            return;
+        }
+        self.finish_rename(true, window, cx);
+        self.split_menu = None;
+        self.tab_bar_open = true;
+        if self.workspace.is_folded(project) {
+            self.toggle_fold(project, cx);
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |state, cx| state.select_all(window, cx));
+        let input_events = cx.subscribe_in(&input, window, Self::on_rename_input);
+        window.focus(&input.focus_handle(cx), cx);
+        self.renaming = Some(Renaming {
+            tab,
+            input,
+            _input_events: input_events,
+        });
+        cx.notify();
+    }
+
+    /// Clicking away keeps the name typed, as Enter does.
+    fn on_rename_input(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Blur) {
+            self.finish_rename(true, window, cx);
+        }
+    }
+
+    /// Ends the edit; `keep` sends the typed name, and an empty one brings
+    /// back the automatic name.
+    fn finish_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else {
+            return;
+        };
+        let current = self.workspace.tab(renaming.tab).map(|t| t.name.as_str());
+        let typed = renaming.input.read(cx).value();
+        if let Some(name) = keep.then(|| typed_tab_name(&typed, current)).flatten() {
+            self.command(
+                Command::RenameTab {
+                    tab: renaming.tab,
+                    name,
+                },
+                cx,
+            );
+        }
+        self.give_back_keyboard(window, cx);
+    }
+
+    fn rename_confirm(&mut self, _: &RenameConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(true, window, cx);
+    }
+
+    fn rename_cancel(&mut self, _: &RenameCancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(false, window, cx);
     }
 
     fn toggle_project_fold(
@@ -1042,6 +1422,23 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
+        let head = h_flex()
+            .flex_none()
+            .items_center()
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .pt(px(6.0))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(t.faint)
+            .child(div().flex_1().child("Projects"))
+            .child(
+                icon_button("add-project", assets::PLUS, &t)
+                    .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_project(&AddProject, window, cx);
+                    })),
+            );
         v_flex()
             .id("tab-bar")
             .role(Role::Navigation)
@@ -1052,6 +1449,7 @@ impl Shell {
             .border_r_1()
             .border_color(t.line)
             .bg(t.panel)
+            .child(head)
             .child(
                 v_flex()
                     .id("tab-list")
@@ -1073,6 +1471,7 @@ impl Shell {
         let t = self.theme;
         let waiting = self.workspace.needs_you_tabs_of(project);
         let id = project.id;
+        let hover = t.hover;
         let label = if waiting > 0 {
             format!("{}, {waiting} need you", project.name)
         } else {
@@ -1124,6 +1523,26 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
+            .child(
+                div()
+                    .id(("close-project", id.get()))
+                    .role(Role::Button)
+                    .aria_label(format!("Close project {}", project.name))
+                    .ml_auto()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.request_close(id, window, cx);
+                    }))
+                    .child(svg().path(assets::CLOSE).size(px(12.0)).text_color(t.faint)),
+            )
     }
 
     fn render_tab_row(&self, tab: &TabView, active: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1156,22 +1575,22 @@ impl Shell {
                         .hover(move |s| s.bg(hover))
                 }
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.select_tab(id, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if this.renaming.as_ref().is_some_and(|r| r.tab == id) {
+                    return;
+                }
+                if event.click_count() >= 2 {
+                    this.start_rename(id, window, cx);
+                } else {
+                    this.select_tab(id, window, cx);
+                }
+            }))
             .child(
                 h_flex()
                     .items_center()
                     .gap(px(8.0))
                     .child(glyph(state, &t))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(tab.name.clone()),
-                    ),
+                    .child(self.render_tab_name(tab)),
             )
             .when(second_line, |row| {
                 row.child(
@@ -1215,6 +1634,37 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The tab's name, or the field editing it.
+    fn render_tab_name(&self, tab: &TabView) -> AnyElement {
+        let t = self.theme;
+        match self.renaming.as_ref().filter(|r| r.tab == tab.id) {
+            Some(renaming) => div()
+                .flex_1()
+                .min_w_0()
+                .key_context(RENAME_CONTEXT)
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(t.ai)
+                .bg(t.bg)
+                .child(
+                    Input::new(&renaming.input)
+                        .appearance(false)
+                        .aria_label(format!("New name for {}", tab.name)),
+                )
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_weight(FontWeight::MEDIUM)
+                .child(tab.name.clone())
+                .into_any_element(),
+        }
+    }
+
     fn render_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let area = div()
@@ -1226,6 +1676,9 @@ impl Shell {
             .h_full()
             .bg(t.bg)
             .p(px(HALF_GUTTER));
+        if self.workspace.has_no_projects() {
+            return self.render_no_project(area, cx);
+        }
         let Some(tab) = self.workspace.selected_tab() else {
             return area
                 .flex()
@@ -1256,6 +1709,62 @@ impl Shell {
             })
             .collect();
         area.child(div().relative().size_full().children(cells))
+    }
+
+    /// The pane area with no project at all: an invitation to add one.
+    fn render_no_project(&self, area: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.theme;
+        let hover = t.hover;
+        area.flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_color(t.muted)
+                    .when_some(self.fonts.display.clone(), |d, family| {
+                        d.font_family(family)
+                    })
+                    .text_size(px(18.0))
+                    .child("No project is open"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(t.faint)
+                    .child("Add a folder to start working in it."),
+            )
+            .child(
+                h_flex()
+                    .id("empty-add-project")
+                    .role(Role::Button)
+                    .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(14.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(t.line)
+                    .bg(t.raised)
+                    .text_size(px(13.5))
+                    .text_color(t.text)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_project(&AddProject, window, cx);
+                    }))
+                    .child(svg().path(assets::PLUS).size(px(14.0)).text_color(t.muted))
+                    .child("Add project")
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(t.faint)
+                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                            .child(ADD_PROJECT_KEYS),
+                    ),
+            )
     }
 
     fn render_pane(
@@ -1783,7 +2292,8 @@ impl Shell {
                     .justify_end()
                     .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
                 "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
-                 {JUMP_KEYS} next that needs you · {NEW_CLAUDE_TAB_KEYS} Claude tab · \
+                 {JUMP_KEYS} next that needs you · {ADD_PROJECT_KEYS} add project · \
+                 {NEW_CLAUDE_TAB_KEYS} Claude tab · \
                  {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
                  {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
                  {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {TAB_BAR_KEYS} tab bar · \
@@ -1826,6 +2336,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
             .on_action(cx.listener(Self::toggle_project_fold))
+            .on_action(cx.listener(Self::add_project))
+            .on_action(cx.listener(Self::close_project))
+            .on_action(cx.listener(Self::confirm_accept))
+            .on_action(cx.listener(Self::confirm_cancel))
+            .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::rename_confirm))
+            .on_action(cx.listener(Self::rename_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_switcher))
             .on_action(cx.listener(Self::palette_up))
@@ -1860,6 +2377,7 @@ impl Render for Shell {
             )
             .child(self.render_status_bar())
             .children(self.render_palette(cx))
+            .children(self.render_confirm(cx))
     }
 }
 
@@ -1914,8 +2432,13 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("needs-you counter", "agent.next_needs_you"),
     ("palette button", "palette.open"),
     ("project head", "project.fold"),
+    ("add project button", "project.add"),
+    ("empty state's add project button", "project.add"),
+    ("project head close button", "project.close"),
+    ("close project dialog buttons", "project.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
+    ("tab row double-click", "tab.rename"),
 ];
 
 #[cfg(test)]

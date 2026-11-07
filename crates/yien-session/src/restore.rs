@@ -207,6 +207,7 @@ mod tests {
             branch: None,
             worktree: None,
             archived: false,
+            name: None,
         };
         let snapshot = SessionSnapshot::new(
             0,
@@ -215,6 +216,7 @@ mod tests {
                 name: "p".into(),
                 root: "C:/code".into(),
                 setup_script: None,
+                collapsed: false,
                 tabs: vec![tab(1, "C:/code"), tab(2, "C:/gone"), tab(3, "C:/code/wt")],
             }],
         );

@@ -17,6 +17,12 @@ pub(crate) const TERMINAL_CONTEXT: &str = "Terminal";
 /// Key context of the command palette and the switcher.
 pub(crate) const PALETTE_CONTEXT: &str = "YienPalette";
 
+/// Key context of the field that renames a tab in place.
+pub(crate) const RENAME_CONTEXT: &str = "YienRename";
+
+/// Key context of a question the window asks before acting.
+pub(crate) const CONFIRM_CONTEXT: &str = "YienConfirm";
+
 actions!(
     yien,
     [
@@ -78,6 +84,21 @@ actions!(
         /// Folds or unfolds the selected tab's project in the tab bar
         /// (RF-ESP-17).
         ToggleProjectFold,
+        /// Picks a folder and registers it as a project (RF-ESP-01).
+        AddProject,
+        /// Removes the selected tab's project from the tab bar, asking first
+        /// when it would stop work. Nothing on disk is touched.
+        CloseProject,
+        /// Edits the selected tab's name in place (RF-ESP-16).
+        RenameTab,
+        /// Keeps the name typed in the tab rename field.
+        RenameConfirm,
+        /// Leaves the tab rename field without changing the name.
+        RenameCancel,
+        /// Answers yes to the question the window asks.
+        ConfirmAccept,
+        /// Answers no to the question the window asks.
+        ConfirmCancel,
         /// Opens or closes the command palette (RF-NAV-01).
         ToggleCommandPalette,
         /// Opens or closes the switcher of projects, tabs and panes (RF-NAV-04).
@@ -127,6 +148,7 @@ pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const SWITCHER_KEYS: &str = "Ctrl+Shift+O";
 pub(crate) const TAB_NUMBER_KEYS: &str = "Ctrl+1..9";
+pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
@@ -138,6 +160,9 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
     // same depth; being bound later, they win.
     let palette = format!("{PALETTE_CONTEXT} > Input");
     let palette = Some(palette.as_str());
+    let rename = format!("{RENAME_CONTEXT} > Input");
+    let rename = Some(rename.as_str());
+    let confirm = Some(CONFIRM_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -148,6 +173,10 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteDown, palette),
         KeyBinding::new("enter", PaletteConfirm, palette),
         KeyBinding::new("escape", PaletteClose, palette),
+        KeyBinding::new("enter", RenameConfirm, rename),
+        KeyBinding::new("escape", RenameCancel, rename),
+        KeyBinding::new("enter", ConfirmAccept, confirm),
+        KeyBinding::new("escape", ConfirmCancel, confirm),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -187,6 +216,10 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(PaletteDown),
         Box::new(PaletteConfirm),
         Box::new(PaletteClose),
+        Box::new(RenameConfirm),
+        Box::new(RenameCancel),
+        Box::new(ConfirmAccept),
+        Box::new(ConfirmCancel),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -290,6 +323,26 @@ mod tests {
             );
         }
         assert_eq!(matches("ctrl-0", &TERMINAL_STACK), 0);
+    }
+
+    #[test]
+    fn rf_esp_16_enter_and_escape_end_a_tab_rename_not_the_input() {
+        let stack = ["Root", CONTEXT, RENAME_CONTEXT, "Input"];
+        assert!(first_is("enter", &stack, &RenameConfirm));
+        assert!(first_is("escape", &stack, &RenameCancel));
+        assert_eq!(matches("enter", &TERMINAL_STACK), 0);
+    }
+
+    #[test]
+    fn enter_and_escape_answer_a_question() {
+        let stack = ["Root", CONTEXT, CONFIRM_CONTEXT];
+        assert!(first_is("enter", &stack, &ConfirmAccept));
+        assert!(first_is("escape", &stack, &ConfirmCancel));
+    }
+
+    #[test]
+    fn rf_esp_01_add_project_has_a_key_from_a_terminal() {
+        assert!(first_is("ctrl-shift-k", &TERMINAL_STACK, &AddProject));
     }
 
     #[test]

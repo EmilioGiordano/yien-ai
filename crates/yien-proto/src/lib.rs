@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 5);
+//! assert_eq!(PROTO_VERSION, 6);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -21,6 +21,7 @@ pub mod frame;
 mod git;
 pub mod hook_frame;
 mod msg;
+mod path;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,13 +31,22 @@ pub use msg::{
     LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
     ProjectInfo, TabInfo, WorkspaceSnapshot,
 };
+pub use path::{folder_key, same_folder};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
 ///
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 5;
+pub const PROTO_VERSION: u32 = 6;
+
+/// The id of the built-in profile that runs the user's shell; every other
+/// profile runs an agent.
+///
+/// ```
+/// assert_eq!(yien_proto::ProfileId::new(yien_proto::SHELL_PROFILE).as_str(), "shell");
+/// ```
+pub const SHELL_PROFILE: &str = "shell";
 
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {

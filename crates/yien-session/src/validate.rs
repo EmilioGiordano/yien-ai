@@ -267,6 +267,7 @@ mod tests {
             branch: None,
             worktree: None,
             archived: false,
+            name: None,
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
                     name: "p".into(),
                     root: "C:/code".into(),
                     setup_script: None,
+                    collapsed: false,
                     tabs,
                 })
                 .collect(),

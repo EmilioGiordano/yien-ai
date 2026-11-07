@@ -177,7 +177,8 @@ impl AgentState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     /// Registers a project from a local folder and opens a tab on its main
-    /// working copy (RF-ESP-01, RF-ESP-06).
+    /// working copy (RF-ESP-01, RF-ESP-06). A folder that is already a
+    /// project ([`crate::same_folder`]) selects that project instead.
     NewProject {
         /// The project folder.
         root: String,
@@ -193,6 +194,26 @@ pub enum Command {
         name: Option<String>,
         /// The profile its pane launches; the user's shell when `None`.
         profile: Option<ProfileId>,
+    },
+    /// Removes a project from the sidebar, closing its tabs and terminating
+    /// their panes. Nothing on disk is touched.
+    CloseProject {
+        /// The project.
+        project: ProjectId,
+    },
+    /// Folds or unfolds a project's tabs in the sidebar (RF-ESP-17).
+    SetProjectCollapsed {
+        /// The project.
+        project: ProjectId,
+        /// Whether its tabs are hidden.
+        collapsed: bool,
+    },
+    /// Renames a tab (RF-ESP-16).
+    RenameTab {
+        /// The tab.
+        tab: TabId,
+        /// The new name; empty goes back to the automatic name.
+        name: String,
     },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
@@ -438,6 +459,8 @@ pub struct ProjectInfo {
     pub root: String,
     /// Its tabs, in tab-bar order.
     pub tabs: Vec<TabId>,
+    /// Whether its tabs are folded away in the sidebar (RF-ESP-17).
+    pub collapsed: bool,
 }
 
 /// A tab and its layout (RF-ESP-04).
@@ -473,6 +496,8 @@ pub struct PaneInfo {
     pub name: String,
     /// The display name of the profile it runs: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The id of the profile it runs: `claude`, `shell`.
+    pub profile_id: ProfileId,
     /// The title the program set, if any.
     pub title: Option<String>,
     /// The working directory the shell last reported, if any.
@@ -539,6 +564,12 @@ pub enum CoreMsg {
     WorkspaceSnapshot(WorkspaceSnapshot),
     /// A project was added or changed.
     ProjectUpdated(ProjectInfo),
+    /// A project was removed from the sidebar. Its tabs were closed first,
+    /// each with its own [`CoreMsg::TabClosed`].
+    ProjectClosed {
+        /// The project.
+        project: ProjectId,
+    },
     /// A tab was added or changed: layout, focus, name, maximized pane.
     TabUpdated(TabInfo),
     /// A tab was closed, with its panes.
@@ -640,6 +671,17 @@ mod tests {
                 pane: PaneId::new(3),
                 delta: -0.25,
             },
+            Command::CloseProject {
+                project: ProjectId::new(1),
+            },
+            Command::SetProjectCollapsed {
+                project: ProjectId::new(1),
+                collapsed: true,
+            },
+            Command::RenameTab {
+                tab: TabId::new(2),
+                name: "review".into(),
+            },
             Command::MovePane {
                 pane: PaneId::new(3),
                 target: PaneId::new(4),
@@ -710,6 +752,31 @@ mod tests {
                 pane: PaneId::new(3),
             },
             CoreMsg::TabUpdated(tab),
+            CoreMsg::ProjectUpdated(ProjectInfo {
+                id: ProjectId::new(1),
+                name: "yien".into(),
+                root: "C:/Code/yien".into(),
+                tabs: vec![TabId::new(2)],
+                collapsed: true,
+            }),
+            CoreMsg::ProjectClosed {
+                project: ProjectId::new(1),
+            },
+            CoreMsg::PaneUpdated(PaneInfo {
+                id: PaneId::new(3),
+                tab: TabId::new(2),
+                name: "claude".into(),
+                profile: "Claude Code".into(),
+                profile_id: ProfileId::new("claude"),
+                title: None,
+                cwd: Some("C:/Code/yien".into()),
+                state: AgentState::Working,
+                running: true,
+                exit_code: None,
+                session_id: Some("4f1c".into()),
+                needs_you_since: None,
+                signal_lost: false,
+            }),
             CoreMsg::PaneState {
                 pane: PaneId::new(3),
                 state: AgentState::Error(ErrorReason::UnexpectedExit {

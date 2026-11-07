@@ -109,6 +109,7 @@ pub struct Selection {
 ///     name: "yien".into(),
 ///     root: "C:/code/yien".into(),
 ///     setup_script: None,
+///     collapsed: false,
 ///     tabs: Vec::new(),
 /// };
 /// assert!(project.tabs.is_empty());
@@ -124,6 +125,9 @@ pub struct ProjectRecord {
     /// The script run to prepare a new worktree of the project.
     #[serde(default)]
     pub setup_script: Option<String>,
+    /// Whether the project's tabs are folded away in the sidebar (RF-ESP-17).
+    #[serde(default)]
+    pub collapsed: bool,
     /// The project's tabs, in order.
     pub tabs: Vec<TabRecord>,
 }
@@ -137,7 +141,8 @@ pub struct ProjectRecord {
 /// let pane = PaneId::new(1);
 /// let tab = TabRecord {
 ///     id: TabId::new(1),
-///     title: "main".into(),
+///     title: "Tab 1".into(),
+///     name: Some("main".into()),
 ///     dir: "C:/code/yien".into(),
 ///     layout: LayoutRecord::Leaf { pane },
 ///     panes: vec![PaneRecord {
@@ -159,8 +164,11 @@ pub struct ProjectRecord {
 pub struct TabRecord {
     /// The tab's id.
     pub id: TabId,
-    /// The title shown in the tab bar.
+    /// The automatic title, shown when the user has not named the tab.
     pub title: String,
+    /// The name the user gave the tab, shown instead of `title` (RF-ESP-16).
+    #[serde(default)]
+    pub name: Option<String>,
     /// The tab's directory, checked on restore (RF-SES-12).
     pub dir: String,
     /// The git branch the tab works on.

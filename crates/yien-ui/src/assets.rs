@@ -16,8 +16,10 @@ pub(crate) const THEME: &str = "yien/theme.svg";
 pub(crate) const BRANCH: &str = "yien/branch.svg";
 pub(crate) const SPLIT_RIGHT: &str = "yien/split-right.svg";
 pub(crate) const SPLIT_DOWN: &str = "yien/split-down.svg";
+pub(crate) const PLUS: &str = "yien/plus.svg";
+pub(crate) const CLOSE: &str = "yien/close.svg";
 
-const OWN: [(&str, &[u8]); 13] = [
+const OWN: [(&str, &[u8]); 15] = [
     (MARK, include_bytes!("../assets/mark.svg")),
     (CHEVRON, include_bytes!("../assets/chevron.svg")),
     (PANEL_LEFT, include_bytes!("../assets/panel-left.svg")),
@@ -26,6 +28,8 @@ const OWN: [(&str, &[u8]); 13] = [
     (BRANCH, include_bytes!("../assets/branch.svg")),
     (SPLIT_RIGHT, include_bytes!("../assets/split-right.svg")),
     (SPLIT_DOWN, include_bytes!("../assets/split-down.svg")),
+    (PLUS, include_bytes!("../assets/plus.svg")),
+    (CLOSE, include_bytes!("../assets/close.svg")),
     (
         "yien/state-needs.svg",
         include_bytes!("../assets/state-needs.svg"),

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use yien_layout::{Rect, Tree};
 use yien_proto::{
     AgentState, Command, CoreMsg, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
-    TabId, TabInfo, WorkspaceSnapshot,
+    TabId, TabInfo, WorkspaceSnapshot, same_folder,
 };
 
 use crate::CoreError;
@@ -102,13 +102,18 @@ struct Project {
     name: String,
     root: String,
     tabs: Vec<TabId>,
+    /// Its tabs are folded away in the sidebar (RF-ESP-17).
+    collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Tab {
     id: TabId,
     project: ProjectId,
-    name: String,
+    /// The name the user gave it (RF-ESP-16).
+    custom_name: Option<String>,
+    /// The automatic name, shown while it has no name of its own.
+    default_name: String,
     dir: String,
     tree: Tree,
     leaves: HashMap<yien_layout::PaneId, PaneId>,
@@ -215,7 +220,10 @@ impl Workspace {
         TabInfo {
             id: tab.id,
             project: tab.project,
-            name: tab.name.clone(),
+            name: tab
+                .custom_name
+                .clone()
+                .unwrap_or_else(|| tab.default_name.clone()),
             dir: tab.dir.clone(),
             branch: tab.branch.clone(),
             layout,
@@ -263,6 +271,11 @@ impl Workspace {
         Some((tab.id, tab.dir.as_str()))
     }
 
+    /// Whether `root` is the folder of a project already ([`same_folder`]).
+    pub fn has_project_at(&self, root: &str) -> bool {
+        self.projects.iter().any(|p| same_folder(&p.root, root))
+    }
+
     /// Whether the tab is open.
     pub fn has_tab(&self, tab: TabId) -> bool {
         self.tab(tab).is_ok()
@@ -286,10 +299,30 @@ impl Workspace {
         fx
     }
 
+    /// Selects a tab. A tab that becomes selected unfolds its project, so the
+    /// jump to a pane that needs the user never lands in a hidden tab.
     fn set_active(&mut self, tab: Option<TabId>, fx: &mut Vec<Effect>) {
         if self.active_tab != tab {
             self.active_tab = tab;
             fx.push(Effect::Emit(CoreMsg::ActiveTab { tab }));
+            if let Some(tab) = tab {
+                self.unfold_project_of(tab, fx);
+            }
+        }
+    }
+
+    fn unfold_project_of(&mut self, tab: TabId, fx: &mut Vec<Effect>) {
+        if let Ok(project) = self.tab(tab).map(|t| t.project) {
+            self.set_collapsed(project, false, fx);
+        }
+    }
+
+    fn set_collapsed(&mut self, project: ProjectId, collapsed: bool, fx: &mut Vec<Effect>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project)
+            && p.collapsed != collapsed
+        {
+            p.collapsed = collapsed;
+            fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
         }
     }
 
@@ -303,18 +336,42 @@ impl Workspace {
         let mut fx = Vec::new();
         match command {
             Command::NewProject { root, name } => {
-                let plan = resolve(None)?;
-                let id = ProjectId::new(self.next()?);
-                let name = name
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| folder_name(&root));
-                self.projects.push(Project {
-                    id,
-                    name,
-                    root,
-                    tabs: Vec::new(),
-                });
-                self.new_tab(id, None, plan, &mut fx)?;
+                let existing = self
+                    .projects
+                    .iter()
+                    .find(|p| same_folder(&p.root, &root))
+                    .map(|p| p.id);
+                if let Some(project) = existing {
+                    self.open_project(project, resolve, &mut fx)?;
+                } else {
+                    let plan = resolve(None)?;
+                    let id = ProjectId::new(self.next()?);
+                    let name = name
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| folder_name(&root));
+                    self.projects.push(Project {
+                        id,
+                        name,
+                        root,
+                        tabs: Vec::new(),
+                        collapsed: false,
+                    });
+                    self.new_tab(id, None, plan, &mut fx)?;
+                }
+            }
+            Command::CloseProject { project } => self.close_project(project, &mut fx)?,
+            Command::SetProjectCollapsed { project, collapsed } => {
+                if !self.projects.iter().any(|p| p.id == project) {
+                    return Err(CoreError::UnknownProject(project));
+                }
+                self.set_collapsed(project, collapsed, &mut fx);
+            }
+            Command::RenameTab { tab, name } => {
+                let t = self.tab_mut(tab)?;
+                let name = name.trim();
+                t.custom_name =
+                    (!name.is_empty() && name != t.default_name).then(|| name.to_owned());
+                self.emit_tab(tab, &mut fx);
             }
             Command::NewTab {
                 project,
@@ -328,13 +385,7 @@ impl Workspace {
                 self.new_tab(project, name, plan, &mut fx)?;
             }
             Command::CloseTab { tab } => self.close_tab(tab, &mut fx)?,
-            Command::SelectTab { tab } => {
-                let waiting = self.longest_waiting(self.tab(tab)?);
-                match waiting {
-                    Some(pane) => self.focus(pane, &mut fx)?,
-                    None => self.set_active(Some(tab), &mut fx),
-                }
-            }
+            Command::SelectTab { tab } => self.select(tab, &mut fx)?,
             Command::SplitPane {
                 pane,
                 orientation,
@@ -443,6 +494,44 @@ impl Workspace {
         Ok(fx)
     }
 
+    /// Selects a tab, focusing its pane that has needed the user longest
+    /// (RF-ATN-06), and unfolds its project even when it was selected already.
+    fn select(&mut self, tab: TabId, fx: &mut Vec<Effect>) -> Result<(), CoreError> {
+        match self.longest_waiting(self.tab(tab)?) {
+            Some(pane) => self.focus(pane, fx)?,
+            None => self.set_active(Some(tab), fx),
+        }
+        self.unfold_project_of(tab, fx);
+        Ok(())
+    }
+
+    /// Goes to a project already registered: its selected tab, else its
+    /// first; a project with no tab left gets a new one with the shell.
+    fn open_project(
+        &mut self,
+        project: ProjectId,
+        resolve: &dyn Fn(Option<&ProfileId>) -> Result<LaunchPlan, CoreError>,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let tabs = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.tabs.clone())
+            .ok_or(CoreError::UnknownProject(project))?;
+        let tab = self
+            .active_tab
+            .filter(|t| tabs.contains(t))
+            .or_else(|| tabs.first().copied());
+        match tab {
+            Some(tab) => self.select(tab, fx),
+            None => {
+                let plan = resolve(None)?;
+                self.new_tab(project, None, plan, fx)
+            }
+        }
+    }
+
     /// The pane of `tab` that has needed the user longest (RF-ATN-06).
     fn longest_waiting(&self, tab: &Tab) -> Option<PaneId> {
         tab.panes()
@@ -478,16 +567,16 @@ impl Workspace {
             .find(|p| p.id == project)
             .ok_or(CoreError::UnknownProject(project))?;
         p.tabs.push(tab_id);
-        let name = name
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or_else(|| format!("Tab {}", p.tabs.len()));
+        let custom_name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+        let default_name = format!("Tab {}", p.tabs.len());
         let dir = p.root.clone();
         let tree = Tree::new();
         let leaves = tree.panes().into_iter().map(|leaf| (leaf, pane)).collect();
         self.tabs.push(Tab {
             id: tab_id,
             project,
-            name,
+            custom_name,
+            default_name,
             dir: dir.clone(),
             tree,
             leaves,
@@ -616,6 +705,43 @@ impl Workspace {
         }
         if self.active_tab == Some(tab) {
             let next = sibling.or_else(|| self.tabs.first().map(|t| t.id));
+            self.set_active(next, fx);
+        }
+        Ok(())
+    }
+
+    /// Removes a project with its tabs, stopping their panes. A selected tab
+    /// among them gives way to a tab of the nearest other project, preferring
+    /// one that is not folded.
+    fn close_project(&mut self, project: ProjectId, fx: &mut Vec<Effect>) -> Result<(), CoreError> {
+        let at = self
+            .projects
+            .iter()
+            .position(|p| p.id == project)
+            .ok_or(CoreError::UnknownProject(project))?;
+        let removed = self.projects.remove(at);
+        for tab in &removed.tabs {
+            let Some(i) = self.tabs.iter().position(|t| t.id == *tab) else {
+                continue;
+            };
+            let closed = self.tabs.remove(i);
+            for pane in closed.panes() {
+                self.panes.remove(&pane);
+                fx.push(Effect::Stop { pane });
+            }
+            fx.push(Effect::Emit(CoreMsg::TabClosed { tab: *tab }));
+        }
+        fx.push(Effect::Emit(CoreMsg::ProjectClosed { project }));
+        if self.active_tab.is_some_and(|t| removed.tabs.contains(&t)) {
+            let (before, after) = self.projects.split_at(at);
+            let nearest: Vec<&Project> = after.iter().chain(before.iter().rev()).collect();
+            let first_tab = |unfolded_only: bool| {
+                nearest
+                    .iter()
+                    .filter(|p| !unfolded_only || !p.collapsed)
+                    .find_map(|p| p.tabs.first().copied())
+            };
+            let next = first_tab(true).or_else(|| first_tab(false));
             self.set_active(next, fx);
         }
         Ok(())
@@ -826,6 +952,7 @@ fn project_info(p: &Project) -> ProjectInfo {
         name: p.name.clone(),
         root: p.root.clone(),
         tabs: p.tabs.clone(),
+        collapsed: p.collapsed,
     }
 }
 
@@ -838,6 +965,7 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
             .clone()
             .unwrap_or_else(|| p.default_name.clone()),
         profile: p.profile_name.clone(),
+        profile_id: ProfileId::new(p.profile.clone()),
         title: p.title.clone(),
         cwd: p.cwd.clone(),
         state: p.state,
@@ -1363,6 +1491,203 @@ mod tests {
         assert_eq!(ws.active_dir(), Some((tab, "C:/Code/yien/")));
     }
 
+    fn emitted(fx: &[Effect]) -> Vec<&CoreMsg> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Emit(msg) => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rf_esp_01_adding_a_folder_that_is_a_project_selects_it() {
+        let mut ws = Workspace::new();
+        let (first, _) = project(&mut ws);
+        let other = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/Code/other".into(),
+                name: None,
+            },
+        );
+        assert_eq!(spawned(&other).len(), 1);
+        let fx = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/Code//yien".into(),
+                name: None,
+            },
+        );
+        assert!(spawned(&fx).is_empty(), "{fx:?}");
+        assert_eq!(ws.snapshot().projects.len(), 2);
+        assert_eq!(ws.snapshot().active_tab, Some(first));
+
+        run(&mut ws, Command::CloseTab { tab: first });
+        let fx = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/Code/yien".into(),
+                name: None,
+            },
+        );
+        let pane = spawned(&fx)[0];
+        let snap = ws.snapshot();
+        assert_eq!(snap.projects.len(), 2);
+        assert_eq!(snap.projects[0].tabs, [ws.tab_of(pane).unwrap()]);
+        assert_eq!(snap.active_tab, Some(ws.tab_of(pane).unwrap()));
+    }
+
+    #[test]
+    fn closing_a_project_stops_its_panes_and_selects_another() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let fx = run(
+            &mut ws,
+            Command::SplitPane {
+                pane: a,
+                orientation: Orientation::Horizontal,
+                profile: None,
+            },
+        );
+        let b = spawned(&fx)[0];
+        let id = ws.snapshot().projects[0].id;
+        let fx = run(
+            &mut ws,
+            Command::NewProject {
+                root: "C:/Code/other".into(),
+                name: None,
+            },
+        );
+        let other = ws.tab_of(spawned(&fx)[0]).unwrap();
+        run(&mut ws, Command::SelectTab { tab });
+
+        let fx = run(&mut ws, Command::CloseProject { project: id });
+        let mut gone = stopped(&fx);
+        gone.sort_unstable();
+        assert_eq!(gone, [a, b]);
+        let msgs = emitted(&fx);
+        let closed = msgs
+            .iter()
+            .position(|m| matches!(m, CoreMsg::TabClosed { tab: t } if *t == tab));
+        let project_closed = msgs
+            .iter()
+            .position(|m| matches!(m, CoreMsg::ProjectClosed { project } if *project == id));
+        let active = msgs
+            .iter()
+            .position(|m| matches!(m, CoreMsg::ActiveTab { tab: Some(t) } if *t == other));
+        assert!(
+            closed.is_some() && closed < project_closed && project_closed < active,
+            "{msgs:?}"
+        );
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, CoreMsg::ProjectUpdated(p) if p.id == id))
+        );
+        let snap = ws.snapshot();
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.active_tab, Some(other));
+        assert_eq!(ws.check(), Ok(()));
+    }
+
+    #[test]
+    fn closing_the_last_project_leaves_nothing_selected() {
+        let mut ws = Workspace::new();
+        project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let fx = run(&mut ws, Command::CloseProject { project: id });
+        assert!(
+            emitted(&fx)
+                .iter()
+                .any(|m| matches!(m, CoreMsg::ActiveTab { tab: None }))
+        );
+        let snap = ws.snapshot();
+        assert!(snap.projects.is_empty() && snap.tabs.is_empty() && snap.panes.is_empty());
+        assert!(
+            ws.apply(Command::CloseProject { project: id }, &resolve)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rf_esp_16_a_renamed_tab_goes_back_to_its_automatic_name() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let name = |ws: &Workspace| ws.snapshot().tabs[0].name.clone();
+        assert_eq!(name(&ws), "Tab 1");
+        let fx = run(
+            &mut ws,
+            Command::RenameTab {
+                tab,
+                name: "  review  ".into(),
+            },
+        );
+        assert!(matches!(
+            emitted(&fx)[..],
+            [CoreMsg::TabUpdated(t)] if t.name == "review"
+        ));
+        run(
+            &mut ws,
+            Command::RenameTab {
+                tab,
+                name: " ".into(),
+            },
+        );
+        assert_eq!(name(&ws), "Tab 1");
+        run(
+            &mut ws,
+            Command::RenameTab {
+                tab,
+                name: "Tab 1".into(),
+            },
+        );
+        let saved = ws.to_session();
+        assert_eq!(
+            saved.projects[0].tabs[0].name, None,
+            "the automatic name is not pinned as the tab's own"
+        );
+        let unknown = Command::RenameTab {
+            tab: TabId::new(99),
+            name: "x".into(),
+        };
+        assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
+    #[test]
+    fn rf_esp_17_a_folded_project_unfolds_when_one_of_its_tabs_is_selected() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let fold = |collapsed| Command::SetProjectCollapsed {
+            project: id,
+            collapsed,
+        };
+        let fx = run(&mut ws, fold(true));
+        assert!(matches!(
+            emitted(&fx)[..],
+            [CoreMsg::ProjectUpdated(p)] if p.collapsed
+        ));
+        assert!(run(&mut ws, fold(true)).is_empty());
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Permission);
+        ws.on_pane_event(a, PaneEvent::State(needs, Some(1)));
+        assert!(ws.snapshot().projects[0].collapsed, "red does not unfold");
+
+        run(&mut ws, Command::SelectTab { tab });
+        assert!(!ws.snapshot().projects[0].collapsed);
+        run(&mut ws, fold(true));
+        run(&mut ws, Command::FocusPane { pane: a });
+        assert!(
+            ws.snapshot().projects[0].collapsed,
+            "clicking a pane of the selected tab keeps its project folded"
+        );
+        let unknown = Command::SetProjectCollapsed {
+            project: ProjectId::new(99),
+            collapsed: true,
+        };
+        assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
     #[test]
     fn folder_names() {
         assert_eq!(folder_name("C:\\Code\\yien\\"), "yien");
@@ -1372,7 +1697,10 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum Op {
-        NewProject,
+        NewProject(usize),
+        CloseProject(usize),
+        Collapse(usize, bool),
+        RenameTab(usize, usize),
         NewTab(usize),
         CloseTab(usize),
         SelectTab(usize),
@@ -1391,7 +1719,10 @@ mod tests {
     fn op() -> impl Strategy<Value = Op> {
         let i = 0..16usize;
         prop_oneof![
-            Just(Op::NewProject),
+            i.clone().prop_map(Op::NewProject),
+            i.clone().prop_map(Op::CloseProject),
+            (i.clone(), any::<bool>()).prop_map(|(a, b)| Op::Collapse(a, b)),
+            (i.clone(), i.clone()).prop_map(|(a, b)| Op::RenameTab(a, b)),
             i.clone().prop_map(Op::NewTab),
             i.clone().prop_map(Op::CloseTab),
             i.clone().prop_map(Op::SelectTab),
@@ -1430,9 +1761,20 @@ mod tests {
             DropZone::Bottom,
         ];
         Some(match op {
-            Op::NewProject => Command::NewProject {
-                root: "C:/p".into(),
+            Op::NewProject(i) => Command::NewProject {
+                root: ["C:/p", "C:/q/", r"C:\p", "D:/r"][i % 4].into(),
                 name: None,
+            },
+            Op::CloseProject(i) => Command::CloseProject {
+                project: pick(&projects, *i)?,
+            },
+            Op::Collapse(i, collapsed) => Command::SetProjectCollapsed {
+                project: pick(&projects, *i)?,
+                collapsed: *collapsed,
+            },
+            Op::RenameTab(i, n) => Command::RenameTab {
+                tab: pick(&tabs, *i)?,
+                name: ["", " ", "review", "Ñandú 2"][n % 4].into(),
             },
             Op::NewTab(i) => Command::NewTab {
                 project: pick(&projects, *i)?,
