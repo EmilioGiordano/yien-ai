@@ -23,7 +23,7 @@ Follow `AGENTS.md` "The layer rule", "Rules the plan fixed", "Tests" and "Gotcha
 
 ## Validation
 
-Run the commands in `AGENTS.md` "Commands", on the crates you touched first, then the workspace. One that does not exist yet is `n/a`. If `fmt` flags files outside your change, format only yours and name the others.
+Run the branch checks in `AGENTS.md` "Commands" through `scripts/cargo.sh`, on the crates you touched. One that does not exist yet is `n/a`; a gate timeout (exit 75) is reported, not counted as a failure. If `fmt` flags files outside your change, format only yours and name the others.
 
 Never run the app or anything that opens a window, and never send input to the desktop. List what a human must check.
 
