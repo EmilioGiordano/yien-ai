@@ -339,13 +339,13 @@ mod tests {
         };
         drop(events);
         // Far more than the pipe buffer: blocks unless the reader drains.
-        writer.write_all(&vec![b'x'; 1 << 20]).unwrap();
-        drop(writer);
+        let feeder = thread::spawn(move || writer.write_all(&vec![b'x'; 1 << 20]));
         let deadline = Instant::now() + TIMEOUT;
-        while !done.is_finished() {
+        while !feeder.is_finished() || !done.is_finished() {
             assert!(Instant::now() < deadline, "the reader stopped draining");
             thread::sleep(Duration::from_millis(10));
         }
+        feeder.join().unwrap().unwrap();
         assert!(shared.lock().eof);
     }
 
