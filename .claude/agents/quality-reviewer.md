@@ -47,6 +47,14 @@ Every finding is `CONFIRMED` (path followed end to end or command run, with the 
 
 Do not report: formatting, performance without measurement, or pre-existing issues in untouched code (one line under Notes).
 
+On a re-review, say for each repeated finding whether the fault is the patch or the design. When the same area fails a second time, consider whether the model itself is wrong; if so, mark it `design` so it is redesigned, not patched again.
+
+## Known false positives
+
+Kept by the orchestrator: findings of this reviewer that turned out wrong. Do not repeat them.
+
+- (none yet)
+
 ## Verdict
 
 `FAIL` if any `BLOCKER`, `Critical` or `High` finding is `CONFIRMED`, or if a command that applies fails. `n/a` never fails. `PLAUSIBLE` alone never fails a review. `PASS` otherwise.
@@ -63,7 +71,7 @@ Files reviewed: <n>
 ## Verdict: PASS | FAIL
 
 ## Findings
-### [<severity>] [<CONFIRMED|PLAUSIBLE>] <title>
+### [<severity>] [<CONFIRMED|PLAUSIBLE>] [<patch|design>] <title>
 - Where: <path:line>
 - What: <one sentence>
 - Failure scenario: <input or state -> wrong result>
