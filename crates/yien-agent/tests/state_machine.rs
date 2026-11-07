@@ -162,6 +162,7 @@ fn rf_age_05_needs_you_notifications_mark_red() {
 fn rf_age_05_contrary_signal_cancels_pending_red() {
     for contrary in [
         hook(HookEvent::PostToolUse),
+        hook(HookEvent::PostToolUseFailure),
         hook(HookEvent::PreToolUse),
         hook(HookEvent::UserPromptSubmit),
     ] {
@@ -208,6 +209,64 @@ fn rf_age_05_input_followed_by_output_leaves_needs_you() {
         to: AgentState::Working,
         cause: Cause::User,
     }));
+}
+
+#[test]
+fn rf_age_05_input_and_output_in_the_window_cancel_the_pending_red() {
+    let mut p = Pane::working_claude();
+    p.at(ms(0)).send(hook(HookEvent::PermissionRequest));
+    p.at(ms(100)).send(Signal::Input);
+    p.at(ms(150)).send(Signal::Output);
+    p.at(ms(300)).send(Signal::Tick);
+    p.at(ms(5000)).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::Working);
+    assert_eq!(p.m.next_wake(), None);
+}
+
+#[test]
+fn rf_age_05_input_before_the_permission_request_does_not_cancel_it() {
+    let mut p = Pane::working_claude();
+    p.at(ms(0)).send(Signal::Input);
+    p.send(hook(HookEvent::PermissionRequest));
+    p.at(ms(100)).send(Signal::Output);
+    p.at(ms(300)).send(Signal::Tick);
+    assert!(p.state().is_red());
+}
+
+#[test]
+fn rf_age_05_post_tool_use_failure_leaves_needs_you_at_once() {
+    let mut p = Pane::needs_you_claude();
+    p.send(hook(HookEvent::PostToolUseFailure));
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rn_02_unattributed_permission_request_never_marks_red() {
+    let mut p = Pane::working_claude();
+    p.at(ms(0))
+        .send(hook(HookEvent::UnattributedPermissionRequest));
+    assert!(p.fx.is_empty());
+    p.at(ms(1000)).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn next_wake_is_the_earliest_of_pending_red_and_watchdog() {
+    let config = MachineConfig::new(&[Source::Hooks], Some(Duration::from_secs(30)));
+    let mut p = Pane::new(config);
+    assert_eq!(p.m.next_wake(), None);
+    p.send(hook(HookEvent::UserPromptSubmit));
+    assert_eq!(p.m.next_wake(), Some(ms(30_000)));
+    p.at(ms(29_900)).send(hook(HookEvent::PermissionRequest));
+    assert_eq!(p.m.next_wake(), Some(ms(30_000)));
+    // The watchdog tick comes first and must re-arm the pending deadline.
+    p.at(ms(30_000)).send(Signal::Tick);
+    assert!(p.fx.contains(&Effect::WakeAt(ms(30_200))));
+    assert_eq!(p.m.next_wake(), Some(ms(30_200)));
+    p.at(ms(30_200)).send(Signal::Tick);
+    assert!(p.state().is_red());
+    assert_eq!(p.m.next_wake(), None);
 }
 
 #[test]
@@ -688,6 +747,8 @@ fn other_signals() -> Vec<Step> {
         (hook(HookEvent::UserPromptSubmit), 0),
         (hook(HookEvent::PreToolUse), 0),
         (hook(HookEvent::PostToolUse), 0),
+        (hook(HookEvent::PostToolUseFailure), 0),
+        (hook(HookEvent::UnattributedPermissionRequest), 0),
         (hook(HookEvent::Notification(NotificationKind::Other)), 0),
         (hook(HookEvent::Stop), 0),
         (hook(HookEvent::StopFailure), 0),
