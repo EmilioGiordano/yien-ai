@@ -8752,6 +8752,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "yien-agent"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+ "yien-testkit",
+]
+
+[[package]]
 name = "yien-input"
 version = "0.0.0"
 

@@ -1,0 +1,30 @@
+schema = 1
+id = "claude"
+name = "Claude Code"
+detect = { command = "claude", version_args = ["--version"], version_regex = '(\d+\.\d+\.\d+)' }
+
+[launch]
+args = ["--session-id", "{new_uuid}", "--settings", "{hooks_settings_file}"]
+resume = ["--resume", "{session_id}", "--settings", "{hooks_settings_file}"]
+session_id = "preassigned"
+env = { YIEN_PANE = "{pane_id}", YIEN_HOOK_TOKEN = "{hook_token}" }
+
+[[rules]]
+versions = ">=2.1.295, <3"
+sources = ["hooks", "osc7501", "screen"]
+hooks = "claude-command-v1"
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 12
+pattern = '(?m)^\s*Do you want to proceed\?'
+
+[[rules]]
+versions = ">=2.0, <2.1.295"
+sources = ["hooks", "screen"]
+hooks = "claude-command-v1"
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 12
+pattern = '(?m)^\s*Do you want to proceed\?'

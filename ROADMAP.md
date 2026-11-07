@@ -31,7 +31,8 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
-| M4 Claude: hooks, state machine, red mark, counter | `feat/` | pending |
+| M4 Claude: profiles, signals, pure state machine, hook settings and payload decoding (`yien-agent`) | `feat/agent-state-machine` | done on the branch, in review; no UI yet |
+| M4 Claude: `yien-hook`, hook pipe, red mark, counter | `feat/` | pending |
 
 ## Decisions taken on the way
 
@@ -53,6 +54,16 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/pty-backend` open: closing a session while the writer is inside a long `write_all` (a large paste into a stalled child) waits for that write; not verified.
 - `feat/pty-backend`: `write` never blocks: a full input queue returns the bytes in `PtyError::InputQueueFull`. Dropping the session kills the child.
 - `feat/pty-backend`: portable-pty 0.9 loads a `conpty.dll` found on the DLL search path before the kernel32 one. That is the seam for the bundled ConPTY (TBD-05); today nothing ships it, so the system ConPTY is used.
+- `feat/agent-state-machine`: the per-pane hook token travels in the `YIEN_HOOK_TOKEN` environment variable (04 §2.4), never in the `--settings` file. Registered Claude events: the eight of 04 §2.4 plus `PostToolUse` and `PostToolUseFailure`, the real exits from a permission wait.
+- `feat/agent-state-machine`: hooks use Claude Code's exec form (`"command": "<yien-hook.exe>", "args": ["<event>"]`), so no shell runs them and nothing depends on Git Bash or PowerShell. Since which Claude Code version first accepts `args` is unknown, S6 must check it against the 2.0 rule; `yien-hook` should read the event from the payload first.
+- `feat/agent-state-machine`: a `PermissionRequest` carrying `agent_id` (a subagent) or with an unreadable payload never lights the red mark (RN-02); `agent_type` alone does not count, since a main session run with `--agent` carries it too. S6 must confirm with fixtures whether subagent requests show a dialog.
+- `feat/agent-state-machine`: user input followed by output during the 300 ms confirmation window cancels the pending red, as it leaves a confirmed one.
+- `feat/agent-state-machine`: OSC 9, OSC 777 and BEL never change the state: they cannot tell "done" from "waiting" (RN-02). Codex and OpenCode stay idle-only until S7 and S8.
+- `feat/agent-state-machine`: diverges from 04 §4.7 ("se usa la última"): an unverified CLI version uses the newest rule (highest lower bound), not the last one listed; a rule without `versions` is never counted as verified (RF-AGE-11).
+- `feat/agent-state-machine`: `regex` joins the layer-1 allowlist (plan §3.2).
+- `feat/agent-state-machine`: diverges from 04 §4.5: a `SessionStart` with `source = compact` or `resume` during a turn keeps the state and the red mark; `startup`, `clear` and the rest go to Idle as 04 says.
+- `feat/agent-state-machine`: a hook payload that is too large or malformed falls back to the event name `yien-hook` got in argv, with no payload fields (`decode_claude_hook_or_event`), instead of `Ambiguous`.
+- `feat/agent-state-machine`, open: parallel tool calls (a `PostToolUse` from another tool clears a pending or confirmed red; S6 fixtures decide); no warning channel for unknown profile keys (plan §7.4); value errors in profiles name the field path, not the line; no `.yrec` fixtures for the Claude version ranges (RNF-23); Codex and OpenCode resume arguments unverified (S7, S8); `AgentState` not yet in `yien-proto`; Windows hook shell and quoting unverified (S6).
 
 ## In flight
 
