@@ -444,6 +444,24 @@ pub(crate) fn paste_plan(text: &str, bracketed: bool) -> PastePlan {
     PastePlan::Confirm { bytes, reason }
 }
 
+/// A key pressed while a paste waits for a yes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptKey {
+    Confirm,
+    Cancel,
+    /// Any other key does nothing: it must not reach the program or the
+    /// window's shortcuts while the question is open.
+    Swallow,
+}
+
+pub(crate) fn paste_prompt_key(key: &str) -> PromptKey {
+    match key {
+        "enter" => PromptKey::Confirm,
+        "escape" => PromptKey::Cancel,
+        _ => PromptKey::Swallow,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,5 +826,14 @@ mod tests {
         };
         assert!(reason.contains("control"));
         assert_eq!(bytes.iter().filter(|&&b| b == 0x1b).count(), 2);
+    }
+
+    #[test]
+    fn rf_pan_09_only_enter_and_escape_answer_the_paste_question() {
+        assert_eq!(paste_prompt_key("enter"), PromptKey::Confirm);
+        assert_eq!(paste_prompt_key("escape"), PromptKey::Cancel);
+        for key in ["a", "space", "tab", "up", "f5", "backspace"] {
+            assert_eq!(paste_prompt_key(key), PromptKey::Swallow);
+        }
     }
 }

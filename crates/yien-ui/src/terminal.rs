@@ -16,7 +16,7 @@ use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
 use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
 use crate::bridge::{Backlog, Link, deliver, pane_busy};
-use crate::grid::{self, CursorPaint, PastePlan, Underline, WheelAction};
+use crate::grid::{self, CursorPaint, PastePlan, PromptKey, Underline, WheelAction};
 use crate::theme::Theme;
 
 /// The terminal font size, before display scaling (RNF-19).
@@ -206,10 +206,10 @@ impl TerminalPane {
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if self.pending_paste.is_some() {
-            match keystroke.key.as_str() {
-                "enter" => self.confirm_paste(cx),
-                "escape" => self.cancel_paste(cx),
-                _ => return,
+            match grid::paste_prompt_key(&keystroke.key) {
+                PromptKey::Confirm => self.confirm_paste(cx),
+                PromptKey::Cancel => self.cancel_paste(cx),
+                PromptKey::Swallow => {}
             }
             cx.stop_propagation();
             return;
@@ -899,7 +899,10 @@ impl EntityInputHandler for TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.preedit = None;
-        self.write_input(text.as_bytes().to_vec(), cx);
+        // IME text skips the key handler, so the paste question is held here too.
+        if self.pending_paste.is_none() {
+            self.write_input(text.as_bytes().to_vec(), cx);
+        }
         cx.notify();
     }
 
@@ -911,7 +914,8 @@ impl EntityInputHandler for TerminalPane {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.preedit = (!new_text.is_empty()).then(|| new_text.to_owned());
+        self.preedit =
+            (!new_text.is_empty() && self.pending_paste.is_none()).then(|| new_text.to_owned());
         cx.notify();
     }
 
