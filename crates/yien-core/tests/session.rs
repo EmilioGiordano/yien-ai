@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
-use yien_core::{Core, CoreConfig, CoreHandle, SessionStore, ShellCommand};
+use yien_core::{Core, CoreConfig, CoreHandle, SessionSaveError, SessionStore, ShellCommand};
 use yien_proto::{ClientMsg, Command, CoreMsg, Orientation, PaneId, ProfileId, WorkspaceSnapshot};
 use yien_pty::{FakeChild, FakePty};
 use yien_session::{MemStore, SessionSnapshot, Store, StoreError, load};
@@ -52,6 +52,25 @@ impl Store for Shared {
     }
 }
 
+/// A store whose writes take two seconds, as a stalled disk would.
+#[derive(Clone, Default)]
+struct Slow(Shared);
+
+impl Store for Slow {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0.read(name)
+    }
+
+    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        std::thread::sleep(Duration::from_secs(2));
+        self.0.write_atomic(name, bytes)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), StoreError> {
+        self.0.rename(from, to)
+    }
+}
+
 struct Run {
     core: CoreHandle,
     events: Receiver<CoreMsg>,
@@ -62,10 +81,14 @@ impl Run {
     /// Starts a core on `store` that opens this crate's folder when nothing
     /// is restored.
     fn start(store: &Shared) -> Self {
+        Self::start_on(store.clone())
+    }
+
+    fn start_on(store: impl Store + Send + 'static) -> Self {
         let backend = FakePty::new();
         let config = CoreConfig {
             shell: ShellCommand::new("fake-shell"),
-            session: Some(SessionStore::new(store.clone())),
+            session: Some(SessionStore::new(store)),
             start_project: Some(ROOT.to_owned()),
             ..CoreConfig::default()
         };
@@ -374,4 +397,19 @@ fn without_a_saved_session_the_start_folder_opens() {
         _ => None,
     });
     assert_eq!(project, ROOT);
+}
+
+#[test]
+fn rf_ses_01_the_quit_save_waits_no_longer_than_asked() {
+    let store = Slow::default();
+    let mut run = Run::start_on(store.clone());
+    run.first_pane();
+    let started = Instant::now();
+    let result = run.core.save_session(Duration::from_millis(200));
+    assert!(
+        matches!(result, Err(SessionSaveError::TimedOut)),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    wait_until(|| store.0.saved().is_some());
 }
