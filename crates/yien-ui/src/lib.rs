@@ -48,7 +48,7 @@ pub fn run(workspace: WorkspaceView) {
             match opened {
                 Ok(_) => cx.activate(true),
                 Err(error) => {
-                    eprintln!("yien: could not open the main window: {error:#}");
+                    tracing::error!("could not open the main window: {error:#}");
                     cx.quit();
                 }
             }
