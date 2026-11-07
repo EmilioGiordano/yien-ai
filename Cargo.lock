@@ -8811,9 +8811,10 @@ name = "yien"
 version = "0.0.0"
 dependencies = [
  "tracing",
- "yien-layout",
+ "yien-core",
  "yien-platform",
  "yien-proto",
+ "yien-pty",
  "yien-ui",
 ]
 
@@ -8845,12 +8846,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "yien-git"
+name = "yien-hook"
 version = "0.0.0"
 dependencies = [
- "proptest",
- "thiserror 2.0.21",
- "tracing",
+ "yien-agent",
+ "yien-platform",
+ "yien-proto",
 ]
 
 [[package]]
@@ -8866,16 +8867,21 @@ name = "yien-platform"
 version = "0.0.0"
 dependencies = [
  "dirs 6.0.0",
+ "getrandom 0.4.3",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "yien-agent",
+ "yien-proto",
 ]
 
 [[package]]
 name = "yien-proto"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
 ]
@@ -8908,9 +8914,9 @@ name = "yien-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-kit",
- "thiserror 2.0.21",
+ "tokio",
  "tracing",
- "yien-layout",
+ "yien-input",
  "yien-proto",
 ]
 

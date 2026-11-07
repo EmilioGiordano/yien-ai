@@ -89,12 +89,11 @@ mod tests {
             AgentState::Working,
             AgentState::Idle,
         ];
-        let mut paths: Vec<_> = states.iter().map(|s| state_icon(*s)).collect();
+        let paths: std::collections::HashSet<_> = states.iter().map(|s| state_icon(*s)).collect();
         for path in &paths {
             let bytes = YienAssets.load(path).unwrap().unwrap();
             assert!(bytes.starts_with(b"<svg"), "{path}");
         }
-        paths.dedup();
         assert_eq!(paths.len(), states.len());
     }
 
