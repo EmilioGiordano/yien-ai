@@ -31,6 +31,7 @@ use std::time::Duration;
 #[cfg(any(test, feature = "fake"))]
 mod fake;
 mod portable;
+mod program;
 mod pump;
 
 #[cfg(any(test, feature = "fake"))]

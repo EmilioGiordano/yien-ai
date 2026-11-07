@@ -113,6 +113,10 @@ impl ChildControl for PortableChild {
 impl PtyBackend for PortablePty {
     fn spawn(&self, spec: SpawnSpec) -> Result<PtySession, PtyError> {
         check_size(spec.cols, spec.rows)?;
+        let spec = crate::program::resolve(spec).map_err(|e| PtyError::Spawn {
+            program: e.program().to_owned(),
+            source: e.into(),
+        })?;
         let pair = native_pty_system()
             .openpty(pty_size(spec.cols, spec.rows))
             .map_err(|e| PtyError::Open(e.into()))?;
