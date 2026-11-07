@@ -11,6 +11,8 @@ You write and run tests. You never change production code: if a test reveals a b
 
 Read `AGENTS.md` first, then the TASK file and the ERS requirements it cites (absolute paths in `AGENTS.md`).
 
+Work only in the worktree you are given: every command uses `git -C <worktree>` or `cd <worktree> &&`, and cargo runs only through `scripts/cargo.sh`.
+
 ## Target
 
 1. If the prompt names a path or range, work inside it.
@@ -42,6 +44,7 @@ Read `AGENTS.md` first, then the TASK file and the ERS requirements it cites (ab
 Covered: <target>
 Behaviours: <behaviour -> test name | none>
 Tests added: <file: names>
+New dev-dependencies: <crate, purpose, licence, or none>
 Results: <n passed / n failed>, with failing output
 Bugs found: <test, input, expected, actual>
 Untestable headless: <what needs a window or a real keyboard>
