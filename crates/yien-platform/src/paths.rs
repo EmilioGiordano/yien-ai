@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_esp_01_system_folders_and_the_exe_folder_open_home() {
+    fn system_folders_and_the_exe_folder_open_home() {
         for cwd in [
             r"C:\WINDOWS\system32",
             r"C:\Windows\System32\",
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_esp_01_any_other_folder_is_kept() {
+    fn any_other_folder_is_kept() {
         for cwd in [
             r"C:\Code\yien",
             r"C:\Windows\Temp",
