@@ -19,7 +19,7 @@ use crate::actions::{
     TAB_BAR_KEYS, THEME_KEYS, ToggleContextBar, ToggleMaximize, ToggleTabBar, ToggleTheme,
 };
 use crate::assets::{self, state_icon};
-use crate::bridge::{Link, deliver};
+use crate::bridge::{Link, core_busy, deliver};
 use crate::fonts::Fonts;
 use crate::layout::neighbor;
 use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView};
@@ -945,6 +945,15 @@ impl Shell {
                 ws.pane_count()
             ))
             .child(format!("{} working", ws.working_panes()))
+            .when_some(core_busy(self.link.shared_backlog()), |bar, text| {
+                bar.child(
+                    div()
+                        .id("core-busy")
+                        .role(Role::Status)
+                        .text_color(t.ochre)
+                        .child(text),
+                )
+            })
             .when_some(self.notice.clone(), |bar, notice| {
                 bar.child(
                     div()

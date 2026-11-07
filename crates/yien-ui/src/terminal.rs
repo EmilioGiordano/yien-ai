@@ -15,7 +15,7 @@ use yien_proto::frame::{Frame, Modes, Rgb, SelectionKind, ViewportPoint};
 use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
 use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
-use crate::bridge::{Link, deliver};
+use crate::bridge::{Backlog, Link, deliver, pane_busy};
 use crate::grid::{self, CursorPaint, PastePlan, Underline, WheelAction};
 use crate::theme::Theme;
 
@@ -114,7 +114,15 @@ impl TerminalPane {
     }
 
     fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) {
+        let before = self.link.revision();
         deliver(&self.link, msg, cx);
+        if self.link.revision() != before {
+            cx.notify();
+        }
+    }
+
+    fn backlog(&self) -> Backlog {
+        self.link.pane_backlog(self.id)
     }
 
     /// The user's own bytes. A pane scrolled back returns to the live screen
@@ -352,7 +360,12 @@ impl TerminalPane {
             );
             return;
         }
-        if !self.program_owns_mouse(&event.modifiers) || self.last_motion == Some(at) {
+        // Motion to a pane that is not reading is dropped rather than queued:
+        // only the latest position matters, and it would crowd out keys.
+        if !self.program_owns_mouse(&event.modifiers)
+            || self.last_motion == Some(at)
+            || self.backlog() != Backlog::Clear
+        {
             return;
         }
         self.last_motion = Some(at);
@@ -499,7 +512,27 @@ impl Render for TerminalPane {
             .as_ref()
             .map(|(_, reason)| reason.clone())
             .map(|reason| self.render_paste_strip(reason, cx));
+        let busy = pane_busy(self.backlog()).map(|text| {
+            let t = self.theme;
+            div()
+                .id("pane-busy")
+                .role(Role::Status)
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .px(px(8.0))
+                .py(px(4.0))
+                .border_t_1()
+                .border_color(t.term_line)
+                .bg(t.term_raised)
+                .text_size(px(12.0))
+                .text_color(t.ochre)
+                .occlude()
+                .child(text)
+        });
         div()
+            .relative()
             .id(("terminal", self.id.get()))
             .key_context(TERMINAL_CONTEXT)
             .track_focus(&self.focus)
@@ -537,6 +570,7 @@ impl Render for TerminalPane {
                         focused,
                     }),
             )
+            .children(busy)
     }
 }
 
