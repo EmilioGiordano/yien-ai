@@ -158,16 +158,17 @@ impl Question {
                 None => return Answer::Wait,
             },
         };
-        // Only what the user saw counted is confirmed: changes are discarded
-        // only then, and the core keeps a worktree that has more by now. A
-        // failed check confirms nothing, so git keeps any work.
+        // Only what the user saw is confirmed: uncommitted changes are
+        // discarded only when they were counted, and the core keeps a
+        // worktree that holds anything else by now. A failed check confirms
+        // nothing, so git keeps any work.
         let confirmed = match seen {
-            WorktreeCheck::Checked { work, .. } => *work,
+            WorktreeCheck::Checked { work, .. } => work.clone(),
             WorktreeCheck::Failed { .. } => WorktreeWork::default(),
         };
         Answer::Run(Command::RemoveWorktreeTab {
             tab: self.tab,
-            discard_changes: confirmed.changed > 0 || confirmed.ignored > 0,
+            discard_changes: confirmed.changed > 0,
             confirmed,
         })
     }
@@ -182,7 +183,6 @@ fn work_text(check: Option<&WorktreeCheck>) -> String {
         Some(WorktreeCheck::Checked {
             work,
             ignored_examples,
-            detached,
         }) => {
             if !work.any() {
                 return "No uncommitted changes, ignored files or unpushed commits.".to_owned();
@@ -201,13 +201,13 @@ fn work_text(check: Option<&WorktreeCheck>) -> String {
                     format!(", such as {},", ignored_examples.join(", "))
                 };
                 parts.push(format!(
-                    "{}{such_as} will be deleted.",
+                    "{}{such_as} will be deleted; an ignored folder goes with everything in it.",
                     count(work.ignored, "ignored file")
                 ));
             }
             if work.unpushed > 0 {
                 let n = count(work.unpushed, "commit");
-                parts.push(match (*detached, work.unpushed) {
+                parts.push(match (work.detached, work.unpushed) {
                     (true, 1) => format!("{n} is on no branch and will be lost."),
                     (true, _) => format!("{n} are on no branch and will be lost."),
                     (false, 1) => format!("{n} is not pushed; the branch keeps it."),
@@ -249,6 +249,7 @@ mod tests {
             changed,
             ignored,
             unpushed,
+            ..WorktreeWork::default()
         }
     }
 
@@ -256,7 +257,6 @@ mod tests {
         WorktreeCheck::Checked {
             work: work(changed, ignored, unpushed),
             ignored_examples: Vec::new(),
-            detached: false,
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
     fn rn_08_work_in_the_worktree_needs_a_second_confirm_that_names_it() {
         for (counts, discard) in [
             ((2, 0, 0), true),
-            ((0, 4, 0), true),
+            ((0, 4, 0), false),
             ((0, 0, 1), false),
             ((1, 2, 3), true),
         ] {
@@ -344,21 +344,23 @@ mod tests {
         let q = question(Some(WorktreeCheck::Checked {
             work: work(0, 3, 0),
             ignored_examples: vec![".env".into(), "target/".into()],
-            detached: false,
         }));
         assert!(q.needs_confirm());
         assert_eq!(
             q.work_text(),
-            "3 ignored files, such as .env, target/, will be deleted."
+            "3 ignored files, such as .env, target/, will be deleted; an ignored folder goes \
+             with everything in it."
         );
     }
 
     #[test]
     fn rn_08_commits_on_a_detached_head_are_said_to_be_lost() {
         let q = question(Some(WorktreeCheck::Checked {
-            work: work(0, 0, 2),
+            work: WorktreeWork {
+                detached: true,
+                ..work(0, 0, 2)
+            },
             ignored_examples: Vec::new(),
-            detached: true,
         }));
         assert_eq!(
             q.work_text(),

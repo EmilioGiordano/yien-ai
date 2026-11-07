@@ -789,12 +789,26 @@ fn rn_08_ignored_files_and_untracked_folders_are_counted() {
     assert!(state.has_work(), "ignored files are lost on removal");
     assert!(state.ignored_examples.contains(&".env".to_owned()));
     assert!(state.ignored_examples.contains(&"node_modules/".to_owned()));
+    assert_eq!(state.entries, ["ignored .env", "ignored node_modules/"]);
 
     std::fs::create_dir_all(path.join("new/deep")).unwrap();
     for name in ["new/a.txt", "new/b.txt", "new/deep/c.txt"] {
         std::fs::write(path.join(name), "n\n").unwrap();
     }
-    assert_eq!(git().worktree_state(&path).unwrap().changed, 3);
+    std::fs::write(path.join("a.txt"), "edited\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!(state.changed, 4);
+    assert_eq!(
+        state.entries,
+        [
+            "changed ? new/a.txt",
+            "changed ? new/b.txt",
+            "changed ? new/deep/c.txt",
+            "changed M a.txt",
+            "ignored .env",
+            "ignored node_modules/",
+        ]
+    );
 }
 
 #[test]
@@ -809,4 +823,7 @@ fn rn_08_commits_on_a_detached_head_are_flagged() {
     let state = git().worktree_state(&path).unwrap();
     assert!(state.detached);
     assert_eq!(state.unpushed, 1);
+    // The stranded commit is part of what a removal must not change unseen.
+    let head = sb.git(&path, &["rev-parse", "HEAD"]);
+    assert_eq!(state.entries, [format!("head {head}")]);
 }

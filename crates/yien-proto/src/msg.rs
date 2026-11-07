@@ -535,14 +535,29 @@ pub struct TabInfo {
     pub worktree: Option<String>,
 }
 
-/// What a worktree holds that a removal would delete or strand (RN-08).
+/// What a worktree holds that a removal would delete or strand (RN-08):
+/// the counts the question names, and a fingerprint of the files behind
+/// them, so a removal can tell that nothing new arrived since the user
+/// confirmed, even when the counts stayed the same.
 ///
 /// ```
-/// let work = yien_proto::WorktreeWork { changed: 0, ignored: 2, unpushed: 0 };
-/// assert!(work.any());
-/// assert!(work.within(&yien_proto::WorktreeWork { changed: 1, ignored: 2, unpushed: 0 }));
+/// use yien_proto::{WorktreeFiles, WorktreeWork};
+/// let seen = WorktreeWork {
+///     changed: 1,
+///     ignored: 1,
+///     files: WorktreeFiles::of(["changed M a.txt", "ignored .env"]),
+///     ..Default::default()
+/// };
+/// let now = WorktreeWork {
+///     ignored: 1,
+///     files: WorktreeFiles::of(["ignored .env"]),
+///     ..Default::default()
+/// };
+/// assert!(now.any());
+/// assert!(now.within(&seen));
+/// assert!(!seen.within(&now));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WorktreeWork {
     /// Changed and untracked files, each counted.
     pub changed: u32,
@@ -550,6 +565,11 @@ pub struct WorktreeWork {
     pub ignored: u32,
     /// Commits not pushed, or on no other branch.
     pub unpushed: u32,
+    /// HEAD is detached, so unpushed commits are lost on removal.
+    pub detached: bool,
+    /// The changed files with their status, the ignored entries and, when
+    /// detached commits would be lost, the commit.
+    pub files: WorktreeFiles,
 }
 
 impl WorktreeWork {
@@ -558,12 +578,75 @@ impl WorktreeWork {
         self.changed > 0 || self.ignored > 0 || self.unpushed > 0
     }
 
-    /// Whether every count is at most `other`'s.
+    /// Whether this holds nothing `other` did not: no count is higher, the
+    /// head is as detached as it was, and every file is one `other` had.
     pub fn within(&self, other: &WorktreeWork) -> bool {
         self.changed <= other.changed
             && self.ignored <= other.ignored
             && self.unpushed <= other.unpushed
+            && self.detached == other.detached
+            && self.files.within(&other.files)
     }
+}
+
+/// A fingerprint of the entries a removal would delete or strand: one hash
+/// per entry, or, past [`WorktreeFiles::MAX_EACH`] entries, one hash of
+/// them all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeFiles {
+    /// A sorted hash per entry.
+    Each(Vec<u64>),
+    /// One hash of every entry, for a set too big to send entry by entry.
+    Whole(u64),
+}
+
+impl Default for WorktreeFiles {
+    fn default() -> Self {
+        Self::Each(Vec::new())
+    }
+}
+
+impl WorktreeFiles {
+    /// How many entries are fingerprinted one by one.
+    pub const MAX_EACH: usize = 4096;
+
+    /// The fingerprint of `entries`, in any order.
+    pub fn of<I, S>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut hashes: Vec<u64> = entries
+            .into_iter()
+            .map(|e| fnv1a(e.as_ref().as_bytes()))
+            .collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+        if hashes.len() <= Self::MAX_EACH {
+            return Self::Each(hashes);
+        }
+        let bytes: Vec<u8> = hashes.iter().flat_map(|h| h.to_le_bytes()).collect();
+        Self::Whole(fnv1a(&bytes))
+    }
+
+    /// Whether every entry here is one of `other`'s. A whole-set hash only
+    /// matches the same whole set; it never vouches for a part of it.
+    pub fn within(&self, other: &WorktreeFiles) -> bool {
+        match (self, other) {
+            (Self::Each(mine), Self::Each(theirs)) => {
+                mine.iter().all(|h| theirs.binary_search(h).is_ok())
+            }
+            (Self::Whole(mine), Self::Whole(theirs)) => mine == theirs,
+            _ => false,
+        }
+    }
+}
+
+/// 64-bit FNV-1a: stable across processes and builds, unlike `std`'s hasher.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// What removing a worktree would lose, as [`CoreMsg::WorktreeChecked`]
@@ -576,8 +659,6 @@ pub enum WorktreeCheck {
         work: WorktreeWork,
         /// A few of the ignored entries, to name them.
         ignored_examples: Vec<String>,
-        /// HEAD is detached, so unpushed commits are lost on removal.
-        detached: bool,
     },
     /// git could not tell; the reason says why.
     Failed {
@@ -765,6 +846,29 @@ mod tests {
     use super::*;
     use crate::frame::{Cell, CellFlags, Frame, Modes, MouseTracking, Rgb, Size};
 
+    #[test]
+    fn rn_08_other_files_with_the_same_counts_are_not_within() {
+        let seen = WorktreeFiles::of(["changed M a.txt", "changed ? b.txt"]);
+        let swapped = WorktreeFiles::of(["changed ? b.txt", "changed ? c.txt"]);
+        assert!(!swapped.within(&seen));
+        assert!(WorktreeFiles::of(["changed ? b.txt"]).within(&seen));
+        assert!(WorktreeFiles::default().within(&seen));
+        // The status is part of the entry.
+        assert!(!WorktreeFiles::of(["changed D a.txt"]).within(&seen));
+    }
+
+    #[test]
+    fn rn_08_a_whole_set_hash_vouches_only_for_the_same_set() {
+        let many: Vec<String> = (0..=WorktreeFiles::MAX_EACH)
+            .map(|i| format!("changed ? f{i}"))
+            .collect();
+        let whole = WorktreeFiles::of(&many);
+        assert!(matches!(whole, WorktreeFiles::Whole(_)));
+        assert!(whole.within(&WorktreeFiles::of(many.iter().rev())));
+        assert!(!WorktreeFiles::of(&many[1..]).within(&whole));
+        assert!(!whole.within(&WorktreeFiles::of(&many[1..])));
+    }
+
     fn round_trip<T>(value: &T) -> T
     where
         T: Serialize + for<'de> Deserialize<'de>,
@@ -828,6 +932,8 @@ mod tests {
                     changed: 2,
                     ignored: 1,
                     unpushed: 0,
+                    detached: false,
+                    files: WorktreeFiles::of(["changed M a.txt", "ignored .env"]),
                 },
             },
             Command::MovePane {
@@ -936,9 +1042,10 @@ mod tests {
                         changed: 3,
                         ignored: 2,
                         unpushed: 1,
+                        detached: true,
+                        files: WorktreeFiles::Whole(7),
                     },
                     ignored_examples: vec![".env".into(), "node_modules/".into()],
-                    detached: true,
                 },
             },
             CoreMsg::WorktreeChecked {

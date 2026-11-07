@@ -29,7 +29,7 @@ pub use git::{GitFacts, GitFile, GitFileStatus, GitHead, GitUpstream, MAX_GIT_FI
 pub use msg::{
     AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason, InputBytes,
     LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
-    ProjectInfo, TabInfo, WorkspaceSnapshot, WorktreeCheck, WorktreeWork,
+    ProjectInfo, TabInfo, WorkspaceSnapshot, WorktreeCheck, WorktreeFiles, WorktreeWork,
 };
 pub use path::{folder_key, same_folder};
 

@@ -18,11 +18,6 @@ use tokio::sync::mpsc::Receiver;
 use yien_core::{Core, CoreConfig, CoreHandle, ShellCommand};
 use yien_proto::{ClientMsg, Command, CoreMsg, ProjectId, TabInfo, WorktreeCheck, WorktreeWork};
 
-const ONE_CHANGE: WorktreeWork = WorktreeWork {
-    changed: 1,
-    ignored: 0,
-    unpushed: 0,
-};
 use yien_pty::{FakePty, PtyBackend};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -168,6 +163,23 @@ impl Harness {
     }
 
     /// Waits for the next notice or error, skipping everything else.
+    /// Asks the core to check the tab's worktree and waits for the answer.
+    fn check(&mut self, tab: yien_proto::TabId) -> WorktreeCheck {
+        self.send(Command::CheckWorktree { tab });
+        self.wait_for(|m| match m {
+            CoreMsg::WorktreeChecked { tab: t, check, .. } if *t == tab => Some(check.clone()),
+            _ => None,
+        })
+    }
+
+    /// What a check of the tab's worktree found, as the question confirms it.
+    fn work(&mut self, tab: yien_proto::TabId) -> WorktreeWork {
+        match self.check(tab) {
+            WorktreeCheck::Checked { work, .. } => work,
+            WorktreeCheck::Failed { reason } => panic!("the check failed: {reason}"),
+        }
+    }
+
     fn outcome(&mut self) -> Result<String, String> {
         self.wait_for(|m| match m {
             CoreMsg::Notice { message } => Some(Ok(message.clone())),
@@ -201,17 +213,11 @@ fn rf_esp_05_a_worktree_tab_opens_on_a_new_worktree_and_its_removal_keeps_the_br
     assert_eq!(tab.branch.as_deref(), Some("feat/x"));
     assert!(expected.join("a.txt").is_file());
 
-    h.send(Command::CheckWorktree { tab: tab.id });
-    let check = h.wait_for(|m| match m {
-        CoreMsg::WorktreeChecked { tab: t, check, .. } if *t == tab.id => Some(check.clone()),
-        _ => None,
-    });
     assert_eq!(
-        check,
+        h.check(tab.id),
         WorktreeCheck::Checked {
             work: WorktreeWork::default(),
             ignored_examples: vec![],
-            detached: false,
         }
     );
 
@@ -285,24 +291,14 @@ fn rn_08_a_dirty_worktree_is_kept_unless_its_changes_are_discarded() {
     std::fs::write(a_dir.join("new.txt"), "work\n").unwrap();
     std::fs::write(b_dir.join("new.txt"), "work\n").unwrap();
 
-    h.send(Command::CheckWorktree { tab: a.id });
-    let check = h.wait_for(|m| match m {
-        CoreMsg::WorktreeChecked { check, .. } => Some(check.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        check,
-        WorktreeCheck::Checked {
-            work: ONE_CHANGE,
-            ignored_examples: vec![],
-            detached: false,
-        }
-    );
+    let a_work = h.work(a.id);
+    assert_eq!((a_work.changed, a_work.ignored, a_work.unpushed), (1, 0, 0));
+    let b_work = h.work(b.id);
 
     h.send(Command::RemoveWorktreeTab {
         tab: a.id,
         discard_changes: false,
-        confirmed: ONE_CHANGE,
+        confirmed: a_work,
     });
     let message = h.outcome().unwrap_err();
     assert!(message.contains("uncommitted"), "{message}");
@@ -311,7 +307,7 @@ fn rn_08_a_dirty_worktree_is_kept_unless_its_changes_are_discarded() {
     h.send(Command::RemoveWorktreeTab {
         tab: b.id,
         discard_changes: true,
-        confirmed: ONE_CHANGE,
+        confirmed: b_work,
     });
     h.outcome().unwrap();
     assert!(!b_dir.exists());
@@ -365,15 +361,48 @@ fn rn_08_work_written_after_the_confirm_keeps_the_worktree() {
     let tab = h.worktree_tab();
     let dir = PathBuf::from(tab.worktree.clone().unwrap());
     std::fs::write(dir.join("seen.txt"), "seen\n").unwrap();
+    let seen = h.work(tab.id);
     // The user confirmed one change; an agent writes another before the removal.
     std::fs::write(dir.join("late.txt"), "late\n").unwrap();
     h.send(Command::RemoveWorktreeTab {
         tab: tab.id,
         discard_changes: true,
-        confirmed: ONE_CHANGE,
+        confirmed: seen,
     });
     let message = h.outcome().unwrap_err();
     assert!(message.contains("changed after you confirmed"), "{message}");
     assert!(dir.join("late.txt").is_file() && dir.join("seen.txt").is_file());
     assert!(sb.has_branch(&root, "feat/late"));
+}
+
+#[test]
+fn rn_08_other_files_with_the_same_count_keep_the_worktree() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("swap");
+    let mut h = Harness::fake();
+    let project = h.open(&root);
+    h.send(Command::NewWorktreeTab {
+        project,
+        branch: "feat/swap".into(),
+        base: None,
+    });
+    let tab = h.worktree_tab();
+    let dir = PathBuf::from(tab.worktree.clone().unwrap());
+    let original = std::fs::read(dir.join("a.txt")).unwrap();
+    std::fs::write(dir.join("a.txt"), "edited\n").unwrap();
+    let seen = h.work(tab.id);
+    assert_eq!(seen.changed, 1);
+    // The edit is reverted and another file appears: still one change.
+    std::fs::write(dir.join("a.txt"), &original).unwrap();
+    std::fs::write(dir.join("other.txt"), "unseen\n").unwrap();
+    assert_eq!(h.work(tab.id).changed, 1);
+    h.send(Command::RemoveWorktreeTab {
+        tab: tab.id,
+        discard_changes: true,
+        confirmed: seen,
+    });
+    let message = h.outcome().unwrap_err();
+    assert!(message.contains("changed after you confirmed"), "{message}");
+    assert!(dir.join("other.txt").is_file());
+    assert!(sb.has_branch(&root, "feat/swap"));
 }

@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use yien_git::{Git, WorktreeError, WorktreeState, default_worktree_path};
-use yien_proto::{ProjectId, TabId, WorktreeCheck, WorktreeWork};
+use yien_proto::{ProjectId, TabId, WorktreeCheck, WorktreeFiles, WorktreeWork};
 
 use crate::consoles::Consoles;
 
@@ -130,7 +130,6 @@ pub(crate) fn check(tab: TabId, worktree: String) -> Done {
         Ok(state) => WorktreeCheck::Checked {
             work: work_of(&state),
             ignored_examples: state.ignored_examples,
-            detached: state.detached,
         },
         Err(e) => {
             tracing::debug!("worktree not checked: {}", e.kind());
@@ -151,6 +150,8 @@ fn work_of(state: &WorktreeState) -> WorktreeWork {
         changed: state.changed,
         ignored: state.ignored,
         unpushed: state.unpushed,
+        detached: state.detached,
+        files: WorktreeFiles::of(&state.entries),
     }
 }
 
@@ -184,7 +185,8 @@ pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
             ));
         }
     }
-    // The programs may have written more since the user confirmed.
+    // The programs may have written more since the user confirmed, or
+    // swapped files for others while the counts stayed the same.
     let now = match Git::new().with_timeout(CHECK_TIMEOUT).worktree_state(&path) {
         Ok(state) => work_of(&state),
         Err(e) => return failed(format!("it could not be checked again ({e})")),
@@ -192,7 +194,8 @@ pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
     if !now.within(&job.confirmed) {
         return failed(format!(
             "it changed after you confirmed: it now has {} changed, {} ignored and {} \
-             unpushed. Close the tab again to see what removing it would lose.",
+             unpushed, not all of them what you saw. Close the tab again to see what \
+             removing it would lose.",
             now.changed, now.ignored, now.unpushed
         ));
     }

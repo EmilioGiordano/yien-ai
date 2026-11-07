@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Git, GitError, Head, parse_status};
+use crate::{FileStatus, Git, GitError, Head, parse_status};
 
 /// One entry of `git worktree list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,11 @@ pub struct WorktreeState {
     pub unpushed: u32,
     /// HEAD is detached: its unpushed commits become unreachable on removal.
     pub detached: bool,
+    /// One line per thing a removal would delete or strand, sorted:
+    /// `changed <status> <path>` per changed file, `ignored <path>` per
+    /// ignored entry, and `head <commit>` when detached commits would be
+    /// lost. Files written inside an already ignored folder do not show.
+    pub entries: Vec<String>,
 }
 
 impl WorktreeState {
@@ -379,12 +384,26 @@ impl Git {
                 String::from_utf8_lossy(&out).trim().parse().unwrap_or(0)
             }
         };
+        let detached = matches!(status.head, Head::Detached { .. });
+        let mut entries: Vec<String> = status
+            .files
+            .iter()
+            .map(|f| format!("changed {} {}", status_code(&f.status), f.path))
+            .chain(ignored_paths.iter().map(|p| format!("ignored {p}")))
+            .collect();
+        if let Head::Detached { oid } = &status.head
+            && unpushed > 0
+        {
+            entries.push(format!("head {oid}"));
+        }
+        entries.sort();
         Ok(WorktreeState {
             changed,
             ignored: count(ignored_paths.len()),
             ignored_examples: ignored_paths.into_iter().take(IGNORED_EXAMPLES).collect(),
             unpushed,
-            detached: matches!(status.head, Head::Detached { .. }),
+            detached,
+            entries,
         })
     }
 
@@ -436,6 +455,19 @@ impl Git {
             }
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+/// A changed file's status as one stable word for [`WorktreeState::entries`].
+fn status_code(status: &FileStatus) -> String {
+    match status {
+        FileStatus::Modified => "M".to_owned(),
+        FileStatus::Added => "A".to_owned(),
+        FileStatus::Deleted => "D".to_owned(),
+        FileStatus::Renamed { from } => format!("R<{from}>"),
+        FileStatus::Copied { from } => format!("C<{from}>"),
+        FileStatus::Untracked => "?".to_owned(),
+        FileStatus::Conflicted => "U".to_owned(),
     }
 }
 
