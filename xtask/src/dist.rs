@@ -2,7 +2,6 @@
 //! third-party notice in `<target>/dist/yien-<version>-windows-x64/`, then zipped.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -42,13 +41,22 @@ pub fn zip_name(version: &str) -> String {
     format!("{}.zip", package_name(version))
 }
 
-/// Cargo's target dir: `CARGO_TARGET_DIR` (relative to `cwd` when relative)
-/// or `<root>/target` when it is unset or empty.
-pub fn target_dir(env_value: Option<OsString>, root: &Path, cwd: &Path) -> PathBuf {
-    match env_value.filter(|v| !v.is_empty()) {
-        Some(dir) => cwd.join(dir),
-        None => root.join("target"),
+/// The `target_directory` of `cargo metadata` output: cargo's own answer,
+/// with `CARGO_TARGET_DIR` and config already applied. It must be absolute,
+/// since `<it>/dist` is deleted.
+pub fn target_directory(metadata: &Value) -> anyhow::Result<PathBuf> {
+    let dir = metadata["target_directory"]
+        .as_str()
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .context("cargo metadata has no target_directory")?;
+    if !dir.is_absolute() {
+        bail!(
+            "cargo metadata gave a relative target_directory: {}",
+            dir.display()
+        );
     }
+    Ok(dir)
 }
 
 /// The licence files among the names of the files at the repository root,
@@ -245,23 +253,9 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
         bail!("dist builds the Windows portable package and runs only on Windows");
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let cwd = std::env::current_dir().context("reading the current directory")?;
-    let target = target_dir(std::env::var_os("CARGO_TARGET_DIR"), root, &cwd);
     let version = workspace_version(
         &std::fs::read_to_string(root.join("Cargo.toml")).context("reading Cargo.toml")?,
     )?;
-
-    let mut build = Command::new(&cargo);
-    build
-        .current_dir(root)
-        .args(["build", "--release", "--locked"]);
-    for bin in BINARIES {
-        build.args(["-p", bin]);
-    }
-    let status = build.status().context("starting cargo build")?;
-    if !status.success() {
-        bail!("cargo build --release failed ({status})");
-    }
 
     let metadata = Command::new(&cargo)
         .current_dir(root)
@@ -284,6 +278,23 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     }
     let metadata: Value =
         serde_json::from_slice(&metadata.stdout).context("parsing cargo metadata")?;
+    let target = target_directory(&metadata)?;
+
+    // Pinned so the build writes where the files are copied from and where
+    // `<target>/dist` is deleted.
+    let mut build = Command::new(&cargo);
+    build
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", &target)
+        .args(["build", "--release", "--locked"]);
+    for bin in BINARIES {
+        build.args(["-p", bin]);
+    }
+    let status = build.status().context("starting cargo build")?;
+    if !status.success() {
+        bail!("cargo build --release failed ({status})");
+    }
+
     let notice = third_party_notice(&third_party_packages(&metadata, &BINARIES)?);
 
     let dist = target.join("dist");
@@ -358,22 +369,17 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_honours_cargo_target_dir() {
-        let root = Path::new("/repo");
-        let cwd = Path::new("/work");
-        assert_eq!(target_dir(None, root, cwd), Path::new("/repo/target"));
-        assert_eq!(
-            target_dir(Some("".into()), root, cwd),
-            Path::new("/repo/target")
-        );
-        assert_eq!(
-            target_dir(Some("/slots/4".into()), root, cwd),
-            Path::new("/slots/4")
-        );
-        assert_eq!(
-            target_dir(Some("rel".into()), root, cwd),
-            Path::new("/work/rel")
-        );
+    fn target_directory_is_cargos_absolute_answer() {
+        let dir = if cfg!(windows) {
+            r"D:\slots\4"
+        } else {
+            "/slots/4"
+        };
+        let found = target_directory(&json!({ "target_directory": dir })).unwrap();
+        assert_eq!(found, Path::new(dir));
+        assert!(target_directory(&json!({ "target_directory": "target" })).is_err());
+        assert!(target_directory(&json!({ "target_directory": "" })).is_err());
+        assert!(target_directory(&json!({})).is_err());
     }
 
     #[test]
