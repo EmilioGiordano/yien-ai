@@ -2,8 +2,9 @@
 //! functions and values the pure layers can be handed.
 //!
 //! For now: per-user paths ([`paths`]), the log file ([`init_logging`]), the
-//! pipe that receives Claude Code hook events ([`hook_pipe`]) and the file
-//! store for the saved session ([`state_store`]).
+//! pipe that receives Claude Code hook events ([`hook_pipe`]), the DLL search
+//! restriction ([`dll_search`]) and the file store for the saved session
+//! ([`state_store`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -14,6 +15,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod dll_search;
 pub mod hook_pipe;
 mod logging;
 pub mod paths;
