@@ -569,7 +569,6 @@ impl Tree {
 
     fn insert_beside(&mut self, target_node: NodeId, pane: PaneId, zone: DropZone) {
         let orientation = zone.orientation();
-        // The target's slot in a parent branch laid out on the same axis, if any.
         let same_axis = self.nodes[target_node]
             .parent
             .and_then(|p| match &self.nodes[p].kind {
@@ -769,13 +768,7 @@ impl Tree {
         }
     }
 
-    /// The pane to focus when moving `direction` from `pane`.
-    ///
-    /// Warp warns that this is the hard part, because tree order does not match
-    /// what the eye expects. So this ignores the tree and works on geometry:
-    /// among the panes on that side, take the one that overlaps the most across
-    /// the movement axis, and break ties by distance. That is the rule a person
-    /// actually has in mind.
+    /// The pane to focus moving `direction` from `pane`, chosen by geometry.
     ///
     /// ```
     /// use yien_layout::{Direction, Orientation, Rect, Tree};
