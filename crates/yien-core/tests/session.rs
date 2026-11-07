@@ -706,13 +706,7 @@ fn saved_session_of(store: &Shared, pane: PaneId) -> Option<String> {
 fn rf_ses_11_a_resume_that_finds_no_conversation_opens_a_shell_and_keeps_the_session() {
     let (store, claude, session) = first_run();
     let (mut again, child) = resumed(&store);
-    child.output(
-        format!(
-            "No conversation found with session ID: {session}
-"
-        )
-        .as_bytes(),
-    );
+    child.output(format!("No conversation found with session ID: {session}\r\n").as_bytes());
     child.exit(1);
     let notice = again.pane_notice(claude);
     assert!(notice.contains("could not resume"), "{notice}");
@@ -723,6 +717,11 @@ fn rf_ses_11_a_resume_that_finds_no_conversation_opens_a_shell_and_keeps_the_ses
         shell.spec().cwd.as_deref(),
         Some(std::path::Path::new(ROOT))
     );
+    // The pane says what runs in it; the saved session keeps the agent.
+    again.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == claude && p.profile == "Shell" => Some(()),
+        _ => None,
+    });
     again.save();
     assert_eq!(saved_session_of(&store, claude), Some(session.clone()));
     drop(again);
@@ -754,6 +753,10 @@ fn rf_ses_11_a_relaunch_after_the_fallback_starts_a_new_agent_session() {
     let relaunched = again.children(1).pop().unwrap();
     assert!(shell.was_killed());
     assert_eq!(relaunched.spec().program, "claude");
+    again.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == claude && p.profile == "Claude Code" => Some(()),
+        _ => None,
+    });
     let launch = args(&relaunched);
     assert_eq!(launch[0], "--session-id");
     assert_ne!(launch[1], session);
