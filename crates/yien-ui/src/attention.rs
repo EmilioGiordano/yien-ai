@@ -294,6 +294,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::model::AgentState;
 
     fn w(pane: u64) -> Waiting {
         Waiting {
@@ -554,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_atn_11_muting_stops_toasts_and_flashes_but_not_the_badge() {
+    fn rf_atn_16_muting_stops_toasts_and_flashes_but_not_the_mark_counter_or_badge() {
         let t0 = Instant::now();
         let mut all = view(&[(1, NEEDS)]);
         all.set_notifications_muted(true);
@@ -572,6 +573,8 @@ mod tests {
         });
         assert!(one.alerts_muted(PaneId::new(1)) && !one.alerts_muted(PaneId::new(2)));
         for muted in [all, one] {
+            assert_eq!(muted.needs_you_panes(), 1);
+            assert_eq!(muted.pane(PaneId::new(1)).state, AgentState::NeedsYou);
             let os = Rc::new(FakeOs::default());
             let mut alerts = Alerts::new(os.clone());
             assert_eq!(alerts.update(&muted, false, t0), None);
@@ -581,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_atn_16_a_pane_that_cleared_before_the_flush_is_not_toasted_but_the_badge_moved() {
+    fn a_pane_that_cleared_before_the_flush_is_not_toasted_but_the_badge_moved() {
         let os = Rc::new(FakeOs::default());
         let mut alerts = Alerts::new(os.clone());
         let t0 = Instant::now();
