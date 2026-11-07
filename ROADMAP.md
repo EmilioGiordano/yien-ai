@@ -28,7 +28,8 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
-| M4 Claude: hooks, state machine, red mark, counter | `feat/` | pending |
+| M4 Claude: profiles, signals, pure state machine, hook settings and payload decoding (`yien-agent`) | `feat/agent-state-machine` | done on the branch, in review; no UI yet |
+| M4 Claude: `yien-hook`, hook pipe, red mark, counter | `feat/` | pending |
 
 ## Decisions taken on the way
 
@@ -37,6 +38,10 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `build/workspace-skeleton`: layer-0 crates do not depend on each other. `yien-layout` keeps its own `PaneId` (a `u64` handed out by the tree); mapping it to `yien_proto::PaneId` is the core's job.
 - `build/workspace-skeleton`: foothy's `win32.rs` (win32-input-mode encoding) was left out of `yien-input` as the TASK asked. It makes no OS calls, and plan §3.2 places win32-input-mode in `yien-input`, so it should come back there with M1 input, not go to `yien-platform`.
 - `build/workspace-skeleton`: `xtask check-deps` also requires `#![forbid(unsafe_code)]` in every crate root except `yien-pty` and `yien-platform`, limits `yien-proto` to `serde`, and holds layers 0 and 1 to an allowlist of external crates kept in `xtask/src/check_deps.rs` (adding one is a reviewed change).
+- `feat/agent-state-machine`: the per-pane hook token travels in the `YIEN_HOOK_TOKEN` environment variable (04 §2.4), never in the `--settings` file. Registered Claude events: the eight of 04 §2.4 plus `PostToolUse`, the real exit from a permission wait.
+- `feat/agent-state-machine`: OSC 9, OSC 777 and BEL never change the state: they cannot tell "done" from "waiting" (RN-02). Codex and OpenCode stay idle-only until S7 and S8.
+- `feat/agent-state-machine`: an unverified CLI version uses the newest rule (highest lower bound), not the last one listed; a rule without `versions` is never counted as verified (RF-AGE-11).
+- `feat/agent-state-machine`: `regex` joins the layer-1 allowlist (plan §3.2).
 
 ## In flight
 
