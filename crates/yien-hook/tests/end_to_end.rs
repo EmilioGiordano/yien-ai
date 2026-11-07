@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::io::Write;
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -43,8 +44,19 @@ fn start() -> Pipe {
 }
 
 fn run_hook(pipe: Option<&str>, token: Option<&str>, event: &str, payload: &[u8]) -> Output {
+    run_hook_with_flags(0, pipe, token, event, payload)
+}
+
+fn run_hook_with_flags(
+    creation_flags: u32,
+    pipe: Option<&str>,
+    token: Option<&str>,
+    event: &str,
+    payload: &[u8],
+) -> Output {
     let mut cmd = Command::new(HOOK);
-    cmd.arg(event)
+    cmd.creation_flags(creation_flags)
+        .arg(event)
         .env_remove(HOOK_PIPE_ENV)
         .env_remove(HOOK_TOKEN_ENV)
         .stdin(Stdio::piped())
@@ -114,6 +126,32 @@ fn hook_event_reaches_the_server_decoded() {
         Ok(HookEvent::Notification(NotificationKind::PermissionPrompt))
     );
     assert_eq!(delivery.payload_len, payload.len());
+}
+
+#[test]
+fn stdin_reaches_the_hook_when_its_parent_has_no_console() {
+    // A GUI-subsystem parent such as the release `yien.exe` has no console,
+    // so its console children start detached or with a console of their own.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let pipe = start();
+    for (i, flags) in [DETACHED_PROCESS, CREATE_NO_WINDOW].into_iter().enumerate() {
+        let pane = PaneId::new(20 + i as u64);
+        let token = pipe.registry.issue(pane).unwrap();
+        let payload = br#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+        let out = run_hook_with_flags(
+            flags,
+            Some(pipe.server.name()),
+            Some(token.as_str()),
+            "Stop",
+            payload,
+        );
+        assert_silent_success(&out);
+        let delivery = pipe.events.recv_timeout(WAIT).unwrap();
+        assert_eq!(delivery.pane, pane, "flags {flags:#x}");
+        assert_eq!(delivery.event, Ok(HookEvent::Stop), "flags {flags:#x}");
+        assert_eq!(delivery.payload_len, payload.len(), "flags {flags:#x}");
+    }
 }
 
 #[test]
