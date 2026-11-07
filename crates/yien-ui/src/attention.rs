@@ -22,6 +22,8 @@ const TITLE_MAX: usize = 64;
 const BODY_MAX: usize = 160;
 /// Prefix of a toast's `launch`, followed by the pane's id.
 const LAUNCH_PANE: &str = "pane:";
+/// The tag of the toast for a burst of panes.
+const BURST_TAG: &str = "burst";
 
 /// What a toast says, and what its click hands back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,9 @@ pub struct ToastText {
     pub body: String,
     /// Handed back to the activation callback when the toast is clicked.
     pub launch: String,
+    /// A toast replaces the earlier one with the same tag: one per pane, and
+    /// one for bursts.
+    pub tag: String,
 }
 
 /// The OS side: a system toast, the taskbar badge and a taskbar flash. Each
@@ -144,7 +149,7 @@ pub(crate) struct ToastPane {
 /// The toast for `panes`, the one waiting longest first. `None` for none.
 pub(crate) fn toast_text(panes: &[ToastPane]) -> Option<ToastText> {
     let first = panes.first()?;
-    let (title, body) = match panes {
+    let (title, body, tag) = match panes {
         [one] => {
             let agent = if one.agent.is_empty() {
                 "An agent"
@@ -156,7 +161,11 @@ pub(crate) fn toast_text(panes: &[ToastPane]) -> Option<ToastText> {
                 Some(why) => format!("{place}: {why}"),
                 None => place,
             };
-            (format!("{agent} needs you"), body)
+            (
+                format!("{agent} needs you"),
+                body,
+                format!("pane-{}", one.pane.get()),
+            )
         }
         _ => {
             let mut tabs: Vec<&str> = Vec::new();
@@ -165,13 +174,18 @@ pub(crate) fn toast_text(panes: &[ToastPane]) -> Option<ToastText> {
                     tabs.push(&p.tab);
                 }
             }
-            (format!("{} agents need you", panes.len()), tabs.join(", "))
+            (
+                format!("{} agents need you", panes.len()),
+                tabs.join(", "),
+                BURST_TAG.to_owned(),
+            )
         }
     };
     Some(ToastText {
         title: truncate(&title, TITLE_MAX),
         body: truncate(&body, BODY_MAX),
         launch: format!("{LAUNCH_PANE}{}", first.pane.get()),
+        tag,
     })
 }
 
@@ -364,6 +378,40 @@ mod tests {
     }
 
     #[test]
+    fn rf_atn_11_unmuting_inside_a_window_toasts_only_new_arrivals() {
+        let t0 = Instant::now();
+        let mut n = Notifier::default();
+        let muted = |pane| Waiting {
+            pane: PaneId::new(pane),
+            muted: true,
+        };
+        // Muted on arrival, unmuted while a window is open for another pane.
+        assert_eq!(n.observe(&[muted(1)], false, t0), None);
+        let at = n.observe(&[muted(1), w(2)], false, t0).expect("window");
+        assert_eq!(n.observe(&[w(1), w(2)], false, t0), None);
+        assert_eq!(n.flush(false, at), ids(&[2]));
+        // Muted and unmuted again inside a window: its toast is not revived.
+        let at = n.observe(&[w(1), w(2), w(3)], false, at).expect("window");
+        n.observe(&[w(1), w(2), muted(3)], false, at);
+        n.observe(&[w(1), w(2), w(3)], false, at);
+        assert!(n.flush(false, at).is_empty());
+    }
+
+    #[test]
+    fn rf_atn_09_a_pane_closed_inside_the_window_is_not_toasted() {
+        let os = Rc::new(FakeOs::default());
+        let mut alerts = Alerts::new(os.clone());
+        let t0 = Instant::now();
+        let at = alerts
+            .update(&view(&[(1, NEEDS), (2, P::Idle)]), false, t0)
+            .expect("flush due");
+        let closed = view(&[(2, P::Idle)]);
+        alerts.update(&closed, false, t0);
+        alerts.flush(&closed, false, at);
+        assert_eq!(*os.calls.borrow(), ["badge 1", "badge 0"]);
+    }
+
+    #[test]
     fn rf_atn_09_a_pane_that_clears_inside_the_window_is_not_toasted() {
         let t0 = Instant::now();
         let mut n = Notifier::default();
@@ -410,6 +458,7 @@ mod tests {
         assert_eq!(toast.title, "Claude Code needs you");
         assert_eq!(toast.body, "Tab 1 · yien: asks for permission");
         assert_eq!(launch_pane(&toast.launch), Some(PaneId::new(7)));
+        assert_eq!(toast.tag, "pane-7", "each pane keeps its own toast");
         let toast = toast_text(&[tp(7, "", "Tab 1", None)]).expect("toast");
         assert_eq!(toast.title, "An agent needs you");
         assert_eq!(toast.body, "Tab 1 · yien");
@@ -427,6 +476,7 @@ mod tests {
         assert_eq!(toast.title, "3 agents need you");
         assert_eq!(toast.body, "api, web");
         assert_eq!(launch_pane(&toast.launch), Some(PaneId::new(3)));
+        assert_eq!(toast.tag, BURST_TAG);
     }
 
     #[test]

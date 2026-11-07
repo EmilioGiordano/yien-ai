@@ -25,6 +25,7 @@
 //!     title: "Claude Code needs you".into(),
 //!     body: "Tab 1 · yien".into(),
 //!     launch: "pane:7".into(),
+//!     tag: "pane-7".into(),
 //! })?;
 //! # Ok::<(), yien_platform::attention::AttentionError>(())
 //! ```
@@ -48,6 +49,9 @@ pub struct Toast {
     pub body: String,
     /// Given back to [`OsAttention::on_activate`] when the toast is clicked.
     pub launch: String,
+    /// A new toast replaces the one with the same tag (at most 64
+    /// characters).
+    pub tag: String,
 }
 
 /// Which call failed.
@@ -63,6 +67,8 @@ pub enum Step {
     Badge,
     /// Flashing the taskbar button.
     Flash,
+    /// The attention thread's queue was full, so the call was dropped.
+    Queue,
 }
 
 impl fmt::Display for Step {
@@ -73,6 +79,7 @@ impl fmt::Display for Step {
             Self::Toast => "toast",
             Self::Badge => "taskbar badge",
             Self::Flash => "taskbar flash",
+            Self::Queue => "attention queue (full, dropped)",
         })
     }
 }
@@ -89,7 +96,8 @@ pub struct AttentionError {
 }
 
 /// Toasts, the taskbar badge and the flash for one window. Lives on the UI
-/// thread.
+/// thread and never blocks it: the OS calls run in order on a thread of
+/// their own, which ends with the process.
 pub struct OsAttention {
     imp: imp::Imp,
 }
@@ -111,21 +119,23 @@ impl OsAttention {
         self.imp.attach(hwnd);
     }
 
-    /// Shows `toast`, replacing YIEN's previous one. The toast is shown on a
-    /// thread of its own; its failures are logged there at debug level, and
-    /// an error here means it could not be handed over.
+    /// Shows `toast`, replacing YIEN's previous toast with the same tag. Its
+    /// failures are logged at debug level on the attention thread; an error
+    /// here means it could not be handed over (queue full or thread gone).
     pub fn toast(&self, toast: &Toast) -> Result<(), AttentionError> {
         self.imp.toast(toast)
     }
 
     /// Shows how many agents need the user on the taskbar button, or clears
-    /// the badge at 0. Does nothing before [`attach`](Self::attach).
+    /// the badge at 0; calling it again with the same count sets it again.
+    /// Does nothing before [`attach`](Self::attach).
     pub fn set_badge(&self, count: usize) -> Result<(), AttentionError> {
         self.imp.set_badge(count)
     }
 
     /// Flashes the taskbar button until the window comes forward. Does
-    /// nothing before [`attach`](Self::attach).
+    /// nothing before [`attach`](Self::attach). Dropped when the queue is
+    /// full.
     pub fn flash(&self) -> Result<(), AttentionError> {
         self.imp.flash()
     }
@@ -148,6 +158,7 @@ type Activate = Box<dyn Fn(String) + Send + Sync>;
 #[cfg(windows)]
 mod imp {
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
     use windows::Data::Xml::Dom::XmlDocument;
@@ -157,7 +168,7 @@ mod imp {
     };
     use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
     use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     };
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
@@ -175,15 +186,28 @@ mod imp {
     use super::{APP_ID, APP_NAME, Activate, AttentionError, Step, Toast};
     use crate::badge::{badge_text, render};
 
-    /// YIEN keeps one toast in the notification centre: each new one
-    /// replaces the last.
-    const TAG: &str = "needs-you";
+    /// Jobs waiting for the attention thread; more are dropped.
+    const QUEUE: usize = 4;
+    /// Toasts whose click is still listened for, the latest last.
+    const KEPT_TOASTS: usize = 16;
+
+    enum Job {
+        Toast(Toast),
+        /// Apply the latest badge; `force` sets it even when unchanged.
+        Badge {
+            force: bool,
+        },
+        Flash(isize),
+    }
+
+    /// The badge the UI wants: the window and the count.
+    type Wanted = Arc<Mutex<Option<(isize, usize)>>>;
 
     pub(super) struct Imp {
         hwnd: Cell<isize>,
-        taskbar: RefCell<Option<ITaskbarList3>>,
-        /// The toast thread's queue, started with the first toast.
-        toasts: RefCell<Option<mpsc::Sender<Toast>>>,
+        /// The attention thread's queue, started with the first job.
+        jobs: RefCell<Option<mpsc::SyncSender<Job>>>,
+        badge: Wanted,
         activate: Arc<Mutex<Option<Activate>>>,
     }
 
@@ -198,8 +222,8 @@ mod imp {
         pub(super) fn new() -> Self {
             Self {
                 hwnd: Cell::new(0),
-                taskbar: RefCell::new(None),
-                toasts: RefCell::new(None),
+                jobs: RefCell::new(None),
+                badge: Arc::new(Mutex::new(None)),
                 activate: Arc::new(Mutex::new(None)),
             }
         }
@@ -219,44 +243,40 @@ mod imp {
             *self.activate.lock().unwrap_or_else(PoisonError::into_inner) = Some(callback);
         }
 
-        pub(super) fn toast(&self, toast: &Toast) -> Result<(), AttentionError> {
-            let mut worker = self.toasts.borrow_mut();
-            if worker.is_none() {
-                let (send, recv) = mpsc::channel::<Toast>();
+        /// Hands `job` to the attention thread without waiting.
+        fn send(&self, job: Job, step: Step) -> Result<(), AttentionError> {
+            let mut jobs = self.jobs.borrow_mut();
+            if jobs.is_none() {
+                let (send, recv) = mpsc::sync_channel::<Job>(QUEUE);
+                let badge = Arc::clone(&self.badge);
                 let activate = Arc::clone(&self.activate);
                 std::thread::Builder::new()
-                    .name("yien-toast".into())
-                    .spawn(move || toast_thread(&recv, &activate))
+                    .name("yien-attention".into())
+                    .spawn(move || attention_thread(&recv, &badge, &activate))
                     .map_err(|e| AttentionError {
-                        step: Step::Toast,
+                        step,
                         code: e.raw_os_error().unwrap_or(0) as u32,
                     })?;
-                *worker = Some(send);
+                *jobs = Some(send);
             }
-            let queued = worker.as_ref().map(|w| w.send(toast.clone()));
-            if !matches!(queued, Some(Ok(()))) {
-                *worker = None;
-                return Err(AttentionError {
-                    step: Step::Toast,
+            let Some(sender) = jobs.as_ref() else {
+                return Err(AttentionError { step, code: 0 });
+            };
+            match sender.try_send(job) {
+                Ok(()) => Ok(()),
+                Err(mpsc::TrySendError::Full(_)) => Err(AttentionError {
+                    step: Step::Queue,
                     code: 0,
-                });
+                }),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    *jobs = None;
+                    Err(AttentionError { step, code: 0 })
+                }
             }
-            Ok(())
         }
 
-        fn taskbar(&self) -> Result<ITaskbarList3, AttentionError> {
-            if let Some(list) = self.taskbar.borrow().as_ref() {
-                return Ok(list.clone());
-            }
-            // SAFETY: COM is initialised on this (the UI) thread by gpui's
-            // OleInitialize; the CLSID and interface match.
-            let list: ITaskbarList3 =
-                unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) }
-                    .map_err(fail(Step::Badge))?;
-            // SAFETY: `list` is a live ITaskbarList3.
-            unsafe { list.HrInit() }.map_err(fail(Step::Badge))?;
-            *self.taskbar.borrow_mut() = Some(list.clone());
-            Ok(list)
+        pub(super) fn toast(&self, toast: &Toast) -> Result<(), AttentionError> {
+            self.send(Job::Toast(toast.clone()), Step::Toast)
         }
 
         pub(super) fn set_badge(&self, count: usize) -> Result<(), AttentionError> {
@@ -264,26 +284,16 @@ mod imp {
             if hwnd == 0 {
                 return Ok(());
             }
-            let hwnd = HWND(hwnd as *mut _);
-            let list = self.taskbar()?;
-            let Some(text) = badge_text(count) else {
-                // SAFETY: a null icon and description clear the overlay of
-                // our own window.
-                return unsafe { list.SetOverlayIcon(hwnd, HICON::default(), PCWSTR::null()) }
-                    .map_err(fail(Step::Badge));
+            let wanted = Some((hwnd, count));
+            let force = {
+                let mut badge = self.badge.lock().unwrap_or_else(PoisonError::into_inner);
+                let same = *badge == wanted;
+                *badge = wanted;
+                same
             };
-            let icon = badge_icon(&text)?;
-            let description = HSTRING::from(if count == 1 {
-                "1 agent needs you".to_owned()
-            } else {
-                format!("{text} agents need you")
-            });
-            // SAFETY: `icon` is a live icon we own and `description` a
-            // NUL-terminated wide string; both outlive the call.
-            let set = unsafe { list.SetOverlayIcon(hwnd, icon, PCWSTR(description.as_ptr())) };
-            // SAFETY: the taskbar keeps its own copy, so ours can go now.
-            let _ = unsafe { DestroyIcon(icon) };
-            set.map_err(fail(Step::Badge))
+            // A dropped wake-up only delays the badge: the thread applies the
+            // latest one after every job it runs.
+            self.send(Job::Badge { force }, Step::Badge)
         }
 
         pub(super) fn flash(&self) -> Result<(), AttentionError> {
@@ -291,41 +301,110 @@ mod imp {
             if hwnd == 0 {
                 return Ok(());
             }
-            let info = FLASHWINFO {
-                cbSize: size_of::<FLASHWINFO>() as u32,
-                hwnd: HWND(hwnd as *mut _),
-                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
-                uCount: 1,
-                dwTimeout: 0,
-            };
-            // SAFETY: `info` is a valid FLASHWINFO for the duration of the
-            // call. The result is the window's previous state, not an error.
-            let _ = unsafe { FlashWindowEx(&info) };
-            Ok(())
+            self.send(Job::Flash(hwnd), Step::Flash)
         }
     }
 
-    /// Shows the toasts it is sent, one at a time. Showing a toast is a
-    /// cross-process COM call: on the UI thread its modal loop would
-    /// dispatch window messages into gpui while gpui is mid-update.
-    fn toast_thread(recv: &mpsc::Receiver<Toast>, activate: &Arc<Mutex<Option<Activate>>>) {
+    /// Runs the toasts, badges and flashes it is sent, in order, and ends
+    /// with the process. Each is a cross-process call: on the UI thread,
+    /// COM's modal loop or the messages the call sends would dispatch into
+    /// gpui while it is mid-update.
+    fn attention_thread(
+        recv: &mpsc::Receiver<Job>,
+        badge: &Wanted,
+        activate: &Arc<Mutex<Option<Activate>>>,
+    ) {
         // SAFETY: initialises COM for this new thread, which owns no other
         // COM state; never uninitialised, since the thread lives until exit.
-        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         let mut notifier: Option<ToastNotifier> = None;
-        // The toast on screen; dropping it would stop its click from
-        // reaching `on_activate`.
-        let mut shown: Option<ToastNotification> = None;
-        while let Ok(toast) = recv.recv() {
-            match show(&toast, &mut notifier, activate) {
-                Ok(notification) => {
-                    shown = Some(notification);
-                    tracing::debug!("toast shown");
+        let mut taskbar: Option<ITaskbarList3> = None;
+        let mut applied: Option<(isize, usize)> = None;
+        // Dropping a toast would stop its click from reaching `on_activate`.
+        let mut shown: VecDeque<(String, ToastNotification)> = VecDeque::new();
+        while let Ok(job) = recv.recv() {
+            let mut force = false;
+            match job {
+                Job::Toast(toast) => match show(&toast, &mut notifier, activate) {
+                    Ok(notification) => {
+                        shown.retain(|(tag, _)| *tag != toast.tag);
+                        shown.push_back((toast.tag, notification));
+                        if shown.len() > KEPT_TOASTS {
+                            shown.pop_front();
+                        }
+                        tracing::debug!("toast shown");
+                    }
+                    Err(error) => tracing::debug!("{error}"),
+                },
+                Job::Badge { force: again } => force = again,
+                Job::Flash(hwnd) => flash(hwnd),
+            }
+            let wanted = *badge.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((hwnd, count)) = wanted
+                && (force || applied != wanted)
+            {
+                match set_badge(&mut taskbar, hwnd, count) {
+                    Ok(()) => {
+                        applied = wanted;
+                        tracing::debug!(count, "taskbar badge set");
+                    }
+                    Err(error) => tracing::debug!("{error}"),
                 }
-                Err(error) => tracing::debug!("{error}"),
             }
         }
-        drop(shown);
+    }
+
+    fn set_badge(
+        taskbar: &mut Option<ITaskbarList3>,
+        hwnd: isize,
+        count: usize,
+    ) -> Result<(), AttentionError> {
+        let list = match taskbar {
+            Some(list) => list.clone(),
+            None => {
+                // SAFETY: COM is initialised on this thread; the CLSID and
+                // interface match.
+                let list: ITaskbarList3 =
+                    unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) }
+                        .map_err(fail(Step::Badge))?;
+                // SAFETY: `list` is a live ITaskbarList3.
+                unsafe { list.HrInit() }.map_err(fail(Step::Badge))?;
+                *taskbar = Some(list.clone());
+                list
+            }
+        };
+        let hwnd = HWND(hwnd as *mut _);
+        let Some(text) = badge_text(count) else {
+            // SAFETY: a null icon and description clear the overlay of our
+            // own window.
+            return unsafe { list.SetOverlayIcon(hwnd, HICON::default(), PCWSTR::null()) }
+                .map_err(fail(Step::Badge));
+        };
+        let icon = badge_icon(&text)?;
+        let description = HSTRING::from(if count == 1 {
+            "1 agent needs you".to_owned()
+        } else {
+            format!("{text} agents need you")
+        });
+        // SAFETY: `icon` is a live icon we own and `description` a
+        // NUL-terminated wide string; both outlive the call.
+        let set = unsafe { list.SetOverlayIcon(hwnd, icon, PCWSTR(description.as_ptr())) };
+        // SAFETY: the taskbar keeps its own copy, so ours can go now.
+        let _ = unsafe { DestroyIcon(icon) };
+        set.map_err(fail(Step::Badge))
+    }
+
+    fn flash(hwnd: isize) {
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: HWND(hwnd as *mut _),
+            dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            uCount: 1,
+            dwTimeout: 0,
+        };
+        // SAFETY: `info` is a valid FLASHWINFO for the duration of the call.
+        // The result is the window's previous state, not an error.
+        let _ = unsafe { FlashWindowEx(&info) };
     }
 
     fn show(
@@ -347,7 +426,7 @@ mod imp {
         let notification =
             ToastNotification::CreateToastNotification(&document).map_err(fail(Step::Toast))?;
         notification
-            .SetTag(&TAG.into())
+            .SetTag(&toast.tag.as_str().into())
             .map_err(fail(Step::Toast))?;
         let activate = Arc::clone(activate);
         notification

@@ -31,6 +31,7 @@ impl OsAttention for Attention {
             title: toast.title.clone(),
             body: toast.body.clone(),
             launch: toast.launch.clone(),
+            tag: toast.tag.clone(),
         }));
     }
 
