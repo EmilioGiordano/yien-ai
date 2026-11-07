@@ -1033,3 +1033,26 @@ fn a_pane_waiting_to_start_never_starts_after_the_shutdown() {
     assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 0);
     h.assert_nothing_spawned_for(wait + Duration::from_millis(500));
 }
+
+#[test]
+fn closing_a_project_terminates_its_panes() {
+    let mut h = Harness::start();
+    let (project, _, first) = h.pending_project();
+    let first_child = h.child();
+    let (_, second_child) = h.split(first, None);
+    h.command(Command::CloseProject { project });
+    let closed = h.wait_for(|m| match m {
+        CoreMsg::ProjectClosed { project } => Some(*project),
+        _ => None,
+    });
+    assert_eq!(closed, project);
+    wait_until(|| first_child.was_killed() && second_child.was_killed());
+}
+
+#[test]
+fn a_project_closed_before_its_pane_starts_spawns_nothing() {
+    let mut h = waiting(START_WAIT, START_WAIT);
+    let (project, _, _) = h.pending_project();
+    h.command(Command::CloseProject { project });
+    h.assert_nothing_spawned_for(START_WAIT + Duration::from_millis(500));
+}
