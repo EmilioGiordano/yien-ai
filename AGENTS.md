@@ -64,9 +64,18 @@ Parallel work means one branch, one worktree and one implementer per feature. Wo
 C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic>
 ```
 
-- Each worktree has its own `target/`. cargo runs only inside the worktree the agent was given.
+- cargo runs only inside the worktree the agent was given, and always through `scripts/cargo.sh` (see "Builds").
 - Never switch branches in a checkout where an agent is working.
 - Two branches that touch the same files do not run in parallel.
+
+## Builds
+
+The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is the limit, not CPU.
+
+- `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the lock `D:/yien-build.lock`, and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds; if the gate waits a long time, tell Emilio.
+- Each worktree has an untracked `.yien-slot` file naming its target dir: `D:/More-Code-Projects/yien-compiled/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile on `C:`. Never share a target dir between two branches: mixed builds have caused real bugs.
+- Old slots are cleaned only when `D:` drops below about 40 GB free.
+- Branches run cheap checks on the crates they touch: `fmt --check`, `check -p <crates> --all-targets`, `test -p <crates>`. The full gate runs at integration.
 
 ## The branch loop
 
