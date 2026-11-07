@@ -248,13 +248,17 @@ pub enum Command {
     },
     /// Closes a worktree tab, terminating its panes, and then removes its
     /// worktree folder. The branch is never deleted. Without
-    /// `discard_changes` a worktree with uncommitted changes is kept. A
-    /// worktree another tab still uses is kept (RF-ESP-07, RN-08).
+    /// `discard_changes` a worktree with uncommitted changes is kept. Right
+    /// before removing, git looks again: if the worktree holds more than
+    /// `confirmed`, it is kept. A worktree another tab still uses is kept
+    /// (RF-ESP-07, RN-08).
     RemoveWorktreeTab {
         /// The tab.
         tab: TabId,
         /// Delete uncommitted changes too; only after the user confirmed it.
         discard_changes: bool,
+        /// What the user was shown and agreed to lose.
+        confirmed: WorktreeWork,
     },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
@@ -531,17 +535,49 @@ pub struct TabInfo {
     pub worktree: Option<String>,
 }
 
+/// What a worktree holds that a removal would delete or strand (RN-08).
+///
+/// ```
+/// let work = yien_proto::WorktreeWork { changed: 0, ignored: 2, unpushed: 0 };
+/// assert!(work.any());
+/// assert!(work.within(&yien_proto::WorktreeWork { changed: 1, ignored: 2, unpushed: 0 }));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorktreeWork {
+    /// Changed and untracked files, each counted.
+    pub changed: u32,
+    /// Ignored files and folders; every removal deletes them.
+    pub ignored: u32,
+    /// Commits not pushed, or on no other branch.
+    pub unpushed: u32,
+}
+
+impl WorktreeWork {
+    /// Whether there is anything at all.
+    pub fn any(&self) -> bool {
+        self.changed > 0 || self.ignored > 0 || self.unpushed > 0
+    }
+
+    /// Whether every count is at most `other`'s.
+    pub fn within(&self, other: &WorktreeWork) -> bool {
+        self.changed <= other.changed
+            && self.ignored <= other.ignored
+            && self.unpushed <= other.unpushed
+    }
+}
+
 /// What removing a worktree would lose, as [`CoreMsg::WorktreeChecked`]
 /// reports it (RN-08).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeCheck {
     /// git looked.
     Checked {
-        /// Changed and untracked files; removing deletes them.
-        changed: u32,
-        /// Commits not pushed (or, without an upstream, on no other
-        /// branch); the branch keeps them.
-        unpushed: u32,
+        /// The counts.
+        work: WorktreeWork,
+        /// A few of the ignored entries, to name them.
+        ignored_examples: Vec<String>,
+        /// HEAD is detached, so unpushed commits are lost on removal.
+        detached: bool,
     },
     /// git could not tell; the reason says why.
     Failed {
@@ -788,6 +824,11 @@ mod tests {
             Command::RemoveWorktreeTab {
                 tab: TabId::new(2),
                 discard_changes: true,
+                confirmed: WorktreeWork {
+                    changed: 2,
+                    ignored: 1,
+                    unpushed: 0,
+                },
             },
             Command::MovePane {
                 pane: PaneId::new(3),
@@ -891,8 +932,13 @@ mod tests {
                 tab: TabId::new(2),
                 worktree: "C:/Code/yien-wt/feat-x".into(),
                 check: WorktreeCheck::Checked {
-                    changed: 3,
-                    unpushed: 1,
+                    work: WorktreeWork {
+                        changed: 3,
+                        ignored: 2,
+                        unpushed: 1,
+                    },
+                    ignored_examples: vec![".env".into(), "node_modules/".into()],
+                    detached: true,
                 },
             },
             CoreMsg::WorktreeChecked {

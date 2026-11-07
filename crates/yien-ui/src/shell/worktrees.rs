@@ -147,14 +147,16 @@ impl Shell {
         true
     }
 
-    /// The core's answer to the check, for the open question.
+    /// The core's answer to the check, for the open question. An answer
+    /// that differs from what a second step showed takes the question back
+    /// to its first step.
     pub(super) fn worktree_checked(&mut self, tab: TabId, check: WorktreeCheck) {
         if let Some(closing) = self
             .worktree_close
             .as_mut()
             .filter(|c| c.question.tab == tab)
         {
-            closing.question.check = Some(check);
+            closing.question.set_check(check);
         }
     }
 
@@ -208,10 +210,8 @@ impl Shell {
             return;
         }
         match closing.question.remove() {
-            Answer::ConfirmFirst => {
-                closing.question.step = Step::ConfirmRemove;
-                cx.notify();
-            }
+            Answer::Wait => {}
+            Answer::ConfirmFirst => cx.notify(),
             Answer::Run(command) => {
                 self.worktree_close = None;
                 self.command(command, cx);
@@ -233,12 +233,14 @@ impl Shell {
         if !confirming {
             return;
         }
-        if let Some(closing) = self.worktree_close.take()
-            && let Answer::Run(command) = closing.question.remove()
-        {
+        let Some(closing) = self.worktree_close.as_mut() else {
+            return;
+        };
+        if let Answer::Run(command) = closing.question.remove() {
+            self.worktree_close = None;
             self.command(command, cx);
+            self.give_back_keyboard(window, cx);
         }
-        self.give_back_keyboard(window, cx);
     }
 
     pub(super) fn worktree_cancel(
@@ -360,6 +362,7 @@ impl Shell {
                 )
                 .child(
                     self.dialog_button("worktree-remove", "Remove worktree", "Alt+R")
+                        .when(!q.checked(), |b| b.opacity(0.5).cursor_default())
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.worktree_remove(&WorktreeRemove, window, cx);
                         })),

@@ -2,7 +2,7 @@
 //! command needs and whether a worktree may be removed. The git work itself
 //! runs in `crate::worktree`, off the runtime's workers.
 
-use yien_proto::{CoreMsg, PaneId, ProjectId, TabId, same_folder};
+use yien_proto::{CoreMsg, PaneId, ProjectId, TabId, WorktreeWork, same_folder};
 
 use super::{Effect, Workspace};
 use crate::CoreError;
@@ -29,6 +29,8 @@ pub(crate) struct RemoveJob {
     /// The closed tab's panes, whose programs must end first.
     pub panes: Vec<PaneId>,
     pub discard_changes: bool,
+    /// What the user agreed to lose; more than this keeps the worktree.
+    pub confirmed: WorktreeWork,
 }
 
 impl Workspace {
@@ -87,6 +89,7 @@ impl Workspace {
         &mut self,
         tab: TabId,
         discard_changes: bool,
+        confirmed: WorktreeWork,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
         let t = self.tab(tab)?;
@@ -102,6 +105,7 @@ impl Workspace {
             branch: t.branch.clone(),
             panes: t.panes(),
             discard_changes,
+            confirmed,
             worktree,
         };
         let shared = self.folder_used_elsewhere(tab, &job.worktree);
@@ -219,6 +223,7 @@ mod tests {
         let command = Command::RemoveWorktreeTab {
             tab,
             discard_changes: false,
+            confirmed: WorktreeWork::default(),
         };
         let fx = ws.apply(command, &resolve).unwrap();
         let removal = fx
@@ -253,6 +258,7 @@ mod tests {
         let command = Command::RemoveWorktreeTab {
             tab: first,
             discard_changes: true,
+            confirmed: WorktreeWork::default(),
         };
         let fx = ws.apply(command, &resolve).unwrap();
         assert!(!fx.iter().any(|e| matches!(e, Effect::RemoveWorktree(_))));
@@ -266,6 +272,7 @@ mod tests {
         let command = Command::RemoveWorktreeTab {
             tab: second,
             discard_changes: false,
+            confirmed: WorktreeWork::default(),
         };
         let fx = ws.apply(command, &resolve).unwrap();
         assert!(fx.iter().any(|e| matches!(e, Effect::RemoveWorktree(_))));
@@ -281,6 +288,7 @@ mod tests {
             Command::RemoveWorktreeTab {
                 tab: plain,
                 discard_changes: true,
+                confirmed: WorktreeWork::default(),
             },
         ] {
             assert!(matches!(

@@ -2,7 +2,7 @@
 //! worktree tab" prompt accepts, and what the question asked before closing
 //! a worktree tab says. Pure, so it is tested without a window.
 
-use yien_proto::{Command, TabId, WorktreeCheck};
+use yien_proto::{Command, TabId, WorktreeCheck, WorktreeWork};
 
 /// Reads the prompt: a branch name, then optionally a base to start from,
 /// separated by spaces. Branch names cannot hold spaces, so this is never
@@ -45,7 +45,10 @@ pub(crate) struct Question {
     pub worktree: String,
     pub branch: Option<String>,
     /// What git found; `None` while it is looking.
-    pub check: Option<WorktreeCheck>,
+    check: Option<WorktreeCheck>,
+    /// What the second step shows and confirms: the check as it was when
+    /// that step opened.
+    shown: Option<WorktreeCheck>,
     pub step: Step,
 }
 
@@ -56,6 +59,8 @@ pub(crate) enum Answer {
     Run(Command),
     /// Ask again, at the second step.
     ConfirmFirst,
+    /// Nothing yet: git is still looking.
+    Wait,
 }
 
 impl Question {
@@ -71,8 +76,25 @@ impl Question {
             worktree,
             branch,
             check: None,
+            shown: None,
             step: Step::Choose,
         }
+    }
+
+    /// Takes what git found. A check that changes what the second step
+    /// showed sends the question back to the first: the user confirmed
+    /// something else.
+    pub(crate) fn set_check(&mut self, check: WorktreeCheck) {
+        if self.step == Step::ConfirmRemove && self.shown.as_ref() != Some(&check) {
+            self.step = Step::Choose;
+            self.shown = None;
+        }
+        self.check = Some(check);
+    }
+
+    /// Whether git has answered.
+    pub(crate) fn checked(&self) -> bool {
+        self.check.is_some()
     }
 
     /// The question's title.
@@ -95,31 +117,20 @@ impl Question {
                 "This tab works in the worktree {}. Keep the folder, or remove it? {branch}",
                 self.worktree
             ),
-            Step::ConfirmRemove => format!("{} {branch}", self.work_text()),
+            Step::ConfirmRemove => format!("{} {branch}", work_text(self.shown.as_ref())),
         }
     }
 
     /// What git found, in words.
     pub(crate) fn work_text(&self) -> String {
-        match &self.check {
-            None => "Checking it for uncommitted changes…".to_owned(),
-            Some(WorktreeCheck::Failed { reason }) => format!(
-                "It could not be checked ({reason}); if it has uncommitted changes it is kept."
-            ),
-            Some(WorktreeCheck::Checked { changed, unpushed }) => match (*changed, *unpushed) {
-                (0, 0) => "No uncommitted changes and nothing unpushed.".to_owned(),
-                (c, 0) => format!("{} will be deleted.", files(c)),
-                (0, u) => commits(u),
-                (c, u) => format!("{} will be deleted. {}", files(c), commits(u)),
-            },
-        }
+        work_text(self.check.as_ref())
     }
 
     /// Whether removing needs the second confirmation: there is work, or it
-    /// is not known yet whether there is.
+    /// could not be checked.
     pub(crate) fn needs_confirm(&self) -> bool {
         match &self.check {
-            Some(WorktreeCheck::Checked { changed, unpushed }) => *changed > 0 || *unpushed > 0,
+            Some(WorktreeCheck::Checked { work, .. }) => work.any(),
             _ => true,
         }
     }
@@ -129,37 +140,90 @@ impl Question {
         Command::CloseTab { tab: self.tab }
     }
 
-    /// Remove, at the first step or the second.
-    pub(crate) fn remove(&self) -> Answer {
-        if self.step == Step::Choose && self.needs_confirm() {
-            return Answer::ConfirmFirst;
-        }
-        // Changes are discarded only when git counted them and the user saw
-        // the count; otherwise git keeps a worktree that has any.
-        let discard_changes = matches!(
-            self.check,
-            Some(WorktreeCheck::Checked { changed, .. }) if changed > 0
-        );
+    /// Remove, at the first step or the second. Nothing happens while git
+    /// is still looking.
+    pub(crate) fn remove(&mut self) -> Answer {
+        let Some(check) = &self.check else {
+            return Answer::Wait;
+        };
+        let seen = match self.step {
+            Step::Choose if self.needs_confirm() => {
+                self.shown = Some(check.clone());
+                self.step = Step::ConfirmRemove;
+                return Answer::ConfirmFirst;
+            }
+            Step::Choose => check,
+            Step::ConfirmRemove => match &self.shown {
+                Some(shown) => shown,
+                None => return Answer::Wait,
+            },
+        };
+        // Only what the user saw counted is confirmed: changes are discarded
+        // only then, and the core keeps a worktree that has more by now. A
+        // failed check confirms nothing, so git keeps any work.
+        let confirmed = match seen {
+            WorktreeCheck::Checked { work, .. } => *work,
+            WorktreeCheck::Failed { .. } => WorktreeWork::default(),
+        };
         Answer::Run(Command::RemoveWorktreeTab {
             tab: self.tab,
-            discard_changes,
+            discard_changes: confirmed.changed > 0 || confirmed.ignored > 0,
+            confirmed,
         })
     }
 }
 
-fn files(n: u32) -> String {
-    if n == 1 {
-        "1 uncommitted change".to_owned()
-    } else {
-        format!("{n} uncommitted changes")
+fn work_text(check: Option<&WorktreeCheck>) -> String {
+    match check {
+        None => "Checking it for uncommitted changes…".to_owned(),
+        Some(WorktreeCheck::Failed { reason }) => {
+            format!("It could not be checked ({reason}); if it has uncommitted changes it is kept.")
+        }
+        Some(WorktreeCheck::Checked {
+            work,
+            ignored_examples,
+            detached,
+        }) => {
+            if !work.any() {
+                return "No uncommitted changes, ignored files or unpushed commits.".to_owned();
+            }
+            let mut parts = Vec::new();
+            if work.changed > 0 {
+                parts.push(format!(
+                    "{} will be deleted.",
+                    count(work.changed, "uncommitted change")
+                ));
+            }
+            if work.ignored > 0 {
+                let such_as = if ignored_examples.is_empty() {
+                    String::new()
+                } else {
+                    format!(", such as {},", ignored_examples.join(", "))
+                };
+                parts.push(format!(
+                    "{}{such_as} will be deleted.",
+                    count(work.ignored, "ignored file")
+                ));
+            }
+            if work.unpushed > 0 {
+                let n = count(work.unpushed, "commit");
+                parts.push(match (*detached, work.unpushed) {
+                    (true, 1) => format!("{n} is on no branch and will be lost."),
+                    (true, _) => format!("{n} are on no branch and will be lost."),
+                    (false, 1) => format!("{n} is not pushed; the branch keeps it."),
+                    (false, _) => format!("{n} are not pushed; the branch keeps them."),
+                });
+            }
+            parts.join(" ")
+        }
     }
 }
 
-fn commits(n: u32) -> String {
+fn count(n: u32, what: &str) -> String {
     if n == 1 {
-        "1 commit is not pushed; the branch keeps it.".to_owned()
+        format!("1 {what}")
     } else {
-        format!("{n} commits are not pushed; the branch keeps them.")
+        format!("{n} {what}s")
     }
 }
 
@@ -174,12 +238,34 @@ mod tests {
             "C:/Code/app-wt/feat-x".into(),
             Some("feat/x".into()),
         );
-        q.check = check;
+        if let Some(check) = check {
+            q.set_check(check);
+        }
         q
     }
 
-    fn checked(changed: u32, unpushed: u32) -> Option<WorktreeCheck> {
-        Some(WorktreeCheck::Checked { changed, unpushed })
+    fn work(changed: u32, ignored: u32, unpushed: u32) -> WorktreeWork {
+        WorktreeWork {
+            changed,
+            ignored,
+            unpushed,
+        }
+    }
+
+    fn checked(changed: u32, ignored: u32, unpushed: u32) -> WorktreeCheck {
+        WorktreeCheck::Checked {
+            work: work(changed, ignored, unpushed),
+            ignored_examples: Vec::new(),
+            detached: false,
+        }
+    }
+
+    fn removes(discard_changes: bool, confirmed: WorktreeWork) -> Answer {
+        Answer::Run(Command::RemoveWorktreeTab {
+            tab: TabId::new(4),
+            discard_changes,
+            confirmed,
+        })
     }
 
     #[test]
@@ -197,7 +283,7 @@ mod tests {
 
     #[test]
     fn rf_esp_07_keep_closes_the_tab_and_leaves_the_worktree() {
-        let q = question(checked(3, 1));
+        let q = question(Some(checked(3, 0, 1)));
         assert_eq!(q.keep(), Command::CloseTab { tab: TabId::new(4) });
         assert!(q.detail().contains("C:/Code/app-wt/feat-x"));
         assert!(q.detail().contains("branch feat/x stays"));
@@ -206,74 +292,112 @@ mod tests {
 
     #[test]
     fn rf_esp_07_a_clean_worktree_is_removed_at_once() {
-        let q = question(checked(0, 0));
+        let mut q = question(Some(checked(0, 0, 0)));
         assert!(!q.needs_confirm());
-        assert_eq!(
-            q.remove(),
-            Answer::Run(Command::RemoveWorktreeTab {
-                tab: TabId::new(4),
-                discard_changes: false
-            })
-        );
+        assert_eq!(q.remove(), removes(false, work(0, 0, 0)));
         assert_eq!(
             q.work_text(),
-            "No uncommitted changes and nothing unpushed."
+            "No uncommitted changes, ignored files or unpushed commits."
         );
     }
 
     #[test]
+    fn rn_08_nothing_is_removed_while_the_check_is_pending() {
+        let mut q = question(None);
+        assert!(!q.checked());
+        assert_eq!(q.remove(), Answer::Wait);
+        assert_eq!(q.step, Step::Choose);
+        assert_eq!(q.work_text(), "Checking it for uncommitted changes…");
+    }
+
+    #[test]
     fn rn_08_work_in_the_worktree_needs_a_second_confirm_that_names_it() {
-        for (check, discard) in [
-            (checked(2, 0), true),
-            (checked(0, 1), false),
-            (checked(1, 3), true),
+        for (counts, discard) in [
+            ((2, 0, 0), true),
+            ((0, 4, 0), true),
+            ((0, 0, 1), false),
+            ((1, 2, 3), true),
         ] {
-            let mut q = question(check);
+            let (c, i, u) = counts;
+            let mut q = question(Some(checked(c, i, u)));
             assert_eq!(q.remove(), Answer::ConfirmFirst);
-            q.step = Step::ConfirmRemove;
+            assert_eq!(q.step, Step::ConfirmRemove);
             assert!(q.title().starts_with("Remove"));
-            assert_eq!(
-                q.remove(),
-                Answer::Run(Command::RemoveWorktreeTab {
-                    tab: TabId::new(4),
-                    discard_changes: discard
-                })
-            );
+            assert_eq!(q.remove(), removes(discard, work(c, i, u)));
         }
-        let q = question(checked(2, 3));
         assert_eq!(
-            q.work_text(),
+            question(Some(checked(2, 0, 3))).work_text(),
             "2 uncommitted changes will be deleted. 3 commits are not pushed; the branch keeps them."
         );
         assert_eq!(
-            question(checked(1, 0)).work_text(),
+            question(Some(checked(1, 0, 0))).work_text(),
             "1 uncommitted change will be deleted."
         );
         assert_eq!(
-            question(checked(0, 1)).work_text(),
+            question(Some(checked(0, 0, 1))).work_text(),
             "1 commit is not pushed; the branch keeps it."
         );
     }
 
     #[test]
-    fn rn_08_an_unknown_state_never_discards_changes() {
-        for check in [
-            None,
-            Some(WorktreeCheck::Failed {
-                reason: "git was not found".into(),
-            }),
-        ] {
-            let mut q = question(check);
-            assert!(q.needs_confirm());
-            assert_eq!(q.remove(), Answer::ConfirmFirst);
-            q.step = Step::ConfirmRemove;
-            assert_eq!(
-                q.remove(),
-                Answer::Run(Command::RemoveWorktreeTab {
-                    tab: TabId::new(4),
-                    discard_changes: false
-                })
-            );
-        }
+    fn rn_08_ignored_files_are_named() {
+        let q = question(Some(WorktreeCheck::Checked {
+            work: work(0, 3, 0),
+            ignored_examples: vec![".env".into(), "target/".into()],
+            detached: false,
+        }));
+        assert!(q.needs_confirm());
+        assert_eq!(
+            q.work_text(),
+            "3 ignored files, such as .env, target/, will be deleted."
+        );
+    }
+
+    #[test]
+    fn rn_08_commits_on_a_detached_head_are_said_to_be_lost() {
+        let q = question(Some(WorktreeCheck::Checked {
+            work: work(0, 0, 2),
+            ignored_examples: Vec::new(),
+            detached: true,
+        }));
+        assert_eq!(
+            q.work_text(),
+            "2 commits are on no branch and will be lost."
+        );
+    }
+
+    #[test]
+    fn rn_08_a_check_that_changes_during_the_confirm_goes_back_to_the_start() {
+        let mut q = question(Some(checked(1, 0, 0)));
+        assert_eq!(q.remove(), Answer::ConfirmFirst);
+        // The same answer again changes nothing the user saw.
+        q.set_check(checked(1, 0, 0));
+        assert_eq!(q.step, Step::ConfirmRemove);
+        // More work arrived: the confirm no longer applies.
+        q.set_check(checked(5, 0, 0));
+        assert_eq!(q.step, Step::Choose);
+        assert_eq!(q.remove(), Answer::ConfirmFirst);
+        assert_eq!(q.remove(), removes(true, work(5, 0, 0)));
+    }
+
+    #[test]
+    fn rn_08_the_confirm_sends_what_it_showed() {
+        let mut q = question(Some(checked(1, 0, 0)));
+        assert_eq!(q.remove(), Answer::ConfirmFirst);
+        assert!(
+            q.detail()
+                .starts_with("1 uncommitted change will be deleted.")
+        );
+        assert_eq!(q.remove(), removes(true, work(1, 0, 0)));
+    }
+
+    #[test]
+    fn rn_08_a_failed_check_confirms_no_work() {
+        let mut q = question(Some(WorktreeCheck::Failed {
+            reason: "git was not found".into(),
+        }));
+        assert!(q.needs_confirm());
+        assert_eq!(q.remove(), Answer::ConfirmFirst);
+        assert_eq!(q.remove(), removes(false, work(0, 0, 0)));
     }
 }

@@ -431,7 +431,8 @@ impl Workspace {
             Command::RemoveWorktreeTab {
                 tab,
                 discard_changes,
-            } => self.remove_worktree_tab(tab, discard_changes, &mut fx)?,
+                confirmed,
+            } => self.remove_worktree_tab(tab, discard_changes, confirmed, &mut fx)?,
             Command::CloseTab { tab } => self.close_tab(tab, &mut fx)?,
             Command::SelectTab { tab } => self.select(tab, &mut fx)?,
             Command::SplitPane {

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use yien_git::{Git, WorktreeError, default_worktree_path};
-use yien_proto::{ProjectId, TabId, WorktreeCheck};
+use yien_git::{Git, WorktreeError, WorktreeState, default_worktree_path};
+use yien_proto::{ProjectId, TabId, WorktreeCheck, WorktreeWork};
 
 use crate::consoles::Consoles;
 
@@ -127,8 +127,9 @@ pub(crate) fn check(tab: TabId, worktree: String) -> Done {
     let git = Git::new().with_timeout(CHECK_TIMEOUT);
     let check = match git.worktree_state(Path::new(&worktree)) {
         Ok(state) => WorktreeCheck::Checked {
-            changed: state.changed,
-            unpushed: state.unpushed,
+            work: work_of(&state),
+            ignored_examples: state.ignored_examples,
+            detached: state.detached,
         },
         Err(e) => {
             tracing::debug!("worktree not checked: {}", e.kind());
@@ -144,8 +145,17 @@ pub(crate) fn check(tab: TabId, worktree: String) -> Done {
     }
 }
 
-/// Removes the worktree once the closed tab's programs have ended and no
-/// other program holds the folder; its branch stays.
+fn work_of(state: &WorktreeState) -> WorktreeWork {
+    WorktreeWork {
+        changed: state.changed,
+        ignored: state.ignored,
+        unpushed: state.unpushed,
+    }
+}
+
+/// Removes the worktree once the closed tab's programs have ended, no other
+/// program holds the folder, and it holds no more than the user confirmed;
+/// its branch stays.
 pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
     let deadline = Instant::now() + CLOSE_WAIT;
     for closer in consoles.closers_after_spawns(&job.panes, CLOSE_WAIT) {
@@ -172,6 +182,18 @@ pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
                 at.display()
             ));
         }
+    }
+    // The programs may have written more since the user confirmed.
+    let now = match Git::new().with_timeout(CHECK_TIMEOUT).worktree_state(&path) {
+        Ok(state) => work_of(&state),
+        Err(e) => return failed(format!("it could not be checked again ({e})")),
+    };
+    if !now.within(&job.confirmed) {
+        return failed(format!(
+            "it changed after you confirmed: it now has {} changed, {} ignored and {} \
+             unpushed. Close the tab again to see what removing it would lose.",
+            now.changed, now.ignored, now.unpushed
+        ));
     }
     let git = Git::new().with_timeout(WRITE_TIMEOUT);
     match git.remove_worktree(Path::new(&job.root), &path, job.discard_changes) {

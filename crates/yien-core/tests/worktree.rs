@@ -16,7 +16,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
 use yien_core::{Core, CoreConfig, CoreHandle, ShellCommand};
-use yien_proto::{ClientMsg, Command, CoreMsg, ProjectId, TabInfo, WorktreeCheck};
+use yien_proto::{ClientMsg, Command, CoreMsg, ProjectId, TabInfo, WorktreeCheck, WorktreeWork};
+
+const ONE_CHANGE: WorktreeWork = WorktreeWork {
+    changed: 1,
+    ignored: 0,
+    unpushed: 0,
+};
 use yien_pty::{FakePty, PtyBackend};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -203,14 +209,16 @@ fn rf_esp_05_a_worktree_tab_opens_on_a_new_worktree_and_its_removal_keeps_the_br
     assert_eq!(
         check,
         WorktreeCheck::Checked {
-            changed: 0,
-            unpushed: 0
+            work: WorktreeWork::default(),
+            ignored_examples: vec![],
+            detached: false,
         }
     );
 
     h.send(Command::RemoveWorktreeTab {
         tab: tab.id,
         discard_changes: false,
+        confirmed: WorktreeWork::default(),
     });
     let notice = h.outcome().unwrap();
     assert!(notice.contains("feat/x"), "{notice}");
@@ -285,14 +293,16 @@ fn rn_08_a_dirty_worktree_is_kept_unless_its_changes_are_discarded() {
     assert_eq!(
         check,
         WorktreeCheck::Checked {
-            changed: 1,
-            unpushed: 0
+            work: ONE_CHANGE,
+            ignored_examples: vec![],
+            detached: false,
         }
     );
 
     h.send(Command::RemoveWorktreeTab {
         tab: a.id,
         discard_changes: false,
+        confirmed: ONE_CHANGE,
     });
     let message = h.outcome().unwrap_err();
     assert!(message.contains("uncommitted"), "{message}");
@@ -301,6 +311,7 @@ fn rn_08_a_dirty_worktree_is_kept_unless_its_changes_are_discarded() {
     h.send(Command::RemoveWorktreeTab {
         tab: b.id,
         discard_changes: true,
+        confirmed: ONE_CHANGE,
     });
     h.outcome().unwrap();
     assert!(!b_dir.exists());
@@ -332,9 +343,37 @@ fn rf_esp_07_removal_waits_for_the_tab_shell_to_leave_the_worktree() {
     h.send(Command::RemoveWorktreeTab {
         tab: tab.id,
         discard_changes: false,
+        confirmed: WorktreeWork::default(),
     });
     let notice = h.outcome().unwrap();
     assert!(notice.contains("feat/s"), "{notice}");
     assert!(!worktree.exists());
     assert!(sb.has_branch(&root, "feat/s"));
+}
+
+#[test]
+fn rn_08_work_written_after_the_confirm_keeps_the_worktree() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("late");
+    let mut h = Harness::fake();
+    let project = h.open(&root);
+    h.send(Command::NewWorktreeTab {
+        project,
+        branch: "feat/late".into(),
+        base: None,
+    });
+    let tab = h.worktree_tab();
+    let dir = PathBuf::from(tab.worktree.clone().unwrap());
+    std::fs::write(dir.join("seen.txt"), "seen\n").unwrap();
+    // The user confirmed one change; an agent writes another before the removal.
+    std::fs::write(dir.join("late.txt"), "late\n").unwrap();
+    h.send(Command::RemoveWorktreeTab {
+        tab: tab.id,
+        discard_changes: true,
+        confirmed: ONE_CHANGE,
+    });
+    let message = h.outcome().unwrap_err();
+    assert!(message.contains("changed after you confirmed"), "{message}");
+    assert!(dir.join("late.txt").is_file() && dir.join("seen.txt").is_file());
+    assert!(sb.has_branch(&root, "feat/late"));
 }
