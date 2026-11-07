@@ -5,7 +5,7 @@ mod common;
 use common::sample;
 use yien_session::{
     BACKUPS, CURRENT_FILE, DAMAGED_FILE, MemStore, ROTATION_INTERVAL_MS, SaveError, SkipReason,
-    Store, generation_name, load, preserve_newer, save, serialize,
+    Store, StoreError, generation_name, load, preserve_newer, save, serialize,
 };
 
 const MINUTE: u64 = ROTATION_INTERVAL_MS;
@@ -252,4 +252,71 @@ fn rnf_09_every_save_lands_in_the_current_file() {
         save(&mut store, &sample(at)).unwrap();
         assert_eq!(load(&store).restored.unwrap().snapshot.saved_at, at);
     }
+}
+
+/// A store whose reads of one file fail, as when another process holds it.
+struct UnreadableFile {
+    inner: MemStore,
+    name: String,
+}
+
+impl Store for UnreadableFile {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        if name == self.name {
+            return Err(StoreError::new(
+                "read",
+                name,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ));
+        }
+        self.inner.read(name)
+    }
+
+    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.inner.write_atomic(name, bytes)
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), StoreError> {
+        self.inner.rename(from, to)
+    }
+}
+
+fn filled_store() -> MemStore {
+    let mut store = MemStore::new();
+    for minute in 0..=5 {
+        save(&mut store, &sample(minute * MINUTE)).unwrap();
+    }
+    store
+}
+
+#[test]
+fn rnf_10_an_unreadable_backup_does_not_block_saving() {
+    let mut store = UnreadableFile {
+        inner: filled_store(),
+        name: generation_name(3),
+    };
+    let saved = save(&mut store, &sample(6 * MINUTE)).unwrap();
+    assert!(saved.rotated);
+    assert_eq!(
+        load(&store.inner).restored.unwrap().snapshot,
+        sample(6 * MINUTE)
+    );
+    assert_eq!(
+        saved_at(&store.inner, 4),
+        Some(2 * MINUTE),
+        "the unreadable backup moved down"
+    );
+}
+
+#[test]
+fn rnf_10_an_unreadable_current_file_fails_the_save() {
+    let mut store = UnreadableFile {
+        inner: filled_store(),
+        name: CURRENT_FILE.into(),
+    };
+    assert!(matches!(
+        save(&mut store, &sample(6 * MINUTE)),
+        Err(SaveError::Store(_))
+    ));
+    assert_eq!(saved_at(&store.inner, 0), Some(5 * MINUTE));
 }

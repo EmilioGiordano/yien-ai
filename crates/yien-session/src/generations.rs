@@ -84,7 +84,9 @@ pub struct Saved {
 /// [`ROTATION_INTERVAL_MS`] away from the one in `workspace.1.json`; the oldest backup then
 /// drops off. A damaged previous file is moved to [`DAMAGED_FILE`] instead, for diagnosis,
 /// and the backups stay as they are. Refuses to write an invalid snapshot, and refuses while any
-/// generation holds a newer schema, since rotation would move or drop it.
+/// generation holds a newer schema, since rotation would move or drop it. A backup the store
+/// cannot read does not block the save: it is treated as not newer and rotated like the others;
+/// only an unreadable [`CURRENT_FILE`] is an error.
 ///
 /// ```
 /// use yien_session::{MemStore, SessionSnapshot, load, save};
@@ -102,8 +104,14 @@ pub fn save(store: &mut impl Store, snapshot: &SessionSnapshot) -> Result<Saved,
     let mut backup_saved_at = None;
     for (generation, slot) in present.iter_mut().enumerate() {
         let name = generation_name(generation);
-        let Some(old) = store.read(&name)? else {
-            continue;
+        let old = match store.read(&name) {
+            Ok(Some(old)) => old,
+            Ok(None) => continue,
+            Err(err) if generation == 0 => return Err(err.into()),
+            Err(_) => {
+                *slot = true;
+                continue;
+            }
         };
         *slot = true;
         let doc = serde_json::from_slice::<Value>(&old).ok();
