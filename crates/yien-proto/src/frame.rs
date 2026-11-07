@@ -314,6 +314,7 @@ pub struct Cursor {
 ///     history_len: 0,
 ///     background: Rgb::default(),
 ///     cursor_color: Rgb::default(),
+///     modes: Default::default(),
 /// };
 /// assert_eq!(frame.line_text(0), "hi");
 /// assert_eq!(frame.text(), "hi");
@@ -335,6 +336,9 @@ pub struct Frame {
     pub background: Rgb,
     /// The cursor colour.
     pub cursor_color: Rgb,
+    /// The modes the program set when the frame was taken, for encoding keys,
+    /// paste and mouse.
+    pub modes: Modes,
 }
 
 impl Frame {

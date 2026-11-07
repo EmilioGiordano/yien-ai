@@ -571,7 +571,7 @@ pub enum CoreMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{Cell, CellFlags, Rgb, Size};
+    use crate::frame::{Cell, CellFlags, Modes, MouseTracking, Rgb, Size};
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -645,6 +645,11 @@ mod tests {
             history_len: 7,
             background: Rgb::default(),
             cursor_color: Rgb::new(9, 9, 9),
+            modes: Modes {
+                bracketed_paste: true,
+                mouse: MouseTracking::Drag,
+                ..Modes::default()
+            },
         };
         let tab = TabInfo {
             id: TabId::new(2),
