@@ -10,7 +10,17 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = []
+# Unmaintained crates pulled in by gpui-kit =0.7.1 (ADR-02), none a direct
+# dependency of ours and none with a fix to upgrade to. Revisit on each gpui-kit bump.
+ignore = [
+    { id = "RUSTSEC-2024-0384", reason = "instant, via gpui-kit" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, via gpui-kit" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via gpui-kit" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via gpui-kit" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, via gpui-kit (Linux)" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, via gpui-kit (Linux)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via gpui-kit (Linux)" },
+]
 
 [licenses]
 # Anything not listed is rejected, which keeps out the GPL family (GPL, AGPL,
@@ -28,6 +38,8 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "BSL-1.0",
+    "0BSD",
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
