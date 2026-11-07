@@ -79,7 +79,7 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 
 ## The branch loop
 
-Every branch goes through the same loop, run by the `yien-branch` skill:
+Every branch goes through the same loop: steps 1–6 with the `yien-branch` skill, step 7 with `yien-integrate`.
 
 1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
 2. `implementer` implements and runs the branch checks, committing as it goes.
