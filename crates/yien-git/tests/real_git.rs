@@ -709,7 +709,7 @@ fn locked_and_main_worktrees_are_not_removed() {
 }
 
 #[test]
-fn rnf_14_worktree_add_and_remove_run_no_repo_hook_or_filter() {
+fn worktree_add_and_remove_run_no_repo_hook_or_filter() {
     let Some(sb) = Sandbox::new() else { return };
     let root = sb.repo("hooks");
     let hooks = root.join(".git/hooks");
@@ -765,4 +765,48 @@ fn rnf_14_worktree_add_and_remove_run_no_repo_hook_or_filter() {
             marker.display()
         );
     }
+}
+
+#[test]
+fn rn_08_ignored_files_and_untracked_folders_are_counted() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("ignored");
+    std::fs::write(root.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+    sb.git(&root, &["add", ".gitignore"]);
+    sb.git(&root, &["commit", "-q", "-m", "ignore"]);
+    let path = sb.dir.join("ignored-wt");
+    git().add_worktree(&root, "feat/i", &path, None).unwrap();
+    assert_eq!(
+        git().worktree_state(&path).unwrap(),
+        WorktreeState::default()
+    );
+
+    std::fs::write(path.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(path.join("node_modules/pkg")).unwrap();
+    std::fs::write(path.join("node_modules/pkg/index.js"), "x\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!((state.changed, state.ignored), (0, 2));
+    assert!(state.has_work(), "ignored files are lost on removal");
+    assert!(state.ignored_examples.contains(&".env".to_owned()));
+    assert!(state.ignored_examples.contains(&"node_modules/".to_owned()));
+
+    std::fs::create_dir_all(path.join("new/deep")).unwrap();
+    for name in ["new/a.txt", "new/b.txt", "new/deep/c.txt"] {
+        std::fs::write(path.join(name), "n\n").unwrap();
+    }
+    assert_eq!(git().worktree_state(&path).unwrap().changed, 3);
+}
+
+#[test]
+fn rn_08_commits_on_a_detached_head_are_flagged() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("detached");
+    let path = sb.dir.join("detached-wt");
+    git().add_worktree(&root, "feat/d", &path, None).unwrap();
+    sb.git(&path, &["switch", "-q", "--detach"]);
+    std::fs::write(path.join("a.txt"), "loose\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "loose"]);
+    let state = git().worktree_state(&path).unwrap();
+    assert!(state.detached);
+    assert_eq!(state.unpushed, 1);
 }
