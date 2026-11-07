@@ -15,6 +15,7 @@
 //!     id: ProjectId::new(1),
 //!     name: "yien".into(),
 //!     root: "C:/code/yien".into(),
+//!     setup_script: None,
 //!     tabs: vec![TabRecord {
 //!         id: TabId::new(1),
 //!         title: "main".into(),
@@ -30,8 +31,12 @@
 //!                 ended_explicitly: false,
 //!             }),
 //!             last_command: None,
+//!             name: None,
 //!         }],
 //!         focused: pane,
+//!         branch: None,
+//!         worktree: None,
+//!         archived: false,
 //!     }],
 //! }]);
 //!
@@ -61,8 +66,8 @@ pub use generations::{
     Saved, SkipReason, Skipped, generation_name, load, preserve_newer, save,
 };
 pub use model::{
-    AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, SessionRef,
-    SessionSnapshot, TabRecord,
+    AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, Selection,
+    SessionRef, SessionSnapshot, TabRecord,
 };
 pub use restore::{ResumeAction, missing_dirs, resume_plan};
 #[cfg(feature = "fs")]

@@ -42,6 +42,7 @@ pub enum ResumeAction {
 ///         ended_explicitly: false,
 ///     }),
 ///     last_command: None,
+///     name: None,
 /// };
 /// assert_eq!(resume_plan(&pane), ResumeAction::Resume(SessionRef::new("4f1c")));
 /// ```
@@ -94,6 +95,7 @@ mod tests {
                 ended_explicitly: ended,
             }),
             last_command: Some("claude".into()),
+            name: None,
         }
     }
 
@@ -104,6 +106,7 @@ mod tests {
             cwd: "C:/code".into(),
             agent: None,
             last_command: last.map(str::to_owned),
+            name: None,
         }
     }
 
@@ -171,6 +174,9 @@ mod tests {
                 ..shell_pane(None)
             }],
             focused: PaneId::new(id),
+            branch: None,
+            worktree: None,
+            archived: false,
         };
         let snapshot = SessionSnapshot::new(
             0,
@@ -178,6 +184,7 @@ mod tests {
                 id: ProjectId::new(1),
                 name: "p".into(),
                 root: "C:/code".into(),
+                setup_script: None,
                 tabs: vec![tab(1, "C:/code"), tab(2, "C:/gone"), tab(3, "C:/code/wt")],
             }],
         );

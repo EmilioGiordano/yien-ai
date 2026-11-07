@@ -61,6 +61,9 @@ pub struct SessionSnapshot {
     pub schema_version: u32,
     /// When the caller took the snapshot, in milliseconds since the Unix epoch.
     pub saved_at: u64,
+    /// The project and tab that were selected.
+    #[serde(default)]
+    pub selected: Selection,
     /// The projects in sidebar order.
     pub projects: Vec<ProjectRecord>,
 }
@@ -76,9 +79,26 @@ impl SessionSnapshot {
         Self {
             schema_version: SCHEMA_VERSION,
             saved_at,
+            selected: Selection::default(),
             projects,
         }
     }
+}
+
+/// The project and tab selected when the snapshot was taken; each `None` when nothing was.
+///
+/// ```
+/// let selected = yien_session::Selection::default();
+/// assert!(selected.project.is_none() && selected.tab.is_none());
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Selection {
+    /// The selected project.
+    #[serde(default)]
+    pub project: Option<ProjectId>,
+    /// The selected tab; it belongs to `project` when both are set.
+    #[serde(default)]
+    pub tab: Option<TabId>,
 }
 
 /// One project in the sidebar.
@@ -88,6 +108,7 @@ impl SessionSnapshot {
 ///     id: yien_proto::ProjectId::new(1),
 ///     name: "yien".into(),
 ///     root: "C:/code/yien".into(),
+///     setup_script: None,
 ///     tabs: Vec::new(),
 /// };
 /// assert!(project.tabs.is_empty());
@@ -100,6 +121,9 @@ pub struct ProjectRecord {
     pub name: String,
     /// The project's root folder.
     pub root: String,
+    /// The script run to prepare a new worktree of the project.
+    #[serde(default)]
+    pub setup_script: Option<String>,
     /// The project's tabs, in order.
     pub tabs: Vec<TabRecord>,
 }
@@ -122,8 +146,12 @@ pub struct ProjectRecord {
 ///         cwd: "C:/code/yien".into(),
 ///         agent: None,
 ///         last_command: None,
+///         name: None,
 ///     }],
 ///     focused: pane,
+///     branch: None,
+///     worktree: None,
+///     archived: false,
 /// };
 /// assert_eq!(tab.layout.panes(), vec![pane]);
 /// ```
@@ -135,6 +163,15 @@ pub struct TabRecord {
     pub title: String,
     /// The tab's directory, checked on restore (RF-SES-12).
     pub dir: String,
+    /// The git branch the tab works on.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The worktree folder, when the tab has its own.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// Whether the tab is archived rather than active.
+    #[serde(default)]
+    pub archived: bool,
     /// How the panes are arranged.
     pub layout: LayoutRecord,
     /// Every pane of the tab; exactly the leaves of `layout`.
@@ -152,6 +189,7 @@ pub struct TabRecord {
 ///     cwd: "C:/code".into(),
 ///     agent: None,
 ///     last_command: Some("cargo test".into()),
+///     name: None,
 /// };
 /// assert!(pane.agent.is_none());
 /// ```
@@ -159,6 +197,9 @@ pub struct TabRecord {
 pub struct PaneRecord {
     /// The pane's id, unique in the whole snapshot.
     pub id: PaneId,
+    /// The name the user gave the pane, if any.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The profile the pane runs.
     pub profile: ProfileId,
     /// The pane's working directory.
