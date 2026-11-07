@@ -898,9 +898,9 @@ fn input_sent_before_the_program_starts_reaches_it() {
 
 #[test]
 fn without_any_size_a_new_pane_starts_at_the_initial_size_after_the_wait() {
-    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(300));
+    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(600));
     h.pending_project();
-    h.assert_nothing_spawned_for(Duration::from_millis(150));
+    h.assert_nothing_spawned_for(Duration::from_millis(250));
     let child = h.child();
     assert_eq!((child.spec().cols, child.spec().rows), (80, 24));
 }
@@ -932,7 +932,7 @@ fn while_the_ui_has_reported_nothing_a_new_pane_keeps_waiting() {
 
 #[test]
 fn a_pane_terminated_before_it_starts_never_starts() {
-    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(100));
+    let mut h = waiting(Duration::from_millis(300), Duration::from_millis(300));
     let (_, _, pane) = h.pending_project();
     h.command(Command::TerminatePane { pane });
     h.wait_for(|m| match m {
@@ -942,17 +942,17 @@ fn a_pane_terminated_before_it_starts_never_starts() {
         } if *p == pane => Some(()),
         _ => None,
     });
-    h.assert_nothing_spawned_for(Duration::from_millis(300));
+    h.assert_nothing_spawned_for(Duration::from_millis(800));
     h.command(Command::RelaunchPane { pane });
     h.child();
 }
 
 #[test]
 fn a_tab_closed_before_its_pane_starts_spawns_nothing() {
-    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(100));
+    let mut h = waiting(Duration::from_millis(300), Duration::from_millis(300));
     let (_, tab, _) = h.pending_project();
     h.command(Command::CloseTab { tab });
-    h.assert_nothing_spawned_for(Duration::from_millis(300));
+    h.assert_nothing_spawned_for(Duration::from_millis(800));
 }
 
 #[test]
