@@ -15,7 +15,7 @@ use yien_proto::frame::{Frame, Modes, Rgb, SelectionKind, ViewportPoint};
 use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
 use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
-use crate::bridge::{Backlog, Link, deliver, pane_busy};
+use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
 use crate::grid::{self, CursorPaint, PastePlan, PromptKey, Underline, WheelAction};
 use crate::theme::Theme;
 
@@ -113,12 +113,13 @@ impl TerminalPane {
         self.frame.as_ref().map(|f| f.modes).unwrap_or_default()
     }
 
-    fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) {
+    fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) -> Sent {
         let before = self.link.revision();
-        deliver(&self.link, msg, cx);
+        let sent = deliver(&self.link, msg, cx);
         if self.link.revision() != before {
             cx.notify();
         }
+        sent
     }
 
     fn backlog(&self) -> Backlog {
@@ -192,8 +193,7 @@ impl TerminalPane {
         if self.sent_size == Some((cols, rows)) {
             return;
         }
-        self.sent_size = Some((cols, rows));
-        self.send(
+        let sent = self.send(
             ClientMsg::ResizePane {
                 pane: self.id,
                 cols,
@@ -201,6 +201,10 @@ impl TerminalPane {
             },
             cx,
         );
+        // A refused size is asked for again on the next paint.
+        if matches!(sent, Sent::Delivered | Sent::Queued) {
+            self.sent_size = Some((cols, rows));
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -416,13 +420,15 @@ impl TerminalPane {
         let whole = whole.clamp(-1000.0, 1000.0) as i32;
         match grid::wheel_action(whole, &self.modes(), at, mods_of(&event.modifiers)) {
             Some(WheelAction::Report(bytes)) => self.write_report(bytes, cx),
-            Some(WheelAction::Scroll(delta)) => self.send(
-                ClientMsg::Scroll {
-                    pane: self.id,
-                    delta,
-                },
-                cx,
-            ),
+            Some(WheelAction::Scroll(delta)) => {
+                self.send(
+                    ClientMsg::Scroll {
+                        pane: self.id,
+                        delta,
+                    },
+                    cx,
+                );
+            }
             None => {}
         }
     }
