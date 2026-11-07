@@ -90,14 +90,21 @@ impl Git {
     /// Submodules count as changed only when their commit differs, not for
     /// edits inside them (`--ignore-submodules=dirty`), which keeps it fast.
     ///
+    /// Content filters (`filter.<name>.clean` and `.process`) defined by the
+    /// repository's own config are switched off for the call, since a cloned or
+    /// planted `.git` must not run programs. Filters from the user's global and
+    /// system config, such as git-lfs, still run. This costs one extra `git config` call.
+    ///
     /// ```no_run
     /// let status = yien_git::Git::new().status(std::path::Path::new("."))?;
     /// println!("{} dirty={}", status.head.label(), status.is_dirty());
     /// # Ok::<(), yien_git::GitError>(())
     /// ```
     pub fn status(&self, dir: &Path) -> Result<Status, GitError> {
-        let out = self.run(
+        let overrides = self.repo_filter_overrides(dir)?;
+        let out = self.run_with(
             dir,
+            &overrides,
             &[
                 "status",
                 "--porcelain=v2",
@@ -109,7 +116,28 @@ impl Git {
         Ok(parse_status(&out)?)
     }
 
-    /// [`Git::discover`] and [`Git::status`] together: two or three git calls.
+    /// `-c` settings that switch off every filter the repository's own config defines.
+    fn repo_filter_overrides(&self, dir: &Path) -> Result<Vec<String>, GitError> {
+        let listing = self.run(
+            dir,
+            &[
+                "config",
+                "-z",
+                "--show-scope",
+                "--name-only",
+                "--get-regexp",
+                r"^filter\..*\.(clean|process|required)$",
+            ],
+        );
+        match listing {
+            Ok(out) => filter_overrides(&out),
+            // Exit code 1: no key matched.
+            Err(GitError::Failed { code: Some(1), .. }) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// [`Git::discover`] and [`Git::status`] together: three or four git calls.
     ///
     /// ```no_run
     /// let info = yien_git::Git::new().info(std::path::Path::new("."))?;
@@ -129,6 +157,48 @@ impl Git {
             .ok()?;
         main_worktree_from_list(&out)
     }
+}
+
+/// Config scopes whose settings the user wrote. `--show-scope` labels an
+/// included file with the scope of the file that includes it, so a repo file
+/// pulled in by `.git/config` still reads as `local`.
+const TRUSTED_SCOPES: &[&str] = &["global", "system", "command"];
+
+/// Builds the `-c` overrides from `git config -z --show-scope --name-only`
+/// output, which alternates scope and key, each NUL-terminated.
+fn filter_overrides(out: &[u8]) -> Result<Vec<String>, GitError> {
+    let mut fields = out.split(|&b| b == 0);
+    let mut overrides = Vec::new();
+    while let Some(scope) = fields.next() {
+        if scope.is_empty() {
+            continue;
+        }
+        let key = fields
+            .next()
+            .filter(|k| !k.is_empty())
+            .ok_or(ParseError::ConfigListing)?;
+        if TRUSTED_SCOPES.contains(&String::from_utf8_lossy(scope).as_ref()) {
+            continue;
+        }
+        // `-c` splits at the first '=', and a lossy key would name another filter.
+        let Ok(key) = std::str::from_utf8(key) else {
+            return Err(GitError::UnsafeFilter {
+                key: String::from_utf8_lossy(key).into_owned(),
+            });
+        };
+        if key.contains('=') {
+            return Err(GitError::UnsafeFilter {
+                key: key.to_owned(),
+            });
+        }
+        let value = if key.ends_with(".required") {
+            "false"
+        } else {
+            ""
+        };
+        overrides.push(format!("{key}={value}"));
+    }
+    Ok(overrides)
 }
 
 /// Reads the main worktree from `git worktree list --porcelain -z` output;
@@ -159,6 +229,39 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_filters_are_emptied_and_user_filters_kept() {
+        let out = b"local\0filter.evil.clean\0global\0filter.lfs.process\0\
+                    worktree\0filter.my evil.process\0local\0filter.evil.required\0\
+                    system\0filter.sys.clean\0command\0filter.cmd.clean\0\
+                    unknown\0filter.u.clean\0";
+        assert_eq!(
+            filter_overrides(out).unwrap(),
+            vec![
+                "filter.evil.clean=",
+                "filter.my evil.process=",
+                "filter.evil.required=false",
+                "filter.u.clean=",
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_key_that_cannot_be_overridden_is_refused() {
+        let err = filter_overrides(b"local\0filter.a=b.clean\0").unwrap_err();
+        assert!(matches!(err, GitError::UnsafeFilter { ref key } if key == "filter.a=b.clean"));
+        let err = filter_overrides(b"local\0filter.\xff.clean\0").unwrap_err();
+        assert!(matches!(err, GitError::UnsafeFilter { .. }));
+        assert!(filter_overrides(b"global\0filter.a=b.clean\0").is_ok());
+    }
+
+    #[test]
+    fn malformed_config_listing_is_an_error() {
+        assert!(filter_overrides(b"local\0").is_err());
+        assert!(filter_overrides(b"local\0\0").is_err());
+        assert_eq!(filter_overrides(b"").unwrap(), Vec::<String>::new());
+    }
 
     #[test]
     fn main_worktree_is_the_first_entry() {

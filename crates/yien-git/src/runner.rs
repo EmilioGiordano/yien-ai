@@ -104,18 +104,17 @@ impl Git {
 
     /// Runs `git <args>` in `dir` and returns its stdout.
     pub(crate) fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
-        let mut cmd = Command::new(&self.program);
-        cmd.arg("-C")
-            .arg(dir)
-            .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
-            .args(args)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            // Untranslated messages, so "not a git repository" can be recognised.
-            .env("LC_ALL", "C");
-        for var in REPO_OVERRIDES {
-            cmd.env_remove(var);
-        }
+        self.run_with(dir, &[], args)
+    }
+
+    /// Like [`Git::run`], with extra `-c <key>=<value>` settings before the subcommand.
+    pub(crate) fn run_with(
+        &self,
+        dir: &Path,
+        config: &[String],
+        args: &[&str],
+    ) -> Result<Vec<u8>, GitError> {
+        let cmd = self.command(dir, config, args);
         let subcommand = args.first().copied().unwrap_or_default();
         let output = match run_command(cmd, self.timeout, MAX_OUTPUT) {
             Ok(output) => output,
@@ -127,14 +126,40 @@ impl Git {
         if output.status.success() {
             return Ok(output.stdout);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("not a git repository") {
-            return Err(GitError::NotARepository);
+        Err(classify_failure(
+            output.status.code(),
+            &String::from_utf8_lossy(&output.stderr),
+        ))
+    }
+
+    fn command(&self, dir: &Path, config: &[String], args: &[&str]) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.arg("-C")
+            .arg(dir)
+            .args(["--no-optional-locks", "-c", "core.fsmonitor=false"]);
+        for setting in config {
+            cmd.arg("-c").arg(setting);
         }
-        Err(GitError::Failed {
-            code: output.status.code(),
-            message: first_line(&stderr),
-        })
+        cmd.args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            // Untranslated messages, so they can be recognised in classify_failure.
+            .env("LC_ALL", "C");
+        for var in REPO_OVERRIDES {
+            cmd.env_remove(var);
+        }
+        cmd
+    }
+}
+
+/// Turns a failed call's exit code and stderr (untranslated, `LC_ALL=C`) into an error.
+fn classify_failure(code: Option<i32>, stderr: &str) -> GitError {
+    if stderr.contains("not a git repository") {
+        return GitError::NotARepository;
+    }
+    GitError::Failed {
+        code,
+        message: first_line(stderr),
     }
 }
 
@@ -326,6 +351,48 @@ mod tests {
             ),
             Err(other) => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn failures_are_classified() {
+        assert!(matches!(
+            classify_failure(
+                Some(128),
+                "fatal: not a git repository (or any of the parent directories): .git\n"
+            ),
+            GitError::NotARepository
+        ));
+        match classify_failure(Some(129), "\nerror: unknown option `x'\nusage: ...") {
+            GitError::Failed { code, message } => {
+                assert_eq!(code, Some(129));
+                assert_eq!(message, "error: unknown option `x'");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn inherited_repository_variables_are_removed() {
+        let cmd = Git::new().command(Path::new("."), &["filter.x.clean=".to_owned()], &["status"]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(
+                envs.contains(&(std::ffi::OsStr::new(var), None)),
+                "{var} is not removed"
+            );
+        }
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args.iter().position(|a| a == "filter.x.clean=").unwrap();
+        assert_eq!(args[at - 1], "-c");
+        assert!(at < args.iter().position(|a| a == "status").unwrap());
     }
 
     #[test]

@@ -16,6 +16,13 @@ pub enum GitError {
     /// The directory is not inside a git work tree.
     #[error("not inside a git repository")]
     NotARepository,
+    /// The repository's own config defines a content filter that cannot be
+    /// switched off from the command line, so `status` was not run.
+    #[error("the repository config defines filter setting {key}, which YIEN cannot switch off")]
+    UnsafeFilter {
+        /// The config key, such as `filter.x=y.clean`.
+        key: String,
+    },
     /// git did not finish in time and was killed.
     #[error("git did not answer within {} ms", .0.as_millis())]
     Timeout(Duration),
@@ -54,6 +61,9 @@ pub enum ParseError {
         /// What was wrong with it.
         reason: &'static str,
     },
+    /// `git config -z --show-scope --name-only` printed a scope with no key.
+    #[error("config listing has a scope with no key")]
+    ConfigListing,
     /// `rev-parse` printed fewer lines than were asked for.
     #[error("rev-parse printed {got} lines, expected {expected}")]
     RevParseLines {
