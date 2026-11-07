@@ -57,8 +57,27 @@ pub(crate) enum PaneEvent {
     SessionId(String),
     Started,
     Exited(Option<u32>),
-    SpawnFailed(String),
+    /// The program could not start or can no longer be shown; the actor
+    /// still runs and can relaunch it.
+    Failed(String),
+    /// The actor itself died; a relaunch starts a new one.
     Crashed,
+    Selection(Option<String>),
+}
+
+impl PaneEvent {
+    /// A detail of the pane rather than a step of its program's lifecycle;
+    /// only the latest value of each matters.
+    pub fn is_detail(&self) -> bool {
+        matches!(
+            self,
+            PaneEvent::State(_)
+                | PaneEvent::Title(_)
+                | PaneEvent::Cwd(_)
+                | PaneEvent::SessionId(_)
+                | PaneEvent::Selection(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -564,17 +583,28 @@ impl Workspace {
                 p.running = false;
                 p.exit_code = code;
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code }));
+                self.emit_pane(pane, &mut fx);
             }
-            PaneEvent::SpawnFailed(message) => {
+            PaneEvent::Failed(message) => {
                 p.running = false;
+                p.exit_code = None;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message,
                 }));
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code: None }));
+                self.emit_pane(pane, &mut fx);
+            }
+            PaneEvent::Selection(text) => {
+                fx.push(Effect::Emit(CoreMsg::SelectionText { pane, text }));
             }
             PaneEvent::Crashed => {
                 p.running = false;
+                p.exit_code = None;
+                // The new actor a relaunch starts knows nothing: the next
+                // refresh sends it the view again.
+                p.visible = false;
+                p.seen = false;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message: "This pane stopped after an internal error. Relaunch it to start \
@@ -582,6 +612,7 @@ impl Workspace {
                         .to_owned(),
                 }));
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code: None }));
+                self.emit_pane(pane, &mut fx);
             }
         }
         fx

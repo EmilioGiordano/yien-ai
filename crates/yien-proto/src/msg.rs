@@ -2,14 +2,17 @@
 //! and events from the core ([`CoreMsg`]), with the workspace descriptions they
 //! carry.
 //!
-//! State events carry the whole object (a [`PaneInfo`], a [`TabInfo`]), never
-//! a delta, so a lost or merged event is corrected by the next one.
+//! [`CoreMsg::ProjectUpdated`], [`CoreMsg::TabUpdated`] and
+//! [`CoreMsg::PaneUpdated`] carry the whole object, so a later one corrects
+//! anything missed. [`CoreMsg::PaneState`] and [`CoreMsg::PaneExited`] are
+//! deltas: they carry only what changed, and the next [`PaneInfo`] carries it
+//! too.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::frame::{Frame, SelectionKind, Side, ViewportPoint};
+use crate::frame::{SelectionKind, Side, ViewportPoint};
 use crate::{PaneId, ProjectId, TabId};
 
 /// Names an agent profile: `claude`, `codex`, `shell` (RF-AGE-01, RF-PAN-18).
@@ -493,11 +496,14 @@ pub struct WorkspaceSnapshot {
     pub active_tab: Option<TabId>,
 }
 
-/// Everything the core tells the UI.
+/// Everything the core tells the UI, in order.
 ///
-/// Frames are "last one wins": the core may skip one when the UI is behind,
-/// and the next carries the current screen. Every other event is delivered.
-/// Events for a pane or tab the UI no longer knows are stale and ignored.
+/// While the UI is behind, details of a pane reported between two steps of
+/// its program's lifecycle are merged: only the latest state, title,
+/// directory and session id are sent. Frames do not travel as events:
+/// [`CoreMsg::PaneFrameReady`] says a pane has a new frame, and the UI takes
+/// the latest one from the core handle. Events for a pane or tab the UI no
+/// longer knows are stale and ignored.
 ///
 /// ```
 /// use yien_proto::{AgentState, CoreMsg, PaneId};
@@ -530,14 +536,16 @@ pub enum CoreMsg {
         /// The pane.
         pane: PaneId,
     },
-    /// The visible rows of a pane (ADR-06: the UI never holds the grid).
-    PaneFrame {
+    /// A pane has a new frame to draw (ADR-06: the UI holds visible rows,
+    /// never the grid). Take it with the core handle's `take_frame`. Frames
+    /// are "last one wins" (plan §4.2): until the UI takes one, newer frames
+    /// replace it and no further notice is sent.
+    PaneFrameReady {
         /// The pane.
         pane: PaneId,
-        /// What to draw.
-        frame: Frame,
     },
-    /// The agent state of a pane changed (RF-PAN-12).
+    /// The agent state of a pane changed (RF-PAN-12). A delta; the pane's
+    /// next [`PaneInfo`] carries the same state.
     PaneState {
         /// The pane.
         pane: PaneId,
@@ -545,7 +553,7 @@ pub enum CoreMsg {
         state: AgentState,
     },
     /// The program of a pane exited; the pane stays and can be relaunched
-    /// (RF-PAN-19).
+    /// (RF-PAN-19). A [`CoreMsg::PaneUpdated`] with the exit code follows.
     PaneExited {
         /// The pane.
         pane: PaneId,
@@ -571,7 +579,7 @@ pub enum CoreMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{Cell, CellFlags, Modes, MouseTracking, Rgb, Size};
+    use crate::frame::{Cell, CellFlags, Frame, Modes, MouseTracking, Rgb, Size};
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -661,10 +669,10 @@ mod tests {
             focused: PaneId::new(3),
             maximized: None,
         };
+        assert_eq!(round_trip(&frame), frame);
         let msgs = [
-            CoreMsg::PaneFrame {
+            CoreMsg::PaneFrameReady {
                 pane: PaneId::new(3),
-                frame,
             },
             CoreMsg::TabUpdated(tab),
             CoreMsg::PaneState {

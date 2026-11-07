@@ -12,13 +12,23 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
-use yien_core::{Core, CoreConfig, CoreHandle, ShellCommand};
+use yien_agent::Profile;
+use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand};
+use yien_proto::frame::Frame;
 use yien_proto::{
-    AgentState, ClientMsg, Command, CoreMsg, InputBytes, Orientation, PaneId, ProfileId, TabId,
+    AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
+    ProfileId, TabId,
 };
 use yien_pty::{FakeChild, FakeInput, FakePty};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+fn config() -> CoreConfig {
+    CoreConfig {
+        shell: ShellCommand::new("fake-shell"),
+        ..CoreConfig::default()
+    }
+}
 
 struct Harness {
     core: CoreHandle,
@@ -28,11 +38,11 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
+        Self::start_with(config())
+    }
+
+    fn start_with(config: CoreConfig) -> Self {
         let backend = FakePty::new();
-        let config = CoreConfig {
-            shell: ShellCommand::new("fake-shell"),
-            ..CoreConfig::default()
-        };
         let (core, events) = Core::start(Arc::new(backend.clone()), config).unwrap();
         Self {
             core,
@@ -49,11 +59,22 @@ impl Harness {
         self.send(ClientMsg::Command(command));
     }
 
+    /// Sends input, waiting while the pane's queue is full.
     fn input(&self, pane: PaneId, bytes: &[u8]) {
-        self.send(ClientMsg::Input {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut msg = ClientMsg::Input {
             pane,
             bytes: InputBytes::new(bytes.to_vec()),
-        });
+        };
+        loop {
+            match self.core.try_send(msg) {
+                Ok(()) => return,
+                Err(SendError::Busy(back)) => msg = back,
+                Err(e) => panic!("{e}"),
+            }
+            assert!(Instant::now() < deadline, "the pane stayed busy");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Reads events until `pick` accepts one; drains everything before it.
@@ -73,6 +94,20 @@ impl Harness {
                 Err(TryRecvError::Disconnected) => panic!("the core stopped"),
             }
         }
+    }
+
+    fn frame_ready(&mut self, pane: PaneId) {
+        self.wait_for(|m| match m {
+            CoreMsg::PaneFrameReady { pane: p } if *p == pane => Some(()),
+            _ => None,
+        });
+    }
+
+    fn state(&mut self, pane: PaneId) -> AgentState {
+        self.wait_for(|m| match m {
+            CoreMsg::PaneState { pane: p, state } if *p == pane => Some(*state),
+            _ => None,
+        })
     }
 
     fn child(&self) -> FakeChild {
@@ -112,24 +147,39 @@ impl Harness {
         (new, self.child())
     }
 
-    fn frame_with(&mut self, pane: PaneId, text: &str) -> String {
-        self.wait_for(|m| match m {
-            CoreMsg::PaneFrame { pane: p, frame } if *p == pane && frame.text().contains(text) => {
-                Some(frame.text())
+    /// Takes frames of `pane` as they are announced until one shows `text`.
+    fn frame_with(&mut self, pane: PaneId, text: &str) -> Frame {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(frame) = self.core.take_frame(pane)
+                && frame.text().contains(text)
+            {
+                return frame;
             }
-            _ => None,
-        })
+            assert!(Instant::now() < deadline, "no frame showed {text:?}");
+            self.frame_ready(pane);
+        }
     }
+}
+
+fn next_input(child: &FakeChild) -> FakeInput {
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(input) = child.recv_input(Duration::from_millis(50)) {
+            return input;
+        }
+    }
+    panic!("timed out waiting for input");
 }
 
 fn next_bytes(child: &FakeChild) -> Vec<u8> {
     let deadline = Instant::now() + TIMEOUT;
     while Instant::now() < deadline {
-        if let Some(FakeInput::Bytes(bytes)) = child.recv_input(Duration::from_millis(50)) {
+        if let FakeInput::Bytes(bytes) = next_input(child) {
             return bytes;
         }
     }
-    panic!("timed out waiting for input");
+    panic!("timed out waiting for bytes");
 }
 
 fn wait_until(mut done: impl FnMut() -> bool) {
@@ -192,7 +242,7 @@ fn rf_pan_18_split_spawns_the_chosen_profile() {
 }
 
 #[test]
-fn rf_pan_01_close_terminates_and_removes_the_pane() {
+fn rf_pan_20_close_terminates_and_removes_the_pane() {
     let mut h = Harness::start();
     let (_, first, _) = h.project();
     let (second, child) = h.split(first, None);
@@ -248,29 +298,115 @@ fn rf_age_02_input_reaches_the_program_unaltered() {
 }
 
 #[test]
-fn rf_pan_12_output_produces_a_frame_with_the_text() {
+fn input_to_a_pane_that_does_not_read_is_busy_and_the_pane_still_closes() {
+    let mut h = Harness::start();
+    let (_, first, first_child) = h.project();
+    let (pane, child) = h.split(first, None);
+    let mut accepted = 0;
+    let refused = loop {
+        let msg = ClientMsg::Input {
+            pane,
+            bytes: InputBytes::new(b"x".to_vec()),
+        };
+        match h.core.try_send(msg) {
+            Ok(()) => accepted += 1,
+            Err(SendError::Busy(msg)) => break msg,
+            Err(e) => panic!("{e}"),
+        }
+        assert!(accepted < 10_000, "input was never refused");
+    };
+    assert!(matches!(refused, ClientMsg::Input { pane: p, .. } if p == pane));
+
+    h.input(first, b"still served");
+    assert_eq!(next_bytes(&first_child), b"still served");
+    h.command(Command::ClosePane { pane });
+    h.wait_for(|m| match m {
+        CoreMsg::PaneClosed { pane: p } if *p == pane => Some(()),
+        _ => None,
+    });
+    wait_until(|| child.was_killed());
+}
+
+#[test]
+fn rf_pan_06_output_produces_a_frame_with_the_text() {
     let mut h = Harness::start();
     let (_, pane, child) = h.project();
     child.output(b"hello from the child");
-    let text = h.frame_with(pane, "hello from the child");
-    assert!(text.starts_with("hello"));
+    let frame = h.frame_with(pane, "hello from the child");
+    assert!(frame.text().starts_with("hello"));
 }
 
 #[test]
 fn frames_are_coalesced_while_output_streams() {
-    let mut h = Harness::start();
+    let mut h = Harness::start_with(CoreConfig {
+        frame_interval: Duration::from_millis(200),
+        ..config()
+    });
     let (_, pane, child) = h.project();
     for i in 0..200 {
         child.output(format!("line {i}\r\n").as_bytes());
     }
-    h.frame_with(pane, "line 199");
-    let mut frames = 1;
-    while let Ok(msg) = h.events.try_recv() {
-        if matches!(msg, CoreMsg::PaneFrame { .. }) {
-            frames += 1;
+    let mut frames = 0;
+    loop {
+        h.frame_ready(pane);
+        frames += 1;
+        let frame = h.core.take_frame(pane);
+        if frame.is_some_and(|f| f.text().contains("line 199")) {
+            break;
         }
     }
-    assert!(frames < 200, "{frames} frames for 200 chunks");
+    assert!(frames <= 3, "{frames} frames for 200 chunks");
+}
+
+#[test]
+fn an_untaken_frame_is_replaced_and_announced_once() {
+    let mut h = Harness::start_with(CoreConfig {
+        frame_interval: Duration::from_millis(10),
+        ..config()
+    });
+    let (_, pane, child) = h.project();
+    h.frame_ready(pane);
+    child.output(b"one");
+    std::thread::sleep(Duration::from_millis(100));
+    child.output(b" two");
+    std::thread::sleep(Duration::from_millis(100));
+    let mut notices = 0;
+    while let Ok(msg) = h.events.try_recv() {
+        if matches!(msg, CoreMsg::PaneFrameReady { pane: p } if p == pane) {
+            notices += 1;
+        }
+    }
+    assert_eq!(notices, 0, "the first notice stands until a take");
+    assert_eq!(h.core.take_frame(pane).unwrap().text(), "one two");
+    assert!(h.core.take_frame(pane).is_none());
+
+    child.output(b" three");
+    assert!(h.frame_with(pane, "three").text().ends_with("three"));
+}
+
+#[test]
+fn rf_pan_14_frames_carry_the_terminal_modes() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"\x1b[?2004h\x1b[?1h\x1b[?1000h\x1b[?1006hmodes");
+    let modes = h.frame_with(pane, "modes").modes;
+    assert!(modes.bracketed_paste && modes.app_cursor);
+    assert_eq!(modes.mouse, yien_proto::frame::MouseTracking::Click);
+    assert_eq!(modes.mouse_encoding, yien_proto::frame::MouseEncoding::Sgr);
+}
+
+#[test]
+fn an_open_synchronized_update_shows_after_its_timeout() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    let start = Instant::now();
+    child.output(b"\x1b[?2026hheld back");
+    h.frame_with(pane, "held back");
+    assert!(
+        start.elapsed() >= yien_vt::SYNC_UPDATE_TIMEOUT - Duration::from_millis(20),
+        "shown after {:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -295,6 +431,7 @@ fn a_reply_is_never_dropped_behind_a_full_input_queue() {
     }
     std::thread::sleep(Duration::from_millis(50));
     child.output(b"\x1b[6n");
+    std::thread::sleep(Duration::from_millis(50));
 
     let mut inputs = Vec::new();
     let mut replies = Vec::new();
@@ -337,14 +474,7 @@ fn a_reply_goes_before_a_resize_waiting_on_a_full_queue() {
 
     let mut order = Vec::new();
     while order.len() < sent.len() + 2 {
-        let deadline = Instant::now() + TIMEOUT;
-        let input = loop {
-            if let Some(input) = child.recv_input(Duration::from_millis(50)) {
-                break input;
-            }
-            assert!(Instant::now() < deadline, "timed out waiting for input");
-        };
-        order.push(match input {
+        order.push(match next_input(&child) {
             FakeInput::Bytes(b) if b.starts_with(b"\x1b[") => "reply".to_owned(),
             FakeInput::Bytes(b) => String::from_utf8(b).unwrap(),
             FakeInput::Resize { cols, rows } => format!("resize {cols}x{rows}"),
@@ -387,6 +517,11 @@ fn rf_pan_19_exit_is_reported_and_the_pane_relaunches() {
         _ => None,
     });
     assert_eq!(code, Some(3));
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!((info.running, info.exit_code), (false, Some(3)));
 
     h.command(Command::RelaunchPane { pane });
     let again = h.child();
@@ -396,6 +531,27 @@ fn rf_pan_19_exit_is_reported_and_the_pane_relaunches() {
         _ => None,
     });
     assert_eq!(running, None);
+}
+
+#[test]
+fn rf_pan_19_a_relaunched_program_starts_on_a_fresh_terminal() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"\x1b[?2004h\x1b[?1049hbefore");
+    let frame = h.frame_with(pane, "before");
+    assert!(frame.modes.bracketed_paste && frame.modes.alt_screen);
+    child.exit(0);
+    h.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane: p, .. } if *p == pane => Some(()),
+        _ => None,
+    });
+
+    h.command(Command::RelaunchPane { pane });
+    let again = h.child();
+    again.output(b"after");
+    let frame = h.frame_with(pane, "after");
+    assert!(!frame.text().contains("before"));
+    assert!(!frame.modes.bracketed_paste && !frame.modes.alt_screen);
 }
 
 #[test]
@@ -460,11 +616,57 @@ fn rf_age_05_a_running_shell_command_is_working() {
     let mut h = Harness::start();
     let (_, pane, child) = h.project();
     child.output(b"\x1b]133;C\x07");
-    let state = h.wait_for(|m| match m {
-        CoreMsg::PaneState { pane: p, state } if *p == pane => Some(*state),
-        _ => None,
+    assert_eq!(h.state(pane), AgentState::Working);
+}
+
+#[test]
+fn rf_age_07_a_turn_done_unseen_goes_idle_once_the_window_is_focused() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"\x1b]133;C\x07");
+    assert_eq!(h.state(pane), AgentState::Working);
+    child.output(b"\x1b]133;D;0\x07");
+    assert_eq!(h.state(pane), AgentState::Done);
+    h.send(ClientMsg::WindowFocus { focused: true });
+    assert_eq!(h.state(pane), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_the_watchdog_ticks_and_confirms_a_prompt_on_screen() {
+    let profile = Profile::from_toml(
+        r#"
+schema = 1
+id = "watched"
+name = "Watched"
+detect = { command = "fake-agent" }
+
+[[rules]]
+sources = ["osc133", "screen"]
+watchdog_secs = 1
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 12
+pattern = '(?m)^Do you want to proceed\?'
+"#,
+    )
+    .unwrap();
+    let mut h = Harness::start_with(CoreConfig {
+        profiles: vec![profile],
+        ..config()
     });
-    assert_eq!(state, AgentState::Working);
+    let (_, first, _) = h.project();
+    let (pane, child) = h.split(first, Some("watched"));
+    assert_eq!(child.spec().program, "fake-agent");
+    let start = Instant::now();
+    child.output(b"\x1b]133;C\x07\x1b[20;1HDo you want to proceed?");
+    assert_eq!(h.state(pane), AgentState::Working);
+    assert_eq!(h.state(pane), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -530,19 +732,19 @@ fn panes_in_a_hidden_tab_send_frames_once_shown() {
         _ => None,
     });
     let shown_child = h.child();
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = h.core.take_frame(hidden);
 
     hidden_child.output(b"hidden text");
     std::thread::sleep(Duration::from_millis(50));
     shown_child.output(b"shown text");
-    h.wait_for(|m| match m {
-        CoreMsg::PaneFrame { pane, .. } if *pane == hidden => {
-            panic!("a pane in a hidden tab sent a frame")
-        }
-        CoreMsg::PaneFrame { pane, frame } if *pane == shown && frame.text().contains("shown") => {
-            Some(())
-        }
-        _ => None,
-    });
+    h.frame_with(shown, "shown text");
+    assert!(
+        h.core
+            .take_frame(hidden)
+            .is_none_or(|f| !f.text().contains("hidden")),
+        "a pane in a hidden tab published a frame"
+    );
 
     h.command(Command::SelectTab { tab: first_tab });
     h.frame_with(hidden, "hidden text");
