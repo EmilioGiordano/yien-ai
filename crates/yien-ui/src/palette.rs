@@ -364,6 +364,7 @@ mod tests {
             tab: TabId::new(tab),
             name: name.into(),
             profile: "Shell".into(),
+            profile_id: yien_proto::ProfileId::new("shell"),
             title: None,
             cwd: None,
             state,
@@ -385,6 +386,7 @@ mod tests {
             name: name.into(),
             root: "C:/Code".into(),
             tabs: tabs.iter().map(|t| TabId::new(*t)).collect(),
+            collapsed: false,
         };
         WorkspaceView::from_snapshot(&WorkspaceSnapshot {
             projects: vec![project(1, "yien", &[10, 11]), project(2, "notes", &[20])],

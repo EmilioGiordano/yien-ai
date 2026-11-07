@@ -164,6 +164,11 @@ impl Shell {
                     self.workspace = WorkspaceView::from_snapshot(&snapshot);
                 }
                 CoreMsg::ProjectUpdated(info) => self.workspace.project_updated(&info),
+                CoreMsg::ProjectClosed { project } => {
+                    for pane in self.workspace.project_closed(project) {
+                        ready.remove(&pane);
+                    }
+                }
                 CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {

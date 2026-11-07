@@ -203,7 +203,10 @@ pub struct ProjectView {
 /// use yien_ui::WorkspaceView;
 ///
 /// let snapshot = WorkspaceSnapshot {
-///     projects: vec![ProjectInfo { id: ProjectId::new(1), name: "yien".into(), root: "C:/yien".into(), tabs: vec![TabId::new(2)] }],
+///     projects: vec![ProjectInfo {
+///         id: ProjectId::new(1), name: "yien".into(), root: "C:/yien".into(), tabs: vec![TabId::new(2)],
+///         collapsed: false,
+///     }],
 ///     tabs: vec![TabInfo {
 ///         id: TabId::new(2), project: ProjectId::new(1), name: "Tab 1".into(), dir: "C:/yien".into(),
 ///         branch: None, layout: LayoutNode::Pane(PaneId::new(3)), focused: PaneId::new(3), maximized: None,
@@ -327,6 +330,24 @@ impl WorkspaceView {
                     .copied()
             };
             self.selected = sibling.or_else(fallback);
+        }
+        gone
+    }
+
+    /// A project left the sidebar. The core closes its tabs first; any still
+    /// held go now. Returns the panes that went with them.
+    pub fn project_closed(&mut self, id: ProjectId) -> Vec<PaneId> {
+        let tabs = self
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.tabs.clone())
+            .unwrap_or_default();
+        let gone = tabs.into_iter().flat_map(|t| self.tab_closed(t)).collect();
+        self.projects.retain(|p| p.id != id);
+        self.folded.remove(&id);
+        if self.last_project == Some(id) {
+            self.last_project = None;
         }
         gone
     }
@@ -696,6 +717,7 @@ mod tests {
             name: format!("project-{id}"),
             root: format!("C:/Code/project-{id}"),
             tabs: tabs.iter().map(|t| TabId::new(*t)).collect(),
+            collapsed: false,
         }
     }
 
@@ -705,6 +727,7 @@ mod tests {
             tab: TabId::new(tab),
             name: format!("pane-{id}"),
             profile: "Shell".into(),
+            profile_id: yien_proto::ProfileId::new("shell"),
             title: None,
             cwd: None,
             state,

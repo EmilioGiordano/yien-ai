@@ -74,7 +74,7 @@ impl Workspace {
                 name: p.name.clone(),
                 root: p.root.clone(),
                 setup_script: None,
-                collapsed: false,
+                collapsed: p.collapsed,
                 tabs: p
                     .tabs
                     .iter()
@@ -104,7 +104,7 @@ impl Workspace {
             .collect();
         TabRecord {
             id: tab.id,
-            title: tab.name.clone(),
+            title: tab.default_name.clone(),
             dir: tab.kept_dir.clone().unwrap_or_else(|| tab.dir.clone()),
             branch: match tab.kept_dir {
                 Some(_) => tab.kept_branch.clone(),
@@ -112,7 +112,7 @@ impl Workspace {
             },
             worktree: None,
             archived: false,
-            name: None,
+            name: tab.custom_name.clone(),
             layout,
             panes,
             focused: tab.focused,
@@ -143,7 +143,9 @@ impl Workspace {
                 if self.restore_tab(project, record, resolve, disk, &mut fx, &mut notes) {
                     tabs.push(record.id);
                 } else {
-                    notes.broken.push(record.title.clone());
+                    notes
+                        .broken
+                        .push(record.name.clone().unwrap_or_else(|| record.title.clone()));
                 }
             }
             self.projects.push(Project {
@@ -151,6 +153,7 @@ impl Workspace {
                 name: project.name.clone(),
                 root: project.root.clone(),
                 tabs,
+                collapsed: project.collapsed,
             });
         }
         // Ids grow as tabs open, so this is the order they were opened in.
@@ -283,7 +286,12 @@ impl Workspace {
         self.tabs.push(Tab {
             id: record.id,
             project: project.id,
-            name: record.title.clone(),
+            custom_name: record
+                .name
+                .as_ref()
+                .map(|n| n.trim().to_owned())
+                .filter(|n| !n.is_empty()),
+            default_name: record.title.clone(),
             dir,
             tree,
             leaves,
@@ -733,6 +741,44 @@ mod tests {
             back.to_session().projects[0].tabs[1].branch.as_deref(),
             Some("feat/x")
         );
+    }
+
+    #[test]
+    fn rf_esp_16_a_tab_name_survives_a_restore_and_can_still_be_cleared() {
+        let (mut ws, _) = workspace("shell");
+        let tab = ws.tabs[0].id;
+        let rename = |name: &str| Command::RenameTab {
+            tab,
+            name: name.into(),
+        };
+        ws.apply(rename("review"), &resolve).unwrap();
+        let saved = ws.to_session();
+        let record = &saved.projects[0].tabs[0];
+        assert_eq!(
+            (record.title.as_str(), record.name.as_deref()),
+            ("Tab 1", Some("review"))
+        );
+        let (mut back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot().tabs[0].name, "review");
+        assert_eq!(back.to_session(), saved);
+        back.apply(rename(""), &resolve).unwrap();
+        assert_eq!(back.snapshot().tabs[0].name, "Tab 1");
+    }
+
+    #[test]
+    fn rf_esp_17_a_folded_project_stays_folded_after_a_restore() {
+        let (mut ws, _) = workspace("shell");
+        let project = ws.projects[0].id;
+        let fold = Command::SetProjectCollapsed {
+            project,
+            collapsed: true,
+        };
+        ws.apply(fold, &resolve).unwrap();
+        let saved = ws.to_session();
+        assert!(saved.projects[0].collapsed);
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert!(back.snapshot().projects[0].collapsed);
+        assert_eq!(back.to_session(), saved);
     }
 
     #[test]

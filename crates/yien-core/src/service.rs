@@ -528,6 +528,9 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::TerminatePane { pane } => Some(*pane),
         Command::SwapPanes { a, .. } => Some(*a),
         Command::NewProject { .. }
+        | Command::CloseProject { .. }
+        | Command::SetProjectCollapsed { .. }
+        | Command::RenameTab { .. }
         | Command::NewTab { .. }
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }
