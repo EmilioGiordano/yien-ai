@@ -17,7 +17,7 @@ use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand};
 use yien_proto::frame::Frame;
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
-    ProfileId, TabId,
+    ProfileId, ProjectId, TabId,
 };
 use yien_pty::{FakeChild, FakeInput, FakePty};
 
@@ -803,4 +803,167 @@ fn a_pane_shown_for_the_first_time_draws_at_once() {
         );
         (pane, child) = h.split(pane, None);
     }
+}
+
+/// A core whose new panes wait for the UI's size; long waits, so only a
+/// size or the end of a wait the test chooses starts a program.
+fn waiting(size_wait: Duration, ui_wait: Duration) -> Harness {
+    Harness::start_with(CoreConfig {
+        size_wait,
+        ui_wait,
+        ..config()
+    })
+}
+
+impl Harness {
+    /// A new project whose pane has not started its program yet.
+    fn pending_project(&mut self) -> (ProjectId, TabId, PaneId) {
+        self.command(Command::NewProject {
+            root: env!("CARGO_MANIFEST_DIR").into(),
+            name: None,
+        });
+        self.wait_for(|m| match m {
+            CoreMsg::TabUpdated(t) => Some((t.project, t.id, t.focused)),
+            _ => None,
+        })
+    }
+
+    fn resize(&self, pane: PaneId, cols: u16, rows: u16) {
+        self.send(ClientMsg::ResizePane { pane, cols, rows });
+    }
+
+    fn assert_nothing_spawned_for(&self, wait: Duration) {
+        std::thread::sleep(wait);
+        assert!(self.backend.take_spawned().is_empty(), "spawned too early");
+    }
+}
+
+/// No resize reaches a program that started at its drawn size.
+fn assert_no_resize(child: &FakeChild) {
+    while let Some(input) = child.recv_input(Duration::from_millis(100)) {
+        assert!(
+            !matches!(input, FakeInput::Resize { .. }),
+            "resized after the spawn: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn a_new_pane_starts_at_the_first_size_the_ui_sends() {
+    let mut h = waiting(TIMEOUT * 2, TIMEOUT * 2);
+    let (_, _, pane) = h.pending_project();
+    h.assert_nothing_spawned_for(Duration::from_millis(100));
+    h.resize(pane, 95, 31);
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (95, 31));
+    assert_no_resize(&child);
+}
+
+#[test]
+fn a_split_pane_starts_at_the_first_size_the_ui_sends() {
+    let mut h = waiting(TIMEOUT * 2, TIMEOUT * 2);
+    let (_, _, first) = h.pending_project();
+    h.resize(first, 120, 40);
+    let first_child = h.child();
+    h.command(Command::SplitPane {
+        pane: first,
+        orientation: Orientation::Horizontal,
+        profile: None,
+    });
+    let new = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id != first => Some(p.id),
+        _ => None,
+    });
+    h.assert_nothing_spawned_for(Duration::from_millis(100));
+    h.resize(first, 60, 40);
+    h.resize(new, 59, 40);
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (59, 40));
+    assert_no_resize(&child);
+    assert_eq!(
+        next_input(&first_child),
+        FakeInput::Resize { cols: 60, rows: 40 }
+    );
+}
+
+#[test]
+fn input_sent_before_the_program_starts_reaches_it() {
+    let mut h = waiting(TIMEOUT * 2, TIMEOUT * 2);
+    let (_, _, pane) = h.pending_project();
+    h.input(pane, b"early");
+    h.resize(pane, 90, 30);
+    let child = h.child();
+    assert_eq!(next_bytes(&child), b"early");
+}
+
+#[test]
+fn without_any_size_a_new_pane_starts_at_the_initial_size_after_the_wait() {
+    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(300));
+    h.pending_project();
+    h.assert_nothing_spawned_for(Duration::from_millis(150));
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (80, 24));
+}
+
+#[test]
+fn a_pane_whose_size_never_comes_starts_at_the_last_size_the_ui_reported() {
+    let mut h = waiting(Duration::from_millis(100), TIMEOUT * 2);
+    let (project, _, first) = h.pending_project();
+    h.resize(first, 111, 33);
+    h.child();
+    h.command(Command::NewTab {
+        project,
+        name: None,
+        profile: None,
+    });
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (111, 33));
+}
+
+#[test]
+fn while_the_ui_has_reported_nothing_a_new_pane_keeps_waiting() {
+    let mut h = waiting(Duration::from_millis(50), TIMEOUT * 2);
+    let (_, _, pane) = h.pending_project();
+    h.assert_nothing_spawned_for(Duration::from_millis(300));
+    h.resize(pane, 101, 29);
+    let child = h.child();
+    assert_eq!((child.spec().cols, child.spec().rows), (101, 29));
+}
+
+#[test]
+fn a_pane_terminated_before_it_starts_never_starts() {
+    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(100));
+    let (_, _, pane) = h.pending_project();
+    h.command(Command::TerminatePane { pane });
+    h.wait_for(|m| match m {
+        CoreMsg::PaneExited {
+            pane: p,
+            code: None,
+        } if *p == pane => Some(()),
+        _ => None,
+    });
+    h.assert_nothing_spawned_for(Duration::from_millis(300));
+    h.command(Command::RelaunchPane { pane });
+    h.child();
+}
+
+#[test]
+fn a_tab_closed_before_its_pane_starts_spawns_nothing() {
+    let mut h = waiting(Duration::from_millis(100), Duration::from_millis(100));
+    let (_, tab, _) = h.pending_project();
+    h.command(Command::CloseTab { tab });
+    h.assert_nothing_spawned_for(Duration::from_millis(300));
+}
+
+#[test]
+fn rf_pan_19_a_relaunch_starts_at_once_at_the_last_size() {
+    let mut h = waiting(TIMEOUT * 2, TIMEOUT * 2);
+    let (_, _, pane) = h.pending_project();
+    h.resize(pane, 95, 31);
+    let child = h.child();
+    h.resize(pane, 70, 20);
+    assert_eq!(next_input(&child), FakeInput::Resize { cols: 70, rows: 20 });
+    h.command(Command::RelaunchPane { pane });
+    let again = h.child();
+    assert_eq!((again.spec().cols, again.spec().rows), (70, 20));
 }
