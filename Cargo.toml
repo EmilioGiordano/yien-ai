@@ -17,6 +17,7 @@ yien-pty = { path = "crates/yien-pty" }
 yien-testkit = { path = "crates/yien-testkit" }
 yien-vt = { path = "crates/yien-vt" }
 yien-ui = { path = "crates/yien-ui" }
+yien-session = { path = "crates/yien-session" }
 yien-platform = { path = "crates/yien-platform" }
 yien-agent = { path = "crates/yien-agent" }
 

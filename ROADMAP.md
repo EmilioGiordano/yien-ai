@@ -30,7 +30,7 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M1 PTY backend: `yien-pty`, portable-pty over the system ConPTY, reader/writer/waiter threads, `FakePty` | `feat/pty-backend` | done on the branch: tests green on Windows; unix tests not yet run |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
-| M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
+| M3 core: snapshot and restore of layout and sessions | `feat/session-store`, then `feat/` | started: `feat/session-store` adds `yien-session` (model, invariants, versioned JSON with migrations, 5 generations, resume plan), done on the branch, in review; core wiring, screens, single instance and previous-session listing pending |
 | M4 Claude: profiles, signals, pure state machine, hook settings and payload decoding (`yien-agent`) | `feat/agent-state-machine` | done on the branch, in review; no UI yet |
 | M4 Claude: `yien-hook`, hook pipe, red mark, counter | `feat/` | pending |
 
@@ -66,6 +66,11 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/agent-state-machine`: diverges from 04 §4.5: a `SessionStart` with `source = compact` or `resume` during a turn keeps the state and the red mark; `startup`, `clear` and the rest go to Idle as 04 says.
 - `feat/agent-state-machine`: a hook payload that is too large or malformed falls back to the event name `yien-hook` got in argv, with no payload fields (`decode_claude_hook_or_event`), instead of `Ambiguous`.
 - `feat/agent-state-machine`, open: parallel tool calls (a `PostToolUse` from another tool clears a pending or confirmed red; S6 fixtures decide); no warning channel for unknown profile keys (plan §7.4); value errors in profiles name the field path, not the line; no `.yrec` fixtures for the Claude version ranges (RNF-23); Codex and OpenCode resume arguments unverified (S7, S8); `AgentState` not yet in `yien-proto`; Windows hook shell and quoting unverified (S6).
+- `feat/session-store`: the state file is `workspace.json` (plan §7.2), with backups `workspace.1.json` to `workspace.4.json`: five copies in all (RF-SES-06). `save` rotates only when the snapshot is `ROTATION_INTERVAL_MS` (60 s) past the one in `workspace.1.json`; other saves replace `workspace.json` atomically. A damaged `workspace.json` is moved to `workspace.damaged.json` for diagnosis, leaving the backups untouched.
+- `feat/session-store`: a generation with a newer `schema_version` stops `load` without restoring and makes `save` refuse; `preserve_newer` renames it to `workspace.v<N>.json` (plan §5.2), after which saving works.
+- `feat/session-store`: split ratios are checked as positive, one per child and summing to 1 (within 1e-3), but not against `yien-layout`'s 5 % minimum, because repeated splits legitimately go below it.
+- `feat/session-store`: schema v1 carries every plan §6.1 field before it ships: `selected` (project and tab, both optional, validated to exist), tab `branch`, `worktree` and `archived`, pane `name`, project `setup_script`. All have serde defaults, so a v1 file without them still loads.
+- `feat/session-store`: file I/O goes through the `Store` trait; the `fs` feature's `FsStore` uses only `std::fs` (temp file, `sync_all`, `rename`) and lacks `MOVEFILE_WRITE_THROUGH`, so `yien-platform` should supply the production store.
 
 ## In flight
 
