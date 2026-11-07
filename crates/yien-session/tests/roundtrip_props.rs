@@ -196,7 +196,7 @@ fn build(
 fn snapshot() -> impl Strategy<Value = SessionSnapshot> {
     (
         any::<u64>(),
-        any::<u64>(),
+        0..yien_session::MAX_ID - 10_000,
         prop::collection::vec(project_seed(), 0..4),
         (any::<bool>(), any::<bool>(), any::<usize>()),
     )

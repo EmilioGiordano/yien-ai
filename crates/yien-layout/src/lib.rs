@@ -895,6 +895,91 @@ impl Tree {
         self.shape_of(self.root)
     }
 
+    /// Rebuilds a tree from its structure, keeping each leaf's pane id and
+    /// each branch's ratios. Ratios that drift from summing to 1 by more than
+    /// a rounding error are scaled back to 1.
+    ///
+    /// `None` when the shape cannot be a tree: a branch with fewer than two
+    /// children, a ratio that is not a positive finite number, or a pane id
+    /// used twice.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Shape, Tree};
+    ///
+    /// let mut tree = Tree::new();
+    /// let right = tree.split(0, Orientation::Horizontal).unwrap();
+    /// tree.split(right, Orientation::Vertical);
+    /// tree.resize(0, 0.2);
+    /// let copy = Tree::from_shape(&tree.shape()).unwrap();
+    /// assert_eq!(copy.shape(), tree.shape());
+    ///
+    /// let empty = Shape::Split { orientation: Orientation::Vertical, children: Vec::new() };
+    /// assert!(Tree::from_shape(&empty).is_none());
+    /// ```
+    pub fn from_shape(shape: &Shape) -> Option<Tree> {
+        let mut tree = Tree {
+            nodes: Vec::new(),
+            root: 0,
+            vacant: Vec::new(),
+            next_pane: 0,
+        };
+        let mut seen = Vec::new();
+        tree.root = tree.build(shape, None, &mut seen)?;
+        tree.next_pane = seen.iter().max().map_or(0, |max| max + 1);
+        Some(tree)
+    }
+
+    fn build(
+        &mut self,
+        shape: &Shape,
+        parent: Option<NodeId>,
+        seen: &mut Vec<PaneId>,
+    ) -> Option<NodeId> {
+        match shape {
+            Shape::Pane(pane) => {
+                if seen.contains(pane) || *pane == PaneId::MAX {
+                    return None;
+                }
+                seen.push(*pane);
+                Some(self.alloc(Node {
+                    parent,
+                    kind: Kind::Leaf(*pane),
+                }))
+            }
+            Shape::Split {
+                orientation,
+                children,
+            } => {
+                let total: f32 = children.iter().map(|(f, _)| f).sum();
+                let valid = children.len() >= 2
+                    && children.iter().all(|(f, _)| f.is_finite() && *f > 0.0)
+                    && total.is_finite();
+                if !valid {
+                    return None;
+                }
+                let id = self.alloc(Node {
+                    parent,
+                    kind: Kind::Leaf(PaneId::MAX),
+                });
+                let mut ids = Vec::with_capacity(children.len());
+                for (_, child) in children {
+                    ids.push(self.build(child, Some(id), seen)?);
+                }
+                let scale = if (total - 1.0).abs() > 1e-3 {
+                    total
+                } else {
+                    1.0
+                };
+                self.nodes[id].kind = Kind::Branch {
+                    orientation: *orientation,
+                    children: ids,
+                    flex: children.iter().map(|(f, _)| f / scale).collect(),
+                };
+                Some(id)
+            }
+        }
+    }
+
     fn shape_of(&self, node: NodeId) -> Shape {
         match &self.nodes[node].kind {
             Kind::Leaf(pane) => Shape::Pane(*pane),
@@ -1596,6 +1681,48 @@ mod tests {
             for (pane, r) in t.layout(AREA) {
                 assert!(r.w > 0.0, "pane {pane} has width {}", r.w);
             }
+        }
+    }
+
+    #[test]
+    fn from_shape_rebuilds_structure_ratios_and_ids() {
+        let mut tree = Tree::new();
+        let right = tree.split(0, Orientation::Horizontal).unwrap();
+        let below = tree.split(right, Orientation::Vertical).unwrap();
+        tree.split_towards(0, DropZone::Top).unwrap();
+        assert!(tree.resize(below, 0.15));
+        let copy = Tree::from_shape(&tree.shape()).unwrap();
+        assert_eq!(copy.shape(), tree.shape());
+        assert_eq!(copy.layout(AREA), tree.layout(AREA));
+        let mut copy = copy;
+        let next = copy.split(below, Orientation::Horizontal).unwrap();
+        assert!(!tree.panes().contains(&next), "a new pane reuses an id");
+        assert!(copy.close(next));
+    }
+
+    #[test]
+    fn from_shape_scales_drifted_ratios_and_refuses_broken_shapes() {
+        let leaf = Shape::Pane;
+        let split = |children| Shape::Split {
+            orientation: Orientation::Horizontal,
+            children,
+        };
+        let drifted = Tree::from_shape(&split(vec![(1.0, leaf(4)), (3.0, leaf(9))])).unwrap();
+        let Shape::Split { children, .. } = drifted.shape() else {
+            panic!("expected a split");
+        };
+        assert_close(children[0].0, 0.25);
+        assert_close(children[1].0, 0.75);
+        assert_eq!(Tree::from_shape(&leaf(7)).unwrap().panes(), vec![7]);
+        for broken in [
+            split(vec![(1.0, leaf(1))]),
+            split(vec![(0.5, leaf(1)), (0.5, leaf(1))]),
+            split(vec![(0.0, leaf(1)), (1.0, leaf(2))]),
+            split(vec![(f32::NAN, leaf(1)), (0.5, leaf(2))]),
+            split(vec![(0.5, leaf(1)), (0.5, split(Vec::new()))]),
+            leaf(PaneId::MAX),
+        ] {
+            assert!(Tree::from_shape(&broken).is_none(), "{broken:?}");
         }
     }
 }
