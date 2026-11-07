@@ -31,6 +31,7 @@ use std::time::Duration;
 #[cfg(any(test, feature = "fake"))]
 mod fake;
 mod portable;
+mod program;
 mod pump;
 
 #[cfg(any(test, feature = "fake"))]
@@ -100,6 +101,8 @@ pub struct SpawnSpec {
     pub args: Vec<OsString>,
     /// Working directory; `None` inherits the platform default.
     pub cwd: Option<PathBuf>,
+    /// Inherited variables the child does not get.
+    pub env_remove: Vec<OsString>,
     /// Variables set on top of the inherited environment, in order.
     pub env: Vec<(OsString, OsString)>,
     /// Terminal width in cells, at least 1.
@@ -115,6 +118,7 @@ impl fmt::Debug for SpawnSpec {
             .field("program", &self.program)
             .field("args", &format_args!("{} args", self.args.len()))
             .field("cwd", &self.cwd)
+            .field("env_remove", &self.env_remove)
             .field("env_keys", &env_keys)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
@@ -134,6 +138,7 @@ impl SpawnSpec {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
+            env_remove: Vec::new(),
             env: Vec::new(),
             cols: 80,
             rows: 24,
@@ -185,6 +190,18 @@ impl SpawnSpec {
     /// ```
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Keeps an inherited variable from the child. A variable set with
+    /// [`SpawnSpec::env`] is still set.
+    ///
+    /// ```
+    /// let spec = yien_pty::SpawnSpec::new("sh").env_remove("CLAUDECODE");
+    /// assert_eq!(spec.env_remove, ["CLAUDECODE"]);
+    /// ```
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.env_remove.push(key.into());
         self
     }
 
@@ -327,6 +344,14 @@ pub enum PtyError {
         /// The OS error.
         #[source]
         source: BoxError,
+    },
+    /// The program is a batch file (`.cmd`, `.bat`) and an argument has a
+    /// character `cmd.exe` would interpret, so it was not started. Without
+    /// that argument it may start.
+    #[error("{program} is a batch file and an argument has a character cmd.exe would interpret")]
+    UnsafeBatchArgument {
+        /// The batch file found for the program.
+        program: String,
     },
     /// The PTY opened but its pipes or threads could not be set up.
     #[error("could not set up the pseudo terminal")]

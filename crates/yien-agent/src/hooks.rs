@@ -17,6 +17,29 @@ pub const HOOK_TOKEN_ENV: &str = "YIEN_HOOK_TOKEN";
 /// whole file for `Write`) make payloads large.
 pub const MAX_HOOK_PAYLOAD: usize = 4 * 1024 * 1024;
 
+/// Variables Claude Code sets for the programs it runs, which mark them as
+/// inside its session. A pane inheriting them (YIEN started from a Claude
+/// Code session) would make the Claude Code started in it take itself for a
+/// subprocess of that session. The user's own configuration (`ANTHROPIC_*`,
+/// `CLAUDE_CONFIG_DIR`, ...) is not among them, nor is an IDE's link
+/// (`CLAUDE_CODE_SSE_PORT`), which belongs to the terminal, not a session.
+///
+/// ```
+/// assert!(yien_agent::CLAUDE_SESSION_MARKERS.contains(&"CLAUDECODE"));
+/// assert!(!yien_agent::CLAUDE_SESSION_MARKERS.contains(&"CLAUDE_CONFIG_DIR"));
+/// ```
+pub const CLAUDE_SESSION_MARKERS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+];
+
 /// Seconds Claude Code waits for `yien-hook` before going on without it.
 pub const HOOK_TIMEOUT_SECS: u64 = 5;
 

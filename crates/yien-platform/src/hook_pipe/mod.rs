@@ -83,11 +83,17 @@ pub enum HookPipeError {
 /// # Ok::<(), yien_platform::hook_pipe::HookPipeError>(())
 /// ```
 #[derive(Clone, PartialEq, Eq)]
-pub struct HookToken(String);
+pub struct HookToken {
+    value: String,
+    serial: u64,
+}
 
 impl HookToken {
-    fn generate() -> Result<Self, HookPipeError> {
-        Ok(Self(random_hex::<TOKEN_BYTES>()?))
+    fn generate(serial: u64) -> Result<Self, HookPipeError> {
+        Ok(Self {
+            value: random_hex::<TOKEN_BYTES>()?,
+            serial,
+        })
     }
 
     /// The value for `YIEN_HOOK_TOKEN`.
@@ -98,7 +104,22 @@ impl HookToken {
     /// # Ok::<(), yien_platform::hook_pipe::HookPipeError>(())
     /// ```
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.value
+    }
+
+    /// Which issue of its registry this token is: the first is 1, and each
+    /// later one is higher. A delivery carries it as [`HookDelivery::serial`],
+    /// so a pane can tell its current launch's hooks from an earlier one's.
+    ///
+    /// ```
+    /// let registry = yien_platform::hook_pipe::HookRegistry::new();
+    /// let pane = yien_proto::PaneId::new(1);
+    /// assert_eq!(registry.issue(pane)?.serial(), 1);
+    /// assert_eq!(registry.issue(pane)?.serial(), 2);
+    /// # Ok::<(), yien_platform::hook_pipe::HookPipeError>(())
+    /// ```
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 }
 
@@ -131,6 +152,7 @@ fn random_hex<const N: usize>() -> Result<String, HookPipeError> {
 #[derive(Debug, Clone, Default)]
 pub struct HookRegistry {
     tokens: Arc<Mutex<HashMap<PaneId, HookToken>>>,
+    issued: Arc<AtomicU64>,
 }
 
 impl HookRegistry {
@@ -156,7 +178,7 @@ impl HookRegistry {
     /// # Ok::<(), yien_platform::hook_pipe::HookPipeError>(())
     /// ```
     pub fn issue(&self, pane: PaneId) -> Result<HookToken, HookPipeError> {
-        let token = HookToken::generate()?;
+        let token = HookToken::generate(self.issued.fetch_add(1, Ordering::Relaxed) + 1)?;
         self.lock().insert(pane, token.clone());
         Ok(token)
     }
@@ -179,11 +201,16 @@ impl HookRegistry {
     /// assert_eq!(registry.owner(b""), None);
     /// ```
     pub fn owner(&self, token: &[u8]) -> Option<PaneId> {
+        self.find(token).map(|(pane, _)| pane)
+    }
+
+    /// The pane that owns `token` and the token's serial.
+    fn find(&self, token: &[u8]) -> Option<(PaneId, u64)> {
         let tokens = self.lock();
         let mut found = None;
         for (pane, live) in tokens.iter() {
-            if constant_time_eq(live.0.as_bytes(), token) {
-                found = Some(*pane);
+            if constant_time_eq(live.value.as_bytes(), token) {
+                found = Some((*pane, live.serial));
             }
         }
         found
@@ -206,6 +233,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub struct HookDelivery {
     /// The pane that owns the token.
     pub pane: PaneId,
+    /// The token's [`HookToken::serial`].
+    pub serial: u64,
     /// The decoded event. An error means the frame was authentic but the
     /// payload could not be read even with the argv fallback; it should reach
     /// the state machine as `Signal::Ambiguous`.
@@ -312,13 +341,14 @@ fn serve_connection<R: Read>(
     read_exact(conn, prefix)?;
     let (token, event_arg) =
         hook_frame::decode_prefix(&header, prefix).map_err(Rejection::Frame)?;
-    let pane = registry.owner(token).ok_or(Rejection::UnknownToken)?;
+    let (pane, serial) = registry.find(token).ok_or(Rejection::UnknownToken)?;
 
     let mut payload = vec![0u8; header.payload_len];
     read_exact(conn, &mut payload)?;
 
     Ok(HookDelivery {
         pane,
+        serial,
         event: decode_claude_hook_or_event(event_arg, &payload),
         payload_len: payload.len(),
     })
@@ -485,6 +515,7 @@ mod tests {
             delivery,
             HookDelivery {
                 pane: PaneId::new(7),
+                serial: token.serial(),
                 event: Ok(HookEvent::Notification(NotificationKind::PermissionPrompt)),
                 payload_len: payload.len(),
             }

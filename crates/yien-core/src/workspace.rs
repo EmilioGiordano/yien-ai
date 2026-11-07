@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
-    AgentState, Command, CoreMsg, PaneId, PaneInfo, ProfileId, ProjectId, ProjectInfo, TabId,
-    TabInfo, WorkspaceSnapshot,
+    AgentState, Command, CoreMsg, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
+    TabId, TabInfo, WorkspaceSnapshot,
 };
 
 use crate::CoreError;
@@ -51,7 +51,10 @@ pub(crate) enum Effect {
 /// What a pane actor reports about its pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneEvent {
-    State(AgentState),
+    /// The agent state, and while it is "needs you" when it got there.
+    State(AgentState, Option<u64>),
+    /// The "signal lost" mark went on or off.
+    SignalLost(bool),
     Title(Option<String>),
     Cwd(String),
     SessionId(String),
@@ -60,6 +63,8 @@ pub(crate) enum PaneEvent {
     /// The program could not start or can no longer be shown; the actor
     /// still runs and can relaunch it.
     Failed(String),
+    /// Something the user should know about a program that runs.
+    Notice(String),
     /// The actor itself died; a relaunch starts a new one.
     Crashed,
     Selection(Option<String>),
@@ -71,7 +76,8 @@ impl PaneEvent {
     pub fn is_detail(&self) -> bool {
         matches!(
             self,
-            PaneEvent::State(_)
+            PaneEvent::State(..)
+                | PaneEvent::SignalLost(_)
                 | PaneEvent::Title(_)
                 | PaneEvent::Cwd(_)
                 | PaneEvent::SessionId(_)
@@ -128,6 +134,8 @@ struct Pane {
     running: bool,
     exit_code: Option<u32>,
     session_id: Option<String>,
+    needs_you_since: Option<u64>,
+    signal_lost: bool,
     visible: bool,
     seen: bool,
 }
@@ -141,11 +149,18 @@ pub(crate) struct Workspace {
     panes: BTreeMap<PaneId, Pane>,
     active_tab: Option<TabId>,
     window_focused: bool,
+    profiles: Vec<ProfileInfo>,
 }
 
 impl Workspace {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The profiles the snapshot lists for new panes.
+    pub fn with_profiles(mut self, profiles: Vec<ProfileInfo>) -> Self {
+        self.profiles = profiles;
+        self
     }
 
     fn next(&mut self) -> u64 {
@@ -159,6 +174,7 @@ impl Workspace {
             tabs: self.tabs.iter().map(|t| self.tab_info(t)).collect(),
             panes: self.panes.iter().map(|(id, p)| pane_info(*id, p)).collect(),
             active_tab: self.active_tab,
+            profiles: self.profiles.clone(),
         }
     }
 
@@ -240,17 +256,24 @@ impl Workspace {
                 });
                 self.new_tab(id, None, plan, &mut fx)?;
             }
-            Command::NewTab { project, name } => {
+            Command::NewTab {
+                project,
+                name,
+                profile,
+            } => {
                 if !self.projects.iter().any(|p| p.id == project) {
                     return Err(CoreError::UnknownProject(project));
                 }
-                let plan = resolve(None)?;
+                let plan = resolve(profile.as_ref())?;
                 self.new_tab(project, name, plan, &mut fx)?;
             }
             Command::CloseTab { tab } => self.close_tab(tab, &mut fx)?,
             Command::SelectTab { tab } => {
-                self.tab(tab)?;
-                self.set_active(Some(tab), &mut fx);
+                let waiting = self.longest_waiting(self.tab(tab)?);
+                match waiting {
+                    Some(pane) => self.focus(pane, &mut fx)?,
+                    None => self.set_active(Some(tab), &mut fx),
+                }
             }
             Command::SplitPane {
                 pane,
@@ -356,6 +379,18 @@ impl Workspace {
         Ok(fx)
     }
 
+    /// The pane of `tab` that has needed the user longest (RF-ATN-06).
+    fn longest_waiting(&self, tab: &Tab) -> Option<PaneId> {
+        tab.panes()
+            .into_iter()
+            .filter_map(|id| {
+                let p = self.panes.get(&id)?;
+                p.state.is_red().then_some((p.needs_you_since, id))
+            })
+            .min()
+            .map(|(_, id)| id)
+    }
+
     fn same_tab(&self, a: PaneId, b: PaneId) -> Result<TabId, CoreError> {
         let (ta, tb) = (self.tab_of(a)?, self.tab_of(b)?);
         if ta != tb {
@@ -426,6 +461,8 @@ impl Workspace {
                 running: false,
                 exit_code: None,
                 session_id: None,
+                needs_you_since: None,
+                signal_lost: false,
                 visible: false,
                 seen: false,
             },
@@ -559,9 +596,18 @@ impl Workspace {
             return fx;
         };
         match event {
-            PaneEvent::State(state) => {
+            PaneEvent::State(state, since) => {
                 p.state = state;
+                let since_changed = p.needs_you_since != since;
+                p.needs_you_since = since;
                 fx.push(Effect::Emit(CoreMsg::PaneState { pane, state }));
+                if since_changed {
+                    self.emit_pane(pane, &mut fx);
+                }
+            }
+            PaneEvent::SignalLost(lost) => {
+                p.signal_lost = lost;
+                self.emit_pane(pane, &mut fx);
             }
             PaneEvent::Title(title) => {
                 p.title = title;
@@ -599,9 +645,25 @@ impl Workspace {
             PaneEvent::Selection(text) => {
                 fx.push(Effect::Emit(CoreMsg::SelectionText { pane, text }));
             }
+            PaneEvent::Notice(message) => {
+                fx.push(Effect::Emit(CoreMsg::Error {
+                    pane: Some(pane),
+                    message,
+                }));
+            }
             PaneEvent::Crashed => {
                 p.running = false;
                 p.exit_code = None;
+                // The restarted actor starts idle and reports no change, so a
+                // red mark would otherwise outlive the agent that raised it.
+                p.needs_you_since = None;
+                if p.state != AgentState::Idle {
+                    p.state = AgentState::Idle;
+                    fx.push(Effect::Emit(CoreMsg::PaneState {
+                        pane,
+                        state: AgentState::Idle,
+                    }));
+                }
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message: "This pane stopped after an internal error. Relaunch it to start \
@@ -708,6 +770,8 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
         running: p.running,
         exit_code: p.exit_code,
         session_id: p.session_id.clone(),
+        needs_you_since: p.needs_you_since,
+        signal_lost: p.signal_lost,
     }
 }
 
@@ -789,6 +853,7 @@ mod tests {
             Command::NewTab {
                 project: project_id,
                 name: Some("review".into()),
+                profile: None,
             },
         );
         let pane = spawned(&fx)[0];
@@ -1051,6 +1116,24 @@ mod tests {
     }
 
     #[test]
+    fn rn_02_a_crashed_actor_takes_its_red_mark_with_it() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Permission);
+        ws.on_pane_event(a, PaneEvent::State(needs, Some(3)));
+        let fx = ws.on_pane_event(a, PaneEvent::Crashed);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneState { pane, state: AgentState::Idle }) if *pane == a
+        )));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p))
+                if p.id == a && p.state == AgentState::Idle && p.needs_you_since.is_none()
+        )));
+    }
+
+    #[test]
     fn an_exit_updates_the_pane() {
         let mut ws = Workspace::new();
         let (_, a) = project(&mut ws);
@@ -1102,6 +1185,62 @@ mod tests {
             .iter()
             .position(|e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(_))));
         assert!(spawn.is_some() && spawn < tab && tab < pane, "{fx:?}");
+    }
+
+    #[test]
+    fn rf_atn_06_selecting_a_tab_focuses_the_pane_that_needs_you_longest() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let split = |ws: &mut Workspace, pane| {
+            let fx = run(
+                ws,
+                Command::SplitPane {
+                    pane,
+                    orientation: Orientation::Horizontal,
+                    profile: None,
+                },
+            );
+            spawned(&fx)[0]
+        };
+        let b = split(&mut ws, a);
+        let c = split(&mut ws, b);
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Permission);
+        ws.on_pane_event(c, PaneEvent::State(needs, Some(4)));
+        ws.on_pane_event(b, PaneEvent::State(needs, Some(9)));
+        run(&mut ws, Command::FocusPane { pane: a });
+        run(&mut ws, Command::SelectTab { tab });
+        assert_eq!(ws.tab(tab).unwrap().focused, c);
+        ws.on_pane_event(c, PaneEvent::State(AgentState::Working, None));
+        run(&mut ws, Command::FocusPane { pane: a });
+        run(&mut ws, Command::SelectTab { tab });
+        assert_eq!(ws.tab(tab).unwrap().focused, b);
+    }
+
+    #[test]
+    fn rf_atn_05_entering_needs_you_republishes_the_pane_with_its_order() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Question);
+        let fx = ws.on_pane_event(a, PaneEvent::State(needs, Some(1)));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.needs_you_since == Some(1) && p.state == needs
+        )));
+        let fx = ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.needs_you_since.is_none()
+        )));
+        let fx = ws.on_pane_event(a, PaneEvent::State(AgentState::Idle, None));
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::Emit(CoreMsg::PaneUpdated(_))))
+        );
+        let fx = ws.on_pane_event(a, PaneEvent::SignalLost(true));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.signal_lost
+        )));
     }
 
     #[test]
@@ -1187,6 +1326,7 @@ mod tests {
             Op::NewTab(i) => Command::NewTab {
                 project: pick(&projects, *i)?,
                 name: None,
+                profile: None,
             },
             Op::CloseTab(i) => Command::CloseTab {
                 tab: pick(&tabs, *i)?,

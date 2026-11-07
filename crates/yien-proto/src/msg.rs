@@ -184,20 +184,23 @@ pub enum Command {
         /// The name in the tab bar; the folder name when `None`.
         name: Option<String>,
     },
-    /// Opens a tab on the project's main working copy, with one shell pane
-    /// (RF-ESP-03, RF-ESP-06).
+    /// Opens a tab on the project's main working copy, with one pane
+    /// (RF-ESP-03, RF-ESP-06, RF-PAN-18).
     NewTab {
         /// The project.
         project: ProjectId,
         /// The name in the tab bar; generated when `None`.
         name: Option<String>,
+        /// The profile its pane launches; the user's shell when `None`.
+        profile: Option<ProfileId>,
     },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
         /// The tab.
         tab: TabId,
     },
-    /// Makes a tab the selected one.
+    /// Makes a tab the selected one and focuses its pane that has needed the
+    /// user longest, if any (RF-ATN-06).
     SelectTab {
         /// The tab.
         tab: TabId,
@@ -479,8 +482,24 @@ pub struct PaneInfo {
     pub running: bool,
     /// The exit code of the program's last run, once it exited.
     pub exit_code: Option<u32>,
-    /// The agent's session id, once known (RF-PAN-20).
+    /// The agent's session id, once known (RF-PAN-20, RF-SES-01).
     pub session_id: Option<String>,
+    /// While `state` is "needs you": when it entered that state, as a
+    /// sequence number shared by all panes. Lower has waited longer
+    /// (RF-ATN-05). Not a time.
+    pub needs_you_since: Option<u64>,
+    /// The agent's structured channel is unavailable or failed, so its state
+    /// cannot be told and stays idle (RN-02): the "signal lost" mark.
+    pub signal_lost: bool,
+}
+
+/// An agent profile a pane can be started with (RF-AGE-01, RF-PAN-18).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    /// Its id, for [`Command::SplitPane`] and [`Command::NewTab`].
+    pub id: ProfileId,
+    /// The name to show: `Claude Code`, `Shell`.
+    pub name: String,
 }
 
 /// The whole workspace, sent as the core's first event.
@@ -494,6 +513,8 @@ pub struct WorkspaceSnapshot {
     pub panes: Vec<PaneInfo>,
     /// The selected tab.
     pub active_tab: Option<TabId>,
+    /// The profiles new panes can be started with, the shell first.
+    pub profiles: Vec<ProfileInfo>,
 }
 
 /// Everything the core tells the UI, in order.
@@ -595,6 +616,11 @@ mod tests {
             Command::NewProject {
                 root: "C:/Code/yien".into(),
                 name: None,
+            },
+            Command::NewTab {
+                project: ProjectId::new(1),
+                name: None,
+                profile: Some(ProfileId::new("claude")),
             },
             Command::SplitPane {
                 pane: PaneId::new(3),

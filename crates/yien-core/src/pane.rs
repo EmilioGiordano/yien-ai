@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -17,8 +18,8 @@ use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput};
 
 use crate::convert;
-use crate::launch::LaunchPlan;
-use crate::service::Ctx;
+use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::service::{Ctx, HookItem};
 use crate::workspace::PaneEvent;
 
 /// How soon a write refused by a full input queue is tried again. Nothing
@@ -209,6 +210,10 @@ pub(crate) struct PaneSetup {
     /// counts as seen without waiting for the next change.
     pub visible: bool,
     pub seen: bool,
+    /// Hook events for this pane, from the hook pipe.
+    pub hooks: mpsc::Receiver<HookItem>,
+    /// Set by the hook pipe when it had to refuse an event for this pane.
+    pub hooks_lost: Arc<AtomicBool>,
 }
 
 struct Actor {
@@ -229,6 +234,16 @@ struct Actor {
     notice_owed: bool,
     sync: Option<(u64, Instant)>,
     wake_at: Option<Instant>,
+    hooks_lost: Arc<AtomicBool>,
+    /// The serial of this launch's hook token. A hook with another one was
+    /// on its way when the pane relaunched and belongs to the old program.
+    hook_serial: Option<u64>,
+    /// The profile reports through hooks but this launch has no channel.
+    hooks_missing: bool,
+    /// The "signal lost" mark last reported.
+    signal_lost: bool,
+    /// When the pane entered "needs you", while it is there (RF-ATN-05).
+    needs_since: Option<u64>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -247,6 +262,7 @@ pub(crate) fn spawn(
     }
     let id = setup.id;
     let reports = Arc::clone(&ctx.reports);
+    let hooks = setup.hooks;
     let actor = Actor {
         id,
         plan: setup.plan,
@@ -265,8 +281,13 @@ pub(crate) fn spawn(
         notice_owed: false,
         sync: None,
         wake_at: None,
+        hooks_lost: setup.hooks_lost,
+        hook_serial: None,
+        hooks_missing: false,
+        signal_lost: false,
+        needs_since: None,
     };
-    let task = tokio::spawn(actor.run(cmds, input));
+    let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
         if let Err(e) = task.await
             && e.is_panic()
@@ -281,6 +302,7 @@ pub(crate) fn spawn(
 enum Wake {
     Cmd(Option<PaneCmd>),
     Input(PaneInput),
+    Hook(HookItem),
     Reader(Option<ReaderMsg>),
     Noticed { owed: bool },
     Timer,
@@ -305,6 +327,7 @@ impl Actor {
         mut self,
         mut cmds: mpsc::Receiver<PaneCmd>,
         mut input: mpsc::Receiver<PaneInput>,
+        mut hooks: mpsc::Receiver<HookItem>,
     ) {
         self.start().await;
         loop {
@@ -319,6 +342,7 @@ impl Actor {
             let wake = tokio::select! {
                 biased;
                 cmd = cmds.recv() => Wake::Cmd(cmd),
+                Some(item) = hooks.recv() => Wake::Hook(item),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
                 room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
@@ -337,10 +361,14 @@ impl Actor {
                 Wake::Cmd(Some(cmd)) => {
                     if matches!(cmd, PaneCmd::Relaunch | PaneCmd::Terminate) {
                         while input.try_recv().is_ok() {}
+                        // Hooks of the old program must not reach the next.
+                        while hooks.try_recv().is_ok() {}
+                        self.hooks_lost.store(false, Ordering::Release);
                     }
                     self.on_cmd(cmd).await;
                 }
                 Wake::Input(input) => self.on_input(input),
+                Wake::Hook(item) => self.on_hook(item, &mut hooks),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
                 Wake::Noticed { owed } => self.notice_owed = owed,
@@ -373,13 +401,52 @@ impl Actor {
             size.rows,
         )));
         self.dirty = true;
-        let spec = self.plan.spec(self.id, &self.cwd, size.cols, size.rows);
-        let backend = Arc::clone(&self.ctx.backend);
-        let spawned = tokio::task::spawn_blocking(move || backend.spawn(spec)).await;
+        let session_id = if self.plan.preassigns_session() {
+            launch::new_uuid()
+        } else {
+            None
+        };
+        // A relaunch replaces the token, so the old program's hooks are refused.
+        let hooks = self.ctx.hooks.clone().filter(|_| self.plan.hooks);
+        let token = hooks.as_ref().and_then(|h| h.registry.issue(self.id).ok());
+        self.hook_serial = token.as_ref().map(|t| t.serial());
+        let fill = Fill {
+            pane: self.id,
+            session_id: session_id.as_deref(),
+            hooks: hooks
+                .as_deref()
+                .zip(token.as_ref())
+                .map(|(h, token)| HookFill {
+                    settings_file: &h.settings_file,
+                    pipe: &h.pipe,
+                    token: token.as_str(),
+                }),
+        };
+        self.hooks_missing = self.plan.hooks && fill.hooks.is_none();
+        if let Some(id) = &session_id {
+            self.report(PaneEvent::SessionId(id.clone()));
+        }
+        let mut spawned = self.spawn(&fill, size.cols, size.rows).await;
+        if let (Some(h), Ok(Err(PtyError::UnsafeBatchArgument { .. }))) = (&hooks, &spawned) {
+            // The settings path has a character a batch file cannot be
+            // given safely; the program still starts without it.
+            h.registry.revoke(self.id);
+            self.hook_serial = None;
+            self.hooks_missing = true;
+            let fill = Fill {
+                hooks: None,
+                ..fill
+            };
+            spawned = self.spawn(&fill, size.cols, size.rows).await;
+            if matches!(spawned, Ok(Ok(_))) {
+                self.report(PaneEvent::Notice(batch_without_hooks(&self.plan)));
+            }
+        }
         let session = match spawned {
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
                 self.report(PaneEvent::Failed(spawn_message(&self.plan, &e)));
+                self.report_signal_lost();
                 return;
             }
             Err(_) => {
@@ -416,6 +483,47 @@ impl Actor {
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
+    }
+
+    /// Spawns the plan filled with `fill`, off the runtime's threads.
+    async fn spawn(
+        &self,
+        fill: &Fill<'_>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Result<yien_pty::PtySession, PtyError>, tokio::task::JoinError> {
+        let spec = self.plan.spec(fill, &self.cwd, cols, rows);
+        let backend = Arc::clone(&self.ctx.backend);
+        tokio::task::spawn_blocking(move || backend.spawn(spec)).await
+    }
+
+    /// Once the pipe has refused an event, the queued ones are older than
+    /// the gap: stepping them after `SourceLost` could clear it and bring the
+    /// red mark back from a stale state, so they are dropped with it.
+    fn on_hook(&mut self, item: HookItem, queue: &mut mpsc::Receiver<HookItem>) {
+        if self.hooks_lost.swap(false, Ordering::AcqRel) {
+            while queue.try_recv().is_ok() {}
+            self.step(&Signal::SourceLost);
+            return;
+        }
+        if self.hook_serial != Some(item.serial) {
+            tracing::debug!(pane = self.id.get(), "hook from an earlier launch dropped");
+            return;
+        }
+        match item.event {
+            Ok(event) => self.step(&Signal::Hook(event)),
+            Err(_) => self.step(&Signal::Ambiguous),
+        }
+    }
+
+    /// Reports the "signal lost" mark when it changes: the launch has no
+    /// hook channel, or the machine lost or could not read its source.
+    fn report_signal_lost(&mut self) {
+        let lost = self.hooks_missing || self.machine.signal_lost();
+        if lost != self.signal_lost {
+            self.signal_lost = lost;
+            self.report(PaneEvent::SignalLost(lost));
+        }
     }
 
     async fn on_cmd(&mut self, cmd: PaneCmd) {
@@ -586,8 +694,15 @@ impl Actor {
                 AgentEffect::Transition { to, .. } => {
                     let state = convert::agent_state(to);
                     if state != self.state {
+                        self.needs_since = match (state.is_red(), self.needs_since) {
+                            (false, _) => None,
+                            (true, Some(since)) => Some(since),
+                            (true, None) => {
+                                Some(self.ctx.attention.fetch_add(1, Ordering::Relaxed) + 1)
+                            }
+                        };
                         self.state = state;
-                        self.report(PaneEvent::State(state));
+                        self.report(PaneEvent::State(state, self.needs_since));
                     }
                 }
                 AgentEffect::CheckScreen => {
@@ -610,6 +725,7 @@ impl Actor {
             let clock_now = self.now();
             Instant::now() + at.saturating_sub(clock_now)
         });
+        self.report_signal_lost();
     }
 
     /// A pane that never drew is due at `now`, the caller's own instant: a
@@ -731,8 +847,26 @@ fn write_all(control: &PtyControl, queue: &mut VecDeque<Vec<u8>>) -> Result<(), 
     Ok(())
 }
 
+/// Why a pane started its batch-file program without the hook settings.
+fn batch_without_hooks(plan: &LaunchPlan) -> String {
+    format!(
+        "{} is installed as a batch file (.cmd or .bat), and the path of YIEN's \
+         hook settings has a character such a file cannot be given safely, \
+         one of ( ) & ! ^ % \" | < >. It runs without the red mark. Installing \
+         it as an .exe, or moving YIEN's data folder to a plain path, brings \
+         the red mark back.",
+        plan.program
+    )
+}
+
 fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
     match error {
+        PtyError::UnsafeBatchArgument { .. } => format!(
+            "Could not start {}: it is a batch file (.cmd or .bat) and one of its \
+             arguments has a character cmd.exe would interpret. Remove it from the \
+             profile's arguments, or install the program as an .exe.",
+            plan.program
+        ),
         PtyError::Spawn { .. } => format!(
             "Could not start {}. Check that it is installed and on PATH, then relaunch the pane.",
             plan.program
@@ -851,6 +985,180 @@ mod tests {
         let cut = panic_message(&"é".repeat(MAX_PANIC_CHARS + 9));
         assert_eq!(cut.chars().count(), MAX_PANIC_CHARS + 3);
         assert!(cut.ends_with("..."));
+    }
+
+    /// A Claude pane actor on a fake PTY. Its hooks have a registry and no
+    /// pipe, so the test hands them to the actor and the "signal lost" mark
+    /// comes from the state machine alone. The first launch's token has
+    /// serial 1, each relaunch's the next.
+    struct Solo {
+        runtime: tokio::runtime::Runtime,
+        reports: Arc<crate::report::Reports>,
+        cmds: mpsc::Sender<PaneCmd>,
+        hooks: mpsc::Sender<HookItem>,
+        hooks_lost: Arc<AtomicBool>,
+        _events: mpsc::Receiver<CoreMsg>,
+        _input: mpsc::Sender<PaneInput>,
+    }
+
+    impl Solo {
+        /// Starts the actor with `queued` already waiting in its hook queue.
+        fn start(queued: Vec<HookItem>, lost: bool) -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_time()
+                .build()
+                .unwrap();
+            let config = crate::CoreConfig::default();
+            let claude = yien_proto::ProfileId::new("claude");
+            let plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
+            let (events, events_rx) = mpsc::channel(64);
+            let ctx = Ctx {
+                backend: Arc::new(yien_pty::FakePty::new()),
+                config: Arc::new(config),
+                events,
+                reports: Arc::default(),
+                engine: alacritty,
+                hooks: Some(Arc::new(crate::hooks::Hooks::detached())),
+                attention: Arc::default(),
+            };
+            let reports = Arc::clone(&ctx.reports);
+            let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
+            for item in queued {
+                hooks.try_send(item).unwrap();
+            }
+            let hooks_lost = Arc::new(AtomicBool::new(lost));
+            let (cmds, cmds_rx) = mpsc::channel(8);
+            let (input, input_rx) = mpsc::channel(8);
+            let setup = PaneSetup {
+                id: PaneId::new(1),
+                plan,
+                cwd: ".".to_owned(),
+                size: (20, 4),
+                slot: Arc::default(),
+                visible: false,
+                seen: false,
+                hooks: hooks_rx,
+                hooks_lost: Arc::clone(&hooks_lost),
+            };
+            runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
+            Self {
+                runtime,
+                reports,
+                cmds,
+                hooks,
+                hooks_lost,
+                _events: events_rx,
+                _input: input,
+            }
+        }
+
+        /// Everything the actor reports within `window`.
+        fn collect(&self, window: Duration) -> Vec<PaneEvent> {
+            let mut seen = Vec::new();
+            let end = Instant::now() + window;
+            self.runtime.block_on(async {
+                while let Ok(batch) = tokio::time::timeout_at(end, self.reports.next()).await {
+                    seen.extend(batch.into_values().flatten());
+                }
+            });
+            seen
+        }
+    }
+
+    fn hook(serial: u64, event: yien_agent::HookEvent) -> HookItem {
+        HookItem {
+            serial,
+            event: Ok(event),
+        }
+    }
+
+    fn last_state(events: &[PaneEvent]) -> Option<AgentState> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::State(state, _) => Some(*state),
+            _ => None,
+        })
+    }
+
+    fn last_signal_lost(events: &[PaneEvent]) -> Option<bool> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::SignalLost(lost) => Some(*lost),
+            _ => None,
+        })
+    }
+
+    /// Longer than the "needs you" confirmation, so a red mark would show.
+    const SETTLE: Duration = Duration::from_millis(800);
+
+    #[test]
+    fn hooks_queued_before_a_refused_one_are_dropped_with_it() {
+        use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
+        let queued = vec![
+            hook(1, UserPromptSubmit),
+            hook(1, UserPromptSubmit),
+            hook(1, PermissionRequest),
+        ];
+        let pane = Solo::start(queued, true);
+        let events = pane.collect(SETTLE);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        assert!(
+            matches!(last_state(&events), None | Some(AgentState::Idle)),
+            "{events:?}"
+        );
+        assert_eq!(last_signal_lost(&events), Some(true), "{events:?}");
+    }
+
+    #[test]
+    fn a_hook_after_the_refused_ones_is_read_again() {
+        use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
+        let pane = Solo::start(vec![hook(1, UserPromptSubmit)], true);
+        assert_eq!(last_signal_lost(&pane.collect(SETTLE)), Some(true));
+        assert!(!pane.hooks_lost.load(Ordering::Acquire));
+        pane.hooks.try_send(hook(1, UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn a_hook_from_before_a_relaunch_does_not_reach_the_new_program() {
+        use yien_agent::HookEvent::{PermissionRequest, SessionStart, UserPromptSubmit};
+        use yien_agent::SessionStartSource;
+        let pane = Solo::start(Vec::new(), false);
+        pane.collect(Duration::from_millis(100));
+        pane.cmds.try_send(PaneCmd::Relaunch).unwrap();
+        let relaunched = pane.collect(Duration::from_millis(200));
+        assert!(relaunched.contains(&PaneEvent::Started), "{relaunched:?}");
+        let stale = "11111111-1111-4111-8111-111111111111".to_owned();
+        let session = SessionStart {
+            session_id: Some(stale.clone()),
+            source: SessionStartSource::Resume,
+        };
+        for event in [session, UserPromptSubmit, PermissionRequest] {
+            pane.hooks.try_send(hook(1, event)).unwrap();
+        }
+        let events = pane.collect(SETTLE);
+        assert!(!events.contains(&PaneEvent::SessionId(stale)), "{events:?}");
+        assert!(
+            matches!(last_state(&events), None | Some(AgentState::Idle)),
+            "{events:?}"
+        );
+        pane.hooks.try_send(hook(2, UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(hook(2, PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
     }
 
     #[test]

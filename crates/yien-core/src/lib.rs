@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod convert;
+mod hooks;
 mod launch;
 mod pane;
 mod report;
@@ -40,6 +41,7 @@ mod tests;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +56,7 @@ use yien_vt::VtConfig;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
 
+pub use hooks::HookConfig;
 pub use shell::{ShellCommand, default_shell};
 
 /// Commands waiting for the core; beyond this [`CoreHandle::try_send`]
@@ -139,6 +142,9 @@ pub struct CoreConfig {
     pub initial_size: (u16, u16),
     /// Threads of the core's runtime.
     pub worker_threads: usize,
+    /// The Claude Code hook pipe (ADR-09). `None` runs without it: Claude
+    /// panes launch without hook settings and show "signal lost".
+    pub hooks: Option<HookConfig>,
 }
 
 impl Default for CoreConfig {
@@ -152,6 +158,7 @@ impl Default for CoreConfig {
             frame_interval: FRAME_INTERVAL,
             initial_size: (80, 24),
             worker_threads: 2,
+            hooks: None,
         }
     }
 }
@@ -207,6 +214,10 @@ impl Core {
     /// Starts the core on its own runtime with an empty workspace. The first
     /// event is a [`CoreMsg::WorkspaceSnapshot`]. The core stops when the last
     /// [`CoreHandle`] is dropped, terminating every pane's program.
+    ///
+    /// With [`CoreConfig::hooks`] set it also writes the hook settings file
+    /// and opens the hook pipe. Neither failing stops the core: the reason
+    /// comes as a [`CoreMsg::Error`] after the snapshot.
     pub fn start(
         backend: Arc<dyn PtyBackend>,
         config: CoreConfig,
@@ -229,18 +240,36 @@ impl Core {
             .map_err(CoreError::Runtime)?;
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         let (events, event_rx) = mpsc::channel(EVENT_QUEUE);
+        let panes: Links = Arc::new(Mutex::new(HashMap::new()));
+        let (hooks, hooks_error) = match &config.hooks {
+            None => (None, None),
+            Some(hook_config) => match hooks::start(hook_config, Arc::clone(&panes)) {
+                Ok(hooks) => (Some(Arc::new(hooks)), None),
+                Err(e) => {
+                    tracing::warn!("Claude Code hooks are off: {e}");
+                    (None, Some(e.to_string()))
+                }
+            },
+        };
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),
             events,
             reports: Arc::default(),
             engine,
+            hooks: hooks.clone(),
+            attention: Arc::new(AtomicU64::new(0)),
         };
-        let panes: Links = Arc::new(Mutex::new(HashMap::new()));
-        runtime.spawn(service::run(ctx, Arc::clone(&panes), command_rx));
+        runtime.spawn(service::run(
+            ctx,
+            Arc::clone(&panes),
+            command_rx,
+            hooks_error,
+        ));
         let handle = CoreHandle {
             commands,
             panes,
+            hooks,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -263,6 +292,15 @@ impl Drop for RuntimeGuard {
 pub struct CoreHandle {
     commands: mpsc::Sender<ClientMsg>,
     panes: Links,
+    /// Keeps the hook pipe open while any handle lives.
+    #[cfg_attr(
+        not(all(test, windows)),
+        allow(
+            dead_code,
+            reason = "held for its Drop: closes the pipe, removes the settings file"
+        )
+    )]
+    hooks: Option<Arc<hooks::Hooks>>,
     _runtime: Arc<RuntimeGuard>,
 }
 

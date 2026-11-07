@@ -42,6 +42,7 @@ pub const KILLED_EXIT_CODE: u32 = 1;
 pub struct FakePty {
     spawned: Arc<Mutex<Vec<FakeChild>>>,
     refuse: Arc<AtomicBool>,
+    batch: Arc<AtomicBool>,
 }
 
 impl FakePty {
@@ -68,6 +69,22 @@ impl FakePty {
         self.refuse.store(refuse, Ordering::SeqCst);
     }
 
+    /// Makes the following programs count as batch files: a spawn with an
+    /// argument `cmd.exe` would interpret fails with
+    /// [`PtyError::UnsafeBatchArgument`], as a `.cmd` install would.
+    ///
+    /// ```
+    /// use yien_pty::{FakePty, PtyBackend, PtyError, SpawnSpec};
+    /// let backend = FakePty::new();
+    /// backend.batch_programs(true);
+    /// let err = backend.spawn(SpawnSpec::new("claude").arg("C:/John (Work)")).unwrap_err();
+    /// assert!(matches!(err, PtyError::UnsafeBatchArgument { .. }));
+    /// assert!(backend.spawn(SpawnSpec::new("claude").arg("C:/John")).is_ok());
+    /// ```
+    pub fn batch_programs(&self, batch: bool) {
+        self.batch.store(batch, Ordering::SeqCst);
+    }
+
     /// The children spawned since the last call, oldest first.
     ///
     /// ```
@@ -88,6 +105,13 @@ impl PtyBackend for FakePty {
             return Err(PtyError::Spawn {
                 program: spec.program.to_string_lossy().into_owned(),
                 source: "refused by FakePty".into(),
+            });
+        }
+        if self.batch.load(Ordering::SeqCst)
+            && spec.args.iter().any(|a| crate::program::batch_unsafe(a))
+        {
+            return Err(PtyError::UnsafeBatchArgument {
+                program: spec.program.to_string_lossy().into_owned(),
             });
         }
         let (events_tx, events) = sync_channel(OUTPUT_QUEUE_CAPACITY);

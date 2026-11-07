@@ -92,9 +92,14 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    fn start_with(hooks: Option<crate::HookConfig>) -> Self {
         let backend = FakePty::new();
         let config = CoreConfig {
             shell: ShellCommand::new("fake-shell"),
+            hooks,
             ..CoreConfig::default()
         };
         let (core, events) = Core::start_with(Arc::new(backend.clone()), config, faulty).unwrap();
@@ -273,4 +278,66 @@ fn rf_pan_19_a_crashed_pane_given_commands_before_its_relaunch_still_draws_and_i
         AgentState::Idle,
         "a seen pane ends its turn idle"
     );
+}
+
+/// Red through the real hook pipe, then the actor dies: the pane must not
+/// keep a red mark nothing can clear.
+#[cfg(windows)]
+#[test]
+fn a_crashed_pane_that_needed_you_drops_the_red_mark() {
+    use std::io::Write;
+
+    use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV, connect_client};
+    use yien_proto::{NeedsReason, Orientation, ProfileId, hook_frame};
+
+    let mut h = Harness::start_with(Some(crate::HookConfig {
+        hook_exe: std::env::current_exe().unwrap(),
+        settings_dir: std::env::temp_dir().join(format!("yien-core-crash-{}", std::process::id())),
+    }));
+    let (shell, _) = h.project();
+    h.send(ClientMsg::Command(Command::SplitPane {
+        pane: shell,
+        orientation: Orientation::Horizontal,
+        profile: Some(ProfileId::new("claude")),
+    }));
+    let pane = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) if t.focused != shell => Some(t.focused),
+        _ => None,
+    });
+    let child = h.child();
+    let env = |key: &str| {
+        let (_, value) = child
+            .spec()
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .unwrap();
+        value.to_string_lossy().into_owned()
+    };
+    let (token, pipe) = (env(HOOK_TOKEN_ENV), env(HOOK_PIPE_ENV));
+    // Each connection is served on its own thread, so the next hook waits
+    // for the state the last one set.
+    let hook = |event: &str| {
+        let payload = format!(r#"{{"hook_event_name":"{event}","tool_name":"Bash"}}"#);
+        let frame = hook_frame::encode(token.as_bytes(), event, payload.as_bytes()).unwrap();
+        let mut conn = connect_client(&pipe, Instant::now() + TIMEOUT).unwrap();
+        conn.write_all(&frame).unwrap();
+    };
+    hook("UserPromptSubmit");
+    assert_eq!(h.state(pane), AgentState::Working);
+    hook("PermissionRequest");
+    assert_eq!(h.state(pane), AgentState::NeedsYou(NeedsReason::Permission));
+
+    h.send(ClientMsg::Scroll {
+        pane,
+        delta: PANIC_IN_ACTOR,
+    });
+    assert_eq!(h.state(pane), AgentState::Idle);
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane && !p.running => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!(info.state, AgentState::Idle);
+    assert_eq!(info.needs_you_since, None);
 }

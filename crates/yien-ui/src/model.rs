@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use yien_proto::{LayoutNode, PaneId, PaneInfo, ProjectId, ProjectInfo, TabId, TabInfo};
+use yien_proto::{
+    LayoutNode, PaneId, PaneInfo, ProfileInfo, ProjectId, ProjectInfo, TabId, TabInfo,
+};
 
 use crate::layout::{Rect, pane_rects};
 
@@ -97,6 +99,11 @@ pub struct PaneView {
     /// Its program ran and stopped, or could not start (RF-PAN-19). A pane
     /// still starting is not running but has not exited either.
     pub exited: bool,
+    /// While it needs the user: its place in the wait order, lower first
+    /// (RF-ATN-05).
+    pub needs_you_since: Option<u64>,
+    /// Its agent's state cannot be told, so it shows idle (RN-02).
+    pub signal_lost: bool,
 }
 
 impl PaneView {
@@ -110,6 +117,8 @@ impl PaneView {
             running: true,
             exit_code: None,
             exited: false,
+            needs_you_since: None,
+            signal_lost: false,
         }
     }
 
@@ -122,6 +131,8 @@ impl PaneView {
             running: info.running,
             exit_code: info.exit_code,
             exited: !info.running && info.exit_code.is_some(),
+            needs_you_since: info.needs_you_since,
+            signal_lost: info.signal_lost,
         }
     }
 }
@@ -199,6 +210,7 @@ pub struct ProjectView {
 ///     }],
 ///     panes: vec![],
 ///     active_tab: Some(TabId::new(2)),
+///     profiles: vec![],
 /// };
 /// let view = WorkspaceView::from_snapshot(&snapshot);
 /// assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(2)));
@@ -215,12 +227,17 @@ pub struct WorkspaceView {
     /// are never reused.
     closed_tabs: HashSet<TabId>,
     closed_panes: HashSet<PaneId>,
+    /// The profiles a new pane can start with, the shell first.
+    profiles: Vec<ProfileInfo>,
 }
 
 impl WorkspaceView {
     /// The workspace as the core's first event describes it.
     pub fn from_snapshot(snapshot: &yien_proto::WorkspaceSnapshot) -> Self {
-        let mut view = Self::default();
+        let mut view = Self {
+            profiles: snapshot.profiles.clone(),
+            ..Self::default()
+        };
         for project in &snapshot.projects {
             view.project_updated(project);
         }
@@ -334,11 +351,17 @@ impl WorkspaceView {
         self.closed_panes.insert(id);
     }
 
-    /// A pane's agent state changed. `false` when the pane is unknown.
+    /// A pane's agent state changed. `false` when the pane is unknown. Its
+    /// place in the wait order comes with the pane update that follows.
     pub fn pane_state(&mut self, id: PaneId, state: yien_proto::AgentState) -> bool {
         self.panes
             .get_mut(&id)
-            .map(|p| p.state = state.into())
+            .map(|p| {
+                p.state = state.into();
+                if !p.state.needs_you() {
+                    p.needs_you_since = None;
+                }
+            })
             .is_some()
     }
 
@@ -357,6 +380,40 @@ impl WorkspaceView {
     /// Every project, in tab-bar order.
     pub fn projects(&self) -> &[ProjectView] {
         &self.projects
+    }
+
+    /// The profiles a new pane can start with, the shell first.
+    pub fn profiles(&self) -> &[ProfileInfo] {
+        &self.profiles
+    }
+
+    /// Every pane that needs the user, the one waiting longest first
+    /// (RF-ATN-05). A pane whose place has not arrived yet goes last.
+    pub fn waiting_panes(&self) -> Vec<PaneId> {
+        let mut waiting: Vec<(Option<u64>, usize, PaneId)> = self
+            .all_panes()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(at, id)| {
+                let pane = self.panes.get(&id)?;
+                pane.state
+                    .needs_you()
+                    .then_some((pane.needs_you_since, at, id))
+            })
+            .collect();
+        waiting.sort_by_key(|(since, at, _)| (since.is_none(), *since, *at));
+        waiting.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Where the jump to the next pane that needs the user goes from
+    /// `current` (RF-ATN-05): the pane waiting longest, or, from a pane that
+    /// is itself waiting, the next one in the wait order, wrapping around.
+    pub fn next_waiting(&self, current: Option<PaneId>) -> Option<PaneId> {
+        let waiting = self.waiting_panes();
+        let next = current
+            .and_then(|c| waiting.iter().position(|p| *p == c))
+            .map_or(0, |at| (at + 1) % waiting.len());
+        waiting.get(next).copied()
     }
 
     /// The tabs of a project that the UI knows, in tab-bar order.
@@ -581,6 +638,8 @@ mod tests {
             running: true,
             exit_code: None,
             session_id: None,
+            needs_you_since: state.is_red().then_some(id),
+            signal_lost: false,
         }
     }
 
@@ -603,6 +662,7 @@ mod tests {
                 pane(200, 20, P::Done),
             ],
             active_tab: Some(TabId::new(10)),
+            profiles: vec![],
         })
     }
 
@@ -652,6 +712,126 @@ mod tests {
         assert_eq!(view.working_panes(), 1);
         let first = view.projects()[0].clone();
         assert_eq!(view.needs_you_tabs_of(&first), 1);
+    }
+
+    #[test]
+    fn rf_atn_02_red_propagates_to_the_tab_and_the_project_and_clears_with_the_pane() {
+        let mut view = demo();
+        let tab = |v: &WorkspaceView, id| v.tab_state(v.tab(TabId::new(id)).unwrap());
+        let project = |v: &WorkspaceView| {
+            let first = v.projects()[0].clone();
+            v.needs_you_tabs_of(&first)
+        };
+        assert_eq!(tab(&view, 11), AgentState::Working);
+        assert!(view.pane_state(PaneId::new(110), NEEDS));
+        assert_eq!(tab(&view, 11), AgentState::NeedsYou);
+        assert_eq!(project(&view), 2);
+        assert_eq!(view.needs_you_panes(), 2);
+        assert!(view.pane_state(PaneId::new(100), P::Working));
+        assert!(view.pane_state(PaneId::new(110), P::Working));
+        assert_eq!(tab(&view, 10), AgentState::Working);
+        assert_eq!(project(&view), 0);
+        assert_eq!(view.needs_you_panes(), 0);
+    }
+
+    #[test]
+    fn rf_atn_05_the_jump_goes_oldest_first_and_cycles() {
+        let mut view = demo();
+        // 100 waits since 100; 200 and 110 start waiting later, 110 last.
+        let later = |view: &mut WorkspaceView, id: u64, tab: u64, since: u64| {
+            let mut info = pane(id, tab, NEEDS);
+            info.needs_you_since = Some(since);
+            view.pane_updated(&info);
+        };
+        later(&mut view, 110, 11, 300);
+        later(&mut view, 200, 20, 250);
+        let order: Vec<u64> = view.waiting_panes().iter().map(|p| p.get()).collect();
+        assert_eq!(order, vec![100, 200, 110]);
+        assert_eq!(view.next_waiting(None), Some(PaneId::new(100)));
+        assert_eq!(
+            view.next_waiting(Some(PaneId::new(101))),
+            Some(PaneId::new(100))
+        );
+        assert_eq!(
+            view.next_waiting(Some(PaneId::new(100))),
+            Some(PaneId::new(200))
+        );
+        assert_eq!(
+            view.next_waiting(Some(PaneId::new(200))),
+            Some(PaneId::new(110))
+        );
+        assert_eq!(
+            view.next_waiting(Some(PaneId::new(110))),
+            Some(PaneId::new(100))
+        );
+        assert!(view.pane_state(PaneId::new(100), P::Working));
+        assert_eq!(view.pane(PaneId::new(100)).needs_you_since, None);
+        assert_eq!(view.next_waiting(None), Some(PaneId::new(200)));
+    }
+
+    #[test]
+    fn rf_atn_05_a_pane_red_before_its_place_arrives_goes_last() {
+        let mut view = demo();
+        assert!(view.pane_state(PaneId::new(110), NEEDS));
+        assert_eq!(
+            view.waiting_panes(),
+            vec![PaneId::new(100), PaneId::new(110)]
+        );
+    }
+
+    #[test]
+    fn rf_atn_05_nobody_waiting_means_no_jump() {
+        let mut view = demo();
+        assert!(view.pane_state(PaneId::new(100), P::Idle));
+        assert_eq!(view.next_waiting(None), None);
+        assert_eq!(view.next_waiting(Some(PaneId::new(100))), None);
+    }
+
+    #[test]
+    fn rf_atn_03_the_counter_follows_every_state_change() {
+        let mut view = demo();
+        assert_eq!(view.needs_you_panes(), 1);
+        for (id, state) in [(110, NEEDS), (200, NEEDS), (101, NEEDS)] {
+            assert!(view.pane_state(PaneId::new(id), state));
+        }
+        assert_eq!(view.needs_you_panes(), 4);
+        view.pane_closed(PaneId::new(101));
+        let mut split = tab(10, 1, &[100]);
+        split.focused = PaneId::new(100);
+        view.tab_updated(&split);
+        assert_eq!(view.needs_you_panes(), 3);
+        view.tab_closed(TabId::new(20));
+        assert_eq!(view.needs_you_panes(), 2);
+    }
+
+    #[test]
+    fn rf_pan_18_the_snapshot_brings_the_profiles() {
+        let snapshot = WorkspaceSnapshot {
+            profiles: vec![
+                ProfileInfo {
+                    id: yien_proto::ProfileId::new("shell"),
+                    name: "Shell".into(),
+                },
+                ProfileInfo {
+                    id: yien_proto::ProfileId::new("claude"),
+                    name: "Claude Code".into(),
+                },
+            ],
+            ..WorkspaceSnapshot::default()
+        };
+        let view = WorkspaceView::from_snapshot(&snapshot);
+        let names: Vec<&str> = view.profiles().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Shell", "Claude Code"]);
+    }
+
+    #[test]
+    fn rn_02_signal_lost_reaches_the_pane_view() {
+        let mut view = demo();
+        let mut info = pane(101, 10, P::Idle);
+        info.signal_lost = true;
+        view.pane_updated(&info);
+        let p = view.pane(PaneId::new(101));
+        assert!(p.signal_lost && p.state == AgentState::Idle);
     }
 
     #[test]
@@ -713,6 +893,7 @@ mod tests {
             tabs: vec![tab(10, 1, &[100])],
             panes: vec![],
             active_tab: Some(TabId::new(10)),
+            profiles: vec![],
         });
         view.tab_closed(TabId::new(10));
         assert!(view.selected_tab().is_none());
