@@ -124,6 +124,7 @@ Design reasoning goes in the report, the commit or the PR, never in the code.
 The brief is the only context it gets.
 
 - Give it the worktree path, the branch and the TASK file. cargo runs there and nowhere else.
+- Tell it the shell's working directory resets between calls: every command uses `git -C <worktree>` or starts with `cd <worktree> &&`, and paths use forward slashes.
 - State the rules it would otherwise break, above all commit format and no trailers.
 - Give it the facts already established with `file:line`, and say which ones it must verify.
 - Name what is out of scope, including other agents' worktrees.
