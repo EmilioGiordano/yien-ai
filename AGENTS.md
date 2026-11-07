@@ -34,7 +34,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Commit or push to `main` | never | never | yes |
 | Merge | never | never | yes |
 | Delete a branch or worktree | never | never | yes |
-| Force-push, rewrite pushed history | announce and wait | never | yes |
+| Force-push, rewrite pushed history | never | never | yes |
 
 "Not explicitly forbidden" is not permission.
 
