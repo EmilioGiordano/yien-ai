@@ -154,6 +154,16 @@ impl Git {
 
 /// Turns a failed call's exit code and stderr (untranslated, `LC_ALL=C`) into an error.
 fn classify_failure(code: Option<i32>, stderr: &str) -> GitError {
+    const DUBIOUS: &str = "detected dubious ownership in repository at '";
+    if let Some(rest) = stderr
+        .lines()
+        .find_map(|l| l.split_once(DUBIOUS).map(|(_, rest)| rest.trim_end()))
+    {
+        let path = rest.strip_suffix('\'').unwrap_or(rest);
+        return GitError::UnsafeRepository {
+            path: PathBuf::from(path),
+        };
+    }
     if stderr.contains("not a git repository") {
         return GitError::NotARepository;
     }
@@ -350,6 +360,22 @@ mod tests {
                 String::from_utf8_lossy(&out)
             ),
             Err(other) => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn dubious_ownership_is_an_unsafe_repository() {
+        let stderr = "fatal: detected dubious ownership in repository at 'C:/src/other user'\n\
+                      'C:/src/other user' is owned by:\n\
+                      \tBUILTIN/Administrators (S-1-5-32-544)\n\
+                      To add an exception for this directory, call:\n\
+                      \n\
+                      \tgit config --global --add safe.directory 'C:/src/other user'\n";
+        match classify_failure(Some(128), stderr) {
+            GitError::UnsafeRepository { path } => {
+                assert_eq!(path, PathBuf::from("C:/src/other user"));
+            }
+            other => panic!("{other:?}"),
         }
     }
 

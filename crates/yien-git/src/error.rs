@@ -1,5 +1,6 @@
 //! What can go wrong when asking git.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Why a git question got no answer.
@@ -16,6 +17,17 @@ pub enum GitError {
     /// The directory is not inside a git work tree.
     #[error("not inside a git repository")]
     NotARepository,
+    /// git refuses the repository because another user owns it (`safe.directory`).
+    /// The fix is `git config --global --add safe.directory <path>`, which only the user may run.
+    #[error(
+        "git refuses {} because another user owns it; trust it with: git config --global --add safe.directory {}",
+        path.display(),
+        path.display()
+    )]
+    UnsafeRepository {
+        /// The repository path as git printed it.
+        path: PathBuf,
+    },
     /// The repository's own config defines a content filter that cannot be
     /// switched off from the command line, so `status` was not run.
     #[error("the repository config defines filter setting {key}, which YIEN cannot switch off")]
