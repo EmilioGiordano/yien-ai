@@ -383,11 +383,12 @@ impl CoreHandle {
         Ok(())
     }
 
-    /// Writes the workspace as it is now, for the app's quit path: waits at
-    /// most `timeout` for a save already running, and ignores every change
-    /// after it, so programs ending as the app exits are not saved. Blocks the
-    /// caller only for that write. `Ok(false)` when nothing changed since the
-    /// last save or no session store is set.
+    /// Writes the workspace as it is now, for the app's quit path, and
+    /// ignores every change after it, so programs ending as the app exits are
+    /// not saved. The write runs on its own thread; the caller waits at most
+    /// `timeout`, and on [`SessionSaveError::TimedOut`] the write goes on in
+    /// the background. `Ok(false)` when nothing changed since the last save or
+    /// no session store is set.
     ///
     /// ```
     /// # use std::{sync::Arc, time::Duration};

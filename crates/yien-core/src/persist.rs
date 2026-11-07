@@ -57,21 +57,6 @@ impl SessionStore {
     fn lock(&self) -> MutexGuard<'_, Slot> {
         self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
-
-    /// The lock, waiting at most until `deadline`.
-    fn lock_until(&self, deadline: Instant) -> Option<MutexGuard<'_, Slot>> {
-        loop {
-            match self.slot.try_lock() {
-                Ok(slot) => return Some(slot),
-                Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
 }
 
 impl fmt::Debug for SessionStore {
@@ -84,9 +69,13 @@ impl fmt::Debug for SessionStore {
 /// write the session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionSaveError {
-    /// Another write held the store past the time allowed.
-    #[error("the saved session was busy; the last automatic save is kept")]
+    /// The write did not finish in the time allowed; it goes on in the
+    /// background, and until it lands the previous saved session stays whole.
+    #[error("saving the session took too long; it goes on in the background")]
     TimedOut,
+    /// No thread could be started for the write.
+    #[error("could not start saving the session: {0}")]
+    NoThread(#[source] std::io::Error),
     /// The write failed; the previous saved session is untouched.
     #[error("could not save the session: {0}")]
     Failed(#[from] SaveError),
@@ -231,12 +220,11 @@ impl Writer {
         self.shared.wake.notify_all();
     }
 
-    /// Stops the thread and writes the newest snapshot now, waiting at most
-    /// `timeout` for a write already running. Later updates are ignored, so
-    /// what programs do while they are stopped never reaches the file.
-    /// `Ok(false)` when there was nothing new to write.
+    /// Stops the thread and writes the newest snapshot now, on a thread of
+    /// its own so the caller waits at most `timeout`, disk included. Later
+    /// updates are ignored, so what programs do while they are stopped never
+    /// reaches the file. `Ok(false)` when there was nothing new to write.
     pub fn save_now(&self, timeout: Duration) -> Result<bool, SessionSaveError> {
-        let deadline = Instant::now() + timeout;
         let mut state = self.shared.lock();
         state.stopped = true;
         let pending = state.latest.clone().map(|s| (s, state.version));
@@ -245,11 +233,17 @@ impl Writer {
         let Some((snapshot, version)) = pending else {
             return Ok(false);
         };
-        let slot = self
-            .store
-            .lock_until(deadline)
-            .ok_or(SessionSaveError::TimedOut)?;
-        write(slot, snapshot, version)
+        let (done, result) = std::sync::mpsc::channel();
+        let store = self.store.clone();
+        std::thread::Builder::new()
+            .name("yien-session-quit-save".to_owned())
+            .spawn(move || {
+                let _ = done.send(write(store.lock(), snapshot, version));
+            })
+            .map_err(SessionSaveError::NoThread)?;
+        result
+            .recv_timeout(timeout)
+            .unwrap_or(Err(SessionSaveError::TimedOut))
     }
 }
 
