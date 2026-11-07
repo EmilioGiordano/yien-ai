@@ -131,13 +131,23 @@ impl Run {
     }
 
     fn start_with(store: impl Store + Send + 'static, hooks: Option<HookConfig>) -> Self {
+        Self::configured(
+            store,
+            CoreConfig {
+                hooks,
+                ..CoreConfig::default()
+            },
+        )
+    }
+
+    /// Starts a core on `store` with `config`'s other settings.
+    fn configured(store: impl Store + Send + 'static, config: CoreConfig) -> Self {
         let backend = FakePty::new();
         let config = CoreConfig {
             shell: ShellCommand::new("fake-shell"),
-            hooks,
             session: Some(SessionStore::new(store)),
             start_project: Some(ROOT.to_owned()),
-            ..CoreConfig::default()
+            ..config
         };
         let (core, events) = Core::start(Arc::new(backend.clone()), config).unwrap();
         Self {
@@ -560,4 +570,40 @@ fn rf_ses_03_a_resumed_claude_gets_the_hook_settings_and_a_token() {
         .map(|(_, v)| v.to_string_lossy().into_owned())
         .unwrap();
     assert_eq!(token.len(), 64);
+}
+
+#[test]
+fn rf_ses_02_restored_panes_start_at_the_sizes_the_ui_sends() {
+    let (store, claude, _) = first_run();
+    let mut again = Run::configured(
+        store.clone(),
+        CoreConfig {
+            size_wait: TIMEOUT * 2,
+            ui_wait: TIMEOUT * 2,
+            ..CoreConfig::default()
+        },
+    );
+    let restored = again.snapshot();
+    let panes = restored.tabs[0].layout.panes();
+    let shell = *panes.iter().find(|p| **p != claude).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(again.backend.take_spawned().is_empty(), "spawned too early");
+    for (pane, cols) in [(shell, 61), (claude, 58)] {
+        again
+            .core
+            .try_send(ClientMsg::ResizePane {
+                pane,
+                cols,
+                rows: 27,
+            })
+            .unwrap();
+    }
+    for child in again.children(2) {
+        let cols = if args(&child).iter().any(|a| a == "--resume") {
+            58
+        } else {
+            61
+        };
+        assert_eq!((child.spec().cols, child.spec().rows), (cols, 27));
+    }
 }
