@@ -886,6 +886,8 @@ impl Workspace {
             PaneEvent::Crashed => {
                 p.running = false;
                 p.exit_code = None;
+                // The restarted actor runs the pane's own program again.
+                p.standin = None;
                 // The restarted actor starts idle and reports no change, so a
                 // red mark would otherwise outlive the agent that raised it.
                 p.needs_you_since = None;
@@ -1351,6 +1353,20 @@ mod tests {
             matches!(fx[..], [Effect::Relaunch { pane }] if pane == a),
             "{fx:?}"
         );
+    }
+
+    #[test]
+    fn rf_ses_11_a_crash_drops_the_fallback_shell_name() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let own = ws.panes[&a].profile_name.clone();
+        ws.on_pane_event(
+            a,
+            PaneEvent::Standin(Some(("Shell".to_owned(), "Fallback".to_owned()))),
+        );
+        assert_eq!(pane_info(a, &ws.panes[&a]).profile, "Fallback");
+        ws.on_pane_event(a, PaneEvent::Crashed);
+        assert_eq!(pane_info(a, &ws.panes[&a]).profile, own);
     }
 
     #[test]
