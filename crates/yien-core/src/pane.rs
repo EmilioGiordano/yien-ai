@@ -457,11 +457,16 @@ impl Actor {
         let Some(p) = self.pending.take() else {
             return;
         };
-        let reported = *p.ui.borrow();
+        self.resize_to_reported(&p);
+        self.start().await;
+    }
+
+    /// Takes the last size the UI reported for any pane, if it has.
+    fn resize_to_reported(&self, pending: &Pending) {
+        let reported = *pending.ui.borrow();
         if let Some((cols, rows)) = reported {
             lock(&self.engine).resize(cols, rows);
         }
-        self.start().await;
     }
 
     fn report(&self, event: PaneEvent) {
@@ -667,8 +672,9 @@ impl Actor {
             }
             PaneCmd::Relaunch => {
                 // A relaunch starts a new session, even before the first start.
-                if self.pending.take().is_some() {
+                if let Some(p) = self.pending.take() {
                     self.resume = None;
+                    self.resize_to_reported(&p);
                 }
                 if let Some(old) = self.session.take() {
                     let _ = old.control.kill();
