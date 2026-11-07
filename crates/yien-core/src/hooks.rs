@@ -34,6 +34,29 @@ pub struct HookConfig {
     pub settings_dir: PathBuf,
 }
 
+impl HookConfig {
+    /// The settings file this process writes, one per running YIEN. The
+    /// core removes it when its last handle drops; the app also removes it
+    /// on quit, since the process may exit with the core still running.
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// use yien_core::HookConfig;
+    ///
+    /// let hooks = HookConfig {
+    ///     hook_exe: PathBuf::from("yien-hook.exe"),
+    ///     settings_dir: PathBuf::from("hooks"),
+    /// };
+    /// let file = hooks.settings_file();
+    /// assert!(file.starts_with("hooks"));
+    /// assert!(file.to_string_lossy().contains(&std::process::id().to_string()));
+    /// ```
+    pub fn settings_file(&self) -> PathBuf {
+        self.settings_dir
+            .join(format!("claude-hooks-{}.json", std::process::id()))
+    }
+}
+
 /// Why the hooks could not be set up. Claude panes then launch without
 /// `--settings` and show "signal lost".
 #[derive(Debug, thiserror::Error)]
@@ -91,9 +114,7 @@ pub(crate) fn start(config: &HookConfig, panes: Links) -> Result<Hooks, HooksErr
     }
     let json = render_claude_settings(&forward_slashes(&config.hook_exe))
         .map_err(|_| HooksError::UnsafePath(config.hook_exe.clone()))?;
-    let settings_path = config
-        .settings_dir
-        .join(format!("claude-hooks-{}.json", std::process::id()));
+    let settings_path = config.settings_file();
     std::fs::create_dir_all(&config.settings_dir)
         .and_then(|()| std::fs::write(&settings_path, json))
         .map_err(|source| HooksError::Write {

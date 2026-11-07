@@ -313,6 +313,7 @@ mod pipe {
     fn rf_age_01_claude_gets_its_settings_file_token_and_pipe() {
         let hooks = working_hooks();
         let dir = hooks.settings_dir.clone();
+        let settings_file = hooks.settings_file();
         let mut h = Harness::start(Some(hooks));
         let (_, pane, child) = h.project(Some("claude"));
         let args = args(&child);
@@ -322,6 +323,7 @@ mod pipe {
         assert!(settings.contains("PermissionRequest"));
         assert!(!settings.contains(&env(&child, HOOK_TOKEN_ENV).unwrap()));
         assert!(PathBuf::from(&args[3]).starts_with(&dir));
+        assert_eq!(PathBuf::from(&args[3]), settings_file);
         assert_eq!(env(&child, HOOK_TOKEN_ENV).unwrap().len(), 64);
         assert!(
             env(&child, HOOK_PIPE_ENV)

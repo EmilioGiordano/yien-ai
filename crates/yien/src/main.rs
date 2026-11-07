@@ -36,8 +36,10 @@ fn main() -> ExitCode {
     let log = start_logging();
     panic_log::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
+    let hooks = hook_config();
+    let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let config = CoreConfig {
-        hooks: hook_config(),
+        hooks,
         ..CoreConfig::default()
     };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {
@@ -61,6 +63,9 @@ fn main() -> ExitCode {
     // so the guard is flushed in the quit callback, not after `run`.
     yien_ui::run(Box::new(Client(core)), events, move || {
         tracing::info!("yien exiting");
+        if let Some(file) = &settings_file {
+            let _ = std::fs::remove_file(file);
+        }
         drop(log);
     });
     ExitCode::SUCCESS
