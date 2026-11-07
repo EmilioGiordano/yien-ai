@@ -117,6 +117,8 @@ struct Tab {
     /// The saved folder when a restore had to open the tab elsewhere; saved
     /// again in its place, so a folder that is only offline is not lost.
     kept_dir: Option<String>,
+    /// The git branch last seen in `dir` (RF-ESP-04).
+    branch: Option<String>,
 }
 
 impl Tab {
@@ -213,7 +215,7 @@ impl Workspace {
             project: tab.project,
             name: tab.name.clone(),
             dir: tab.dir.clone(),
-            branch: None,
+            branch: tab.branch.clone(),
             layout,
             focused: tab.focused,
             maximized: tab.maximized,
@@ -251,6 +253,35 @@ impl Workspace {
         if let Some(p) = self.panes.get(&pane) {
             fx.push(Effect::Emit(CoreMsg::PaneUpdated(pane_info(pane, p))));
         }
+    }
+
+    /// The selected tab and its folder.
+    pub fn active_dir(&self) -> Option<(TabId, &str)> {
+        let tab = self.tab(self.active_tab?).ok()?;
+        Some((tab.id, tab.dir.as_str()))
+    }
+
+    /// Whether the tab is open.
+    pub fn has_tab(&self, tab: TabId) -> bool {
+        self.tab(tab).is_ok()
+    }
+
+    /// Every tab and its folder, in no particular order.
+    pub fn tab_dirs(&self) -> impl Iterator<Item = (TabId, &str)> {
+        self.tabs.iter().map(|t| (t.id, t.dir.as_str()))
+    }
+
+    /// Records the branch git found in a tab's folder (RF-ESP-04); the tab
+    /// is announced again only when it changed. A closed tab is ignored.
+    pub fn set_branch(&mut self, tab: TabId, branch: Option<String>) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        if let Ok(t) = self.tab_mut(tab)
+            && t.branch != branch
+        {
+            t.branch = branch;
+            self.emit_tab(tab, &mut fx);
+        }
+        fx
     }
 
     fn set_active(&mut self, tab: Option<TabId>, fx: &mut Vec<Effect>) {
@@ -461,6 +492,7 @@ impl Workspace {
             focused: pane,
             maximized: None,
             kept_dir: None,
+            branch: None,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
@@ -1307,6 +1339,25 @@ mod tests {
             ws.on_pane_event(PaneId::new(5), PaneEvent::Started)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn rf_esp_04_a_branch_change_republishes_the_tab_once() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let fx = ws.set_branch(tab, Some("main".into()));
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Emit(CoreMsg::TabUpdated(t))] if t.branch.as_deref() == Some("main")
+        ));
+        assert!(ws.set_branch(tab, Some("main".into())).is_empty());
+        let fx = ws.set_branch(tab, None);
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Emit(CoreMsg::TabUpdated(t))] if t.branch.is_none()
+        ));
+        assert!(ws.set_branch(TabId::new(99), Some("x".into())).is_empty());
+        assert_eq!(ws.active_dir(), Some((tab, "C:/Code/yien/")));
     }
 
     #[test]

@@ -281,6 +281,7 @@ impl Workspace {
             focused: record.focused,
             maximized: None,
             kept_dir,
+            branch: None,
         });
         true
     }

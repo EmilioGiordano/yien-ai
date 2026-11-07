@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod convert;
+mod git;
 mod hooks;
 mod launch;
 mod pane;
@@ -57,6 +58,7 @@ use yien_vt::VtConfig;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
 
+pub use git::GitConfig;
 pub use hooks::HookConfig;
 pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
 pub use shell::{ShellCommand, default_shell};
@@ -160,6 +162,9 @@ pub struct CoreConfig {
     pub session: Option<SessionStore>,
     /// The folder opened as a project when no session is restored.
     pub start_project: Option<String>,
+    /// Git facts for tabs: the branch of every tab and the selected tab's
+    /// changes (RF-ESP-04, RF-CTX-04). `None`, the default, runs no git.
+    pub git: Option<GitConfig>,
 }
 
 impl Default for CoreConfig {
@@ -178,6 +183,7 @@ impl Default for CoreConfig {
             hooks: None,
             session: None,
             start_project: None,
+            git: None,
         }
     }
 }

@@ -8841,6 +8841,7 @@ dependencies = [
  "tokio",
  "tracing",
  "yien-agent",
+ "yien-git",
  "yien-layout",
  "yien-platform",
  "yien-proto",

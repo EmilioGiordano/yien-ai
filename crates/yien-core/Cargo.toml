@@ -15,6 +15,7 @@ yien-agent = { workspace = true }
 yien-pty = { workspace = true }
 yien-platform = { workspace = true }
 yien-session = { workspace = true }
+yien-git = { workspace = true }
 getrandom = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 thiserror = { workspace = true }
