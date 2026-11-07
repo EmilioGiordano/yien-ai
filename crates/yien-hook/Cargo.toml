@@ -13,6 +13,9 @@ yien-platform = { workspace = true }
 
 [dev-dependencies]
 yien-agent = { workspace = true }
+yien-core = { workspace = true }
+yien-pty = { workspace = true, features = ["fake"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
