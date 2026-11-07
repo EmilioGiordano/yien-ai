@@ -1440,6 +1440,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_divider_id_is_refused_after_a_close() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        let inner = t
+            .dividers(AREA, 6.0)
+            .into_iter()
+            .find(|d| d.orientation == Orientation::Vertical)
+            .unwrap()
+            .id;
+        let outer = t
+            .dividers(AREA, 6.0)
+            .into_iter()
+            .find(|d| d.orientation == Orientation::Horizontal)
+            .unwrap()
+            .id;
+
+        assert!(t.close(c));
+        assert!(!t.drag_divider(inner, 10.0, AREA));
+        assert!(t.close(b));
+        assert!(!t.drag_divider(outer, 10.0, AREA));
+        assert_eq!(t.layout(AREA)[&0], AREA);
+    }
+
+    #[test]
     fn non_finite_areas_are_refused() {
         let mut t = Tree::new();
         let b = t.split(0, Orientation::Horizontal).unwrap();
@@ -1534,7 +1559,7 @@ mod fuzz {
     }
 
     #[test]
-    fn random_split_close_resize_keeps_the_tree_sane() {
+    fn random_operations_keep_the_tree_sane() {
         let area = Rect::new(0.0, 0.0, 1000.0, 800.0);
         for seed in 0..40u64 {
             let mut rng = Lcg(seed.wrapping_mul(0x9E3779B9) + 1);
@@ -1543,8 +1568,8 @@ mod fuzz {
             for _ in 0..120 {
                 let panes = t.panes();
                 let pane = panes[rng.below(panes.len())];
-                match rng.below(10) {
-                    0..=4 => {
+                match rng.below(14) {
+                    0..=3 => {
                         let o = if rng.below(2) == 0 {
                             Orientation::Horizontal
                         } else {
@@ -1552,12 +1577,39 @@ mod fuzz {
                         };
                         t.split(pane, o);
                     }
+                    4 => {
+                        let zones = [
+                            DropZone::Left,
+                            DropZone::Right,
+                            DropZone::Top,
+                            DropZone::Bottom,
+                        ];
+                        t.split_towards(pane, zones[rng.below(4)]);
+                    }
                     5..=7 => {
                         t.close(pane);
                     }
-                    _ => {
+                    8 | 9 => {
                         let delta = (rng.below(21) as f32 - 10.0) / 50.0;
                         t.resize(pane, delta);
+                    }
+                    10 | 11 => {
+                        let target = panes[rng.below(panes.len())];
+                        let zones = [
+                            DropZone::Left,
+                            DropZone::Right,
+                            DropZone::Top,
+                            DropZone::Bottom,
+                        ];
+                        t.move_pane(pane, target, zones[rng.below(4)]);
+                    }
+                    _ => {
+                        let dividers = t.dividers(area, 6.0);
+                        if !dividers.is_empty() {
+                            let id = dividers[rng.below(dividers.len())].id;
+                            let delta = rng.below(801) as f32 - 400.0;
+                            t.drag_divider(id, delta, area);
+                        }
                     }
                 }
                 check_invariants(&t, area);
