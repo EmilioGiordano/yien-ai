@@ -190,7 +190,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 
 | Crate | Layer | Owns |
 |---|---|---|
-| `yien-proto` | 0 | Messages, ids, command catalog, `PROTO_VERSION`. Only `serde`. |
+| `yien-proto` | 0 | Messages, ids, workspace `Command`s, `PROTO_VERSION`. Only `serde`. |
 | `yien-layout` | 0 | Pane tree: split, close, move, swap, dock, sizes. From foothy. |
 | `yien-input` | 0 | Keys and text to bytes per terminal mode. From foothy. |
 | `yien-vt` | 1 | `VtEngine`, alacritty adapter, `osc_scan`, hot/cold scrollback, frame diffs. |
@@ -200,7 +200,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 | `yien-git` | 2 | git CLI and gix, worktrees; `gh` in R2. |
 | `yien-platform` | 2 | Notifications, tray, badge, single instance, shutdown, paths, IPC (the hook pipe today), DPAPI. |
 | `yien-core` | 3 | Pane actors and services. Runs in process or as `--host`. |
-| `yien-ui` | 3 | GPUI: window, bars, terminal element, palette. |
+| `yien-ui` | 3 | GPUI: window, bars, terminal element, palette, command catalog (ids, titles, default keys). |
 | `yien` | 4 | The binary: wires the core and the UI together. May depend on every layer; nothing depends on it. |
 | `yien-hook` | 4 | The binary Claude Code runs per hook: stdin to the hook pipe as one frame, no async runtime, always exit 0. Depends on `yien-proto` and `yien-platform` (the pipe client). |
 | `yien-testkit` | dev | `.yrec` record and replay, fake PTY and clock, acceptance scenarios. |
