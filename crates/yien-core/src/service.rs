@@ -5,17 +5,18 @@
 //! UI and on pane command queues that their actors always drain, so no wait
 //! closes a cycle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{mpsc, watch};
 use yien_agent::{HookError, HookEvent};
-use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo};
+use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo, TabGit, TabId};
 use yien_pty::PtyBackend;
 
 use crate::consoles::Consoles;
+use crate::git::{GitReport, GitThread};
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
@@ -94,6 +95,12 @@ struct Service {
     links: Links,
     /// Saves the workspace; `None` without a session store.
     writer: Option<Arc<Writer>>,
+    /// Runs git for the tabs; `None` when git facts are off.
+    git: Option<GitThread>,
+    /// The git facts last sent for each tab.
+    git_sent: HashMap<TabId, TabGit>,
+    /// Tabs whose folder git has looked at.
+    git_probed: HashSet<TabId>,
 }
 
 pub(crate) async fn run(
@@ -112,12 +119,19 @@ pub(crate) async fn run(
         },
         None => (Opened::default(), false),
     };
+    let (git, mut git_reports) = match ctx.config.git.and_then(GitThread::start) {
+        Some((git, reports)) => (Some(git), Some(reports)),
+        None => (None, None),
+    };
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
         ctx,
         panes: HashMap::new(),
         links,
         writer,
+        git,
+        git_sent: HashMap::new(),
+        git_probed: HashSet::new(),
     };
     let mut notices = opened.notices;
     let mut restored = Vec::new();
@@ -168,6 +182,7 @@ pub(crate) async fn run(
             .await;
     }
     service.publish();
+    service.sync_git();
     loop {
         tokio::select! {
             msg = commands.recv() => match msg {
@@ -183,7 +198,20 @@ pub(crate) async fn run(
                 }
                 service.publish();
             }
+            report = next_git(&mut git_reports) => match report {
+                Some(report) => service.on_git(report).await,
+                None => git_reports = None,
+            },
         }
+        service.sync_git();
+    }
+}
+
+/// The next git report; never, when git facts are off.
+async fn next_git(reports: &mut Option<mpsc::Receiver<GitReport>>) -> Option<GitReport> {
+    match reports {
+        Some(reports) => reports.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -208,6 +236,38 @@ impl Service {
                         .to_owned(),
                 )
             }
+        }
+    }
+
+    /// Points git at the selected tab, and has it look once at every tab it
+    /// has not seen, so their rows show a branch too.
+    fn sync_git(&mut self) {
+        let Some(git) = &mut self.git else {
+            return;
+        };
+        git.watch(self.ws.active_dir());
+        let watched = git.watched();
+        for (tab, dir) in self.ws.tab_dirs() {
+            if self.git_probed.insert(tab) && Some(tab) != watched {
+                git.probe(tab, dir);
+            }
+        }
+        let ws = &self.ws;
+        self.git_probed.retain(|tab| ws.has_tab(*tab));
+        self.git_sent.retain(|tab, _| ws.has_tab(*tab));
+    }
+
+    /// Applies what git found in a tab's folder. A failure keeps the branch
+    /// last seen, so a slow git does not blank the tab's row.
+    async fn on_git(&mut self, report: GitReport) {
+        let Some((fx, msg)) = apply_git(&mut self.ws, &mut self.git_sent, report) else {
+            return;
+        };
+        let changed = !fx.is_empty();
+        self.execute(fx).await;
+        self.emit(msg).await;
+        if changed {
+            self.publish();
         }
     }
 
@@ -410,6 +470,26 @@ impl Service {
     }
 }
 
+/// What a git report changes: the tab update when its branch changed, then
+/// the facts for the UI. `None` for a closed tab or facts already sent. An
+/// `Unavailable` report keeps the branch last seen.
+fn apply_git(
+    ws: &mut Workspace,
+    sent: &mut HashMap<TabId, TabGit>,
+    report: GitReport,
+) -> Option<(Vec<Effect>, CoreMsg)> {
+    let GitReport { tab, git } = report;
+    if !ws.has_tab(tab) || sent.get(&tab) == Some(&git) {
+        return None;
+    }
+    let fx = match git {
+        TabGit::Unavailable { .. } => Vec::new(),
+        _ => ws.set_branch(tab, git.branch().map(str::to_owned)),
+    };
+    sent.insert(tab, git.clone());
+    Some((fx, CoreMsg::TabGit { tab, git }))
+}
+
 /// The profiles new panes can be started with: the shell first, then each
 /// agent profile in the configured order.
 fn profile_list(config: &CoreConfig) -> Vec<ProfileInfo> {
@@ -452,5 +532,100 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }
         | Command::FocusDirection { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use yien_proto::{GitFacts, GitHead};
+
+    use super::*;
+    use crate::shell::ShellCommand;
+
+    fn workspace() -> (Workspace, TabId) {
+        let mut ws = Workspace::new();
+        let resolve =
+            |profile: Option<&ProfileId>| launch::resolve(profile, &[], &ShellCommand::new("sh"));
+        let new = Command::NewProject {
+            root: "C:/Code/yien".into(),
+            name: None,
+        };
+        ws.apply(new, &resolve).unwrap();
+        let tab = ws.active_dir().unwrap().0;
+        (ws, tab)
+    }
+
+    fn on(branch: &str) -> TabGit {
+        TabGit::Repository(GitFacts {
+            head: GitHead::Branch {
+                name: branch.into(),
+                unborn: false,
+            },
+            upstream: None,
+            root: "C:/Code/yien".into(),
+            linked_worktree: false,
+            main_worktree: None,
+            files: vec![],
+            changed: 0,
+        })
+    }
+
+    fn report(tab: TabId, git: TabGit) -> GitReport {
+        GitReport { tab, git }
+    }
+
+    fn branch_of(ws: &Workspace, tab: TabId) -> Option<String> {
+        ws.snapshot()
+            .tabs
+            .into_iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.branch)
+    }
+
+    #[test]
+    fn rf_esp_04_unchanged_facts_are_not_sent_again() {
+        let (mut ws, tab) = workspace();
+        let mut sent = HashMap::new();
+        let (fx, msg) = apply_git(&mut ws, &mut sent, report(tab, on("main"))).unwrap();
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::Emit(CoreMsg::TabUpdated(t))] if t.branch.as_deref() == Some("main")
+        ));
+        assert_eq!(
+            msg,
+            CoreMsg::TabGit {
+                tab,
+                git: on("main")
+            }
+        );
+        assert!(apply_git(&mut ws, &mut sent, report(tab, on("main"))).is_none());
+        let (fx, _) = apply_git(&mut ws, &mut sent, report(tab, on("feat"))).unwrap();
+        assert_eq!(fx.len(), 1);
+    }
+
+    #[test]
+    fn rf_esp_04_git_trouble_keeps_the_branch_last_seen() {
+        let (mut ws, tab) = workspace();
+        let mut sent = HashMap::new();
+        apply_git(&mut ws, &mut sent, report(tab, on("main"))).unwrap();
+        let trouble = TabGit::Unavailable {
+            reason: "git did not answer within 2000 ms".into(),
+        };
+        let (fx, msg) = apply_git(&mut ws, &mut sent, report(tab, trouble.clone())).unwrap();
+        assert!(fx.is_empty());
+        assert_eq!(msg, CoreMsg::TabGit { tab, git: trouble });
+        assert_eq!(branch_of(&ws, tab).as_deref(), Some("main"));
+
+        let (fx, _) = apply_git(&mut ws, &mut sent, report(tab, TabGit::NoRepository)).unwrap();
+        assert_eq!(fx.len(), 1);
+        assert_eq!(branch_of(&ws, tab), None);
+    }
+
+    #[test]
+    fn a_report_for_a_closed_tab_is_dropped() {
+        let (mut ws, _) = workspace();
+        let mut sent = HashMap::new();
+        assert!(apply_git(&mut ws, &mut sent, report(TabId::new(99), on("main"))).is_none());
+        assert!(sent.is_empty());
     }
 }

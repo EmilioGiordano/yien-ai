@@ -13,7 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{SelectionKind, Side, ViewportPoint};
-use crate::{PaneId, ProjectId, TabId};
+use crate::{PaneId, ProjectId, TabGit, TabId};
 
 /// Names an agent profile: `claude`, `codex`, `shell` (RF-AGE-01, RF-PAN-18).
 ///
@@ -451,7 +451,8 @@ pub struct TabInfo {
     pub name: String,
     /// The working directory its panes start in.
     pub dir: String,
-    /// The git branch checked out in `dir`; `None` until git support lands.
+    /// The git branch checked out in `dir`, as last seen; `None` when
+    /// detached, not a repository, or not looked at yet (RF-ESP-04).
     pub branch: Option<String>,
     /// How its panes are laid out.
     pub layout: LayoutNode,
@@ -581,6 +582,14 @@ pub enum CoreMsg {
         /// The exit code, when the OS reported one.
         code: Option<u32>,
     },
+    /// Git facts about a tab's folder changed (RF-ESP-04, RF-CTX-04). Sent
+    /// for the selected tab as it changes, and once for each other tab.
+    TabGit {
+        /// The tab.
+        tab: TabId,
+        /// What git says.
+        git: TabGit,
+    },
     /// The answer to [`ClientMsg::CopySelection`].
     SelectionText {
         /// The pane.
@@ -706,6 +715,72 @@ mod tests {
                 state: AgentState::Error(ErrorReason::UnexpectedExit {
                     code: Some(0xC000_013A),
                 }),
+            },
+        ];
+        for msg in msgs {
+            assert_eq!(round_trip(&msg), msg);
+        }
+    }
+
+    #[test]
+    fn rf_ctx_04_git_facts_round_trip() {
+        use crate::{GitFacts, GitFile, GitFileStatus, GitHead, GitUpstream};
+
+        let facts = GitFacts {
+            head: GitHead::Branch {
+                name: "feat/x".into(),
+                unborn: false,
+            },
+            upstream: Some(GitUpstream {
+                name: "origin/feat/x".into(),
+                ahead: Some(2),
+                behind: Some(1),
+            }),
+            root: "C:/Code/yien-wt/x".into(),
+            linked_worktree: true,
+            main_worktree: Some("C:/Code/yien".into()),
+            files: vec![
+                GitFile {
+                    path: "src/new.rs".into(),
+                    status: GitFileStatus::Renamed {
+                        from: "src/old.rs".into(),
+                    },
+                },
+                GitFile {
+                    path: "notes.txt".into(),
+                    status: GitFileStatus::Untracked,
+                },
+            ],
+            changed: 2,
+        };
+        let msgs = [
+            CoreMsg::TabGit {
+                tab: TabId::new(2),
+                git: TabGit::Repository(facts),
+            },
+            CoreMsg::TabGit {
+                tab: TabId::new(2),
+                git: TabGit::Repository(GitFacts {
+                    head: GitHead::Detached {
+                        commit: "0123456".into(),
+                    },
+                    upstream: None,
+                    root: "/srv/app".into(),
+                    linked_worktree: false,
+                    main_worktree: None,
+                    files: vec![],
+                    changed: 0,
+                }),
+            },
+            CoreMsg::TabGit {
+                tab: TabId::new(3),
+                git: TabGit::NoRepository,
+            },
+            CoreMsg::TabGit {
+                tab: TabId::new(3),
+                git: TabGit::Unavailable {
+                    reason: "git was not found".into(),
+                },
             },
         ];
         for msg in msgs {

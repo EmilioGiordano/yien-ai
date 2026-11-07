@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use yien_core::{Core, CoreConfig, CoreHandle, HookConfig, SendError, SessionStore};
+use yien_core::{Core, CoreConfig, CoreHandle, GitConfig, HookConfig, SendError, SessionStore};
 use yien_platform::LogGuard;
 use yien_platform::state_store::FileStore;
 use yien_proto::frame::Frame;
@@ -53,6 +53,7 @@ fn main() -> ExitCode {
             .map(|dir| dir.to_string_lossy().into_owned()),
         size_wait: SIZE_WAIT,
         ui_wait: UI_WAIT,
+        git: Some(GitConfig::default()),
         ..CoreConfig::default()
     };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {

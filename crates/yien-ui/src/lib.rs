@@ -13,6 +13,7 @@ mod assets;
 mod bridge;
 mod catalog;
 mod fonts;
+mod git;
 mod grid;
 mod layout;
 mod matcher;

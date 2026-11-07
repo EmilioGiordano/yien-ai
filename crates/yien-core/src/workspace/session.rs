@@ -105,7 +105,10 @@ impl Workspace {
             id: tab.id,
             title: tab.name.clone(),
             dir: tab.kept_dir.clone().unwrap_or_else(|| tab.dir.clone()),
-            branch: None,
+            branch: match tab.kept_dir {
+                Some(_) => tab.kept_branch.clone(),
+                None => tab.branch.clone(),
+            },
             worktree: None,
             archived: false,
             layout,
@@ -271,6 +274,10 @@ impl Workspace {
             });
         }
         let kept_dir = (dir != record.dir).then(|| record.dir.clone());
+        let (branch, kept_branch) = match kept_dir {
+            Some(_) => (None, record.branch.clone()),
+            None => (record.branch.clone(), None),
+        };
         self.tabs.push(Tab {
             id: record.id,
             project: project.id,
@@ -281,6 +288,8 @@ impl Workspace {
             focused: record.focused,
             maximized: None,
             kept_dir,
+            branch,
+            kept_branch,
         });
         true
     }
@@ -685,6 +694,43 @@ mod tests {
         }
         let (back, _, _) = restore(&saved, &all_exist(&saved));
         assert_eq!(back.to_session(), saved);
+    }
+
+    #[test]
+    fn rf_esp_04_the_branch_is_saved_and_shown_again_on_restore() {
+        let (mut ws, _) = workspace("shell");
+        let tab = ws.tabs[1].id;
+        ws.set_branch(tab, Some("feat/x".into()));
+        let saved = ws.to_session();
+        assert_eq!(saved.projects[0].tabs[1].branch.as_deref(), Some("feat/x"));
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        let info = back.snapshot().tabs.into_iter().find(|t| t.id == tab);
+        assert_eq!(info.unwrap().branch.as_deref(), Some("feat/x"));
+        assert_eq!(back.to_session(), saved);
+    }
+
+    #[test]
+    fn rf_ses_12_a_fallback_folder_keeps_the_saved_branch_out_of_sight() {
+        let (mut ws, _) = workspace("shell");
+        let tab = ws.tabs[1].id;
+        ws.set_branch(tab, Some("feat/x".into()));
+        let mut saved = ws.to_session();
+        saved.projects[0].tabs[1].dir = "E:/offline".into();
+        saved.projects[0].tabs[1].panes[0].cwd = "E:/offline".into();
+        let mut disk = all_exist(&saved);
+        disk.existing.remove("E:/offline");
+        let (mut back, _, _) = restore(&saved, &disk);
+        let shown = |ws: &Workspace| ws.snapshot().tabs.into_iter().find(|t| t.id == tab);
+        assert_eq!(
+            shown(&back).unwrap().branch,
+            None,
+            "not the fallback's branch"
+        );
+        back.set_branch(tab, Some("main".into()));
+        assert_eq!(
+            back.to_session().projects[0].tabs[1].branch.as_deref(),
+            Some("feat/x")
+        );
     }
 
     #[test]

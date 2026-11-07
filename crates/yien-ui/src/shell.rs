@@ -20,6 +20,7 @@ use crate::assets::{self, state_icon};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, profile_splits, shortcut};
 use crate::fonts::Fonts;
+use crate::git::ContextGit;
 use crate::layout::neighbor;
 use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
 use crate::palette::{
@@ -186,6 +187,11 @@ impl Shell {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                     continue;
+                }
+                CoreMsg::TabGit { tab, git } => {
+                    if !self.workspace.tab_git(tab, git) {
+                        continue;
+                    }
                 }
                 CoreMsg::Error { message, .. } => self.notice = Some(message),
             }
@@ -1126,7 +1132,7 @@ impl Shell {
         let id = tab.id;
         let hover = t.hover;
         let second_line = active || matches!(state, AgentState::NeedsYou | AgentState::Error);
-        let detail = tab.branch.clone().unwrap_or_else(|| tab.dir.clone());
+        let detail = self.workspace.tab_detail(tab);
         div()
             .id(("tab", id.get()))
             .role(Role::Tab)
@@ -1514,11 +1520,58 @@ impl Shell {
     fn render_context_bar(&self) -> impl IntoElement {
         let t = self.theme;
         let tab = self.workspace.selected_tab();
-        let branch = tab
-            .and_then(|tab| tab.branch.clone())
-            .unwrap_or_else(|| "no branch".to_owned());
-        let dir = tab.map(|tab| tab.dir.clone()).unwrap_or_default();
+        let git = ContextGit::new(
+            tab.and_then(|tab| self.workspace.git_of(tab.id)),
+            tab.and_then(|tab| tab.branch.as_deref()),
+            tab.map_or("", |tab| tab.dir.as_str()),
+        );
         let mono = self.fonts.mono.clone();
+        let chip_label = if git.detached {
+            format!("Detached at {}", git.head)
+        } else {
+            format!("Branch {}", git.head)
+        };
+        let hidden = git.hidden();
+        let repository = git.repository;
+        let rows = git.files.into_iter().enumerate().map(|(at, file)| {
+            h_flex()
+                .id(("git-file", at))
+                .role(Role::ListItem)
+                .aria_label(file.label)
+                .items_center()
+                .gap(px(8.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .rounded(px(5.0))
+                .text_size(px(12.5))
+                .when_some(mono.clone(), |d, family| d.font_family(family))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(16.0))
+                        .text_center()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.mark_color(file.mark))
+                        .child(file.mark.letter()),
+                )
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .flex_shrink_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(t.muted)
+                                .child(file.folder),
+                        )
+                        .child(div().flex_none().child(file.name)),
+                )
+        });
         v_flex()
             .id("context-bar")
             .role(Role::Complementary)
@@ -1540,7 +1593,11 @@ impl Shell {
                     .border_color(t.line)
                     .child(
                         h_flex()
-                            .flex_none()
+                            .id("branch-chip")
+                            .role(Role::Status)
+                            .aria_label(chip_label)
+                            .flex_shrink_1()
+                            .min_w_0()
                             .items_center()
                             .gap(px(6.0))
                             .px(px(8.0))
@@ -1554,11 +1611,19 @@ impl Shell {
                             .when_some(mono.clone(), |d, family| d.font_family(family))
                             .child(
                                 svg()
+                                    .flex_none()
                                     .path(assets::BRANCH)
                                     .size(px(13.0))
                                     .text_color(t.muted),
                             )
-                            .child(branch),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(git.head),
+                            ),
                     )
                     .child(
                         div()
@@ -1569,11 +1634,97 @@ impl Shell {
                             .whitespace_nowrap()
                             .text_size(px(12.0))
                             .text_color(t.faint)
-                            .when_some(mono, |d, family| d.font_family(family))
-                            .child(dir),
-                    ),
+                            .when_some(mono.clone(), |d, family| d.font_family(family))
+                            .child(git.place),
+                    )
+                    .when(git.dirty, |row| {
+                        row.child(
+                            div()
+                                .id("git-dirty")
+                                .aria_label("Uncommitted changes")
+                                .flex_none()
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(t.line)
+                                .text_size(px(11.0))
+                                .text_color(t.muted)
+                                .when_some(mono.clone(), |d, family| d.font_family(family))
+                                .child("dirty"),
+                        )
+                    })
+                    .when_some(git.ahead_behind, |row, text| {
+                        row.child(
+                            div()
+                                .id("git-ahead-behind")
+                                .aria_label(format!("Ahead and behind the upstream: {text}"))
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_size(px(12.0))
+                                .text_color(t.muted)
+                                .when_some(mono.clone(), |d, family| d.font_family(family))
+                                .child(text),
+                        )
+                    }),
             )
-            .child(div().flex_1())
+            .when(repository, |bar| {
+                bar.child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(12.0))
+                        .pt(px(10.0))
+                        .pb(px(6.0))
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.muted)
+                        .child("Changes")
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(t.faint)
+                                .when_some(mono.clone(), |d, family| d.font_family(family))
+                                .child(git.changed.to_string()),
+                        ),
+                )
+            })
+            .when_some(git.note, |bar, note| {
+                bar.child(
+                    div()
+                        .flex_none()
+                        .when(!repository, |d| d.pt(px(10.0)))
+                        .px(px(12.0))
+                        .pb(px(8.0))
+                        .text_size(px(12.5))
+                        .text_color(t.muted)
+                        .child(note),
+                )
+            })
+            .child(
+                v_flex()
+                    .id("git-changes")
+                    .role(Role::List)
+                    .aria_label("Changed files")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(6.0))
+                    .pb(px(8.0))
+                    .children(rows)
+                    .when(hidden > 0, |list| {
+                        list.child(
+                            div()
+                                .px(px(6.0))
+                                .py(px(4.0))
+                                .text_size(px(12.0))
+                                .text_color(t.faint)
+                                .child(format!("and {hidden} more")),
+                        )
+                    }),
+            )
     }
 
     fn render_status_bar(&self) -> impl IntoElement {

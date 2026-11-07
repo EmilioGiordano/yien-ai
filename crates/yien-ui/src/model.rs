@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, PaneId, PaneInfo, ProfileInfo, ProjectId, ProjectInfo, TabId, TabInfo,
+    LayoutNode, PaneId, PaneInfo, ProfileInfo, ProjectId, ProjectInfo, TabGit, TabId, TabInfo,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -234,6 +234,8 @@ pub struct WorkspaceView {
     recent: Vec<TabId>,
     /// The project of the tab selected last, kept after its tabs close.
     last_project: Option<ProjectId>,
+    /// The git facts last reported for each tab (RF-CTX-04).
+    git: HashMap<TabId, TabGit>,
 }
 
 impl WorkspaceView {
@@ -308,6 +310,7 @@ impl WorkspaceView {
                 .copied();
         }
         self.closed_tabs.insert(id);
+        self.git.remove(&id);
         self.recent.retain(|t| *t != id);
         let gone = tab.layout.panes();
         for pane in &gone {
@@ -326,6 +329,33 @@ impl WorkspaceView {
             self.selected = sibling.or_else(fallback);
         }
         gone
+    }
+
+    /// Git facts about a tab's folder arrived. `false` for a tab the view
+    /// does not hold.
+    pub fn tab_git(&mut self, id: TabId, git: TabGit) -> bool {
+        if !self.tabs.contains_key(&id) {
+            return false;
+        }
+        self.git.insert(id, git);
+        true
+    }
+
+    /// The git facts last reported for a tab, if any.
+    pub fn git_of(&self, id: TabId) -> Option<&TabGit> {
+        self.git.get(&id)
+    }
+
+    /// The second line of a tab row: its branch, the commit when detached,
+    /// else its folder (RF-ESP-04).
+    pub fn tab_detail(&self, tab: &TabView) -> String {
+        if let Some(branch) = &tab.branch {
+            return branch.clone();
+        }
+        match self.git.get(&tab.id) {
+            Some(TabGit::Repository(facts)) => facts.head.label().to_owned(),
+            _ => tab.dir.clone(),
+        }
     }
 
     /// The core changed the selected tab. An unknown tab is ignored.
@@ -1016,6 +1046,49 @@ mod tests {
         assert!(view.pane(PaneId::new(110)).exited);
         view.pane_updated(&pane(110, 11, P::Idle));
         assert!(!view.pane(PaneId::new(110)).exited);
+    }
+
+    #[test]
+    fn rf_esp_04_a_tab_row_shows_its_branch_then_a_detached_commit_then_its_folder() {
+        use yien_proto::{GitFacts, GitHead};
+
+        let mut view = demo();
+        let id = TabId::new(10);
+        let mut info = tab(10, 1, &[100, 101]);
+        info.branch = Some("feat/x".into());
+        view.tab_updated(&info);
+        let detail = |view: &WorkspaceView| view.tab_detail(view.tab(id).unwrap());
+        assert_eq!(detail(&view), "feat/x");
+
+        info.branch = None;
+        view.tab_updated(&info);
+        let detached = TabGit::Repository(GitFacts {
+            head: GitHead::Detached {
+                commit: "0123456".into(),
+            },
+            upstream: None,
+            root: info.dir.clone(),
+            linked_worktree: false,
+            main_worktree: None,
+            files: vec![],
+            changed: 0,
+        });
+        assert!(view.tab_git(id, detached.clone()));
+        assert_eq!(detail(&view), "0123456");
+        assert_eq!(view.git_of(id), Some(&detached));
+
+        assert!(view.tab_git(id, TabGit::NoRepository));
+        assert_eq!(detail(&view), info.dir);
+    }
+
+    #[test]
+    fn git_facts_for_a_closed_or_unknown_tab_are_dropped() {
+        let mut view = demo();
+        assert!(view.tab_git(TabId::new(11), TabGit::NoRepository));
+        view.tab_closed(TabId::new(11));
+        assert!(!view.tab_git(TabId::new(11), TabGit::NoRepository));
+        assert_eq!(view.git_of(TabId::new(11)), None);
+        assert!(!view.tab_git(TabId::new(99), TabGit::NoRepository));
     }
 
     #[test]
