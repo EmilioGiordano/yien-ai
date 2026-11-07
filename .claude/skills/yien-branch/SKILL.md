@@ -44,7 +44,7 @@ Wait for its report.
 1. Spawn `quality-reviewer` with the worktree path and the TASK path, a fresh context and none of the implementer's reasoning.
 2. Before relaying findings, sanity-check them. A finding that contradicts the plan is noted, not obeyed.
 3. On `FAIL`, send the findings to the implementer to fix, then send the fix commits back to review. Every FAIL needs a later PASS.
-4. After 3 failed rounds, stop and report to Emilio with the open findings.
+4. Repeat until PASS; there is no round limit. Stop and ask Emilio only when a finding needs a decision AGENTS.md reserves for him.
 
 When the review reports coverage the implementer cannot add alone, spawn `test-engineer` with the worktree path, then have the implementer commit its tests.
 
