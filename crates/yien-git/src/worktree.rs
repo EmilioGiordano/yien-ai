@@ -110,6 +110,7 @@ impl GitError {
             Self::UnsafeRepository { .. } => "repository owned by another user",
             Self::UnsafeFilter { .. } => "repository filter cannot be switched off",
             Self::Timeout(_) => "timeout",
+            Self::PipeHeld { .. } => "output pipe held open",
             Self::OutputTooLarge(_) => "output too large",
             Self::Failed { .. } => "git failed",
             Self::Io(_) => "could not run git",

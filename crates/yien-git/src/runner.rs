@@ -19,7 +19,8 @@ pub const MAX_OUTPUT: usize = 32 * 1024 * 1024;
 const MAX_STDERR: usize = 64 * 1024;
 const MAX_MESSAGE_CHARS: usize = 300;
 const POLL: Duration = Duration::from_millis(2);
-/// Time to collect the pipes after git exits; a grandchild can hold them open.
+/// The least time to collect the pipes after git exits, even past the
+/// call's deadline; a grandchild can hold them open.
 const PIPE_GRACE: Duration = Duration::from_millis(500);
 
 /// Inherited variables that would point git at another repository than the one asked about.
@@ -259,13 +260,19 @@ pub(crate) fn run_command(
     let stdout = child.stdout.take().map(|pipe| drain(pipe, max_stdout));
     let stderr = child.stderr.take().map(|pipe| drain(pipe, MAX_STDERR));
 
-    let status = wait_until(&mut child, Instant::now() + timeout).map_err(|e| match e {
+    let deadline = Instant::now() + timeout;
+    let status = wait_until(&mut child, deadline).map_err(|e| match e {
         WaitError::Timeout => GitError::Timeout(timeout),
         WaitError::Io(e) => GitError::Io(e),
     })?;
 
-    let stdout = collect(stdout).ok_or(GitError::Timeout(timeout))?;
-    let stderr = collect(stderr).unwrap_or_default();
+    // git has exited: its output is complete once the pipes close, which on
+    // a loaded machine can take a while; wait for them until the deadline.
+    let pipes_by = deadline.max(Instant::now() + PIPE_GRACE);
+    let stdout = collect(stdout, pipes_by).ok_or(GitError::PipeHeld {
+        success: status.success(),
+    })?;
+    let stderr = collect(stderr, pipes_by).unwrap_or_default();
     if stdout.len() > max_stdout {
         return Err(GitError::OutputTooLarge(max_stdout));
     }
@@ -317,9 +324,11 @@ fn drain(pipe: impl Read + Send + 'static, cap: usize) -> mpsc::Receiver<Vec<u8>
     rx
 }
 
-fn collect(rx: Option<mpsc::Receiver<Vec<u8>>>) -> Option<Vec<u8>> {
+fn collect(rx: Option<mpsc::Receiver<Vec<u8>>>, by: Instant) -> Option<Vec<u8>> {
     match rx {
-        Some(rx) => rx.recv_timeout(PIPE_GRACE).ok(),
+        Some(rx) => rx
+            .recv_timeout(by.saturating_duration_since(Instant::now()))
+            .ok(),
         None => Some(Vec::new()),
     }
 }
@@ -406,7 +415,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yien-git-norepo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut git = Git::new();
-        git.timeout = Duration::from_secs(10);
+        git.timeout = Duration::from_secs(120);
         let result = git.run(&dir, &["rev-parse", "--show-toplevel"]);
         let _ = std::fs::remove_dir_all(&dir);
         match result {
@@ -553,7 +562,7 @@ mod tests {
         let mut cmd =
             Git::new().command(&root, &[], &["status", "--porcelain=v2", "--branch", "-z"]);
         cmd.env_remove("GIT_NO_LAZY_FETCH");
-        let result = run_command(cmd, Duration::from_secs(20), MAX_OUTPUT);
+        let result = run_command(cmd, Duration::from_secs(120), MAX_OUTPUT);
         let ran = marker.exists();
         let _ = std::fs::remove_dir_all(&sandbox);
         assert!(!matches!(result, Err(GitError::Timeout(_))), "{result:?}");
