@@ -541,8 +541,8 @@ impl Service {
                     self.run_job(move || worktree::check(tab, worktree));
                 }
                 Effect::RemoveWorktree(job) => {
-                    let closers = self.ctx.consoles.closers_of(&job.panes);
-                    self.run_job(move || worktree::remove(job, &closers));
+                    let consoles = Arc::clone(&self.ctx.consoles);
+                    self.run_job(move || worktree::remove(job, &consoles));
                 }
                 Effect::View {
                     pane,

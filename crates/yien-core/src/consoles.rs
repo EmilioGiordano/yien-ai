@@ -19,6 +19,8 @@ struct State {
     open: Vec<(PaneId, PtyCloser)>,
     /// Spawns under way: their sessions are not registered yet.
     spawning: usize,
+    /// The pane of each spawn under way, repeats included.
+    spawning_panes: Vec<PaneId>,
     /// Sessions registered after the shut, already closing.
     late: Vec<PtyCloser>,
     shut: bool,
@@ -54,6 +56,7 @@ impl Consoles {
             return None;
         }
         state.spawning += 1;
+        state.spawning_panes.push(pane);
         Some(Spawning {
             consoles: Arc::clone(self),
             pane,
@@ -73,10 +76,25 @@ impl Consoles {
             .collect()
     }
 
-    /// The sessions of `panes` not known to be closed, so a worktree is
-    /// removed only once the programs that ran in it have ended.
-    pub fn closers_of(&self, panes: &[PaneId]) -> Vec<PtyCloser> {
-        self.state()
+    /// The sessions of `panes` not known to be closed, once the spawns of
+    /// those panes under way have registered theirs or ended (waiting at
+    /// most `timeout`), so a worktree is removed only once the programs that
+    /// ran in it have ended. Blocks: call it off the runtime's workers.
+    pub fn closers_after_spawns(&self, panes: &[PaneId], timeout: Duration) -> Vec<PtyCloser> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state();
+        while state.spawning_panes.iter().any(|p| panes.contains(p)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = self
+                .spawned
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        state
             .open
             .iter()
             .filter(|(pane, c)| panes.contains(pane) && !c.is_closed())
@@ -128,6 +146,9 @@ impl Drop for Spawning {
     fn drop(&mut self) {
         let mut state = self.consoles.state();
         state.spawning = state.spawning.saturating_sub(1);
+        if let Some(at) = state.spawning_panes.iter().position(|p| *p == self.pane) {
+            state.spawning_panes.swap_remove(at);
+        }
         drop(state);
         self.consoles.spawned.notify_all();
     }
@@ -196,14 +217,46 @@ mod tests {
         spawning.add(session.control().closer());
         let _other = spawn(&backend, &consoles);
 
-        assert_eq!(consoles.closers_of(&[PaneId::new(7)]).len(), 1);
-        assert!(consoles.closers_of(&[PaneId::new(9)]).is_empty());
+        let of = |pane: u64| consoles.closers_after_spawns(&[PaneId::new(pane)], Duration::ZERO);
+        assert_eq!(of(7).len(), 1);
+        assert!(of(9).is_empty());
         session
             .control()
             .closer()
             .close(Duration::from_secs(1))
             .unwrap();
-        assert!(consoles.closers_of(&[PaneId::new(7)]).is_empty());
+        assert!(of(7).is_empty());
+    }
+
+    #[test]
+    fn closers_wait_for_a_spawn_of_their_pane_under_way() {
+        let backend = FakePty::new();
+        let consoles = Arc::new(Consoles::default());
+        let spawning = consoles.begin(PaneId::new(3)).unwrap();
+        let _other = consoles.begin(PaneId::new(4)).unwrap();
+        let waiter = {
+            let consoles = Arc::clone(&consoles);
+            std::thread::spawn(move || {
+                consoles.closers_after_spawns(&[PaneId::new(3)], Duration::from_secs(5))
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
+        spawning.add(session.control().closer());
+        drop(spawning);
+        assert_eq!(
+            waiter.join().unwrap().len(),
+            1,
+            "the late session is waited for"
+        );
+        let start = Instant::now();
+        assert!(
+            consoles
+                .closers_after_spawns(&[PaneId::new(4)], Duration::from_millis(100))
+                .is_empty()
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+        drop(session);
     }
 
     #[test]

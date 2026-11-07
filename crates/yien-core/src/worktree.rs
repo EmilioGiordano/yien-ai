@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use yien_git::{Git, WorktreeError, default_worktree_path};
 use yien_proto::{ProjectId, TabId, WorktreeCheck};
-use yien_pty::PtyCloser;
+
+use crate::consoles::Consoles;
 
 use crate::workspace::worktree::{AddJob, RemoveJob};
 
@@ -145,9 +146,9 @@ pub(crate) fn check(tab: TabId, worktree: String) -> Done {
 
 /// Removes the worktree once the closed tab's programs have ended and no
 /// other program holds the folder; its branch stays.
-pub(crate) fn remove(job: RemoveJob, closers: &[PtyCloser]) -> Done {
+pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
     let deadline = Instant::now() + CLOSE_WAIT;
-    for closer in closers {
+    for closer in consoles.closers_after_spawns(&job.panes, CLOSE_WAIT) {
         closer.wait(deadline.saturating_duration_since(Instant::now()));
     }
     let path = PathBuf::from(&job.worktree);
