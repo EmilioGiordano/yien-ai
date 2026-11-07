@@ -1,12 +1,64 @@
 //! Plain data the UI renders from: the visible rows, the cursor, positions,
-//! selections, matches, links and terminal modes. No emulator types leak out.
+//! selections, matches, links and terminal modes. The terminal engine
+//! produces it; no emulator types leak out.
 
 use std::ops::BitOr;
 
-use crate::palette::Rgb;
+use serde::{Deserialize, Serialize};
+
+/// A 24-bit colour.
+///
+/// ```
+/// use yien_proto::frame::Rgb;
+///
+/// assert_eq!(Rgb::from_hex(0x0d0c0b), Rgb::new(0x0d, 0x0c, 0x0b));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct Rgb {
+    /// Red.
+    pub r: u8,
+    /// Green.
+    pub g: u8,
+    /// Blue.
+    pub b: u8,
+}
+
+impl Rgb {
+    /// A colour from its components.
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// A colour from `0xRRGGBB`; higher bits are ignored.
+    pub const fn from_hex(hex: u32) -> Self {
+        Self {
+            r: (hex >> 16) as u8,
+            g: (hex >> 8) as u8,
+            b: hex as u8,
+        }
+    }
+
+    /// The colour at two thirds of its brightness, as SGR 2 (faint) draws it.
+    ///
+    /// ```
+    /// use yien_proto::frame::Rgb;
+    ///
+    /// assert_eq!(Rgb::new(255, 30, 0).dim(), Rgb::new(170, 20, 0));
+    /// ```
+    pub const fn dim(self) -> Self {
+        const fn scale(c: u8) -> u8 {
+            (c as u16 * 2 / 3) as u8
+        }
+        Self {
+            r: scale(self.r),
+            g: scale(self.g),
+            b: scale(self.b),
+        }
+    }
+}
 
 /// A terminal size in cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Size {
     /// Columns.
     pub cols: u16,
@@ -16,7 +68,7 @@ pub struct Size {
 
 /// A cell on the screen as the user sees it: row 0 is the top of the
 /// viewport, wherever the viewport is scrolled to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ViewportPoint {
     /// Row from the top of the viewport.
     pub row: u16,
@@ -34,7 +86,7 @@ impl ViewportPoint {
     /// `display_offset` lines.
     ///
     /// ```
-    /// use yien_vt::{GridPoint, ViewportPoint};
+    /// use yien_proto::frame::{GridPoint, ViewportPoint};
     ///
     /// assert_eq!(ViewportPoint::new(0, 3).to_grid(5), GridPoint::new(-5, 3));
     /// ```
@@ -49,8 +101,8 @@ impl ViewportPoint {
 /// line).
 ///
 /// Lines shift as output scrolls the screen, so a stored `GridPoint` is valid
-/// only until the next [`crate::VtEngine::feed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// only until the engine is fed more output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GridPoint {
     /// Line, 0 at the top of the live screen.
     pub line: i32,
@@ -68,7 +120,7 @@ impl GridPoint {
     /// `display_offset`, or `None` when it is out of view.
     ///
     /// ```
-    /// use yien_vt::{GridPoint, ViewportPoint};
+    /// use yien_proto::frame::{GridPoint, ViewportPoint};
     ///
     /// assert_eq!(GridPoint::new(-2, 1).to_viewport(2, 10), Some(ViewportPoint::new(0, 1)));
     /// assert_eq!(GridPoint::new(-3, 1).to_viewport(2, 10), None);
@@ -83,7 +135,7 @@ impl GridPoint {
 
 /// Which half of a cell a mouse position falls on; selections use it to
 /// decide whether the cell is included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     /// The left half.
     Left,
@@ -92,7 +144,7 @@ pub enum Side {
 }
 
 /// How a selection grows from its anchor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SelectionKind {
     /// Character by character, wrapping across lines.
     Simple,
@@ -105,7 +157,7 @@ pub enum SelectionKind {
 }
 
 /// A search match, from `start` to `end` inclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Match {
     /// First cell of the match.
     pub start: GridPoint,
@@ -114,7 +166,7 @@ pub struct Match {
 }
 
 /// What a detected link points at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LinkKind {
     /// A URL found in the text (`https://`, `file:`, `mailto:` and similar).
     Url,
@@ -125,7 +177,7 @@ pub enum LinkKind {
 }
 
 /// A link under a point, with the cells it covers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Link {
     /// What the target is.
     pub kind: LinkKind,
@@ -140,13 +192,14 @@ pub struct Link {
 /// Cell attributes as a bit set.
 ///
 /// ```
-/// use yien_vt::CellFlags;
+/// use yien_proto::frame::CellFlags;
 ///
 /// let flags = CellFlags::BOLD | CellFlags::ITALIC;
 /// assert!(flags.contains(CellFlags::BOLD));
 /// assert!(!flags.contains(CellFlags::WIDE));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CellFlags(u16);
 
 impl CellFlags {
@@ -205,7 +258,7 @@ impl BitOr for CellFlags {
 }
 
 /// One cell of the frame, with its colours already resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cell {
     /// The character; a space for an empty cell.
     pub ch: char,
@@ -221,7 +274,7 @@ pub struct Cell {
 }
 
 /// Cursor shapes a program can ask for with DECSCUSR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum CursorShape {
     /// A filled block.
     #[default]
@@ -235,7 +288,7 @@ pub enum CursorShape {
 }
 
 /// The cursor as it should be drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cursor {
     /// Where it is in the viewport. On a wide character it is the first of
     /// the two cells, and a block cursor should cover both.
@@ -250,15 +303,22 @@ pub struct Cursor {
 /// The visible part of a pane, ready to draw.
 ///
 /// ```
-/// use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
+/// use yien_proto::frame::{Cell, CellFlags, Frame, Rgb, Size};
 ///
-/// let mut engine = AlacrittyEngine::new(VtConfig::default(), 20, 3);
-/// engine.feed(b"hello");
-/// let frame = engine.frame();
-/// assert_eq!(frame.line_text(0), "hello");
-/// assert_eq!(frame.lines.len(), 3);
+/// let cell = |ch| Cell { ch, zerowidth: Vec::new(), fg: Rgb::default(), bg: Rgb::default(), flags: CellFlags::EMPTY };
+/// let frame = Frame {
+///     size: Size { cols: 3, rows: 2 },
+///     lines: vec![vec![cell('h'), cell('i'), cell(' ')], vec![cell(' '); 3]],
+///     cursor: None,
+///     display_offset: 0,
+///     history_len: 0,
+///     background: Rgb::default(),
+///     cursor_color: Rgb::default(),
+/// };
+/// assert_eq!(frame.line_text(0), "hi");
+/// assert_eq!(frame.text(), "hi");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frame {
     /// The size the frame was taken at.
     pub size: Size,
@@ -307,7 +367,7 @@ impl Frame {
 }
 
 /// How the program wants mouse events reported (RF-PAN-14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum MouseTracking {
     /// The mouse belongs to the terminal: selection and scrolling.
     #[default]
@@ -321,7 +381,7 @@ pub enum MouseTracking {
 }
 
 /// How mouse reports are encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum MouseEncoding {
     /// The X10 byte encoding.
     #[default]
@@ -333,7 +393,7 @@ pub enum MouseEncoding {
 }
 
 /// The terminal modes the input side needs to encode keys, paste and mouse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Modes {
     /// The alternate screen is active (full-screen programs).
     pub alt_screen: bool,
