@@ -8834,12 +8834,14 @@ dependencies = [
 name = "yien-core"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "proptest",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "yien-agent",
  "yien-layout",
+ "yien-platform",
  "yien-proto",
  "yien-pty",
  "yien-vt",
