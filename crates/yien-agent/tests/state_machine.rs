@@ -48,7 +48,11 @@ impl Pane {
         let (m, fx) = self.m.clone().step(&signal, self.clock.now());
         self.m = m;
         track_red(&mut self.red, &fx);
-        assert_eq!(self.red, self.m.is_red(), "red mark diverged after {signal:?}");
+        assert_eq!(
+            self.red,
+            self.m.is_red(),
+            "red mark diverged after {signal:?}"
+        );
         self.fx = fx;
         self
     }
@@ -106,7 +110,10 @@ fn track_red(red: &mut bool, fx: &[Effect]) {
     }
     let marks = fx.iter().filter(|e| **e == Effect::MarkRed).count();
     let notifies = fx.iter().filter(|e| **e == Effect::Notify).count();
-    assert_eq!(marks, notifies, "Notify must come with MarkRed and only then");
+    assert_eq!(
+        marks, notifies,
+        "Notify must come with MarkRed and only then"
+    );
 }
 
 #[test]
@@ -171,8 +178,9 @@ fn rf_age_05_contrary_signal_cancels_pending_red() {
 fn rf_age_05_second_needs_signal_keeps_the_first_deadline() {
     let mut p = Pane::working_claude();
     p.at(ms(0)).send(hook(HookEvent::PermissionRequest));
-    p.at(ms(200))
-        .send(hook(HookEvent::Notification(NotificationKind::PermissionPrompt)));
+    p.at(ms(200)).send(hook(HookEvent::Notification(
+        NotificationKind::PermissionPrompt,
+    )));
     assert!(p.fx.is_empty());
     p.at(ms(300)).send(Signal::Tick);
     assert!(p.state().is_red());
@@ -230,7 +238,9 @@ fn rn_07_stop_while_seen_gives_idle() {
 fn rf_atn_08_done_holds_until_the_pane_is_seen() {
     let mut p = Pane::working_claude();
     p.send(hook(HookEvent::Stop));
-    p.at(ms(600_000)).send(Signal::Tick).send(Signal::Seen(false));
+    p.at(ms(600_000))
+        .send(Signal::Tick)
+        .send(Signal::Seen(false));
     assert_eq!(p.state(), AgentState::Done);
     p.send(Signal::Seen(true));
     assert_eq!(p.state(), AgentState::Idle);
@@ -312,7 +322,9 @@ fn rf_age_05_exit_after_session_end_is_not_an_error() {
     let mut p = Pane::working_claude();
     p.send(hook(HookEvent::Stop))
         .send(Signal::Seen(true))
-        .send(hook(HookEvent::SessionEnd(SessionEndReason::PromptInputExit)))
+        .send(hook(HookEvent::SessionEnd(
+            SessionEndReason::PromptInputExit,
+        )))
         .send(Signal::Exited { code: Some(0) });
     assert_eq!(p.state(), AgentState::Idle);
 }
@@ -343,12 +355,14 @@ fn rf_age_08_unprofiled_exit_while_seen_gives_idle() {
 #[test]
 fn signals_after_exit_are_ignored_until_respawn() {
     let mut p = Pane::working_claude();
-    p.send(hook(HookEvent::Stop)).send(Signal::Exited { code: Some(0) });
+    p.send(hook(HookEvent::Stop))
+        .send(Signal::Exited { code: Some(0) });
     p.send(hook(HookEvent::UserPromptSubmit))
         .send(hook(HookEvent::PermissionRequest));
     p.at(ms(10_000)).send(Signal::Tick);
     assert_eq!(p.state(), AgentState::Done);
-    p.send(Signal::Spawned).send(hook(HookEvent::UserPromptSubmit));
+    p.send(Signal::Spawned)
+        .send(hook(HookEvent::UserPromptSubmit));
     assert_eq!(p.state(), AgentState::Working);
 }
 
@@ -425,40 +439,63 @@ fn rn_02_screen_rule_cannot_mark_red_after_signal_lost() {
 }
 
 #[test]
-fn rf_age_05_screen_rule_confirms_a_notification() {
-    let config = MachineConfig::new(&[Source::Osc7501, Source::Osc9, Source::Screen], None);
-    let mut p = Pane::new(config.clone());
-    p.send(osc(OscSignal::Status7501(AgentStatus::Working)));
-    p.send(osc(OscSignal::Notify9));
-    assert_eq!(p.fx, vec![Effect::CheckScreen]);
-    p.at(ms(50)).send(Signal::Screen(ScreenVerdict::NeedsYou));
-    p.at(ms(350)).send(Signal::Tick);
-    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
-
+fn rn_02_pty_notifications_alone_never_change_the_state() {
+    let config = MachineConfig::new(
+        &[Source::Osc9, Source::Osc777, Source::Bel, Source::Screen],
+        None,
+    );
     let mut p = Pane::new(config);
-    p.send(osc(OscSignal::Status7501(AgentStatus::Working)))
-        .send(osc(OscSignal::Notify9))
-        .send(Signal::Screen(ScreenVerdict::NoMatch));
-    assert_eq!(p.state(), AgentState::Done, "a plain notification ends the turn");
+    p.send(Signal::Spawned);
+    for signal in [
+        osc(OscSignal::Notify9),
+        osc(OscSignal::Notify777),
+        osc(OscSignal::Bell),
+        Signal::Screen(ScreenVerdict::NeedsYou),
+    ] {
+        p.send(signal);
+        assert!(p.fx.is_empty());
+    }
+    p.at(ms(1000)).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::Idle);
 }
 
 #[test]
-fn rf_age_05_notification_without_screen_rules_ends_the_turn() {
-    let mut p = Pane::new(MachineConfig::new(&[Source::Osc7501, Source::Bel], None));
-    p.send(osc(OscSignal::Status7501(AgentStatus::Working)))
-        .send(osc(OscSignal::Bell));
-    assert_eq!(p.state(), AgentState::Done);
+fn rf_age_05_watchdog_screen_rule_confirms_needs_you_without_hooks() {
+    let config = MachineConfig::new(
+        &[Source::Osc7501, Source::Screen],
+        Some(Duration::from_secs(30)),
+    );
+    let mut p = Pane::new(config);
+    p.send(osc(OscSignal::Status7501(AgentStatus::Working)));
+    p.at(ms(30_000)).send(Signal::Tick);
+    assert!(p.fx.contains(&Effect::CheckScreen));
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(p.fx, vec![Effect::WakeAt(ms(30_300))]);
+    p.at(ms(30_300)).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::NeedsYou(NeedsReason::ScreenRule),
+        cause: Cause::Source(Source::Screen),
+    }));
 }
 
 #[test]
 fn rf_age_05_watchdog_rechecks_but_never_reds_by_time() {
-    let config = MachineConfig::new(&[Source::Osc7501, Source::Screen], Some(Duration::from_secs(30)));
+    let config = MachineConfig::new(
+        &[Source::Osc7501, Source::Screen],
+        Some(Duration::from_secs(30)),
+    );
     let mut p = Pane::new(config);
     p.send(osc(OscSignal::Status7501(AgentStatus::Working)));
     assert_eq!(p.fx.last(), Some(&Effect::WakeAt(ms(30_000))));
     p.at(ms(10_000)).send(Signal::Output);
     p.at(ms(30_000)).send(Signal::Tick);
-    assert_eq!(p.fx, vec![Effect::WakeAt(ms(40_000))], "activity pushes the watchdog");
+    assert_eq!(
+        p.fx,
+        vec![Effect::WakeAt(ms(40_000))],
+        "activity pushes the watchdog"
+    );
     p.at(ms(40_000)).send(Signal::Tick);
     assert_eq!(p.fx, vec![Effect::CheckScreen, Effect::WakeAt(ms(70_000))]);
     p.send(Signal::Screen(ScreenVerdict::NoMatch));
@@ -576,9 +613,18 @@ type Step = (Signal, u64);
 fn needs_you_signals() -> Vec<Step> {
     vec![
         (hook(HookEvent::PermissionRequest), 0),
-        (hook(HookEvent::Notification(NotificationKind::PermissionPrompt)), 0),
-        (hook(HookEvent::Notification(NotificationKind::Elicitation)), 0),
-        (hook(HookEvent::Notification(NotificationKind::AgentNeedsInput)), 0),
+        (
+            hook(HookEvent::Notification(NotificationKind::PermissionPrompt)),
+            0,
+        ),
+        (
+            hook(HookEvent::Notification(NotificationKind::Elicitation)),
+            0,
+        ),
+        (
+            hook(HookEvent::Notification(NotificationKind::AgentNeedsInput)),
+            0,
+        ),
         (osc(OscSignal::Status7501(AgentStatus::Blocked)), 0),
         (Signal::Screen(ScreenVerdict::NeedsYou), 0),
     ]
@@ -596,7 +642,13 @@ fn other_signals() -> Vec<Step> {
         (Signal::Ambiguous, 0),
         (Signal::Tick, 300),
         (Signal::Tick, 31_000),
-        (hook(HookEvent::SessionStart { session_id: Some("s".into()), source: SessionStartSource::Startup }), 0),
+        (
+            hook(HookEvent::SessionStart {
+                session_id: Some("s".into()),
+                source: SessionStartSource::Startup,
+            }),
+            0,
+        ),
         (hook(HookEvent::UserPromptSubmit), 0),
         (hook(HookEvent::PreToolUse), 0),
         (hook(HookEvent::PostToolUse), 0),
@@ -627,7 +679,10 @@ fn configs() -> Vec<MachineConfig> {
     vec![
         claude(),
         MachineConfig::new(&every, Some(Duration::from_secs(30))),
-        MachineConfig::new(&[Source::Osc7501, Source::Osc9, Source::Screen], Some(Duration::from_secs(30))),
+        MachineConfig::new(
+            &[Source::Osc7501, Source::Osc9, Source::Screen],
+            Some(Duration::from_secs(30)),
+        ),
         MachineConfig::new(&[Source::Osc133], None),
         MachineConfig::unprofiled(),
     ]
@@ -645,7 +700,11 @@ fn run(config: &MachineConfig, steps: &[&Step]) -> bool {
         let (next, fx) = m.step(signal, now);
         m = next;
         track_red(&mut red, &fx);
-        assert_eq!(red, m.is_red(), "red diverged after {signal:?} in {steps:?}");
+        assert_eq!(
+            red,
+            m.is_red(),
+            "red diverged after {signal:?} in {steps:?}"
+        );
         ever_red |= fx.contains(&Effect::MarkRed);
     }
     ever_red
@@ -716,7 +775,10 @@ fn rn_01_red_mark_follows_the_state_in_long_random_walks() {
             ever_red |= run(&config, &walk);
         }
     }
-    assert!(ever_red, "the walks must reach the red state to test anything");
+    assert!(
+        ever_red,
+        "the walks must reach the red state to test anything"
+    );
 }
 
 #[test]
@@ -724,14 +786,20 @@ fn rn_01_no_needs_you_signal_never_marks_red() {
     let alphabet = other_signals();
     for config in configs() {
         for_each_sequence(&alphabet, 4, &mut |seq| {
-            assert!(!run(&config, seq), "red without a needs-you signal: {seq:?}");
+            assert!(
+                !run(&config, seq),
+                "red without a needs-you signal: {seq:?}"
+            );
         });
     }
     let mut rng = XorShift(0xdead_beef_cafe_f00d);
     for config in configs() {
         for _ in 0..500 {
             let walk = rng.walk(&alphabet, 150);
-            assert!(!run(&config, &walk), "red without a needs-you signal: {walk:?}");
+            assert!(
+                !run(&config, &walk),
+                "red without a needs-you signal: {walk:?}"
+            );
         }
     }
 }
