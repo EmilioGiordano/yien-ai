@@ -1,0 +1,7 @@
+schema = 1
+id = "shell"
+name = "Shell"
+
+# The command is the user's default shell, resolved by the caller.
+[[rules]]
+sources = ["osc133"]

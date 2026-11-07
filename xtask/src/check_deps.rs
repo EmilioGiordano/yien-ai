@@ -54,6 +54,7 @@ const LAYER1_EXTRA: &[&str] = &[
     "toml",
     "serde_json",
     "postcard",
+    "regex",
 ];
 
 /// Package names declared in the root `[workspace.dependencies]`, by key, so a
@@ -495,8 +496,13 @@ mod tests {
              serde_json = \"1\"\npostcard = \"1\"\nbitflags = \"2\"",
         )];
         assert_eq!(check(&set), Vec::<String>::new());
-        let set = [manifest("yien-agent", "[dependencies]\nregex = \"1\"")];
-        assert_violation(&set, "yien-agent -> regex: not on the layer allowlist");
+        let set = [manifest(
+            "yien-agent",
+            "[dependencies]\nregex = \"1\"\ntoml = \"1\"",
+        )];
+        assert_eq!(check(&set), Vec::<String>::new());
+        let set = [manifest("yien-agent", "[dependencies]\nrand = \"1\"")];
+        assert_violation(&set, "yien-agent -> rand: not on the layer allowlist");
     }
 
     #[test]

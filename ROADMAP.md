@@ -27,9 +27,12 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
 | VT engine: `yien-vt`, `VtEngine` on alacritty, `osc_scan`, frames, hot scrollback, search, links | `feat/vt-engine` | done on the branch, in review; cold scrollback and frame diffs pending |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; rest pending |
+| M1 PTY backend: `yien-pty`, portable-pty over the system ConPTY, reader/writer/waiter threads, `FakePty` | `feat/pty-backend` | done on the branch: tests green on Windows; unix tests not yet run |
+| M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
-| M4 Claude: hooks, state machine, red mark, counter | `feat/` | pending |
+| M4 Claude: profiles, signals, pure state machine, hook settings and payload decoding (`yien-agent`) | `feat/agent-state-machine` | done on the branch, in review; no UI yet |
+| M4 Claude: `yien-hook`, hook pipe, red mark, counter | `feat/` | pending |
 
 ## Decisions taken on the way
 
@@ -48,6 +51,21 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `build/tracing-and-input-mode`: logs go to `<data dir>/logs`, where the data dir is `%LOCALAPPDATA%\YIEN` or `$YIEN_DATA_DIR`, not to the state dir that plan §5.4 names, so a throwaway profile redirects them too. Debug builds also log to stderr. `yien-platform` uses `#![deny(unsafe_code)]`, so later OS code can allow `unsafe` per module with a `// SAFETY:` line.
 - `build/tracing-and-input-mode`: the log guard is dropped in the callback `yien_ui::run` takes for gpui's `on_app_quit`, because gpui calls `process::exit` at Windows end of session without returning from `run`. `vte` (off) and `alacritty_terminal` (warn) are capped on top of `YIEN_LOG`, since their debug and trace records carry terminal content. The binary logs panics (location and a message capped at 200 chars) before the default hook.
 - `feat/ui-shell`: the sumi `shu` red is below WCAG AA on `panel` (4.39:1) and `raised` (4.11:1), where the tab bar and the counter use it (RNF-18). Left as designed, pending a token change.
+- `feat/pty-backend`: resizes go through the writer thread with the input (plan §4.1), so `resize` reports only "queued"; an OS resize failure is not surfaced.
+- `feat/pty-backend`: end of session is the child's exit (a blocking `wait`; `try_wait` reads exit code 259 as still running), then 100 ms of quiet output measured from the later of the exit and the reader's last wait, capped at 2 s. Both clocks count only time the reader spends waiting in `read`, so the cap does not bound wall time while a consumer is behind; and `Exited` is queued only then, so every byte read before it is delivered first. Bytes that arrive after `Exited` are still forwarded.
+- `feat/pty-backend` open: closing a session while the writer is inside a long `write_all` (a large paste into a stalled child) waits for that write; not verified.
+- `feat/pty-backend`: `write` never blocks: a full input queue returns the bytes in `PtyError::InputQueueFull`. Dropping the session kills the child.
+- `feat/pty-backend`: portable-pty 0.9 loads a `conpty.dll` found on the DLL search path before the kernel32 one. That is the seam for the bundled ConPTY (TBD-05); today nothing ships it, so the system ConPTY is used.
+- `feat/agent-state-machine`: the per-pane hook token travels in the `YIEN_HOOK_TOKEN` environment variable (04 §2.4), never in the `--settings` file. Registered Claude events: the eight of 04 §2.4 plus `PostToolUse` and `PostToolUseFailure`, the real exits from a permission wait.
+- `feat/agent-state-machine`: hooks use Claude Code's exec form (`"command": "<yien-hook.exe>", "args": ["<event>"]`), so no shell runs them and nothing depends on Git Bash or PowerShell. Since which Claude Code version first accepts `args` is unknown, S6 must check it against the 2.0 rule; `yien-hook` should read the event from the payload first.
+- `feat/agent-state-machine`: a `PermissionRequest` carrying `agent_id` (a subagent) or with an unreadable payload never lights the red mark (RN-02); `agent_type` alone does not count, since a main session run with `--agent` carries it too. S6 must confirm with fixtures whether subagent requests show a dialog.
+- `feat/agent-state-machine`: user input followed by output during the 300 ms confirmation window cancels the pending red, as it leaves a confirmed one.
+- `feat/agent-state-machine`: OSC 9, OSC 777 and BEL never change the state: they cannot tell "done" from "waiting" (RN-02). Codex and OpenCode stay idle-only until S7 and S8.
+- `feat/agent-state-machine`: diverges from 04 §4.7 ("se usa la última"): an unverified CLI version uses the newest rule (highest lower bound), not the last one listed; a rule without `versions` is never counted as verified (RF-AGE-11).
+- `feat/agent-state-machine`: `regex` joins the layer-1 allowlist (plan §3.2).
+- `feat/agent-state-machine`: diverges from 04 §4.5: a `SessionStart` with `source = compact` or `resume` during a turn keeps the state and the red mark; `startup`, `clear` and the rest go to Idle as 04 says.
+- `feat/agent-state-machine`: a hook payload that is too large or malformed falls back to the event name `yien-hook` got in argv, with no payload fields (`decode_claude_hook_or_event`), instead of `Ambiguous`.
+- `feat/agent-state-machine`, open: parallel tool calls (a `PostToolUse` from another tool clears a pending or confirmed red; S6 fixtures decide); no warning channel for unknown profile keys (plan §7.4); value errors in profiles name the field path, not the line; no `.yrec` fixtures for the Claude version ranges (RNF-23); Codex and OpenCode resume arguments unverified (S7, S8); `AgentState` not yet in `yien-proto`; Windows hook shell and quoting unverified (S6).
 
 ## In flight
 
