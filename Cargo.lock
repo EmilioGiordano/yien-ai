@@ -8845,6 +8845,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yien-hook"
+version = "0.0.0"
+dependencies = [
+ "yien-agent",
+ "yien-platform",
+ "yien-proto",
+]
+
+[[package]]
 name = "yien-input"
 version = "0.0.0"
 
@@ -8857,16 +8866,21 @@ name = "yien-platform"
 version = "0.0.0"
 dependencies = [
  "dirs 6.0.0",
+ "getrandom 0.4.3",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "yien-agent",
+ "yien-proto",
 ]
 
 [[package]]
 name = "yien-proto"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
 ]

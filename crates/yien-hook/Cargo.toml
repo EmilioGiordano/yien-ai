@@ -1,0 +1,18 @@
+[package]
+name = "yien-hook"
+description = "Forwards a Claude Code hook payload from stdin to the YIEN hook pipe, never blocking the agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+yien-proto = { workspace = true }
+yien-platform = { workspace = true }
+
+[dev-dependencies]
+yien-agent = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,7 +1,8 @@
 //! The YIEN OS layer (layer 2): what needs the operating system, behind plain
 //! functions and values the pure layers can be handed.
 //!
-//! For now: per-user paths ([`paths`]) and the log file ([`init_logging`]).
+//! For now: per-user paths ([`paths`]), the log file ([`init_logging`]) and
+//! the pipe that receives Claude Code hook events ([`hook_pipe`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -12,6 +13,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod hook_pipe;
 mod logging;
 pub mod paths;
 
