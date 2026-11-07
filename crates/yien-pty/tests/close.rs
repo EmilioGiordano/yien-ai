@@ -43,6 +43,7 @@ fn children() -> Vec<(u32, String)> {
 
 #[test]
 fn closing_a_session_ends_its_child_and_its_console_host() {
+    let earlier: Vec<u32> = children().into_iter().map(|(pid, _)| pid).collect();
     let session = PortablePty::new()
         .spawn(SpawnSpec::new("cmd.exe").arg("/d"))
         .unwrap();
@@ -77,7 +78,9 @@ fn closing_a_session_ends_its_child_and_its_console_host() {
     );
     let host = before
         .iter()
-        .find(|(_, name)| name == "conhost.exe" || name == "openconsole.exe")
+        .find(|(pid, name)| {
+            !earlier.contains(pid) && (name == "conhost.exe" || name == "openconsole.exe")
+        })
         .map(|(pid, _)| *pid)
         .unwrap_or_else(|| panic!("no console host among {before:?}"));
 
