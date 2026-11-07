@@ -643,7 +643,7 @@ impl Shell {
         if pane.exited {
             self.command(Command::RelaunchPane { pane: id }, cx);
         } else {
-            self.notice = Some(format!("{} is still running.", pane.name));
+            self.notice = Some(format!("{} has not exited.", pane.name));
             cx.notify();
         }
     }
