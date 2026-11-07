@@ -1,29 +1,36 @@
-//! How the window reaches the core: a sender the binary provides, and a
-//! queue that holds messages while the core is busy, so nothing the user
+//! How the window reaches the core: a sender the binary provides, and
+//! queues that hold messages while the core is busy, so nothing the user
 //! typed is dropped or reordered (plan §4.2).
+//!
+//! Input and reports wait in one queue per pane: a pane whose program stops
+//! reading makes the core refuse that pane only, and must not hold up typing
+//! in the others. Everything else waits in one shared queue.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::Context;
-use yien_proto::ClientMsg;
+use yien_proto::frame::Frame;
+use yien_proto::{ClientMsg, PaneId};
 
 /// Why the core did not take a message.
 #[derive(Debug)]
 pub enum Refused {
-    /// Its queue is full; the message comes back to be retried.
+    /// Its queue, or the pane's input queue, is full; the message comes back
+    /// to be retried.
     Busy(ClientMsg),
     /// It has stopped; nothing will be delivered again.
     Stopped,
 }
 
-/// Delivers messages to the core without waiting. The binary implements it
+/// The window's way to the core, without waiting. The binary implements it
 /// over the core's handle, so the UI never sees core types (ADR-03).
 ///
 /// ```
-/// use yien_proto::ClientMsg;
+/// use yien_proto::frame::Frame;
+/// use yien_proto::{ClientMsg, PaneId};
 /// use yien_ui::{CoreClient, Refused};
 ///
 /// struct Nowhere;
@@ -31,12 +38,20 @@ pub enum Refused {
 ///     fn send(&self, _msg: ClientMsg) -> Result<(), Refused> {
 ///         Err(Refused::Stopped)
 ///     }
+///     fn take_frame(&self, _pane: PaneId) -> Option<Frame> {
+///         None
+///     }
 /// }
 /// assert!(Nowhere.send(ClientMsg::WindowFocus { focused: true }).is_err());
+/// assert!(Nowhere.take_frame(PaneId::new(1)).is_none());
 /// ```
 pub trait CoreClient: 'static {
     /// Queues `msg` for the core.
     fn send(&self, msg: ClientMsg) -> Result<(), Refused>;
+
+    /// The newest frame of `pane` not taken yet, if any. Called after
+    /// `CoreMsg::PaneFrameReady` and whenever a pane comes into view.
+    fn take_frame(&self, pane: PaneId) -> Option<Frame>;
 }
 
 /// What became of a message handed to the [`Link`].
@@ -44,16 +59,30 @@ pub trait CoreClient: 'static {
 pub(crate) enum Sent {
     /// The core has it.
     Delivered,
-    /// It waits in the queue; call [`Link::flush`] later.
+    /// It waits in a queue; call [`Link::flush`] later.
     Queued,
     /// The core has stopped.
     Stopped,
 }
 
-/// The sender plus the queue in front of it.
+/// Which queue a message waits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Lane {
+    Shared,
+    Pane(PaneId),
+}
+
+fn lane_of(msg: &ClientMsg) -> Lane {
+    match msg {
+        ClientMsg::Input { pane, .. } | ClientMsg::Report { pane, .. } => Lane::Pane(*pane),
+        _ => Lane::Shared,
+    }
+}
+
+/// The sender plus the queues in front of it.
 pub(crate) struct Link {
     client: Box<dyn CoreClient>,
-    queue: RefCell<VecDeque<ClientMsg>>,
+    queues: RefCell<BTreeMap<Lane, VecDeque<ClientMsg>>>,
     stopped: Cell<bool>,
     /// A retry is already scheduled.
     pub(crate) flushing: Cell<bool>,
@@ -63,50 +92,72 @@ impl Link {
     pub(crate) fn new(client: Box<dyn CoreClient>) -> Self {
         Self {
             client,
-            queue: RefCell::new(VecDeque::new()),
+            queues: RefCell::new(BTreeMap::new()),
             stopped: Cell::new(false),
             flushing: Cell::new(false),
         }
     }
 
-    /// Sends `msg`, or queues it behind earlier messages still waiting.
+    /// Sends `msg`, or queues it behind earlier messages of its lane.
     pub(crate) fn send(&self, msg: ClientMsg) -> Sent {
         if self.stopped.get() {
             return Sent::Stopped;
         }
-        if !self.queue.borrow().is_empty() {
-            self.queue.borrow_mut().push_back(msg);
+        let lane = lane_of(&msg);
+        if let Some(queue) = self.queues.borrow_mut().get_mut(&lane) {
+            queue.push_back(msg);
             return Sent::Queued;
         }
         match self.client.send(msg) {
             Ok(()) => Sent::Delivered,
             Err(Refused::Busy(msg)) => {
-                self.queue.borrow_mut().push_back(msg);
+                self.queues
+                    .borrow_mut()
+                    .entry(lane)
+                    .or_default()
+                    .push_back(msg);
                 Sent::Queued
             }
             Err(Refused::Stopped) => self.stop(),
         }
     }
 
-    /// Sends what is queued, in order, until the core refuses again.
-    /// Returns whether anything is still waiting.
+    /// Sends what is queued, each lane in order until the core refuses that
+    /// lane again. Returns whether anything is still waiting.
     pub(crate) fn flush(&self) -> bool {
-        loop {
-            let Some(msg) = self.queue.borrow_mut().pop_front() else {
-                return false;
-            };
-            match self.client.send(msg) {
-                Ok(()) => {}
-                Err(Refused::Busy(msg)) => {
-                    self.queue.borrow_mut().push_front(msg);
-                    return true;
-                }
-                Err(Refused::Stopped) => {
-                    self.stop();
-                    return false;
+        let lanes: Vec<Lane> = self.queues.borrow().keys().copied().collect();
+        for lane in lanes {
+            loop {
+                let next = self
+                    .queues
+                    .borrow_mut()
+                    .get_mut(&lane)
+                    .and_then(VecDeque::pop_front);
+                let Some(msg) = next else {
+                    self.queues.borrow_mut().remove(&lane);
+                    break;
+                };
+                match self.client.send(msg) {
+                    Ok(()) => {}
+                    Err(Refused::Busy(msg)) => {
+                        if let Some(queue) = self.queues.borrow_mut().get_mut(&lane) {
+                            queue.push_front(msg);
+                        }
+                        break;
+                    }
+                    Err(Refused::Stopped) => {
+                        self.stop();
+                        return false;
+                    }
                 }
             }
         }
+        !self.queues.borrow().is_empty()
+    }
+
+    /// The newest frame of `pane` the core holds for the UI.
+    pub(crate) fn take_frame(&self, pane: PaneId) -> Option<Frame> {
+        self.client.take_frame(pane)
     }
 
     #[cfg(test)]
@@ -116,7 +167,7 @@ impl Link {
 
     fn stop(&self) -> Sent {
         self.stopped.set(true);
-        self.queue.borrow_mut().clear();
+        self.queues.borrow_mut().clear();
         Sent::Stopped
     }
 }
@@ -155,6 +206,8 @@ mod tests {
         got: RefCell<Vec<ClientMsg>>,
         room: Cell<usize>,
         stopped: Cell<bool>,
+        /// Panes whose program is not reading: their input is refused.
+        stalled: RefCell<Vec<PaneId>>,
     }
 
     struct Shared(Rc<Fake>);
@@ -167,17 +220,49 @@ mod tests {
             if self.0.room.get() == 0 {
                 return Err(Refused::Busy(msg));
             }
+            if let ClientMsg::Input { pane, .. } = &msg
+                && self.0.stalled.borrow().contains(pane)
+            {
+                return Err(Refused::Busy(msg));
+            }
             self.0.room.set(self.0.room.get() - 1);
             self.0.got.borrow_mut().push(msg);
             Ok(())
         }
+
+        fn take_frame(&self, _pane: PaneId) -> Option<Frame> {
+            None
+        }
     }
 
     fn input(n: u8) -> ClientMsg {
+        input_to(1, n)
+    }
+
+    fn input_to(pane: u64, n: u8) -> ClientMsg {
         ClientMsg::Input {
-            pane: PaneId::new(1),
+            pane: PaneId::new(pane),
             bytes: InputBytes::new(vec![n]),
         }
+    }
+
+    #[test]
+    fn a_pane_that_stopped_reading_does_not_hold_up_the_others() {
+        let (fake, link) = link(100);
+        fake.stalled.borrow_mut().push(PaneId::new(1));
+        assert_eq!(link.send(input_to(1, 1)), Sent::Queued);
+        assert_eq!(link.send(input_to(1, 2)), Sent::Queued);
+        assert_eq!(link.send(input_to(2, 3)), Sent::Delivered);
+        assert_eq!(
+            link.send(ClientMsg::WindowFocus { focused: true }),
+            Sent::Delivered
+        );
+        assert!(link.flush());
+        assert_eq!(fake.got.borrow().len(), 2);
+        fake.stalled.borrow_mut().clear();
+        assert!(!link.flush());
+        let got = fake.got.borrow();
+        assert_eq!(&got[2..], &[input_to(1, 1), input_to(1, 2)]);
     }
 
     fn link(room: usize) -> (Rc<Fake>, Link) {
