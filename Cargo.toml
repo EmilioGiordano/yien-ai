@@ -17,6 +17,7 @@ yien-pty = { path = "crates/yien-pty" }
 yien-testkit = { path = "crates/yien-testkit" }
 yien-vt = { path = "crates/yien-vt" }
 yien-ui = { path = "crates/yien-ui" }
+yien-platform = { path = "crates/yien-platform" }
 yien-agent = { path = "crates/yien-agent" }
 
 serde = { version = "1.0.229", features = ["derive"] }
@@ -27,6 +28,10 @@ thiserror = "2.0.21"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 gpui-kit = "=0.7.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "env-filter", "tracing-log"] }
+tracing-appender = "0.2.5"
+dirs = "6.0.0"
 portable-pty = "0.9.0"
 regex = "1.13.1"
 
