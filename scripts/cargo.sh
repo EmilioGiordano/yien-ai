@@ -4,11 +4,15 @@
 #   --full  waits for 4000 MB free instead of 2000 MB (full gate, release builds)
 # The target dir comes from .yien-slot in the worktree root (untracked):
 #   one line, e.g. D:/More-Code-Projects/yien-compiled/slot-1
-# Builds never share a target dir across branches and never land on C:.
+# Exit codes: 2 setup error, 75 gate not acquired within YIEN_GATE_MAX_WAIT
+# seconds (default 3600); otherwise cargo's own exit code.
 set -euo pipefail
 
 min_mb=2000
-if [ "${1:-}" = "--full" ]; then min_mb=4000; shift; fi
+jobs=2
+if [ "${1:-}" = "--full" ]; then min_mb=4000; jobs=4; shift; fi
+max_wait=${YIEN_GATE_MAX_WAIT:-3600}
+stale_after=$((4 * 3600))
 
 root=$(git rev-parse --show-toplevel)
 slot_file="$root/.yien-slot"
@@ -23,19 +27,49 @@ esac
 
 lock=D:/yien-build.lock
 
-avail_mb() {
-  powershell -NoProfile -Command "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes" | tr -d '\r '
+ps_int() {
+  local v
+  v=$(powershell -NoProfile -Command "$1" 2>/dev/null | tr -d '\r ' || true)
+  case "$v" in ''|*[!0-9]*) echo "-1" ;; *) echo "$v" ;; esac
 }
-cargo_count() {
-  powershell -NoProfile -Command "(Get-Process cargo,rustc -ErrorAction SilentlyContinue | Measure-Object).Count" | tr -d '\r '
+avail_mb() { ps_int "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes"; }
+cargo_count() { ps_int "(Get-Process cargo,rustc -ErrorAction SilentlyContinue | Measure-Object).Count"; }
+win_pid_alive() { [ "$(ps_int "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { 1 } else { 0 }")" = "1" ]; }
+
+break_stale_lock() {
+  [ -d "$lock" ] || return 0
+  local owner="$lock/owner" pid since now
+  if [ -f "$owner" ]; then
+    read -r pid since < "$owner" || true
+  fi
+  now=$(date +%s)
+  if [ -z "${pid:-}" ] || [ -z "${since:-}" ]; then
+    # Lock without an owner file: only break it once it is old.
+    since=$(stat -c %Y "$lock" 2>/dev/null || echo "$now")
+    if [ $((now - since)) -gt 600 ]; then rm -rf "$lock"; echo "cargo.sh: removed ownerless lock" >&2; fi
+    return 0
+  fi
+  if ! win_pid_alive "$pid" || [ $((now - since)) -gt "$stale_after" ]; then
+    rm -rf "$lock"
+    echo "cargo.sh: removed stale lock of pid $pid" >&2
+  fi
 }
 
+my_winpid=$(cat /proc/$$/winpid 2>/dev/null || echo "$$")
 waited=0
 while true; do
+  break_stale_lock
   a=$(avail_mb)
   c=$(cargo_count)
-  if [ "$a" -ge "$min_mb" ] && [ "$c" = "0" ] && mkdir "$lock" 2>/dev/null; then
+  if [ "$a" -lt 0 ] || [ "$c" -lt 0 ]; then
+    echo "cargo.sh: could not read memory or process count from PowerShell" >&2
+  elif [ "$a" -ge "$min_mb" ] && [ "$c" -eq 0 ] && mkdir "$lock" 2>/dev/null; then
+    echo "$my_winpid $(date +%s)" > "$lock/owner"
     break
+  fi
+  if [ "$waited" -ge "$max_wait" ]; then
+    echo "cargo.sh: gate not acquired after ${waited}s (free ${a} MB, need ${min_mb}; cargo processes ${c})" >&2
+    exit 75
   fi
   if [ $((waited % 300)) -eq 0 ]; then
     echo "cargo.sh: waiting for the build gate (free ${a} MB, need ${min_mb}; cargo processes ${c})" >&2
@@ -43,9 +77,6 @@ while true; do
   sleep 20
   waited=$((waited + 20))
 done
-trap 'rmdir "$lock" 2>/dev/null || true' EXIT
-
-jobs=2
-if [ "$min_mb" -ge 4000 ]; then jobs=4; fi
+trap 'rm -rf "$lock" 2>/dev/null || true' EXIT INT TERM
 
 CARGO_TARGET_DIR="$target_dir" CARGO_BUILD_JOBS="$jobs" cargo "$@"
