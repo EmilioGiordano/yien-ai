@@ -9,7 +9,7 @@ use anyhow::{Context, bail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layer {
-    /// Layers 0 to 3, lower is purer.
+    /// Layers 0 to 3, lower is purer; 4 is the `yien` binary on top.
     Level(u8),
     /// Test support: only ever a dev-dependency.
     Dev,
@@ -27,6 +27,7 @@ const LAYERS: &[(&str, Layer)] = &[
     ("yien-platform", Layer::Level(2)),
     ("yien-core", Layer::Level(3)),
     ("yien-ui", Layer::Level(3)),
+    ("yien", Layer::Level(4)),
     ("yien-testkit", Layer::Dev),
 ];
 
@@ -339,6 +340,20 @@ mod tests {
             "[dependencies]\nyien-input = \"0\"",
         )];
         assert_violation(&set, "yien-layout -> yien-input");
+    }
+
+    #[test]
+    fn the_binary_may_depend_on_every_layer_and_nothing_on_it() {
+        let set = [manifest(
+            "yien",
+            "[dependencies]\nyien-ui = \"0\"\nyien-core = \"0\"\nyien-proto = \"0\"\ngpui-kit = \"0\"",
+        )];
+        assert_eq!(check(&set), Vec::<String>::new());
+
+        let set = [manifest("yien-core", "[dependencies]\nyien = \"0\"")];
+        assert_violation(&set, "yien-core -> yien");
+        let set = [manifest("yien", "[dependencies]\nyien-testkit = \"0\"")];
+        assert_violation(&set, "yien-testkit is dev-only");
     }
 
     #[test]
