@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_pan_01_closing_the_last_pane_closes_its_tab() {
+    fn rf_pan_20_closing_the_last_pane_closes_its_tab() {
         let mut ws = Workspace::new();
         let (tab, pane) = project(&mut ws);
         let fx = run(&mut ws, Command::ClosePane { pane });
