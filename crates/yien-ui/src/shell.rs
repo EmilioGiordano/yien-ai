@@ -251,6 +251,9 @@ impl Shell {
                         continue;
                     }
                 }
+                CoreMsg::NotificationsMuted { muted } => {
+                    self.workspace.set_notifications_muted(muted);
+                }
                 CoreMsg::Error { message, .. } => self.notice = Some(message),
             }
             changed = true;

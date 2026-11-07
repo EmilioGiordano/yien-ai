@@ -545,6 +545,8 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::CloseProject { .. }
         | Command::SetProjectCollapsed { .. }
         | Command::RenameTab { .. }
+        | Command::SetTabMuted { .. }
+        | Command::SetNotificationsMuted { .. }
         | Command::NewTab { .. }
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }

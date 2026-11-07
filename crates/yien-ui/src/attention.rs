@@ -237,7 +237,10 @@ impl Alerts {
         }
         let waiting: Vec<Waiting> = waiting
             .into_iter()
-            .map(|pane| Waiting { pane, muted: false })
+            .map(|pane| Waiting {
+                pane,
+                muted: view.alerts_muted(pane),
+            })
             .collect();
         self.notifier.observe(&waiting, focused, now)
     }
@@ -479,6 +482,7 @@ mod tests {
             layout: LayoutNode::Pane(PaneId::new(id)),
             focused: PaneId::new(id),
             maximized: None,
+            muted: false,
         };
         WorkspaceView::from_snapshot(&WorkspaceSnapshot {
             projects: vec![ProjectInfo {
@@ -509,6 +513,7 @@ mod tests {
                 .collect(),
             active_tab: Some(TabId::new(states[0].0)),
             profiles: vec![],
+            notifications_muted: false,
         })
     }
 
@@ -546,6 +551,33 @@ mod tests {
                 "flash",
             ]
         );
+    }
+
+    #[test]
+    fn rf_atn_11_muting_stops_toasts_and_flashes_but_not_the_badge() {
+        let t0 = Instant::now();
+        let mut all = view(&[(1, NEEDS)]);
+        all.set_notifications_muted(true);
+        let mut one = view(&[(1, NEEDS), (2, P::Idle)]);
+        one.tab_updated(&TabInfo {
+            id: TabId::new(1),
+            project: ProjectId::new(1),
+            name: "Tab 1".into(),
+            dir: "C:/yien".into(),
+            branch: None,
+            layout: LayoutNode::Pane(PaneId::new(1)),
+            focused: PaneId::new(1),
+            maximized: None,
+            muted: true,
+        });
+        assert!(one.alerts_muted(PaneId::new(1)) && !one.alerts_muted(PaneId::new(2)));
+        for muted in [all, one] {
+            let os = Rc::new(FakeOs::default());
+            let mut alerts = Alerts::new(os.clone());
+            assert_eq!(alerts.update(&muted, false, t0), None);
+            alerts.flush(&muted, false, t0 + COALESCE);
+            assert_eq!(*os.calls.borrow(), ["badge 1"]);
+        }
     }
 
     #[test]

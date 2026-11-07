@@ -355,6 +355,7 @@ mod tests {
             layout,
             focused: PaneId::new(panes[0]),
             maximized: None,
+            muted: false,
         }
     }
 
@@ -403,6 +404,7 @@ mod tests {
             ],
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
+            notifications_muted: false,
         })
     }
 
