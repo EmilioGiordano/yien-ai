@@ -2,19 +2,24 @@
 
 use yien_proto::TabId;
 
-use crate::model::{PaneRecord, SessionRef, SessionSnapshot};
+use crate::model::{PaneRecord, ProfileId, SessionRef, SessionSnapshot};
 
 /// How to relaunch a restored pane.
 ///
 /// ```
 /// use yien_session::ResumeAction;
 /// let action = ResumeAction::Fresh { rerun_offer: None };
-/// assert!(!matches!(action, ResumeAction::Resume(_)));
+/// assert!(!matches!(action, ResumeAction::Resume { .. }));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeAction {
-    /// Launch the pane's profile resuming exactly this session (RN-05).
-    Resume(SessionRef),
+    /// Launch the agent CLI `kind` resuming exactly this session (RN-05).
+    Resume {
+        /// The agent profile that owns the session; always the pane's own profile.
+        kind: ProfileId,
+        /// The session's exact id.
+        session: SessionRef,
+    },
     /// Launch the pane's profile with no session to resume.
     Fresh {
         /// For a pane without an agent, its last command, to offer for rerun after the
@@ -26,7 +31,9 @@ pub enum ResumeAction {
 /// Decides how to relaunch a pane.
 ///
 /// An agent session is resumed only when the pane has its exact id and the user did not end
-/// it (RN-04, RN-05); an empty id counts as none. Anything else starts fresh.
+/// it (RN-04, RN-05); an empty id counts as none. A session whose agent kind is not the
+/// pane's profile is never resumed, so one CLI's id never reaches another. Anything else
+/// starts fresh.
 ///
 /// ```
 /// use yien_proto::PaneId;
@@ -44,13 +51,23 @@ pub enum ResumeAction {
 ///     last_command: None,
 ///     name: None,
 /// };
-/// assert_eq!(resume_plan(&pane), ResumeAction::Resume(SessionRef::new("4f1c")));
+/// assert_eq!(
+///     resume_plan(&pane),
+///     ResumeAction::Resume { kind: ProfileId::new("claude"), session: SessionRef::new("4f1c") }
+/// );
 /// ```
 pub fn resume_plan(pane: &PaneRecord) -> ResumeAction {
     match &pane.agent {
         Some(agent) => match &agent.session_id {
-            Some(id) if !agent.ended_explicitly && !id.as_str().is_empty() => {
-                ResumeAction::Resume(id.clone())
+            Some(id)
+                if !agent.ended_explicitly
+                    && !id.as_str().is_empty()
+                    && agent.kind == pane.profile =>
+            {
+                ResumeAction::Resume {
+                    kind: agent.kind.clone(),
+                    session: id.clone(),
+                }
             }
             _ => ResumeAction::Fresh { rerun_offer: None },
         },
@@ -81,7 +98,7 @@ pub fn missing_dirs(snapshot: &SessionSnapshot, exists: impl Fn(&str) -> bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AgentRecord, LayoutRecord, ProfileId, ProjectRecord, TabRecord};
+    use crate::model::{AgentRecord, LayoutRecord, ProjectRecord, TabRecord};
     use yien_proto::{PaneId, ProjectId};
 
     fn agent_pane(session: Option<&str>, ended: bool) -> PaneRecord {
@@ -114,7 +131,20 @@ mod tests {
     fn rf_ses_03_a_live_session_resumes_by_its_id() {
         assert_eq!(
             resume_plan(&agent_pane(Some("abc-123"), false)),
-            ResumeAction::Resume(SessionRef::new("abc-123"))
+            ResumeAction::Resume {
+                kind: ProfileId::new("claude"),
+                session: SessionRef::new("abc-123")
+            }
+        );
+    }
+
+    #[test]
+    fn rn_05_a_session_of_another_agent_is_never_resumed() {
+        let mut pane = agent_pane(Some("abc-123"), false);
+        pane.profile = ProfileId::new("codex");
+        assert_eq!(
+            resume_plan(&pane),
+            ResumeAction::Fresh { rerun_offer: None }
         );
     }
 

@@ -45,7 +45,10 @@
 //! let restored = load(&store).restored.unwrap().snapshot;
 //! assert_eq!(restored, snapshot);
 //! let first = &restored.projects[0].tabs[0].panes[0];
-//! assert_eq!(resume_plan(first), ResumeAction::Resume(SessionRef::new("4f1c")));
+//! assert_eq!(
+//!     resume_plan(first),
+//!     ResumeAction::Resume { kind: ProfileId::new("claude"), session: SessionRef::new("4f1c") }
+//! );
 //! ```
 
 #![forbid(unsafe_code)]
