@@ -65,4 +65,6 @@ On `PASS`:
 4. Write `REPORT-<topic>.md` in the worktree (gitignored): verdict, commits, checks, findings and their resolution, risks, manual checks.
 5. Report to Emilio in Spanish: the PR link, what changed, and what he should try.
 
-Never merge, never delete the branch or the worktree, never push to `main`.
+6. When the PR meets the merge criteria in `AGENTS.md`, merge it with `gh pr merge --merge` and tell Emilio.
+
+Never delete the branch or the worktree, never push to `main` directly.

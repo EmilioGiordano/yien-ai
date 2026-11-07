@@ -32,7 +32,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Commit on its branch | yes | yes | — |
 | Push a branch, open a PR | yes | no | — |
 | Commit or push to `main` | never | never | yes |
-| Merge | never | never | yes |
+| Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
 
@@ -40,7 +40,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 
 ## When to stop and ask
 
-- Anything Emilio cannot undo from his side: deleting, force-pushing, merging, touching files he has not committed.
+- Anything Emilio cannot undo from his side: deleting, force-pushing, merging a PR that does not meet the merge criteria, touching files he has not committed.
 - A design trade-off with two reasonable outcomes that the ERS and the plan do not settle.
 - A requirement that turns out wrong or impossible.
 
