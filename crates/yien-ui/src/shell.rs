@@ -528,6 +528,15 @@ impl Shell {
         self.give_back_keyboard(window, cx);
     }
 
+    fn context_bar_leave(
+        &mut self,
+        _: &ContextBarLeave,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.give_back_keyboard(window, cx);
+    }
+
     /// The tab row to ring, while the tab bar has the keyboard.
     fn ringed_tab(&self) -> Option<TabId> {
         self.tab_cursor
@@ -2250,6 +2259,7 @@ impl Shell {
         let t = self.theme;
         v_flex()
             .id("context-bar")
+            .key_context(CONTEXT_BAR_CONTEXT)
             .track_focus(&self.context_focus)
             .role(Role::Complementary)
             .aria_label("Context bar")
@@ -2609,6 +2619,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_down))
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
+            .on_action(cx.listener(Self::context_bar_leave))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))

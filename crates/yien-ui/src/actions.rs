@@ -26,6 +26,9 @@ pub(crate) const CONFIRM_CONTEXT: &str = "YienConfirm";
 /// Key context of the tab bar while it holds the keyboard (RF-NAV-08).
 pub(crate) const TAB_BAR_CONTEXT: &str = "YienTabBar";
 
+/// Key context of the context bar while it holds the keyboard (RF-NAV-08).
+pub(crate) const CONTEXT_BAR_CONTEXT: &str = "YienContextBar";
+
 actions!(
     yien,
     [
@@ -151,6 +154,8 @@ actions!(
         TabBarSelect,
         /// Gives the keyboard back to the pane without selecting anything.
         TabBarLeave,
+        /// Gives the keyboard back to the pane from the context bar.
+        ContextBarLeave,
     ]
 );
 
@@ -187,6 +192,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
     let rename = Some(rename.as_str());
     let confirm = Some(CONFIRM_CONTEXT);
     let tab_bar = Some(TAB_BAR_CONTEXT);
+    let context_bar = Some(CONTEXT_BAR_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -205,6 +211,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", TabBarDown, tab_bar),
         KeyBinding::new("enter", TabBarSelect, tab_bar),
         KeyBinding::new("escape", TabBarLeave, tab_bar),
+        KeyBinding::new("escape", ContextBarLeave, context_bar),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -252,6 +259,7 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TabBarDown),
         Box::new(TabBarSelect),
         Box::new(TabBarLeave),
+        Box::new(ContextBarLeave),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -394,6 +402,13 @@ mod tests {
         for keys in ["up", "down", "enter", "escape"] {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
+    }
+
+    #[test]
+    fn rf_nav_08_escape_leaves_the_context_bar() {
+        let context_bar = ["Root", CONTEXT, CONTEXT_BAR_CONTEXT];
+        assert!(first_is("escape", &context_bar, &ContextBarLeave));
+        assert!(first_is("f6", &context_bar, &FocusNextRegion));
     }
 
     #[test]
