@@ -115,8 +115,14 @@ pub enum HookEvent {
     PreToolUse,
     /// A tool finished.
     PostToolUse,
+    /// A tool call failed.
+    PostToolUseFailure,
     /// Claude is asking for permission.
     PermissionRequest,
+    /// A permission request from a subagent (the payload carries
+    /// `agent_id`), or one whose payload could not be read. It can fire with
+    /// no dialog shown, so it never lights the red mark (RN-02).
+    UnattributedPermissionRequest,
     /// Claude sent a notification.
     Notification(NotificationKind),
     /// The turn ended.
@@ -200,7 +206,9 @@ pub enum Signal {
     },
     /// Whether the pane is seen: focused in a focused window (RN-07).
     Seen(bool),
-    /// The user sent input to the pane.
+    /// The user sent input to the pane. The caller sends it only for the
+    /// user's own keys and pastes, never for focus or mouse reports that YIEN
+    /// itself generates.
     Input,
     /// The pane produced output (coalesced by the caller).
     Output,

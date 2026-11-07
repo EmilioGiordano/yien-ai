@@ -100,7 +100,8 @@ pub enum Effect {
     /// Raise the system notification for a new "needs you"; the caller
     /// drops it when the window has focus or the pane is muted (RF-ATN-09).
     Notify,
-    /// Send [`Signal::Tick`] at or after this instant.
+    /// Send [`Signal::Tick`] at or after this instant. One timer armed to
+    /// [`Machine::next_wake`] after each step covers every `WakeAt`.
     WakeAt(Duration),
     /// Run the profile's screen rules and answer with [`Signal::Screen`].
     CheckScreen,
@@ -225,6 +226,33 @@ impl Machine {
         self.signal_lost
     }
 
+    /// The earliest instant at which a [`Signal::Tick`] can change anything:
+    /// the pending "needs you" deadline or the watchdog, whichever comes
+    /// first. The caller needs a single timer, re-armed to this after every
+    /// step; [`Effect::WakeAt`] carries the same instants.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{HookEvent, Machine, MachineConfig, Signal, Source};
+    ///
+    /// let ms = Duration::from_millis;
+    /// let m = Machine::new(MachineConfig::new(&[Source::Hooks], None));
+    /// assert_eq!(m.next_wake(), None);
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::UserPromptSubmit), ms(0));
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::PermissionRequest), ms(10));
+    /// assert_eq!(m.next_wake(), Some(ms(310)));
+    /// ```
+    pub fn next_wake(&self) -> Option<Duration> {
+        if self.state != AgentState::Working {
+            return None;
+        }
+        let pending = self.pending.map(|p| p.deadline);
+        match (pending, self.watchdog_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// The rule this machine runs with.
     pub fn config(&self) -> &MachineConfig {
         &self.config
@@ -270,7 +298,7 @@ impl Machine {
             Signal::SourceLost => self.lose(Cause::SignalLost, now, fx),
             Signal::Ambiguous => self.lose(Cause::Ambiguous, now, fx),
             Signal::Input => {
-                if self.state.is_red() {
+                if self.state.is_red() || self.pending.is_some() {
                     self.input_pending = true;
                 }
             }
@@ -279,6 +307,10 @@ impl Machine {
                     self.set_state(AgentState::Working, Cause::User, now, fx);
                 } else if self.state == AgentState::Working {
                     self.last_activity = now;
+                    if self.pending.is_some() && self.input_pending {
+                        self.pending = None;
+                        self.input_pending = false;
+                    }
                 }
             }
             Signal::Hook(_) | Signal::Osc(_) | Signal::Screen(_) => self.detect(signal, now, fx),
@@ -333,8 +365,11 @@ impl Machine {
                 }
             }
             HookEvent::UserPromptSubmit => self.start_turn(cause, now, fx),
-            HookEvent::PreToolUse | HookEvent::PostToolUse => self.resume_work(cause, now, fx),
+            HookEvent::PreToolUse | HookEvent::PostToolUse | HookEvent::PostToolUseFailure => {
+                self.resume_work(cause, now, fx)
+            }
             HookEvent::PermissionRequest => self.needs(NeedsReason::Permission, cause, now, fx),
+            HookEvent::UnattributedPermissionRequest => {}
             HookEvent::Notification(kind) => match kind {
                 NotificationKind::PermissionPrompt => {
                     self.needs(NeedsReason::Permission, cause, now, fx)
@@ -410,6 +445,13 @@ impl Machine {
         if self.state != AgentState::Working {
             return;
         }
+        self.watchdog_tick(now, fx);
+        if let Some(pending) = self.pending {
+            fx.push(Effect::WakeAt(pending.deadline));
+        }
+    }
+
+    fn watchdog_tick(&mut self, now: Duration, fx: &mut Vec<Effect>) {
         let (Some(at), Some(period)) = (self.watchdog_at, self.config.watchdog) else {
             return;
         };
@@ -461,6 +503,7 @@ impl Machine {
             return;
         }
         let deadline = now + NEEDS_YOU_CONFIRM;
+        self.input_pending = false;
         self.pending = Some(Pending {
             deadline,
             reason,
