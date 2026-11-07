@@ -1056,3 +1056,35 @@ fn a_project_closed_before_its_pane_starts_spawns_nothing() {
     h.command(Command::CloseProject { project });
     h.assert_nothing_spawned_for(START_WAIT + Duration::from_millis(500));
 }
+
+#[test]
+fn rf_esp_01_re_adding_a_project_whose_folder_is_gone_selects_it() {
+    let gone = std::env::temp_dir().join(format!("yien-gone-{}", std::process::id()));
+    std::fs::create_dir_all(&gone).unwrap();
+    let root = gone.to_string_lossy().into_owned();
+    let mut h = Harness::start();
+    h.command(Command::NewProject {
+        root: root.clone(),
+        name: None,
+    });
+    let tab = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.id),
+        _ => None,
+    });
+    h.command(Command::NewProject {
+        root: env!("CARGO_MANIFEST_DIR").into(),
+        name: None,
+    });
+    h.wait_for(|m| match m {
+        CoreMsg::ActiveTab { tab: Some(t) } if *t != tab => Some(()),
+        _ => None,
+    });
+    std::fs::remove_dir_all(&gone).unwrap();
+    h.command(Command::NewProject { root, name: None });
+    let answer = h.wait_for(|m| match m {
+        CoreMsg::ActiveTab { tab: Some(t) } if *t == tab => Some(Ok(())),
+        CoreMsg::Error { message, .. } => Some(Err(message.clone())),
+        _ => None,
+    });
+    assert_eq!(answer, Ok(()));
+}

@@ -271,6 +271,11 @@ impl Workspace {
         Some((tab.id, tab.dir.as_str()))
     }
 
+    /// Whether `root` is the folder of a project already ([`same_folder`]).
+    pub fn has_project_at(&self, root: &str) -> bool {
+        self.projects.iter().any(|p| same_folder(&p.root, root))
+    }
+
     /// Whether the tab is open.
     pub fn has_tab(&self, tab: TabId) -> bool {
         self.tab(tab).is_ok()

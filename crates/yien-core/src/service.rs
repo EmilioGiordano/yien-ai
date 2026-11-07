@@ -414,7 +414,11 @@ impl Service {
     }
 
     async fn on_command(&mut self, command: Command) {
-        if let Command::NewProject { root, .. } = &command {
+        // A folder that is a project already is only selected, even if it
+        // is gone from the disk.
+        if let Command::NewProject { root, .. } = &command
+            && !self.ws.has_project_at(root)
+        {
             let path = PathBuf::from(root);
             let is_dir = tokio::task::spawn_blocking(move || path.is_dir())
                 .await
