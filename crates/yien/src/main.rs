@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod demo;
+mod panic_log;
 
 use std::process::ExitCode;
 
@@ -11,6 +12,7 @@ use yien_platform::LogGuard;
 
 fn main() -> ExitCode {
     let log = start_logging();
+    panic_log::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
     match demo::workspace() {
         Ok(workspace) => {
