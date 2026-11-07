@@ -24,9 +24,9 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | S1 GPUI spike | `spike/s1-gpui` | next |
 | M0 skeleton: workspace, CI, deny, proto, testkit, xtask, foothy layout and input | `build/workspace-skeleton` | done on the branch: all of these, green locally; CI not yet run on the three systems |
 | M0 rest: `tracing` setup, error conventions | follow-up `build/` | pending |
-| M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
+| M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | started: `feat/terminal-view` (in review) draws each pane's frame, sends keys, IME text, AltGr, wheel, mouse reports, selection, copy and paste to the core; link opening, search and real terminal modes wait for the core-panes API |
 | VT engine: `yien-vt`, `VtEngine` on alacritty, `osc_scan`, frames, hot scrollback, search, links | `feat/vt-engine` | done on the branch, in review; cold scrollback and frame diffs pending |
-| M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; rest pending |
+| M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; `feat/terminal-view` replaces the sample data with the core's workspace and adds split, close, focus, resize, swap and maximize keys; palette, divider drag and pane drag pending |
 | M1 PTY backend: `yien-pty`, portable-pty over the system ConPTY, reader/writer/waiter threads, `FakePty` | `feat/pty-backend` | done on the branch: tests green on Windows; unix tests not yet run |
 | M2 core: `yien-core`, workspace model (projects, tabs, layouts), one actor per pane (PTY, VT, agent state), `ClientMsg`/`CoreMsg` in `yien-proto` | `feat/core-panes` | done on the branch: tests green on Windows with `FakePty`; no UI wiring yet |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
@@ -73,6 +73,13 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/core-panes`: OSC 133 `B` (typing a command) has no agent meaning; `C` maps to the agent's command start and `D` to its end. `yien-vt` does not parse OSC 7501, so that source stays silent.
 - `feat/core-panes`: the service keeps each pane's launch plan, so relaunching a pane whose actor panicked starts a fresh actor (§4.5, RF-PAN-19).
 - `feat/core-panes`, open: `Effect::Notify`, OSC 52 clipboard and the bell are not forwarded; tab branch is always `None` until `yien-git`; no `tracing`; core tests run on real time (`FakeClock` is `!Sync`); `ResizeSplit` spreads the change over all siblings rather than one divider.
+
+- `feat/terminal-view`: the UI reaches the core through a `CoreClient` trait the binary implements over `CoreHandle`, and reads events from the core's tokio receiver on GPUI's executor (`yien-ui` gains `tokio` with `sync` only). A busy core never drops input: the UI queues messages in order and retries every 5 ms.
+- `feat/terminal-view`: printable text reaches a pane only through GPUI's input handler (WM_CHAR, IME, AltGr, dead keys); key-down handles named keys and Ctrl/Alt combinations and stops propagation, which on Windows suppresses the WM_CHAR. Keys with `prefer_character_input` (AltGr) are always text.
+- `feat/terminal-view`: rows are shaped in runs of equal style with GPUI's forced cell width; every wide character is its own two-cell run. Cell size comes from the mono font's advance and ascent plus descent at 13 px, snapped to device pixels (RNF-19).
+- `feat/terminal-view`: tab selection goes through `Command::SelectTab`, since the core sends frames only for the active tab. Closing the window quits the app so the core's panes end.
+- `feat/terminal-view`: shortcuts follow Windows Terminal and the prototype: Alt+Shift+= / Alt+Shift+- split, Ctrl+Shift+W closes, Alt+arrows focus, Alt+Shift+arrows grow or shrink within the pane's split, Ctrl+Alt+Shift+arrows swap, Ctrl+Shift+Enter maximizes, Ctrl+Shift+C/V copy and paste.
+- `feat/terminal-view`, open: until `Frame` carries `modes`, the UI reads default modes (no app cursor, bracketed paste or mouse mode); link opening (RF-PAN-11) needs a link lookup message; search (RF-PAN-08) has no UI; divider drag (RF-PAN-02) and pane drag (RF-PAN-05) are not done.
 
 ## In flight
 
