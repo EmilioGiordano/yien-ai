@@ -1,6 +1,6 @@
 [package]
 name = "yien-platform"
-description = "The YIEN OS layer: per-user paths, logging and the hook pipe; later notifications, tray and IPC."
+description = "The YIEN OS layer: per-user paths, logging, the hook pipe and the session file store; later notifications, tray and IPC."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 yien-proto = { workspace = true }
 yien-agent = { workspace = true }
+yien-session = { workspace = true }
 getrandom = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
