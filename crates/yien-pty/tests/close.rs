@@ -55,7 +55,11 @@ fn closing_a_session_ends_its_child_and_its_console_host() {
         match session.events().recv_timeout(left) {
             Ok(PtyEvent::Output(bytes)) => {
                 output.extend(bytes);
-                if !answered && output.windows(CURSOR_QUERY.len()).any(|w| w == CURSOR_QUERY) {
+                if !answered
+                    && output
+                        .windows(CURSOR_QUERY.len())
+                        .any(|w| w == CURSOR_QUERY)
+                {
                     session.write(CURSOR_REPLY.to_vec()).unwrap();
                     answered = true;
                 }

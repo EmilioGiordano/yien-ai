@@ -60,7 +60,11 @@ mod tests {
         consoles.add(first.control().closer());
         let second = backend.spawn(SpawnSpec::new("sh")).unwrap();
         consoles.add(second.control().closer());
-        first.control().closer().close(Duration::from_secs(1)).unwrap();
+        first
+            .control()
+            .closer()
+            .close(Duration::from_secs(1))
+            .unwrap();
 
         let open = consoles.shut();
         assert_eq!(open.len(), 1);
