@@ -37,10 +37,20 @@ mod pump;
 pub use fake::{FakeChild, FakeInput, FakePty, KILLED_EXIT_CODE};
 pub use portable::PortablePty;
 
-/// Messages queued for the writer thread before it blocks [`PtySession::write`].
+/// Writes and resizes waiting for the writer thread; beyond this,
+/// [`PtySession::write`] returns [`PtyError::InputQueueFull`] instead of
+/// blocking.
+///
+/// ```
+/// assert!(yien_pty::INPUT_QUEUE_CAPACITY > 0);
+/// ```
 pub const INPUT_QUEUE_CAPACITY: usize = 256;
 /// Output chunks buffered before the reader thread stops reading, which in
 /// turn stalls the child: the PTY's natural backpressure (plan §4.2).
+///
+/// ```
+/// assert!(yien_pty::OUTPUT_QUEUE_CAPACITY > 0);
+/// ```
 pub const OUTPUT_QUEUE_CAPACITY: usize = 64;
 
 /// Starts children in pseudo terminals.
@@ -60,6 +70,12 @@ pub const OUTPUT_QUEUE_CAPACITY: usize = 64;
 /// ```
 pub trait PtyBackend: Send + Sync {
     /// Starts `spec.program` in a new pseudo terminal.
+    ///
+    /// ```no_run
+    /// use yien_pty::{PortablePty, PtyBackend, SpawnSpec};
+    /// let session = PortablePty::new().spawn(SpawnSpec::new("sh").args(["-c", "echo hi"]))?;
+    /// # Ok::<(), yien_pty::PtyError>(())
+    /// ```
     fn spawn(&self, spec: SpawnSpec) -> Result<PtySession, PtyError>;
 }
 
@@ -169,6 +185,12 @@ impl SpawnSpec {
 }
 
 /// Something the child did.
+///
+/// ```
+/// use yien_pty::{ExitStatus, PtyEvent};
+/// let events = [PtyEvent::Output(b"hi".to_vec()), PtyEvent::Exited(ExitStatus::from_code(0))];
+/// assert!(matches!(events[1], PtyEvent::Exited(s) if s.success()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyEvent {
     /// Bytes exactly as the PTY produced them.
@@ -243,6 +265,12 @@ impl Default for Drain {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Why a PTY operation failed.
+///
+/// ```
+/// use yien_pty::PtyError;
+/// let err = PtyError::InvalidSize { cols: 0, rows: 24 };
+/// assert_eq!(err.to_string(), "invalid terminal size 0x24; both must be at least 1");
+/// ```
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     /// A size with zero columns or rows. A caller defect.
