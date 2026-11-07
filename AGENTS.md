@@ -82,17 +82,45 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 Every branch goes through the same loop, run by the `yien-branch` skill:
 
 1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
-2. `implementer` implements and validates (fmt, clippy, tests), committing as it goes.
+2. `implementer` implements and runs the branch checks, committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
-4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
+4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. When the same area fails twice, the reviewer says whether the problem is the patch or the design; a design problem is redesigned, not patched again. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
 5. When the review reports coverage the implementer cannot add alone, `test-engineer` writes the tests and `implementer` commits them.
-6. On PASS, the orchestrator pushes and opens the PR.
+6. On PASS, the orchestrator pushes and opens the PR as a draft.
+7. The branch goes through integration and UI validation. Then the orchestrator merges it.
 
 A PR is ready to merge only when all of these hold:
 
-- The implementation is correct, tested and working.
+- The implementation is correct, tested and working: the full gate passed at integration.
 - The feature was validated through the interface, not only with unit tests.
 - `quality-reviewer` gave PASS.
+
+## Integration and merge
+
+Ready branches are tested together before any reaches `main`.
+
+1. Create `staging/<date>` from `main`, or `staging/<date>-<n>` when the name is taken. Never reuse an old staging branch, and never push one.
+2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit.
+3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `cargo xtask check-deps` and `cargo xtask trace` once they exist.
+4. Run the UI validation of each feature on the staging build.
+5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. Reproduce on `main` any conflict resolution done in staging.
+6. `git diff staging/<date> main` must be empty: that proves `main` is what was tested. Pull `main` right away.
+
+On a failure:
+- A fix for one branch goes on that branch as a new commit and is reviewed again.
+- A breakage that only shows up when branches are combined gets its own `fix/<topic>` branch, never a commit on staging.
+- A held-out branch drops out of the batch, and the branches that depend on it wait.
+
+## Validating in the UI
+
+Every feature is checked in the running app, driven by tools, not only by unit tests.
+
+- **Test control (preferred):** `yien --test-control <pipe>` exposes a local pipe that dumps UI state (projects, tabs, panes, focus, agent states, visible text) and injects actions (commands, keys, text, resizes). It is test-only, off by default and protected like the hook pipe (RNF-11). Every feature adds the state fields and actions its validation needs, so the check is a script, not a person.
+- **Throwaway profile:** every run sets YIEN's data and config dirs to a new folder under the slot, so a test never touches Emilio's real sessions or settings. Only generated files, never his documents.
+- **Screen driving (fallback):** PowerShell with user32 (`SetForegroundWindow`, `SendInput`, `PrintWindow`) for what the pipe cannot reach: real focus, IME, a real keyboard. It takes focus, so it runs only when Emilio has said he is away.
+- Watch the process while it runs: responding, CPU and working set every 5 seconds. A freeze is a failure.
+- Copy the release exe to the slot's `run/` folder before starting it. If the file is locked, report it; never kill a process you did not start.
+- What still needs a human (a real screen reader, feel, look) goes in the PR as a short checklist.
 
 No branch is handed over without a PASS, including docs-only or comment-only branches. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
 
