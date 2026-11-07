@@ -92,9 +92,10 @@ pub(crate) struct Shell {
     tab_cursor: Option<TabId>,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
-    /// F6 put the keyboard in a bar. Only then does the bar keep it when the
-    /// core moves the pane focus; a click in a bar focuses it too, and the
-    /// pane must still get the keyboard after it.
+    /// F6 put the keyboard in a bar and it has not been in the pane area
+    /// since. Only then does the bar keep it when the core moves the pane
+    /// focus; a click in a bar focuses it too, and the pane must still get
+    /// the keyboard after it.
     keyboard_in_bar: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -391,8 +392,9 @@ impl Shell {
     /// Moves the keyboard to the selected tab's focused pane when that
     /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kept = self.keyboard_in_bar && self.region(window, cx) != Region::Panes;
-        if self.overlay_has_keyboard() || kept {
+        self.keyboard_in_bar =
+            region::bar_claim_holds(self.keyboard_in_bar, self.region(window, cx));
+        if self.overlay_has_keyboard() || self.keyboard_in_bar {
             return;
         }
         let target = keyboard_pane(&self.workspace);
@@ -2556,6 +2558,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
+        self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
         let t = self.theme;
         v_flex()
             .key_context(CONTEXT)

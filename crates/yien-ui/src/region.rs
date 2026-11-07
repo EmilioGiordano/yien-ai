@@ -66,6 +66,14 @@ pub(crate) fn cursor_on_entry(
     move_cursor(rows, at, selected, 0)
 }
 
+/// Whether F6's claim on a bar still holds once the keyboard is seen in
+/// `now`. The claim lasts while the keyboard stays in the bars; once it is
+/// in the pane area (a click on a terminal), a later click in a bar is only
+/// a click, and the pane gets the keyboard after it.
+pub(crate) fn bar_claim_holds(claimed: bool, now: Region) -> bool {
+    claimed && now != Region::Panes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +94,19 @@ mod tests {
         assert_eq!(seen, [ContextBar, TabBar, Panes]);
         assert_eq!(next_region(Panes, false, true, true), TabBar);
         assert_eq!(next_region(TabBar, false, true, true), ContextBar);
+    }
+
+    #[test]
+    fn rf_nav_08_the_bar_claim_ends_once_the_keyboard_is_in_the_panes() {
+        use Region::*;
+        // F6 into the tab bar, then on to the context bar: still claimed.
+        assert!(bar_claim_holds(true, TabBar));
+        assert!(bar_claim_holds(true, ContextBar));
+        // A click on a terminal, then on another tab row: the claim is gone
+        // and stays gone, so the tab row does not keep the keyboard.
+        let after_click = bar_claim_holds(true, Panes);
+        assert!(!after_click);
+        assert!(!bar_claim_holds(after_click, TabBar));
     }
 
     #[test]
