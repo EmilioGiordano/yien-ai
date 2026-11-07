@@ -490,6 +490,35 @@ mod tests {
     }
 
     #[test]
+    fn rf_ctx_04_paths_with_newlines() {
+        let s = parse(&format!(
+            "# branch.oid {OID}\0# branch.head main\0\
+             1 .M N... 100644 100644 100644 {OID} {OID} two\nlines.rs\0\
+             2 R. N... 100644 100644 100644 {OID} {OID} R100 new\nname\0old\nname\0\
+             ? un\ntracked\0"
+        ));
+        assert_eq!(
+            s.files,
+            vec![
+                ChangedFile {
+                    path: "two\nlines.rs".into(),
+                    status: FileStatus::Modified
+                },
+                ChangedFile {
+                    path: "new\nname".into(),
+                    status: FileStatus::Renamed {
+                        from: "old\nname".into()
+                    }
+                },
+                ChangedFile {
+                    path: "un\ntracked".into(),
+                    status: FileStatus::Untracked
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn rf_ctx_04_untracked_and_ignored() {
         let s = parse("# branch.oid (initial)\0# branch.head main\0? a.txt\0? dir/\0! target/\0");
         assert_eq!(
