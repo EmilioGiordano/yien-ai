@@ -107,16 +107,16 @@ A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet
 
 Ready branches are tested together before any reaches `main`.
 
-1. Create `staging/<date>` from `main`, or `staging/<date>-<n>` when the name is taken. Never reuse an old staging branch, and never push one.
-2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit.
-3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `cargo xtask check-deps` and `cargo xtask trace` once they exist.
+1. In the one integration worktree, `C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/staging` (created once, then reused with its own slot), run `git switch -c staging/<date> main`, or `staging/<date>-<n>` when the name is taken. Never reuse an old staging branch, and never push one.
+2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit; drop it with `git merge --abort` (conflict) or `git reset --hard HEAD~1` (merged but broken). `reset --hard` is allowed only on a `staging/*` branch.
+3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `xtask check-deps` and `xtask trace` (also through `scripts/cargo.sh`) once they exist.
 4. Run the UI validation of each feature on the staging build.
-5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. Reproduce on `main` any conflict resolution done in staging.
-6. `git diff staging/<date> main` must be empty: that proves `main` is what was tested. Pull `main` right away.
+5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR.
+6. `git pull --ff-only` on the local `main`, then `git diff staging/<date> main` must be empty: that proves `main` is what was tested.
 
 On a failure:
 - A fix for one branch goes on that branch as a new commit and is reviewed again.
-- A breakage that only shows up when branches are combined gets its own `fix/<topic>` branch, never a commit on staging.
+- The only commits on staging are merge commits, including their conflict resolutions. A breakage that only shows up when branches are combined gets its own `fix/<topic>` branch.
 - A held-out branch drops out of the batch, and the branches that depend on it wait.
 
 ## Validating in the UI
