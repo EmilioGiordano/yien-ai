@@ -324,6 +324,10 @@ impl Service {
             seen,
             hooks,
             hooks_lost: Arc::clone(&hooks_lost),
+            fallback: resume.as_ref().and_then(|_| {
+                let config = &self.ctx.config;
+                launch::resolve(None, &config.profiles, &config.shell).ok()
+            }),
             resume,
             wait_for_size,
         };

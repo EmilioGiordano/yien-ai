@@ -56,6 +56,11 @@ impl Consoles {
         })
     }
 
+    /// Whether the app is quitting: programs that end now were closed by it.
+    pub fn is_shut(&self) -> bool {
+        self.state().shut
+    }
+
     /// Stops taking spawns and hands over the sessions not closed yet,
     /// including ones whose program exited but whose console is still
     /// closing.

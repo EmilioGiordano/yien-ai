@@ -19,6 +19,7 @@ use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEng
 
 use crate::convert;
 use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::resume::{self, ResumeFailure};
 use crate::service::{Ctx, HookItem};
 use crate::workspace::PaneEvent;
 
@@ -221,6 +222,8 @@ pub(crate) struct PaneSetup {
     pub hooks_lost: Arc<AtomicBool>,
     /// The agent session the first launch resumes (RF-SES-03).
     pub resume: Option<String>,
+    /// What runs instead when that resume fails (RF-SES-11): the shell.
+    pub fallback: Option<LaunchPlan>,
     /// Start the program only once the UI's size arrives (see
     /// [`CoreConfig::size_wait`](crate::CoreConfig::size_wait)).
     pub wait_for_size: bool,
@@ -268,6 +271,17 @@ struct Actor {
     /// restore does, so a relaunch starts a new session.
     resume: Option<String>,
     pending: Option<Pending>,
+    /// The shell a failed resume falls back to, until it is used.
+    fallback: Option<LaunchPlan>,
+    /// The agent's plan, put aside while the fallback shell runs; a
+    /// relaunch brings it back.
+    agent_plan: Option<LaunchPlan>,
+    /// When this launch, a resume, started on the agent clock. Cleared when
+    /// YIEN itself stops the program, so that exit is never taken for the
+    /// resume failing.
+    resumed_at: Option<Duration>,
+    /// A resume found failed, for the run loop to fall back on.
+    failed_resume: Option<ResumeFailure>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -323,6 +337,10 @@ pub(crate) fn spawn(
         needs_since: None,
         resume: setup.resume,
         pending,
+        fallback: setup.fallback,
+        agent_plan: None,
+        resumed_at: None,
+        failed_resume: None,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -431,6 +449,9 @@ impl Actor {
                 Wake::Timer => {}
             }
             self.on_timers();
+            if let Some(failure) = self.failed_resume.take() {
+                self.fall_back(failure).await;
+            }
             if self.start_due().is_some_and(|at| at <= Instant::now()) {
                 self.start_pending().await;
             }
@@ -493,6 +514,7 @@ impl Actor {
         )));
         self.dirty = true;
         let resume = self.resume.take().filter(|_| self.plan.can_resume());
+        self.resumed_at = resume.is_some().then(|| self.now());
         let session_id = if resume.is_some() {
             resume.clone()
         } else if self.plan.preassigns_session() {
@@ -683,6 +705,10 @@ impl Actor {
                 }
             }
             PaneCmd::Relaunch => {
+                if let Some(agent) = self.agent_plan.take() {
+                    self.plan = agent;
+                    self.reset_machine();
+                }
                 // A relaunch starts a new session, even before the first start.
                 if let Some(p) = self.pending.take() {
                     self.resume = None;
@@ -694,6 +720,7 @@ impl Actor {
                 self.start().await;
             }
             PaneCmd::Terminate => {
+                self.resumed_at = None;
                 if self.pending.take().is_some() {
                     self.resume = None;
                     self.report(PaneEvent::Exited(None));
@@ -736,11 +763,74 @@ impl Actor {
                 if let Some(s) = &mut self.session {
                     s.exited = true;
                 }
+                if let Some(failure) = self.resume_failure(code) {
+                    self.failed_resume = Some(failure);
+                    return;
+                }
                 self.step(&Signal::Exited {
                     code: convert::exit_code_to_agent(code),
                 });
                 self.report(PaneEvent::Exited(code));
             }
+        }
+    }
+
+    /// Whether this exit ends a resume that failed. Reads the screen the
+    /// program left, all of it fed before the exit was posted.
+    fn resume_failure(&mut self, code: Option<u32>) -> Option<ResumeFailure> {
+        let launched = self.resumed_at.take()?;
+        if self.fallback.is_none() || self.ctx.consoles.is_shut() {
+            return None;
+        }
+        let elapsed = self.now().saturating_sub(launched);
+        let held = {
+            let mut engine = lock(&self.engine);
+            engine.sync_pending().then(|| engine.flush_sync())
+        };
+        if let Some(out) = held {
+            self.sync = None;
+            self.absorb(out);
+        }
+        let frame = lock(&self.engine).frame();
+        let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        resume::resume_failed(code, elapsed, &rows)
+    }
+
+    /// Tells the user why the resume failed and opens the shell in the
+    /// pane's folder (RF-SES-11). The workspace keeps the agent and its
+    /// session for the saved session, so a restart tries the resume again.
+    async fn fall_back(&mut self, failure: ResumeFailure) {
+        let Some(shell) = self.fallback.take() else {
+            return;
+        };
+        tracing::info!(
+            pane = self.id.get(),
+            reason = failure.kind(),
+            "resume failed, the pane opens a shell"
+        );
+        self.report(PaneEvent::Notice(failure.notice(&self.plan.profile_name)));
+        if let Some(hooks) = &self.ctx.hooks {
+            hooks.registry.revoke(self.id);
+        }
+        self.hook_serial = None;
+        self.agent_plan = Some(std::mem::replace(&mut self.plan, shell));
+        self.reset_machine();
+        self.start().await;
+    }
+
+    /// A fresh state machine for the plan now running; a red mark of the
+    /// program that ran before goes with it.
+    fn reset_machine(&mut self) {
+        let mut machine = Machine::new(self.plan.machine.clone());
+        if self.machine.seen() {
+            machine = machine.step(&Signal::Seen(true), self.now()).0;
+        }
+        self.machine = machine;
+        self.needs_since = None;
+        if self.state != AgentState::Idle {
+            self.state = AgentState::Idle;
+            self.report(PaneEvent::State(AgentState::Idle, None));
         }
     }
 
@@ -1169,6 +1259,7 @@ mod tests {
                 hooks: hooks_rx,
                 hooks_lost: Arc::clone(&hooks_lost),
                 resume: None,
+                fallback: None,
                 wait_for_size: false,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
