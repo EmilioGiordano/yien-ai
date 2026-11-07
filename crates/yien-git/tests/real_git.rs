@@ -576,13 +576,18 @@ fn rf_esp_05_add_failures_are_typed_and_leave_nothing() {
     assert!(matches!(err, WorktreeError::PathTaken(_)), "{err:?}");
     let plain = sb.dir.join("plain");
     std::fs::create_dir_all(&plain).unwrap();
-    let err = git()
-        .add_worktree(&plain, "feat/a", &free, None)
-        .unwrap_err();
-    assert!(
-        matches!(err, WorktreeError::Git(GitError::NotARepository)),
-        "{err:?}"
-    );
+    // Inside an enclosing repository the add would write to it: skip then.
+    if matches!(git().discover(&plain), Err(GitError::NotARepository)) {
+        let err = git()
+            .add_worktree(&plain, "feat/a", &free, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::Git(GitError::NotARepository)),
+            "{err:?}"
+        );
+    } else {
+        eprintln!("temp dir sits inside a repo, skipping the not-a-repository case");
+    }
 
     assert!(!free.exists());
     assert!(!has_branch(&sb, &root, "feat/a"));
