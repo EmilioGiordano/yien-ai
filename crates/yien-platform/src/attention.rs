@@ -309,6 +309,11 @@ mod imp {
     /// with the process. Each is a cross-process call: on the UI thread,
     /// COM's modal loop or the messages the call sends would dispatch into
     /// gpui while it is mid-update.
+    ///
+    /// This STA never pumps messages, so nothing may need a call into it:
+    /// whatever another thread calls must be agile (the toast objects, and the
+    /// `Activated` handler, which WinRT runs on a pool thread). ITaskbarList3
+    /// is in-process and only called from here, so it needs no pump.
     fn attention_thread(
         recv: &mpsc::Receiver<Job>,
         badge: &Wanted,
