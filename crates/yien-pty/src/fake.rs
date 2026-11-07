@@ -1,7 +1,7 @@
 //! A scripted backend for tests that need a PTY but not a process.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -120,15 +120,16 @@ struct FakeState {
 
 impl FakeState {
     /// Sends `Exited` once; later calls do nothing. `wait` blocks on a full
-    /// queue; without it a full queue loses the event, which only a kill from
-    /// `Drop` accepts.
+    /// queue; without it a full queue hands the event to a short-lived thread,
+    /// so the caller returns at once and the event is still delivered.
     fn exit(&self, status: ExitStatus, wait: bool) {
         if !self.exited.swap(true, Ordering::SeqCst) {
             let event = PtyEvent::Exited(status);
             if wait {
                 let _ = self.events.send(event);
-            } else {
-                let _ = self.events.try_send(event);
+            } else if let Err(TrySendError::Full(event)) = self.events.try_send(event) {
+                let events = self.events.clone();
+                std::thread::spawn(move || events.send(event));
             }
         }
     }
@@ -140,20 +141,13 @@ impl ChildControl for FakeControl {
     fn kill(&self) -> Result<(), PtyError> {
         if !self.0.exited.load(Ordering::SeqCst) {
             self.0.killed.store(true, Ordering::SeqCst);
-            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), true);
+            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), false);
         }
         Ok(())
     }
 
     fn pid(&self) -> Option<u32> {
         None
-    }
-
-    fn kill_on_drop(&self) {
-        if !self.0.exited.load(Ordering::SeqCst) {
-            self.0.killed.store(true, Ordering::SeqCst);
-            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), false);
-        }
     }
 }
 
@@ -383,19 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_kill_on_a_full_queue_still_delivers_exited() {
+    fn a_kill_on_a_full_queue_returns_at_once_and_still_delivers_exited() {
         let (session, child) = spawn_one();
         for _ in 0..OUTPUT_QUEUE_CAPACITY {
             child.output(b"x");
         }
-        let (control, events) = session.into_parts();
-        let killer = std::thread::spawn(move || {
-            control.kill().unwrap();
-            control
-        });
+        let start = std::time::Instant::now();
+        session.kill().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(1));
         let mut outputs = 0;
         loop {
-            match events.recv_timeout(TIMEOUT).unwrap() {
+            match session.events().recv_timeout(TIMEOUT).unwrap() {
                 PtyEvent::Output(_) => outputs += 1,
                 PtyEvent::Exited(status) => {
                     assert_eq!(status, ExitStatus::from_code(KILLED_EXIT_CODE));
@@ -404,7 +396,6 @@ mod tests {
             }
         }
         assert_eq!(outputs, OUTPUT_QUEUE_CAPACITY);
-        drop(killer.join().unwrap());
         assert!(child.was_killed());
     }
 
