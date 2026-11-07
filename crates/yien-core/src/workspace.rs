@@ -16,6 +16,7 @@ use crate::launch::LaunchPlan;
 
 mod session;
 
+use session::Kept;
 pub(crate) use session::{Disk, folders};
 
 /// Any area works for neighbour lookups; this one keeps the tree's epsilon
@@ -113,6 +114,9 @@ struct Tab {
     leaves: HashMap<yien_layout::PaneId, PaneId>,
     focused: PaneId,
     maximized: Option<PaneId>,
+    /// The saved folder when a restore had to open the tab elsewhere; saved
+    /// again in its place, so a folder that is only offline is not lost.
+    kept_dir: Option<String>,
 }
 
 impl Tab {
@@ -140,6 +144,9 @@ struct Pane {
     launch_cwd: String,
     /// The user ended the pane's agent session (RN-04).
     ended_explicitly: bool,
+    /// What the saved session said, when a restore had to launch the pane
+    /// differently (missing folder, unknown profile); saved again instead.
+    kept: Option<Kept>,
     custom_name: Option<String>,
     default_name: String,
     profile_name: String,
@@ -172,9 +179,9 @@ impl Workspace {
         Self::default()
     }
 
-    /// Whether any tab is open.
-    pub fn has_tabs(&self) -> bool {
-        !self.tabs.is_empty()
+    /// How many tabs are open.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     /// The profiles the snapshot lists for new panes.
@@ -453,6 +460,7 @@ impl Workspace {
             leaves,
             focused: pane,
             maximized: None,
+            kept_dir: None,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
@@ -479,6 +487,7 @@ impl Workspace {
                 profile: plan.profile.clone(),
                 launch_cwd: cwd.clone(),
                 ended_explicitly: false,
+                kept: None,
                 custom_name: None,
                 default_name: plan.default_name.clone(),
                 profile_name: plan.profile_name.clone(),

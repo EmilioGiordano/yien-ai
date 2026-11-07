@@ -10,7 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use yien_proto::CoreMsg;
 use yien_session::{
-    LoadReport, SaveError, SessionSnapshot, Store, generation_name, load, preserve_newer, save,
+    CURRENT_FILE, LoadReport, SaveError, SessionSnapshot, Store, StoreError, generation_name, load,
+    preserve_newer, save,
 };
 
 use crate::workspace::{Disk, folders};
@@ -134,6 +135,21 @@ pub(crate) fn open(store: &SessionStore) -> Opened {
     opened
 }
 
+/// Where [`set_aside`] keeps a saved session that this run did not restore.
+pub(crate) const UNRESTORED_FILE: &str = "workspace.unrestored.json";
+
+/// Moves the saved session out of the way before this run's first write, when
+/// it was not restored (whole), so the fresh workspace cannot replace it.
+/// Returns the new name, or `None` when there was no file. Blocking.
+pub(crate) fn set_aside(store: &SessionStore) -> Result<Option<&'static str>, StoreError> {
+    let mut slot = store.lock();
+    if slot.store.read(CURRENT_FILE)?.is_none() {
+        return Ok(None);
+    }
+    slot.store.rename(CURRENT_FILE, UNRESTORED_FILE)?;
+    Ok(Some(UNRESTORED_FILE))
+}
+
 fn damage_notice(report: &LoadReport) -> Option<String> {
     if report.skipped.is_empty() {
         return None;
@@ -247,10 +263,17 @@ impl Writer {
     }
 }
 
-impl Drop for Writer {
-    fn drop(&mut self) {
+impl Writer {
+    /// Stops saving for the rest of the run, writing nothing.
+    pub fn stop(&self) {
         self.shared.lock().stopped = true;
         self.shared.wake.notify_all();
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

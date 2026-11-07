@@ -100,11 +100,12 @@ pub(crate) async fn run(
 ) {
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
-    let opened = match ctx.config.session.clone() {
-        Some(store) => tokio::task::spawn_blocking(move || persist::open(&store))
-            .await
-            .unwrap_or_default(),
-        None => Opened::default(),
+    let (opened, open_failed) = match ctx.config.session.clone() {
+        Some(store) => match tokio::task::spawn_blocking(move || persist::open(&store)).await {
+            Ok(opened) => (opened, false),
+            Err(_) => (Opened::default(), true),
+        },
+        None => (Opened::default(), false),
     };
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
@@ -123,6 +124,13 @@ pub(crate) async fn run(
         let (fx, notes) = service.ws.restore(snapshot, &resolve, &opened.disk);
         restored = fx;
         notices.extend(notes);
+    }
+    let saved_tabs = opened
+        .snapshot
+        .as_ref()
+        .map(|s| s.projects.iter().map(|p| p.tabs.len()).sum::<usize>());
+    if open_failed || saved_tabs.is_some_and(|n| service.ws.tab_count() < n) {
+        notices.extend(service.set_aside().await);
     }
     service
         .emit(CoreMsg::WorkspaceSnapshot(service.ws.snapshot()))
@@ -147,7 +155,7 @@ pub(crate) async fn run(
             .await;
     }
     service.execute(restored).await;
-    if !service.ws.has_tabs()
+    if service.ws.tab_count() == 0
         && let Some(root) = service.ctx.config.start_project.clone()
     {
         service
@@ -175,6 +183,29 @@ pub(crate) async fn run(
 }
 
 impl Service {
+    /// Keeps a saved session this run could not restore whole out of the way
+    /// of the first save; when that fails, nothing is saved this run.
+    async fn set_aside(&self) -> Option<String> {
+        let store = self.ctx.config.session.clone()?;
+        let moved = tokio::task::spawn_blocking(move || persist::set_aside(&store)).await;
+        match moved {
+            Ok(Ok(None)) => None,
+            Ok(Ok(Some(name))) => Some(format!(
+                "The saved session could not be restored whole; it was kept as {name}."
+            )),
+            Ok(Err(_)) | Err(_) => {
+                if let Some(writer) = &self.writer {
+                    writer.stop();
+                }
+                Some(
+                    "The saved session could not be restored or set aside, so this session \
+                     will not be saved."
+                        .to_owned(),
+                )
+            }
+        }
+    }
+
     /// Hands the workspace to the writer; it writes only what changed.
     fn publish(&self) {
         if let Some(writer) = &self.writer {

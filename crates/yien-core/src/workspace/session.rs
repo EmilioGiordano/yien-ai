@@ -13,6 +13,17 @@ use super::{Effect, Pane, Project, Tab, Workspace};
 use crate::CoreError;
 use crate::launch::{LaunchPlan, SHELL_PROFILE};
 
+/// The saved form of a pane that a restore launched differently.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Kept {
+    /// The saved profile, which may not exist in this run.
+    pub profile: String,
+    /// The saved folder, which may be missing in this run.
+    pub cwd: String,
+    /// The saved agent session, not resumed in this run.
+    pub agent: Option<AgentRecord>,
+}
+
 /// What a restore needs to know about the disk, gathered off the core's
 /// runtime before it starts.
 #[derive(Debug, Clone, Default)]
@@ -93,7 +104,7 @@ impl Workspace {
         TabRecord {
             id: tab.id,
             title: tab.name.clone(),
-            dir: tab.dir.clone(),
+            dir: tab.kept_dir.clone().unwrap_or_else(|| tab.dir.clone()),
             branch: None,
             worktree: None,
             archived: false,
@@ -195,27 +206,36 @@ impl Workspace {
                     Err(_) => return false,
                 },
             };
+            let cwd = disk.pick(&[&pane.cwd, &project.root]);
+            let moved = cwd != pane.cwd;
+            if moved {
+                notes.missing.insert(pane.cwd.clone());
+            }
             let resume = match resume_plan(pane) {
                 ResumeAction::Resume { kind, session }
                     if plan.can_resume() && plan.profile == kind.as_str() =>
                 {
-                    Some(session.as_str().to_owned())
+                    // Resuming elsewhere would carry the conversation into
+                    // another folder; a new session starts there instead.
+                    notes.fresh_agents |= moved;
+                    (!moved).then(|| session.as_str().to_owned())
                 }
                 _ => None,
             };
-            let cwd = disk.pick(&[&pane.cwd, &project.root]);
-            if cwd != pane.cwd {
-                notes.missing.insert(pane.cwd.clone());
-            }
-            panes.push((pane, plan, cwd, resume));
+            let kept = (moved || plan.profile != pane.profile.as_str()).then(|| Kept {
+                profile: pane.profile.as_str().to_owned(),
+                cwd: pane.cwd.clone(),
+                agent: pane.agent.clone(),
+            });
+            panes.push((pane, plan, cwd, resume, kept));
         }
 
         let dir = disk.pick(&[&record.dir, &project.root]);
         if dir != record.dir {
             notes.missing.insert(record.dir.clone());
         }
-        for (pane, plan, cwd, resume) in panes {
-            let agent = pane.agent.as_ref();
+        for (pane, plan, cwd, resume, kept) in panes {
+            let agent = pane.agent.as_ref().filter(|_| kept.is_none());
             self.panes.insert(
                 pane.id,
                 Pane {
@@ -223,6 +243,7 @@ impl Workspace {
                     profile: plan.profile.clone(),
                     launch_cwd: cwd.clone(),
                     ended_explicitly: agent.is_some_and(|a| a.ended_explicitly),
+                    kept,
                     custom_name: pane.name.clone().filter(|n| !n.trim().is_empty()),
                     default_name: plan.default_name.clone(),
                     profile_name: plan.profile_name.clone(),
@@ -249,6 +270,7 @@ impl Workspace {
                 resume,
             });
         }
+        let kept_dir = (dir != record.dir).then(|| record.dir.clone());
         self.tabs.push(Tab {
             id: record.id,
             project: project.id,
@@ -258,6 +280,7 @@ impl Workspace {
             leaves,
             focused: record.focused,
             maximized: None,
+            kept_dir,
         });
         true
     }
@@ -269,6 +292,8 @@ struct Notes {
     missing: BTreeSet<String>,
     profiles: BTreeSet<String>,
     broken: Vec<String>,
+    /// An agent pane started a new session because its folder is missing.
+    fresh_agents: bool,
 }
 
 impl Notes {
@@ -280,6 +305,13 @@ impl Notes {
                  folder.",
                 list(&self.missing)
             ));
+        }
+        if self.fresh_agents {
+            out.push(
+                "Agent panes there started a new session; the saved one resumes once its \
+                 folder is back."
+                    .to_owned(),
+            );
         }
         if !self.profiles.is_empty() {
             out.push(format!(
@@ -306,6 +338,22 @@ fn list<'a>(items: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
+    if let Some(kept) = &p.kept {
+        // A folder the pane reports other than the one it was started in is
+        // the user moving on; the fallback folder itself is never saved.
+        let cwd = match &p.cwd {
+            Some(cwd) if *cwd != p.launch_cwd => cwd.clone(),
+            _ => kept.cwd.clone(),
+        };
+        return PaneRecord {
+            id,
+            name: p.custom_name.clone(),
+            profile: yien_session::ProfileId::new(kept.profile.clone()),
+            cwd,
+            agent: kept.agent.clone(),
+            last_command: None,
+        };
+    }
     let kind = yien_session::ProfileId::new(p.profile.clone());
     PaneRecord {
         id,
@@ -599,6 +647,44 @@ mod tests {
         let (plan, _, resume) = spawn_of(&fx, pane);
         assert_eq!((plan.profile.as_str(), resume), ("shell", None));
         assert!(notes[0].contains("aider"), "{notes:?}");
+    }
+
+    #[test]
+    fn rf_ses_12_a_fallback_folder_is_never_saved_over_the_original() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        let shell = ws.tabs[0].focused;
+        ws.on_pane_event(shell, PaneEvent::Cwd("E:/offline".into()));
+        let mut saved = ws.to_session();
+        saved.projects[0].tabs[1].dir = "E:/offline".into();
+        saved.projects[0].tabs[1].panes[0].cwd = "E:/offline".into();
+        let mut disk = all_exist(&saved);
+        disk.existing.remove("E:/offline");
+        let (mut back, fx, notes) = restore(&saved, &disk);
+        let (_, cwd, resume) = spawn_of(&fx, pane);
+        assert_eq!((cwd, resume), (ROOT, None));
+        assert!(notes.iter().any(|n| n.contains("new session")), "{notes:?}");
+        back.on_pane_event(pane, PaneEvent::SessionId("fresh".into()));
+        back.on_pane_event(shell, PaneEvent::Cwd(ROOT.into()));
+        assert_eq!(back.to_session(), saved);
+
+        back.on_pane_event(shell, PaneEvent::Cwd("C:/Code/other".into()));
+        let resaved = back.to_session();
+        assert_eq!(resaved.projects[0].tabs[0].panes[0].cwd, "C:/Code/other");
+    }
+
+    #[test]
+    fn an_unknown_profile_and_its_session_are_saved_as_they_were() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        let mut saved = ws.to_session();
+        let record = &mut saved.projects[0].tabs[1].panes[0];
+        record.profile = yien_session::ProfileId::new("aider");
+        if let Some(agent) = &mut record.agent {
+            agent.kind = yien_session::ProfileId::new("aider");
+        }
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.to_session(), saved);
     }
 
     #[test]
