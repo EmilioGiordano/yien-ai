@@ -24,14 +24,25 @@ use crate::theme::{Theme, ThemeKind, sync_component_theme};
 
 /// Opens the main window showing `workspace` and runs until it closes.
 ///
+/// `on_quit` runs once when the app quits, including at Windows logoff or
+/// shutdown, where gpui ends the process without returning from `run`.
+///
 /// ```no_run
 /// # fn demo() -> yien_ui::WorkspaceView { unimplemented!() }
-/// yien_ui::run(demo());
+/// yien_ui::run(demo(), || println!("bye"));
 /// ```
-pub fn run(workspace: WorkspaceView) {
+pub fn run(workspace: WorkspaceView, on_quit: impl FnOnce() + 'static) {
     gpui_kit::application()
         .with_assets(assets::YienAssets)
         .run(move |cx| {
+            let mut on_quit = Some(on_quit);
+            cx.on_app_quit(move |_| {
+                if let Some(on_quit) = on_quit.take() {
+                    on_quit();
+                }
+                async {}
+            })
+            .detach();
             gpui_kit::init(cx);
             actions::bind_keys(cx);
             let theme = Theme::of(ThemeKind::default());

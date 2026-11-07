@@ -10,12 +10,16 @@ use std::process::ExitCode;
 use yien_platform::LogGuard;
 
 fn main() -> ExitCode {
-    let _log = start_logging();
+    let log = start_logging();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
     match demo::workspace() {
         Ok(workspace) => {
-            yien_ui::run(workspace);
-            tracing::info!("yien exiting");
+            // gpui may exit the process from inside `run` (Windows end session),
+            // so the guard is flushed in the quit callback, not after `run`.
+            yien_ui::run(workspace, move || {
+                tracing::info!("yien exiting");
+                drop(log);
+            });
             ExitCode::SUCCESS
         }
         Err(error) => {
