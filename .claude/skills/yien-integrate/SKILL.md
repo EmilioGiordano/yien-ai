@@ -14,6 +14,6 @@ Invoke as `/yien-integrate [branch...]`; with no argument, every branch with a P
 5. Run the UI validation of each feature against the staging release build.
 6. For each PR, in staging order: `gh pr ready <n>`, a short comment with the gate and UI results, then `gh pr merge <n> --merge`. Never `--delete-branch`. On a conflict with `main`, merge `origin/main` into the PR branch with the staging resolution and push first.
 7. `git pull --ff-only` on `main`, then check that `git diff staging/<date> main` is empty. If it is not, find out why before doing anything else.
-8. Update `ROADMAP.md` and report to Emilio in Spanish: what was merged, what was held out and why, and what only a human can check.
+8. Report to Emilio in Spanish: what was merged, what was held out and why, and what only a human can check.
 
 Never push `staging/*`, never delete a branch. A breakage that only exists when branches are combined gets its own `fix/<topic>` branch through `yien-branch`.

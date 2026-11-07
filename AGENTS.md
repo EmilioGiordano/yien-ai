@@ -18,7 +18,7 @@ C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/01-vision.md       
 C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/design/prototipo-navegacion.html the UI prototype
 ```
 
-`ROADMAP.md` (in git) says where the project stands and what comes next.
+`ROADMAP.md` (in git) says where the project stands and what comes next. Each branch updates its own row and any decision it took, as its last commit, so the roadmap reaches `main` with the merge.
 
 Behaviour comes from the ERS. Engineering choices come from the plan (05), which overrides 04 where they differ. If the code needs to contradict either, stop and report; do not silently diverge.
 
@@ -93,7 +93,7 @@ Every branch goes through the same loop: steps 1–7 with the `yien-branch` skil
    - Each re-review brief carries the previous findings with their resolution (fixed in a commit, argued against, deliberate). With that, the reviewer says whether a repeated fault is the patch or the design. A design problem is redesigned, not patched again.
    - A finding that contradicts the ERS or the plan is overridden by the orchestrator: it is recorded as deliberate in the REPORT and in the next brief, and it no longer counts toward the verdict. A finding that turns out wrong also goes into the reviewer's "Known false positives", committed on the branch being reviewed.
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
-6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS.
+6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and the branch's `ROADMAP.md` update.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
 8. The branch goes through integration and UI validation. Then the orchestrator merges it.
 

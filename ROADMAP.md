@@ -1,6 +1,6 @@
 # ROADMAP
 
-The index for agents: where the project stands and what comes next. The orchestrator updates it after every merge. Rules are in `AGENTS.md`; behaviour in the ERS; engineering in the plan (absolute paths in `AGENTS.md`).
+The index for agents: where the project stands and what comes next. Each branch updates its own row as its last commit. Rules are in `AGENTS.md`; behaviour in the ERS; engineering in the plan (absolute paths in `AGENTS.md`).
 
 ## Target: MVP
 
