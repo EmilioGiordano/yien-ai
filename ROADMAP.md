@@ -27,6 +27,8 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
 | VT engine: `yien-vt`, `VtEngine` on alacritty, `osc_scan`, frames, hot scrollback, search, links | `feat/vt-engine` | done on the branch, in review; cold scrollback and frame diffs pending |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; rest pending |
+| M1 PTY backend: `yien-pty`, portable-pty over the system ConPTY, reader/writer/waiter threads, `FakePty` | `feat/pty-backend` | done on the branch: tests green on Windows; unix tests not yet run |
+| M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
 | M4 Claude: hooks, state machine, red mark, counter | `feat/` | pending |
@@ -46,6 +48,11 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `feat/ui-shell`: the `yien` binary is layer 4 in `check-deps`; it may depend on every layer and nothing depends on it. `yien-ui` owns `run()`, so the binary does not depend on gpui.
 - `feat/ui-shell`: the view model (`WorkspaceView`) lives in `yien-ui`, keyed by `yien-proto` ids, and models all five RF-AGE-05 states. The counter counts panes (RF-ATN-03); project heads count tabs.
 - `feat/ui-shell`: the sumi `shu` red is below WCAG AA on `panel` (4.39:1) and `raised` (4.11:1), where the tab bar and the counter use it (RNF-18). Left as designed, pending a token change.
+- `feat/pty-backend`: resizes go through the writer thread with the input (plan §4.1), so `resize` reports only "queued"; an OS resize failure is not surfaced.
+- `feat/pty-backend`: end of session is the child's exit (a blocking `wait`; `try_wait` reads exit code 259 as still running), then 100 ms of quiet output measured from the later of the exit and the reader's last wait, capped at 2 s. Both clocks count only time the reader spends waiting in `read`, so the cap does not bound wall time while a consumer is behind; and `Exited` is queued only then, so every byte read before it is delivered first. Bytes that arrive after `Exited` are still forwarded.
+- `feat/pty-backend` open: closing a session while the writer is inside a long `write_all` (a large paste into a stalled child) waits for that write; not verified.
+- `feat/pty-backend`: `write` never blocks: a full input queue returns the bytes in `PtyError::InputQueueFull`. Dropping the session kills the child.
+- `feat/pty-backend`: portable-pty 0.9 loads a `conpty.dll` found on the DLL search path before the kernel32 one. That is the seam for the bundled ConPTY (TBD-05); today nothing ships it, so the system ConPTY is used.
 
 ## In flight
 

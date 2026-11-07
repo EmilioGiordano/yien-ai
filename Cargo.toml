@@ -13,6 +13,7 @@ publish = false
 yien-proto = { path = "crates/yien-proto" }
 yien-layout = { path = "crates/yien-layout" }
 yien-input = { path = "crates/yien-input" }
+yien-pty = { path = "crates/yien-pty" }
 yien-testkit = { path = "crates/yien-testkit" }
 yien-vt = { path = "crates/yien-vt" }
 yien-ui = { path = "crates/yien-ui" }
@@ -25,6 +26,7 @@ thiserror = "2.0.21"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 gpui-kit = "=0.7.1"
+portable-pty = "0.9.0"
 
 [workspace.lints.rust]
 missing_docs = "warn"
