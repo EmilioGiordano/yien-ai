@@ -26,6 +26,7 @@ const PLACEHOLDERS: &[&str] = &[
     "hooks_settings_file",
     "pane_id",
     "hook_token",
+    "hook_pipe",
 ];
 
 const BUILTIN_SOURCES: &[(&str, &str)] = &[
@@ -154,7 +155,7 @@ impl Detect {
 
 /// How to launch and resume the agent. Arguments may contain the
 /// placeholders `{new_uuid}`, `{session_id}`, `{hooks_settings_file}`,
-/// `{pane_id}` and `{hook_token}`, filled by the caller.
+/// `{pane_id}`, `{hook_token}` and `{hook_pipe}`, filled by the caller.
 #[derive(Debug, Clone, Default)]
 pub struct Launch {
     /// Arguments for a new session.
@@ -631,7 +632,11 @@ mod tests {
             claude.launch.env.get(HOOK_TOKEN_ENV).map(String::as_str),
             Some("{hook_token}")
         );
-        assert!(!claude.launch.args.iter().any(|a| a.contains("hook_token")));
+        assert_eq!(
+            claude.launch.env.get("YIEN_HOOK_PIPE").map(String::as_str),
+            Some("{hook_pipe}")
+        );
+        assert!(!claude.launch.args.iter().any(|a| a.contains("hook_")));
     }
 
     #[test]
