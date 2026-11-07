@@ -37,7 +37,14 @@ pub fn data_dir() -> Result<PathBuf, PathError> {
 /// # Ok::<(), yien_platform::paths::PathError>(())
 /// ```
 pub fn logs_dir() -> Result<PathBuf, PathError> {
-    data_dir().map(|dir| dir.join("logs"))
+    resolve_logs_dir(std::env::var_os(DATA_DIR_ENV), dirs::data_local_dir())
+}
+
+fn resolve_logs_dir(
+    override_dir: Option<OsString>,
+    local_data: Option<PathBuf>,
+) -> Result<PathBuf, PathError> {
+    resolve_data_dir(override_dir, local_data).map(|dir| dir.join("logs"))
 }
 
 fn resolve_data_dir(
@@ -96,9 +103,17 @@ mod tests {
     }
 
     #[test]
-    fn logs_live_under_the_data_dir() {
-        let logs = logs_dir();
-        let data = data_dir();
-        assert_eq!(logs, data.map(|d| d.join("logs")));
+    fn logs_follow_the_override_and_the_os_dir() {
+        assert_eq!(
+            resolve_logs_dir(Some(OsString::from("D:/scratch/profile")), None),
+            Ok(PathBuf::from("D:/scratch/profile").join("logs"))
+        );
+        assert_eq!(
+            resolve_logs_dir(None, Some(PathBuf::from("C:/Users/u/AppData/Local"))),
+            Ok(PathBuf::from("C:/Users/u/AppData/Local")
+                .join("YIEN")
+                .join("logs"))
+        );
+        assert_eq!(resolve_logs_dir(None, None), Err(PathError::NoDataDir));
     }
 }
