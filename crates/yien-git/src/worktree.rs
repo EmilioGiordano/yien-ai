@@ -424,7 +424,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rf_esp_14_worktree_list_is_parsed() {
+    fn worktree_list_is_parsed() {
         let out = b"worktree C:/src/app\0HEAD abc\0branch refs/heads/main\0\0\
                     worktree C:/src/app-wt/x\0HEAD def\0branch refs/heads/feat/x\0locked\0\0\
                     worktree C:/src/app-wt/d\0HEAD 123\0detached\0prunable gitdir file points to non-existent location\0\0";
