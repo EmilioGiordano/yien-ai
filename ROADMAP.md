@@ -25,6 +25,7 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | M0 skeleton: workspace, CI, deny, proto, testkit, xtask, foothy layout and input | `build/workspace-skeleton` | done on the branch: all of these, green locally; CI not yet run on the three systems |
 | M0 rest: `tracing` setup, error conventions | follow-up `build/` | pending |
 | M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
+| M1 PTY backend: `yien-pty`, portable-pty over the system ConPTY, reader/writer/waiter threads, `FakePty` | `feat/pty-backend` | done on the branch: tests green on Windows; unix tests not yet run |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | pending |
 | Test control pipe | `feat/test-control` | pending, from M1 on |
 | M3 core: snapshot and restore of layout and sessions | `feat/` | pending |
@@ -37,6 +38,10 @@ Record here what a spike or a branch decided, with the branch name. The plan's s
 - `build/workspace-skeleton`: layer-0 crates do not depend on each other. `yien-layout` keeps its own `PaneId` (a `u64` handed out by the tree); mapping it to `yien_proto::PaneId` is the core's job.
 - `build/workspace-skeleton`: foothy's `win32.rs` (win32-input-mode encoding) was left out of `yien-input` as the TASK asked. It makes no OS calls, and plan §3.2 places win32-input-mode in `yien-input`, so it should come back there with M1 input, not go to `yien-platform`.
 - `build/workspace-skeleton`: `xtask check-deps` also requires `#![forbid(unsafe_code)]` in every crate root except `yien-pty` and `yien-platform`, limits `yien-proto` to `serde`, and holds layers 0 and 1 to an allowlist of external crates kept in `xtask/src/check_deps.rs` (adding one is a reviewed change).
+- `feat/pty-backend`: resizes go through the writer thread with the input (plan §4.1), so `resize` reports only "queued"; an OS resize failure is not surfaced.
+- `feat/pty-backend`: end of session is the child's exit (polled with `try_wait`), then up to 100 ms of quiet output, capped at 2 s. Quiet time counts only while the reader waits in `read`. Bytes that arrive after `Exited` are still forwarded.
+- `feat/pty-backend`: `write` never blocks: a full input queue returns the bytes in `PtyError::InputQueueFull`. Dropping the session kills the child.
+- `feat/pty-backend`: portable-pty 0.9 loads a `conpty.dll` found on the DLL search path before the kernel32 one. That is the seam for the bundled ConPTY (TBD-05); today nothing ships it, so the system ConPTY is used.
 
 ## In flight
 
