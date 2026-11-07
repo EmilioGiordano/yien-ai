@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 3);
+//! assert_eq!(PROTO_VERSION, 4);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 pub use msg::{
     AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason, InputBytes,
-    LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProjectInfo, TabInfo,
-    WorkspaceSnapshot,
+    LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
+    ProjectInfo, TabInfo, WorkspaceSnapshot,
 };
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
@@ -34,7 +34,7 @@ pub use msg::{
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {
