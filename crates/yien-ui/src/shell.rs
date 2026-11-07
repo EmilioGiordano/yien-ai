@@ -76,7 +76,16 @@ pub(crate) struct Shell {
     palette: Option<OpenPalette>,
     /// The question asked before closing a project that has work running.
     confirm: Option<ConfirmClose>,
+    /// The tab whose name is being edited in place (RF-ESP-16).
+    renaming: Option<Renaming>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A tab name being edited in its row.
+struct Renaming {
+    tab: TabId,
+    input: Entity<InputState>,
+    _input_events: Subscription,
 }
 
 /// A project about to close, and how many panes that would stop.
@@ -151,6 +160,7 @@ impl Shell {
             menu_closed: None,
             palette: None,
             confirm: None,
+            renaming: None,
             _subscriptions: vec![activation],
         }
     }
@@ -279,11 +289,19 @@ impl Shell {
             self.confirm = None;
             self.give_back_keyboard(window, cx);
         }
+        let renamed_gone = self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| self.workspace.tab(r.tab).is_none());
+        if renamed_gone {
+            self.renaming = None;
+            self.give_back_keyboard(window, cx);
+        }
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
-        self.palette.is_some() || self.confirm.is_some()
+        self.palette.is_some() || self.confirm.is_some() || self.renaming.is_some()
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that changes.
@@ -578,6 +596,7 @@ impl Shell {
         }
         self.split_menu = None;
         self.confirm = None;
+        self.renaming = None;
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
@@ -793,6 +812,7 @@ impl Shell {
             return;
         }
         self.split_menu = None;
+        self.renaming = None;
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         self.confirm = Some(ConfirmClose {
@@ -916,6 +936,83 @@ impl Shell {
                         ),
                 ),
         )
+    }
+
+    fn rename_tab(&mut self, _: &RenameTab, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.selected_tab().map(|t| t.id) {
+            Some(tab) => self.start_rename(tab, window, cx),
+            None => {
+                self.notice = Some("There is no tab to rename.".to_owned());
+                cx.notify();
+            }
+        }
+    }
+
+    /// Turns the tab's name in its row into a field holding the name, all
+    /// selected. The tab bar opens and the project unfolds to show it.
+    fn start_rename(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, project)) = self.workspace.tab(tab).map(|t| (t.name.clone(), t.project))
+        else {
+            return;
+        };
+        if self.confirm.is_some() {
+            return;
+        }
+        self.split_menu = None;
+        self.tab_bar_open = true;
+        if self.workspace.is_folded(project) {
+            self.toggle_fold(project, cx);
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |state, cx| state.select_all(window, cx));
+        let input_events = cx.subscribe_in(&input, window, Self::on_rename_input);
+        window.focus(&input.focus_handle(cx), cx);
+        self.renaming = Some(Renaming {
+            tab,
+            input,
+            _input_events: input_events,
+        });
+        cx.notify();
+    }
+
+    /// Clicking away keeps the name typed, as Enter does.
+    fn on_rename_input(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Blur) {
+            self.finish_rename(true, window, cx);
+        }
+    }
+
+    /// Ends the edit; `keep` sends the typed name, and an empty one brings
+    /// back the automatic name.
+    fn finish_rename(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else {
+            return;
+        };
+        if keep {
+            let name = renaming.input.read(cx).value().trim().to_owned();
+            self.command(
+                Command::RenameTab {
+                    tab: renaming.tab,
+                    name,
+                },
+                cx,
+            );
+        }
+        self.give_back_keyboard(window, cx);
+    }
+
+    fn rename_confirm(&mut self, _: &RenameConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(true, window, cx);
+    }
+
+    fn rename_cancel(&mut self, _: &RenameCancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(false, window, cx);
     }
 
     fn toggle_project_fold(
@@ -1454,22 +1551,22 @@ impl Shell {
                         .hover(move |s| s.bg(hover))
                 }
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.select_tab(id, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if this.renaming.as_ref().is_some_and(|r| r.tab == id) {
+                    return;
+                }
+                if event.click_count() >= 2 {
+                    this.start_rename(id, window, cx);
+                } else {
+                    this.select_tab(id, window, cx);
+                }
+            }))
             .child(
                 h_flex()
                     .items_center()
                     .gap(px(8.0))
                     .child(glyph(state, &t))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(tab.name.clone()),
-                    ),
+                    .child(self.render_tab_name(tab)),
             )
             .when(second_line, |row| {
                 row.child(
@@ -1511,6 +1608,37 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    /// The tab's name, or the field editing it.
+    fn render_tab_name(&self, tab: &TabView) -> AnyElement {
+        let t = self.theme;
+        match self.renaming.as_ref().filter(|r| r.tab == tab.id) {
+            Some(renaming) => div()
+                .flex_1()
+                .min_w_0()
+                .key_context(RENAME_CONTEXT)
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(t.ai)
+                .bg(t.bg)
+                .child(
+                    Input::new(&renaming.input)
+                        .appearance(false)
+                        .aria_label(format!("New name for {}", tab.name)),
+                )
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_weight(FontWeight::MEDIUM)
+                .child(tab.name.clone())
+                .into_any_element(),
+        }
     }
 
     fn render_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2188,6 +2316,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::close_project))
             .on_action(cx.listener(Self::confirm_accept))
             .on_action(cx.listener(Self::confirm_cancel))
+            .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::rename_confirm))
+            .on_action(cx.listener(Self::rename_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_switcher))
             .on_action(cx.listener(Self::palette_up))
@@ -2283,6 +2414,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("close project dialog buttons", "project.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
+    ("tab row double-click", "tab.rename"),
 ];
 
 #[cfg(test)]
