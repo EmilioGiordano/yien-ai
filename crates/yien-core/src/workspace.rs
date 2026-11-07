@@ -119,6 +119,8 @@ struct Tab {
     kept_dir: Option<String>,
     /// The git branch last seen in `dir` (RF-ESP-04).
     branch: Option<String>,
+    /// The saved branch that goes with `kept_dir`.
+    kept_branch: Option<String>,
 }
 
 impl Tab {
@@ -493,6 +495,7 @@ impl Workspace {
             maximized: None,
             kept_dir: None,
             branch: None,
+            kept_branch: None,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
