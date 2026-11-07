@@ -276,6 +276,21 @@ pub(crate) fn keyboard_pane(ws: &WorkspaceView) -> Option<PaneId> {
     ws.selected_tab().map(|t| t.focused)
 }
 
+/// Where the keyboard goes when the palette closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyboardTo {
+    /// The pane the core says is focused.
+    Pane(PaneId),
+    /// The window itself, when no tab is open, so its keys still work.
+    Window,
+}
+
+/// The palette's close step decides this; the window then focuses it
+/// unconditionally, since the palette's input held the focus until now.
+pub(crate) fn keyboard_after_close(ws: &WorkspaceView) -> KeyboardTo {
+    keyboard_pane(ws).map_or(KeyboardTo::Window, KeyboardTo::Pane)
+}
+
 /// How each stretch of a row's text is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ink {
@@ -531,18 +546,34 @@ mod tests {
     #[test]
     fn rf_nav_01_closing_follows_a_focus_move_made_while_open() {
         let mut ws = workspace();
-        assert_eq!(keyboard_pane(&ws), Some(PaneId::new(100)));
+        assert_eq!(
+            keyboard_after_close(&ws),
+            KeyboardTo::Pane(PaneId::new(100))
+        );
         let palette = Palette::new(Mode::Commands, commands(), Vec::new());
         // Alt+Right reaches the core while the palette is open.
         let mut moved = tab(10, 1, "editor", &[100, 101]);
         moved.focused = PaneId::new(101);
         ws.tab_updated(&moved);
         drop(palette);
-        assert_eq!(keyboard_pane(&ws), Some(PaneId::new(101)));
-        ws.tab_closed(TabId::new(10));
-        ws.tab_closed(TabId::new(11));
-        ws.tab_closed(TabId::new(20));
+        assert_eq!(
+            keyboard_after_close(&ws),
+            KeyboardTo::Pane(PaneId::new(101))
+        );
+    }
+
+    #[test]
+    fn rf_nav_01_closing_with_no_tab_gives_the_keyboard_to_the_window() {
+        let mut ws = workspace();
+        for id in [10, 11, 20] {
+            ws.tab_closed(TabId::new(id));
+        }
         assert_eq!(keyboard_pane(&ws), None);
+        assert_eq!(keyboard_after_close(&ws), KeyboardTo::Window);
+        assert_eq!(
+            keyboard_after_close(&WorkspaceView::default()),
+            KeyboardTo::Window
+        );
     }
 
     #[test]

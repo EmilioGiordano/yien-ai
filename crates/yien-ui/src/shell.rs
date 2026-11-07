@@ -23,8 +23,8 @@ use crate::fonts::Fonts;
 use crate::layout::neighbor;
 use crate::model::{AgentState, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take};
 use crate::palette::{
-    Entry, Ink, Mode, Palette, Row, Target, command_entries, ink_runs, keyboard_pane,
-    switcher_entries,
+    Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
+    keyboard_after_close, keyboard_pane, switcher_entries,
 };
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, sync_component_theme};
@@ -573,8 +573,22 @@ impl Shell {
         if self.palette.take().is_none() {
             return;
         }
-        self.keyboard_on = None;
-        self.sync_focus(window, cx);
+        let terminal = match keyboard_after_close(&self.workspace) {
+            KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
+            KeyboardTo::Window => None,
+        };
+        match terminal {
+            Some((pane, terminal)) => {
+                self.keyboard_on = Some(pane);
+                let handle = terminal.read(cx).handle().clone();
+                window.focus(&handle, cx);
+            }
+            None => {
+                // No view yet: the next sync moves the keyboard once it exists.
+                self.keyboard_on = None;
+                window.focus(&self.focus, cx);
+            }
+        }
         cx.notify();
     }
 
