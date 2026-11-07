@@ -2114,13 +2114,38 @@ impl Shell {
             .children(options)
     }
 
+    /// The context bar's box, without its contents.
+    fn context_bar_frame(&self) -> Stateful<Div> {
+        let t = self.theme;
+        v_flex()
+            .id("context-bar")
+            .role(Role::Complementary)
+            .aria_label("Context bar")
+            .w(px(CONTEXT_BAR_WIDTH))
+            .flex_none()
+            .h_full()
+            .border_l_1()
+            .border_color(t.line)
+            .bg(t.panel)
+    }
+
     fn render_context_bar(&self) -> impl IntoElement {
         let t = self.theme;
-        let tab = self.workspace.selected_tab();
+        let Some(tab) = self.workspace.selected_tab() else {
+            // With no project open there is no branch to speak of.
+            return self.context_bar_frame().child(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .text_size(px(12.5))
+                    .text_color(t.faint)
+                    .child("No project"),
+            );
+        };
         let git = ContextGit::new(
-            tab.and_then(|tab| self.workspace.git_of(tab.id)),
-            tab.and_then(|tab| tab.branch.as_deref()),
-            tab.map_or("", |tab| tab.dir.as_str()),
+            self.workspace.git_of(tab.id),
+            tab.branch.as_deref(),
+            tab.dir.as_str(),
         );
         let mono = self.fonts.mono.clone();
         let chip_label = if git.detached {
@@ -2169,16 +2194,7 @@ impl Shell {
                         .child(div().flex_none().child(file.name)),
                 )
         });
-        v_flex()
-            .id("context-bar")
-            .role(Role::Complementary)
-            .aria_label("Context bar")
-            .w(px(CONTEXT_BAR_WIDTH))
-            .flex_none()
-            .h_full()
-            .border_l_1()
-            .border_color(t.line)
-            .bg(t.panel)
+        self.context_bar_frame()
             .child(
                 h_flex()
                     .flex_none()
