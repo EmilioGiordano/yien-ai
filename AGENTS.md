@@ -75,8 +75,9 @@ Every branch goes through the same loop, run by the `yien-branch` skill:
 1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
 2. `implementer` implements and validates (fmt, clippy, tests), committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
-4. On FAIL, the findings go back to `implementer`. Fixes are verified with the suite. New code needs a new review. After 3 failed rounds, stop and report to Emilio.
-5. On PASS, the orchestrator pushes and opens the PR.
+4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS. After 3 failed rounds, stop and report to Emilio.
+5. When the review reports coverage the implementer cannot add alone, `test-engineer` writes the tests and `implementer` commits them.
+6. On PASS, the orchestrator pushes and opens the PR.
 
 No branch is handed over without a PASS, including docs-only or comment-only branches. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
 
