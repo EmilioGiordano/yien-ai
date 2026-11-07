@@ -13,9 +13,8 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use yien_proto::hook_frame::{
-    self, HOOK_PIPE_ENV, HOOK_PIPE_PREFIX, HOOK_TOKEN_ENV, MAX_HOOK_PAYLOAD,
-};
+use yien_platform::hook_pipe::connect_client;
+use yien_proto::hook_frame::{self, HOOK_PIPE_ENV, HOOK_TOKEN_ENV, MAX_HOOK_PAYLOAD};
 
 /// Reading stdin, connecting and writing all end by then, done or not.
 const DEADLINE: Duration = Duration::from_millis(1000);
@@ -41,7 +40,7 @@ fn forward(deadline: Instant) {
     let (Some(token), Some(pipe)) = (env(HOOK_TOKEN_ENV), env(HOOK_PIPE_ENV)) else {
         return;
     };
-    if !pipe.starts_with(HOOK_PIPE_PREFIX) {
+    if hook_frame::hook_pipe_pid(&pipe).is_none() {
         return;
     }
     let event = std::env::args()
@@ -51,7 +50,7 @@ fn forward(deadline: Instant) {
     let Ok(frame) = hook_frame::encode(token.as_bytes(), &event, &payload) else {
         return;
     };
-    if let Some(mut conn) = connect(&pipe, deadline) {
+    if let Some(mut conn) = connect_client(&pipe, deadline) {
         let _ = conn.write_all(&frame);
     }
 }
@@ -77,37 +76,4 @@ fn read_payload() -> Vec<u8> {
         let _ = io::copy(&mut stdin, &mut io::sink());
     }
     payload
-}
-
-#[cfg(windows)]
-fn connect(pipe: &str, deadline: Instant) -> Option<std::fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-    // With SECURITY_SQOS_PRESENT, which std adds: the server cannot
-    // impersonate this process.
-    const SECURITY_ANONYMOUS: u32 = 0;
-    const BUSY_RETRY: Duration = Duration::from_millis(5);
-
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .security_qos_flags(SECURITY_ANONYMOUS)
-            .open(pipe)
-        {
-            Ok(file) => return Some(file),
-            Err(e)
-                if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
-                    && Instant::now() + BUSY_RETRY < deadline =>
-            {
-                std::thread::sleep(BUSY_RETRY);
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn connect(_pipe: &str, _deadline: Instant) -> Option<std::fs::File> {
-    None
 }

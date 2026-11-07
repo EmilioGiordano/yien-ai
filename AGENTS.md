@@ -202,7 +202,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 | `yien-core` | 3 | Pane actors and services. Runs in process or as `--host`. |
 | `yien-ui` | 3 | GPUI: window, bars, terminal element, palette. |
 | `yien` | 4 | The binary: wires the core and the UI together. May depend on every layer; nothing depends on it. |
-| `yien-hook` | 4 | The binary Claude Code runs per hook: stdin to the hook pipe as one frame, no async runtime, always exit 0. Depends on `yien-proto` only. |
+| `yien-hook` | 4 | The binary Claude Code runs per hook: stdin to the hook pipe as one frame, no async runtime, always exit 0. Depends on `yien-proto` and `yien-platform` (the pipe client). |
 | `yien-testkit` | dev | `.yrec` record and replay, fake PTY and clock, acceptance scenarios. |
 
 ## The layer rule

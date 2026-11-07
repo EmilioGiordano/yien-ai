@@ -9,9 +9,9 @@ publish.workspace = true
 
 [dependencies]
 yien-proto = { workspace = true }
+yien-platform = { workspace = true }
 
 [dev-dependencies]
-yien-platform = { workspace = true }
 yien-agent = { workspace = true }
 
 [lints]
