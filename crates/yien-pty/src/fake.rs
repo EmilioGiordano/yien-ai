@@ -140,13 +140,20 @@ impl ChildControl for FakeControl {
     fn kill(&self) -> Result<(), PtyError> {
         if !self.0.exited.load(Ordering::SeqCst) {
             self.0.killed.store(true, Ordering::SeqCst);
-            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), false);
+            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), true);
         }
         Ok(())
     }
 
     fn pid(&self) -> Option<u32> {
         None
+    }
+
+    fn kill_on_drop(&self) {
+        if !self.0.exited.load(Ordering::SeqCst) {
+            self.0.killed.store(true, Ordering::SeqCst);
+            self.0.exit(ExitStatus::from_code(KILLED_EXIT_CODE), false);
+        }
     }
 }
 
@@ -373,6 +380,32 @@ mod tests {
         child.exit(0);
         session.kill().unwrap();
         assert!(!child.was_killed());
+    }
+
+    #[test]
+    fn an_explicit_kill_on_a_full_queue_still_delivers_exited() {
+        let (session, child) = spawn_one();
+        for _ in 0..OUTPUT_QUEUE_CAPACITY {
+            child.output(b"x");
+        }
+        let (control, events) = session.into_parts();
+        let killer = std::thread::spawn(move || {
+            control.kill().unwrap();
+            control
+        });
+        let mut outputs = 0;
+        loop {
+            match events.recv_timeout(TIMEOUT).unwrap() {
+                PtyEvent::Output(_) => outputs += 1,
+                PtyEvent::Exited(status) => {
+                    assert_eq!(status, ExitStatus::from_code(KILLED_EXIT_CODE));
+                    break;
+                }
+            }
+        }
+        assert_eq!(outputs, OUTPUT_QUEUE_CAPACITY);
+        drop(killer.join().unwrap());
+        assert!(child.was_killed());
     }
 
     #[test]
