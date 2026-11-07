@@ -41,8 +41,15 @@ pub(crate) struct Ctx {
 /// counts as lost (see [`hooks::route`]).
 pub(crate) const PANE_HOOK_QUEUE: usize = 64;
 
-/// A decoded hook, or the error of an authentic frame that did not decode.
-pub(crate) type HookItem = Result<HookEvent, HookError>;
+/// A hook for a pane's actor.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HookItem {
+    /// The serial of the token it came with: the launch it belongs to.
+    pub serial: u64,
+    /// The decoded event, or the error of an authentic frame that did not
+    /// decode.
+    pub event: Result<HookEvent, HookError>,
+}
 
 /// How the handle and the hook pipe reach a pane without going through the
 /// service: its input queue, its frame slot and its hook queue.

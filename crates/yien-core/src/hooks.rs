@@ -10,7 +10,7 @@ use yien_agent::render_claude_settings;
 use yien_platform::hook_pipe::{HookDelivery, HookPipeError, HookPipeServer, HookRegistry};
 use yien_proto::PaneId;
 
-use crate::service::{Links, links};
+use crate::service::{HookItem, Links, links};
 
 /// Where the hook pipe gets what it needs. The core runs without hooks
 /// when [`crate::CoreConfig::hooks`] is `None`.
@@ -59,7 +59,8 @@ pub(crate) struct Hooks {
     pub pipe: String,
     pub settings_file: String,
     settings_path: PathBuf,
-    _server: HookPipeServer,
+    /// `None` only for tests that hand hooks to an actor directly.
+    _server: Option<HookPipeServer>,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -113,8 +114,22 @@ pub(crate) fn start(config: &HookConfig, panes: Links) -> Result<Hooks, HooksErr
         pipe: server.name().to_owned(),
         settings_file: forward_slashes(&settings_path),
         settings_path,
-        _server: server,
+        _server: Some(server),
     })
+}
+
+impl Hooks {
+    /// Hooks with a registry and no pipe or settings file.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            registry: HookRegistry::new(),
+            pipe: String::new(),
+            settings_file: String::new(),
+            settings_path: PathBuf::new(),
+            _server: None,
+        }
+    }
 }
 
 /// Hands a delivery to its pane's hook queue. Never waits: a full queue
@@ -125,7 +140,11 @@ pub(crate) fn route(panes: &Links, delivery: HookDelivery) {
     let Some(link) = panes.get(&delivery.pane) else {
         return;
     };
-    if let Err(TrySendError::Full(_)) = link.hooks.try_send(delivery.event) {
+    let item = HookItem {
+        serial: delivery.serial,
+        event: delivery.event,
+    };
+    if let Err(TrySendError::Full(_)) = link.hooks.try_send(item) {
         link.hooks_lost.store(true, Ordering::Release);
     }
 }
@@ -152,6 +171,7 @@ mod tests {
     fn delivery(pane: u64) -> HookDelivery {
         HookDelivery {
             pane: PaneId::new(pane),
+            serial: 3,
             event: Ok(HookEvent::Stop),
             payload_len: 0,
         }
@@ -173,7 +193,8 @@ mod tests {
         assert!(!lost.load(Ordering::Acquire));
         route(&panes, delivery(1));
         assert!(lost.load(Ordering::Acquire));
-        assert_eq!(hooks_rx.try_recv().ok(), Some(Ok(HookEvent::Stop)));
+        let item = hooks_rx.try_recv().unwrap();
+        assert_eq!((item.serial, item.event), (3, Ok(HookEvent::Stop)));
         route(&panes, delivery(99));
     }
 

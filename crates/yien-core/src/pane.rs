@@ -235,6 +235,9 @@ struct Actor {
     sync: Option<(u64, Instant)>,
     wake_at: Option<Instant>,
     hooks_lost: Arc<AtomicBool>,
+    /// The serial of this launch's hook token. A hook with another one was
+    /// on its way when the pane relaunched and belongs to the old program.
+    hook_serial: Option<u64>,
     /// The profile reports through hooks but this launch has no channel.
     hooks_missing: bool,
     /// The "signal lost" mark last reported.
@@ -279,6 +282,7 @@ pub(crate) fn spawn(
         sync: None,
         wake_at: None,
         hooks_lost: setup.hooks_lost,
+        hook_serial: None,
         hooks_missing: false,
         signal_lost: false,
         needs_since: None,
@@ -405,6 +409,7 @@ impl Actor {
         // A relaunch replaces the token, so the old program's hooks are refused.
         let hooks = self.ctx.hooks.as_deref().filter(|_| self.plan.hooks);
         let token = hooks.and_then(|h| h.registry.issue(self.id).ok());
+        self.hook_serial = token.as_ref().map(|t| t.serial());
         let fill = Fill {
             pane: self.id,
             session_id: session_id.as_deref(),
@@ -473,7 +478,11 @@ impl Actor {
             self.step(&Signal::SourceLost);
             return;
         }
-        match item {
+        if self.hook_serial != Some(item.serial) {
+            tracing::debug!(pane = self.id.get(), "hook from an earlier launch dropped");
+            return;
+        }
+        match item.event {
             Ok(event) => self.step(&Signal::Hook(event)),
             Err(_) => self.step(&Signal::Ambiguous),
         }
@@ -932,8 +941,10 @@ mod tests {
         assert!(cut.ends_with("..."));
     }
 
-    /// A Claude pane actor on a fake PTY, without a hook pipe, so the "signal
-    /// lost" mark comes from the state machine alone.
+    /// A Claude pane actor on a fake PTY. Its hooks have a registry and no
+    /// pipe, so the test hands them to the actor and the "signal lost" mark
+    /// comes from the state machine alone. The first launch's token has
+    /// serial 1, each relaunch's the next.
     struct Solo {
         runtime: tokio::runtime::Runtime,
         reports: Arc<crate::report::Reports>,
@@ -954,8 +965,7 @@ mod tests {
                 .unwrap();
             let config = crate::CoreConfig::default();
             let claude = yien_proto::ProfileId::new("claude");
-            let mut plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
-            plan.hooks = false;
+            let plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
             let (events, events_rx) = mpsc::channel(64);
             let ctx = Ctx {
                 backend: Arc::new(yien_pty::FakePty::new()),
@@ -963,7 +973,7 @@ mod tests {
                 events,
                 reports: Arc::default(),
                 engine: alacritty,
-                hooks: None,
+                hooks: Some(Arc::new(crate::hooks::Hooks::detached())),
                 attention: Arc::default(),
             };
             let reports = Arc::clone(&ctx.reports);
@@ -1010,6 +1020,13 @@ mod tests {
         }
     }
 
+    fn hook(serial: u64, event: yien_agent::HookEvent) -> HookItem {
+        HookItem {
+            serial,
+            event: Ok(event),
+        }
+    }
+
     fn last_state(events: &[PaneEvent]) -> Option<AgentState> {
         events.iter().rev().find_map(|e| match e {
             PaneEvent::State(state, _) => Some(*state),
@@ -1031,9 +1048,9 @@ mod tests {
     fn hooks_queued_before_a_refused_one_are_dropped_with_it() {
         use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
         let queued = vec![
-            Ok(UserPromptSubmit),
-            Ok(UserPromptSubmit),
-            Ok(PermissionRequest),
+            hook(1, UserPromptSubmit),
+            hook(1, UserPromptSubmit),
+            hook(1, PermissionRequest),
         ];
         let pane = Solo::start(queued, true);
         let events = pane.collect(SETTLE);
@@ -1053,17 +1070,49 @@ mod tests {
     #[test]
     fn a_hook_after_the_refused_ones_is_read_again() {
         use yien_agent::HookEvent::{PermissionRequest, UserPromptSubmit};
-        let pane = Solo::start(vec![Ok(UserPromptSubmit)], true);
+        let pane = Solo::start(vec![hook(1, UserPromptSubmit)], true);
         assert_eq!(last_signal_lost(&pane.collect(SETTLE)), Some(true));
         assert!(!pane.hooks_lost.load(Ordering::Acquire));
-        pane.hooks.try_send(Ok(UserPromptSubmit)).unwrap();
-        pane.hooks.try_send(Ok(PermissionRequest)).unwrap();
+        pane.hooks.try_send(hook(1, UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
         let events = pane.collect(SETTLE);
         assert!(
             matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
             "{events:?}"
         );
         drop(pane.cmds);
+    }
+
+    #[test]
+    fn a_hook_from_before_a_relaunch_does_not_reach_the_new_program() {
+        use yien_agent::HookEvent::{PermissionRequest, SessionStart, UserPromptSubmit};
+        use yien_agent::SessionStartSource;
+        let pane = Solo::start(Vec::new(), false);
+        pane.collect(Duration::from_millis(100));
+        pane.cmds.try_send(PaneCmd::Relaunch).unwrap();
+        let relaunched = pane.collect(Duration::from_millis(200));
+        assert!(relaunched.contains(&PaneEvent::Started), "{relaunched:?}");
+        let stale = "11111111-1111-4111-8111-111111111111".to_owned();
+        let session = SessionStart {
+            session_id: Some(stale.clone()),
+            source: SessionStartSource::Resume,
+        };
+        for event in [session, UserPromptSubmit, PermissionRequest] {
+            pane.hooks.try_send(hook(1, event)).unwrap();
+        }
+        let events = pane.collect(SETTLE);
+        assert!(!events.contains(&PaneEvent::SessionId(stale)), "{events:?}");
+        assert!(
+            matches!(last_state(&events), None | Some(AgentState::Idle)),
+            "{events:?}"
+        );
+        pane.hooks.try_send(hook(2, UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(hook(2, PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
     }
 
     #[test]
