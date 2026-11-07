@@ -16,6 +16,7 @@
 //!     name: "yien".into(),
 //!     root: "C:/code/yien".into(),
 //!     setup_script: None,
+//!     collapsed: false,
 //!     tabs: vec![TabRecord {
 //!         id: TabId::new(1),
 //!         title: "main".into(),
@@ -37,6 +38,7 @@
 //!         branch: None,
 //!         worktree: None,
 //!         archived: false,
+//!         name: None,
 //!     }],
 //! }]);
 //!

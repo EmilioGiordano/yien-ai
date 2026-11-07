@@ -74,6 +74,7 @@ impl Workspace {
                 name: p.name.clone(),
                 root: p.root.clone(),
                 setup_script: None,
+                collapsed: false,
                 tabs: p
                     .tabs
                     .iter()
@@ -111,6 +112,7 @@ impl Workspace {
             },
             worktree: None,
             archived: false,
+            name: None,
             layout,
             panes,
             focused: tab.focused,

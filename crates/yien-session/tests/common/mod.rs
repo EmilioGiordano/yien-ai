@@ -68,6 +68,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
             name: "yien".into(),
             root: "C:/code/yien".into(),
             setup_script: None,
+            collapsed: false,
             tabs: vec![
                 TabRecord {
                     id: TabId::new(20),
@@ -85,6 +86,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
                     branch: None,
                     worktree: None,
                     archived: false,
+                    name: None,
                     panes: vec![agent, shell],
                 },
                 TabRecord {
@@ -96,6 +98,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
                     branch: None,
                     worktree: None,
                     archived: false,
+                    name: None,
                     panes: vec![ended],
                 },
             ],

@@ -27,9 +27,10 @@ struct TabSeed {
     branch: Option<String>,
     worktree: Option<String>,
     archived: bool,
+    name: Option<String>,
 }
 
-type ProjectSeed = (String, String, Option<String>, Vec<TabSeed>);
+type ProjectSeed = (String, String, Option<String>, bool, Vec<TabSeed>);
 
 fn text() -> impl Strategy<Value = String> {
     "\\PC{0,12}"
@@ -63,10 +64,11 @@ fn tab_seed() -> impl Strategy<Value = TabSeed> {
             proptest::option::of(text()),
             proptest::option::of(text()),
             any::<bool>(),
+            proptest::option::of(text()),
         ),
     )
         .prop_map(
-            |(title, dir, panes, shape, focus, (branch, worktree, archived))| TabSeed {
+            |(title, dir, panes, shape, focus, (branch, worktree, archived, name))| TabSeed {
                 title,
                 dir,
                 panes,
@@ -75,6 +77,7 @@ fn tab_seed() -> impl Strategy<Value = TabSeed> {
                 branch,
                 worktree,
                 archived,
+                name,
             },
         )
 }
@@ -84,6 +87,7 @@ fn project_seed() -> impl Strategy<Value = ProjectSeed> {
         text(),
         text(),
         proptest::option::of(text()),
+        any::<bool>(),
         prop::collection::vec(tab_seed(), 0..4),
     )
 }
@@ -137,46 +141,50 @@ fn build(
     };
     let projects = projects
         .into_iter()
-        .map(|(name, root, setup_script, tabs)| ProjectRecord {
-            id: ProjectId::new(fresh()),
-            name,
-            root,
-            setup_script,
-            tabs: tabs
-                .into_iter()
-                .map(|seed| {
-                    let panes: Vec<PaneRecord> = seed
-                        .panes
-                        .into_iter()
-                        .map(|p| PaneRecord {
-                            id: PaneId::new(fresh()),
-                            profile: ProfileId::new(p.profile),
-                            cwd: p.cwd,
-                            agent: p.agent.map(|(kind, session, ended)| AgentRecord {
-                                kind: ProfileId::new(kind),
-                                session_id: session.map(SessionRef::new),
-                                ended_explicitly: ended,
-                            }),
-                            last_command: p.last_command,
-                            name: p.name,
-                        })
-                        .collect();
-                    let ids: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
-                    let mut shape = seed.shape.into_iter().cycle();
-                    TabRecord {
-                        id: TabId::new(fresh()),
-                        title: seed.title,
-                        dir: seed.dir,
-                        layout: layout(&ids, &mut shape),
-                        focused: ids[seed.focus % ids.len()],
-                        branch: seed.branch,
-                        worktree: seed.worktree,
-                        archived: seed.archived,
-                        panes,
-                    }
-                })
-                .collect(),
-        })
+        .map(
+            |(name, root, setup_script, collapsed, tabs)| ProjectRecord {
+                id: ProjectId::new(fresh()),
+                name,
+                root,
+                setup_script,
+                collapsed,
+                tabs: tabs
+                    .into_iter()
+                    .map(|seed| {
+                        let panes: Vec<PaneRecord> = seed
+                            .panes
+                            .into_iter()
+                            .map(|p| PaneRecord {
+                                id: PaneId::new(fresh()),
+                                profile: ProfileId::new(p.profile),
+                                cwd: p.cwd,
+                                agent: p.agent.map(|(kind, session, ended)| AgentRecord {
+                                    kind: ProfileId::new(kind),
+                                    session_id: session.map(SessionRef::new),
+                                    ended_explicitly: ended,
+                                }),
+                                last_command: p.last_command,
+                                name: p.name,
+                            })
+                            .collect();
+                        let ids: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
+                        let mut shape = seed.shape.into_iter().cycle();
+                        TabRecord {
+                            id: TabId::new(fresh()),
+                            title: seed.title,
+                            dir: seed.dir,
+                            layout: layout(&ids, &mut shape),
+                            focused: ids[seed.focus % ids.len()],
+                            branch: seed.branch,
+                            worktree: seed.worktree,
+                            archived: seed.archived,
+                            name: seed.name,
+                            panes,
+                        }
+                    })
+                    .collect(),
+            },
+        )
         .collect::<Vec<ProjectRecord>>();
     let mut snapshot = SessionSnapshot::new(saved_at, projects);
     let (with_project, with_tab, at) = pick;
