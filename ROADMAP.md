@@ -23,7 +23,7 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 | S2 ConPTY spike | `spike/s2-conpty` | next |
 | S1 GPUI spike | `spike/s1-gpui` | next |
 | M0 skeleton: workspace, CI, deny, proto, testkit, xtask, foothy layout and input | `build/workspace-skeleton` | done on the branch: all of these, green locally; CI not yet run on the three systems |
-| M0 rest: `tracing` setup, error conventions | `build/tracing-and-input-mode` | done on the branch, in review: `yien-platform` with `init_logging` (daily file, 7 kept, `YIEN_LOG`) and `paths::data_dir` (`YIEN_DATA_DIR` override), wired into the binary; win32-input-mode back in `yien-input` |
+| M0 rest: `tracing` setup, error conventions | `build/tracing-and-input-mode` | done on the branch, in review: `yien-platform` with `init_logging` (daily file, 7 kept, `YIEN_LOG`) and `paths::data_dir` (`YIEN_DATA_DIR` override), wired into the binary; win32-input-mode back in `yien-input`. Error conventions need no code: the thiserror/anyhow rule is in AGENTS.md "Rules the plan fixed" |
 | M1 one pane: PTY, VT, terminal element, input, scrollback | several `feat/` | pending |
 | VT engine: `yien-vt`, `VtEngine` on alacritty, `osc_scan`, frames, hot scrollback, search, links | `feat/vt-engine` | done on the branch, in review; cold scrollback and frame diffs pending |
 | M2 workspace: projects, tabs, splits, focus, palette, commands, theme | several `feat/` | started: `feat/ui-shell` draws the window (tab bar, panes from a `yien-layout` tree, context bar, status bar, both themes) from a view model with sample data; rest pending |
