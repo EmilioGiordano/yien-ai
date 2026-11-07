@@ -343,6 +343,17 @@ fn rf_pan_11_wrapped_url_is_found_from_either_row() {
 }
 
 #[test]
+fn rf_pan_11_url_scheme_is_case_insensitive() {
+    let mut e = engine(60, 3);
+    e.feed(b"HTTPS://Example.com/A Https://b.example/C");
+    let upper = e.link_at(vp(0, 3)).expect("an upper-case scheme");
+    assert_eq!(upper.target, "HTTPS://Example.com/A");
+    let mixed = e.link_at(vp(0, 25)).expect("a mixed-case scheme");
+    assert_eq!(mixed.target, "Https://b.example/C");
+    assert_eq!(mixed.kind, LinkKind::Url);
+}
+
+#[test]
 fn rf_pan_11_windows_path_is_detected() {
     let mut e = engine(60, 3);
     e.feed(b"error at C:\\src\\main.rs:12:5");

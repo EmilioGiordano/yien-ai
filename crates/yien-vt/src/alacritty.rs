@@ -34,7 +34,7 @@ const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 1;
 
 const LINK_PATTERN: &str = concat!(
-    r#"(?:https?://|file:|mailto:|ssh:|git://|ftp://)[^\x00-\x1F\x7F-\x9F<>"\s{}\^`\\]+"#,
+    r#"(?i:https?://|file:|mailto:|ssh:|git://|ftp://)[^\x00-\x1F\x7F-\x9F<>"\s{}\^`\\]+"#,
     r#"|[A-Za-z]:[\\/][^\x00-\x1F<>"\s|?*:]+"#,
 );
 
