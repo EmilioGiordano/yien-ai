@@ -5,7 +5,8 @@
 //! pipe that receives Claude Code hook events ([`hook_pipe`]), the DLL search
 //! restriction ([`dll_search`]) and the file store for the saved session
 //! ([`state_store`]), and the toast, taskbar badge and flash that call the
-//! user back to the window ([`attention`], [`badge`]).
+//! user back to the window ([`attention`], [`badge`]), and the claim that
+//! keeps one YIEN per data dir ([`single_instance`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -22,6 +23,7 @@ pub mod dll_search;
 pub mod hook_pipe;
 mod logging;
 pub mod paths;
+pub mod single_instance;
 pub mod state_store;
 
 pub use logging::{LogError, LogGuard, init_logging, init_logging_with};

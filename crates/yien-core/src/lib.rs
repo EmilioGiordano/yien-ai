@@ -35,6 +35,7 @@ mod launch;
 mod pane;
 mod persist;
 mod report;
+mod resume;
 mod service;
 mod shell;
 mod workspace;

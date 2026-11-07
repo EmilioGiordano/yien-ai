@@ -24,8 +24,8 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND, ReadFile,
@@ -393,7 +393,7 @@ fn event() -> io::Result<OwnedHandle> {
 }
 
 /// A self-relative security descriptor allocated by the OS.
-struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct SecurityDescriptor(pub(crate) PSECURITY_DESCRIPTOR);
 
 // SAFETY: the descriptor is immutable after creation and freed only on drop.
 unsafe impl Send for SecurityDescriptor {}
@@ -407,8 +407,9 @@ impl Drop for SecurityDescriptor {
 }
 
 /// A DACL with one entry: full access for the current user (RNF-11). `P`
-/// blocks inherited entries.
-fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
+/// blocks inherited entries. The owner is the user too: left out, an
+/// elevated token would make it BUILTIN\Administrators.
+pub(crate) fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
     let sid = current_user_sid()?;
     if !sid
         .bytes()
@@ -419,7 +420,7 @@ fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
             code: 0,
         });
     }
-    let sddl = wide(&format!("D:P(A;;GA;;;{sid})"));
+    let sddl = wide(&format!("O:{sid}D:P(A;;GA;;;{sid})"));
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: `sddl` is NUL-terminated; `descriptor` is a valid out pointer;
     // the size out pointer may be null.
@@ -440,7 +441,19 @@ fn user_only_descriptor() -> Result<SecurityDescriptor, HookPipeError> {
 }
 
 /// The current process user's SID, as `S-1-5-21-...`.
-fn current_user_sid() -> Result<String, HookPipeError> {
+pub(crate) fn current_user_sid() -> Result<String, HookPipeError> {
+    token_sid(TokenUser)
+}
+
+/// The owner this process's token gives the objects it creates without
+/// naming one: the user, or BUILTIN\Administrators (`S-1-5-32-544`) when
+/// elevated.
+pub(crate) fn current_default_owner_sid() -> Result<String, HookPipeError> {
+    token_sid(TokenOwner)
+}
+
+/// One SID of this process's token (`TokenUser` or `TokenOwner`), as text.
+fn token_sid(class: TOKEN_INFORMATION_CLASS) -> Result<String, HookPipeError> {
     let mut token: HANDLE = null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing;
     // `token` is a valid out pointer.
@@ -452,17 +465,17 @@ fn current_user_sid() -> Result<String, HookPipeError> {
 
     let mut len = 0u32;
     // SAFETY: a null buffer of length 0 only asks for the size needed.
-    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut len) };
+    unsafe { GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut len) };
     if len == 0 {
         return Err(last_os_error("GetTokenInformation"));
     }
-    // u64 cells keep the TOKEN_USER at the start suitably aligned.
+    // u64 cells keep the TOKEN_USER or TOKEN_OWNER at the start aligned.
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: `buf` holds at least `len` bytes.
     let ok = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
+            class,
             buf.as_mut_ptr().cast(),
             len,
             &mut len,
@@ -471,9 +484,15 @@ fn current_user_sid() -> Result<String, HookPipeError> {
     if ok == 0 {
         return Err(last_os_error("GetTokenInformation"));
     }
-    // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points
-    // inside `buf`, which outlives every use below.
-    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let sid = if class == TokenOwner {
+        // SAFETY: on success the buffer starts with a TOKEN_OWNER whose SID
+        // points inside `buf`, which outlives every use below.
+        unsafe { (*buf.as_ptr().cast::<TOKEN_OWNER>()).Owner }
+    } else {
+        // SAFETY: on success the buffer starts with a TOKEN_USER whose SID
+        // points inside `buf`, which outlives every use below.
+        unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    };
 
     let mut text: *mut u16 = null_mut();
     // SAFETY: `sid` is valid; `text` is an out pointer freed below.

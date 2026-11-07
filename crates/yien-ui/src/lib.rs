@@ -20,6 +20,7 @@ mod layout;
 mod matcher;
 mod model;
 mod palette;
+mod region;
 mod shell;
 mod terminal;
 mod theme;

@@ -276,6 +276,7 @@ impl Workspace {
                     signal_lost: false,
                     visible: false,
                     seen: false,
+                    standin: None,
                 },
             );
             fx.push(Effect::Spawn {
@@ -549,6 +550,30 @@ mod tests {
                 _ => None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn rf_esp_06_a_new_tab_runs_on_the_main_checkout_without_a_worktree() {
+        let mut ws = Workspace::new();
+        let new_project = Command::NewProject {
+            root: ROOT.into(),
+            name: None,
+        };
+        ws.apply(new_project, &resolve).unwrap();
+        let project = ws.projects[0].id;
+        let new_tab = Command::NewTab {
+            project,
+            name: None,
+            profile: None,
+        };
+        let fx = ws.apply(new_tab, &resolve).unwrap();
+        let pane = first_spawn(&fx);
+        assert_eq!(spawn_of(&fx, pane).1, ROOT);
+        let saved = ws.to_session();
+        let tab = &saved.projects[0].tabs[1];
+        assert_eq!(tab.dir, ROOT);
+        assert!(tab.worktree.is_none());
+        assert!(tab.panes.iter().all(|p| p.cwd == ROOT));
     }
 
     #[test]
