@@ -10,6 +10,11 @@ use crate::model::{LayoutRecord, SessionSnapshot, TabRecord};
 /// How far a split's ratios may drift from summing to 1 (f32 resizes accumulate error).
 pub const RATIO_EPSILON: f32 = 1e-3;
 
+/// The highest project, tab or pane id a snapshot may hold. The core numbers new
+/// ids after the highest restored one, so a huge id from a damaged or edited file
+/// would exhaust the id space; real sessions stay far below this.
+pub const MAX_ID: u64 = u32::MAX as u64;
+
 /// One broken invariant.
 ///
 /// ```
@@ -24,6 +29,9 @@ pub enum Problem {
         /// The version found.
         found: u32,
     },
+    /// A project, tab or pane id above [`MAX_ID`].
+    #[error("id {0} is above the highest id YIEN uses")]
+    IdTooLarge(u64),
     /// Two projects share an id.
     #[error("project id {} appears more than once", .0.get())]
     DuplicateProject(ProjectId),
@@ -102,6 +110,20 @@ pub fn validate(snapshot: &SessionSnapshot) -> Result<(), Vec<Problem>> {
     let mut projects = HashSet::new();
     let mut tabs = HashSet::new();
     let mut panes = HashSet::new();
+    let mut check_id = |id: u64| {
+        if id > MAX_ID {
+            problems.push(Problem::IdTooLarge(id));
+        }
+    };
+    for project in &snapshot.projects {
+        check_id(project.id.get());
+        for tab in &project.tabs {
+            check_id(tab.id.get());
+            for pane in &tab.panes {
+                check_id(pane.id.get());
+            }
+        }
+    }
     for project in &snapshot.projects {
         if !projects.insert(project.id) {
             problems.push(Problem::DuplicateProject(project.id));
@@ -438,6 +460,20 @@ mod tests {
             problems(&s),
             vec![Problem::SelectedTabMissing(TabId::new(9))]
         );
+    }
+
+    #[test]
+    fn ids_above_the_cap_are_reported() {
+        let mut s = snapshot(vec![(1, vec![two_pane_tab(2, 3, 4)])]);
+        assert_eq!(validate(&s), Ok(()));
+        s.projects[0].id = ProjectId::new(u64::MAX);
+        s.projects[0].tabs[0].id = TabId::new(MAX_ID + 1);
+        let p = problems(&s);
+        assert!(p.contains(&Problem::IdTooLarge(u64::MAX)), "{p:?}");
+        assert!(p.contains(&Problem::IdTooLarge(MAX_ID + 1)), "{p:?}");
+        let mut s = snapshot(vec![(MAX_ID, vec![two_pane_tab(2, 3, MAX_ID - 1)])]);
+        s.projects[0].tabs[0].focused = PaneId::new(3);
+        assert_eq!(validate(&s), Ok(()));
     }
 
     #[test]
