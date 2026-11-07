@@ -83,7 +83,12 @@ pub(crate) fn workspace() -> Result<WorkspaceView, ViewError> {
                     Some("copy/h1"),
                     &[("codex", "Codex", Working)],
                 ),
-                ids.tab("main", website, Some("main"), &[("pwsh", "PowerShell", Idle)]),
+                ids.tab(
+                    "main",
+                    website,
+                    Some("main"),
+                    &[("pwsh", "PowerShell", Idle)],
+                ),
             ],
         ),
         project(
@@ -135,6 +140,9 @@ mod tests {
         assert_eq!(view.tab_count(), 7);
         assert_eq!(view.pane_count(), 9);
         assert_eq!(view.needs_you_panes(), 2);
-        assert_eq!(view.selected_tab().map(|t| t.name.as_str()), Some("hero-knot"));
+        assert_eq!(
+            view.selected_tab().map(|t| t.name.as_str()),
+            Some("hero-knot")
+        );
     }
 }

@@ -304,7 +304,9 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(id, cx)))
             .child(chevron)
-            .when(waiting > 0, |head| head.child(glyph(AgentState::NeedsYou, &t)))
+            .when(waiting > 0, |head| {
+                head.child(glyph(AgentState::NeedsYou, &t))
+            })
             .child(
                 div()
                     .min_w_0()
@@ -430,7 +432,9 @@ impl Shell {
                 .items_center()
                 .justify_center()
                 .text_color(t.muted)
-                .when_some(self.fonts.display.clone(), |d, family| d.font_family(family))
+                .when_some(self.fonts.display.clone(), |d, family| {
+                    d.font_family(family)
+                })
                 .text_size(px(18.0))
                 .child("No tab is open");
         };

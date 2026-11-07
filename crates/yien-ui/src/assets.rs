@@ -30,12 +30,18 @@ const OWN: [(&str, &[u8]); 11] = [
         "yien/state-error.svg",
         include_bytes!("../assets/state-error.svg"),
     ),
-    ("yien/state-done.svg", include_bytes!("../assets/state-done.svg")),
+    (
+        "yien/state-done.svg",
+        include_bytes!("../assets/state-done.svg"),
+    ),
     (
         "yien/state-working.svg",
         include_bytes!("../assets/state-working.svg"),
     ),
-    ("yien/state-idle.svg", include_bytes!("../assets/state-idle.svg")),
+    (
+        "yien/state-idle.svg",
+        include_bytes!("../assets/state-idle.svg"),
+    ),
 ];
 
 /// The glyph for a state. Its shape tells the state apart, not only its colour.

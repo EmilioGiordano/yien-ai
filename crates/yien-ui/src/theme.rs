@@ -221,6 +221,9 @@ mod tests {
         assert_eq!(ThemeKind::Sumi.toggled(), ThemeKind::Washi);
         assert_eq!(ThemeKind::Washi.toggled().toggled(), ThemeKind::Washi);
         assert_eq!(Theme::of(ThemeKind::Washi).kind, ThemeKind::Washi);
-        assert_ne!(Theme::of(ThemeKind::Sumi).bg, Theme::of(ThemeKind::Washi).bg);
+        assert_ne!(
+            Theme::of(ThemeKind::Sumi).bg,
+            Theme::of(ThemeKind::Washi).bg
+        );
     }
 }

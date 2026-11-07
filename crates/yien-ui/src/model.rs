@@ -469,7 +469,10 @@ mod tests {
         let view = WorkspaceView::new(vec![project(1, vec![]), project(2, vec![tab(7, &[Idle])])])
             .unwrap();
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(7)));
-        assert_eq!(view.selected_project().map(|p| p.id), Some(ProjectId::new(2)));
+        assert_eq!(
+            view.selected_project().map(|p| p.id),
+            Some(ProjectId::new(2))
+        );
     }
 
     #[test]
@@ -520,8 +523,8 @@ mod tests {
 
     #[test]
     fn rf_atn_03_nobody_waiting_counts_zero() {
-        let view = WorkspaceView::new(vec![project(1, vec![tab(1, &[Working, Done, Error])])])
-            .unwrap();
+        let view =
+            WorkspaceView::new(vec![project(1, vec![tab(1, &[Working, Done, Error])])]).unwrap();
         assert_eq!(view.needs_you_panes(), 0);
         assert_eq!(view.needs_you_tabs(), 0);
     }
@@ -529,10 +532,16 @@ mod tests {
     #[test]
     fn selecting_a_tab_in_another_project_moves_the_project() {
         let mut view = demo();
-        assert_eq!(view.selected_project().map(|p| p.id), Some(ProjectId::new(1)));
+        assert_eq!(
+            view.selected_project().map(|p| p.id),
+            Some(ProjectId::new(1))
+        );
         assert!(view.select_tab(TabId::new(4)));
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(4)));
-        assert_eq!(view.selected_project().map(|p| p.id), Some(ProjectId::new(2)));
+        assert_eq!(
+            view.selected_project().map(|p| p.id),
+            Some(ProjectId::new(2))
+        );
     }
 
     #[test]
@@ -584,8 +593,11 @@ mod tests {
         let err = WorkspaceView::new(vec![project(1, vec![]), project(1, vec![])]).unwrap_err();
         assert_eq!(err, ViewError::DuplicateProject(ProjectId::new(1)));
 
-        let err = WorkspaceView::new(vec![project(1, vec![tab(1, &[Idle])]), project(2, vec![tab(1, &[Idle])])])
-            .unwrap_err();
+        let err = WorkspaceView::new(vec![
+            project(1, vec![tab(1, &[Idle])]),
+            project(2, vec![tab(1, &[Idle])]),
+        ])
+        .unwrap_err();
         assert_eq!(err, ViewError::DuplicateTab(TabId::new(1)));
 
         let mut clash = tab(2, &[Idle]);
@@ -620,7 +632,10 @@ mod tests {
     #[test]
     fn pane_rects_cover_the_area_in_tree_order() {
         let mut t = tab(1, &[NeedsYou, Idle]);
-        let below = t.layout.split(t.panes[1].leaf, Orientation::Vertical).unwrap();
+        let below = t
+            .layout
+            .split(t.panes[1].leaf, Orientation::Vertical)
+            .unwrap();
         t.panes.push(pane(199, below, Working));
         let rects = t.pane_rects();
         let ids: Vec<u64> = rects.iter().map(|(p, _)| p.id.get()).collect();
