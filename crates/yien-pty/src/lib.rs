@@ -329,6 +329,14 @@ pub enum PtyError {
         #[source]
         source: BoxError,
     },
+    /// The program is a batch file (`.cmd`, `.bat`) and an argument has a
+    /// character `cmd.exe` would interpret, so it was not started. Without
+    /// that argument it may start.
+    #[error("{program} is a batch file and an argument has a character cmd.exe would interpret")]
+    UnsafeBatchArgument {
+        /// The batch file found for the program.
+        program: String,
+    },
     /// The PTY opened but its pipes or threads could not be set up.
     #[error("could not set up the pseudo terminal")]
     Setup(#[source] BoxError),

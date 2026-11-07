@@ -339,6 +339,30 @@ mod pipe {
     }
 
     #[test]
+    fn a_batch_file_claude_starts_without_settings_its_path_cannot_carry() {
+        let mut hooks = working_hooks();
+        hooks.settings_dir = hooks.settings_dir.join("John (Work)");
+        let mut h = Harness::start(Some(hooks));
+        h.backend.batch_programs(true);
+        let (_, pane, child) = h.project(Some("claude"));
+        let message = h.wait_for(|m| match m {
+            CoreMsg::Error {
+                pane: Some(p),
+                message,
+            } if *p == pane => Some(message.clone()),
+            _ => None,
+        });
+        assert!(message.contains("batch file"), "{message}");
+        assert!(message.contains("without the red mark"), "{message}");
+        let args = args(&child);
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[0], "--session-id");
+        assert_eq!(env(&child, HOOK_TOKEN_ENV).as_deref(), Some(""));
+        let info = h.info(pane, |p| p.signal_lost);
+        assert!(info.running);
+    }
+
+    #[test]
     fn rf_atn_01_a_permission_request_turns_the_pane_red_and_answering_clears_it() {
         let mut h = Harness::start(Some(working_hooks()));
         let (_, pane, child) = h.project(Some("claude"));

@@ -121,7 +121,7 @@ fn is_batch(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
-fn batch_unsafe(arg: &OsStr) -> bool {
+pub(crate) fn batch_unsafe(arg: &OsStr) -> bool {
     arg.to_string_lossy().contains(BATCH_UNSAFE)
 }
 

@@ -63,6 +63,8 @@ pub(crate) enum PaneEvent {
     /// The program could not start or can no longer be shown; the actor
     /// still runs and can relaunch it.
     Failed(String),
+    /// Something the user should know about a program that runs.
+    Notice(String),
     /// The actor itself died; a relaunch starts a new one.
     Crashed,
     Selection(Option<String>),
@@ -642,6 +644,12 @@ impl Workspace {
             }
             PaneEvent::Selection(text) => {
                 fx.push(Effect::Emit(CoreMsg::SelectionText { pane, text }));
+            }
+            PaneEvent::Notice(message) => {
+                fx.push(Effect::Emit(CoreMsg::Error {
+                    pane: Some(pane),
+                    message,
+                }));
             }
             PaneEvent::Crashed => {
                 p.running = false;

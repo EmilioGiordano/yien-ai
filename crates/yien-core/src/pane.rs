@@ -407,25 +407,39 @@ impl Actor {
             None
         };
         // A relaunch replaces the token, so the old program's hooks are refused.
-        let hooks = self.ctx.hooks.as_deref().filter(|_| self.plan.hooks);
-        let token = hooks.and_then(|h| h.registry.issue(self.id).ok());
+        let hooks = self.ctx.hooks.clone().filter(|_| self.plan.hooks);
+        let token = hooks.as_ref().and_then(|h| h.registry.issue(self.id).ok());
         self.hook_serial = token.as_ref().map(|t| t.serial());
         let fill = Fill {
             pane: self.id,
             session_id: session_id.as_deref(),
-            hooks: hooks.zip(token.as_ref()).map(|(h, token)| HookFill {
-                settings_file: &h.settings_file,
-                pipe: &h.pipe,
-                token: token.as_str(),
-            }),
+            hooks: hooks
+                .as_deref()
+                .zip(token.as_ref())
+                .map(|(h, token)| HookFill {
+                    settings_file: &h.settings_file,
+                    pipe: &h.pipe,
+                    token: token.as_str(),
+                }),
         };
         self.hooks_missing = self.plan.hooks && fill.hooks.is_none();
-        let spec = self.plan.spec(&fill, &self.cwd, size.cols, size.rows);
-        if let Some(id) = session_id {
-            self.report(PaneEvent::SessionId(id));
+        if let Some(id) = &session_id {
+            self.report(PaneEvent::SessionId(id.clone()));
         }
-        let backend = Arc::clone(&self.ctx.backend);
-        let spawned = tokio::task::spawn_blocking(move || backend.spawn(spec)).await;
+        let mut spawned = self.spawn(&fill, size.cols, size.rows).await;
+        if let (Some(h), Ok(Err(PtyError::UnsafeBatchArgument { .. }))) = (&hooks, &spawned) {
+            // The settings path has a character a batch file cannot be
+            // given safely; the program still starts without it.
+            h.registry.revoke(self.id);
+            self.hook_serial = None;
+            self.hooks_missing = true;
+            self.report(PaneEvent::Notice(batch_without_hooks(&self.plan)));
+            let fill = Fill {
+                hooks: None,
+                ..fill
+            };
+            spawned = self.spawn(&fill, size.cols, size.rows).await;
+        }
         let session = match spawned {
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
@@ -467,6 +481,18 @@ impl Actor {
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
+    }
+
+    /// Spawns the plan filled with `fill`, off the runtime's threads.
+    async fn spawn(
+        &self,
+        fill: &Fill<'_>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Result<yien_pty::PtySession, PtyError>, tokio::task::JoinError> {
+        let spec = self.plan.spec(fill, &self.cwd, cols, rows);
+        let backend = Arc::clone(&self.ctx.backend);
+        tokio::task::spawn_blocking(move || backend.spawn(spec)).await
     }
 
     /// Once the pipe has refused an event, the queued ones are older than
@@ -819,8 +845,26 @@ fn write_all(control: &PtyControl, queue: &mut VecDeque<Vec<u8>>) -> Result<(), 
     Ok(())
 }
 
+/// Why a pane started its batch-file program without the hook settings.
+fn batch_without_hooks(plan: &LaunchPlan) -> String {
+    format!(
+        "{} is installed as a batch file (.cmd or .bat), and the path of YIEN's \
+         hook settings has a character such a file cannot be given safely, \
+         one of ( ) & ! ^ % \" | < >. It runs without the red mark. Installing \
+         it as an .exe, or moving YIEN's data folder to a plain path, brings \
+         the red mark back.",
+        plan.program
+    )
+}
+
 fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
     match error {
+        PtyError::UnsafeBatchArgument { .. } => format!(
+            "Could not start {}: it is a batch file (.cmd or .bat) and one of its \
+             arguments has a character cmd.exe would interpret. Remove it from the \
+             profile's arguments, or install the program as an .exe.",
+            plan.program
+        ),
         PtyError::Spawn { .. } => format!(
             "Could not start {}. Check that it is installed and on PATH, then relaunch the pane.",
             plan.program
