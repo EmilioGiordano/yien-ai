@@ -201,6 +201,11 @@ fn rn_02_without_the_pipe_claude_launches_with_signal_lost_and_no_settings() {
         _ => None,
     });
     assert!(message.contains("state detection is off"), "{message}");
+    assert!(
+        message.ends_with(". Claude panes still run, without the red mark."),
+        "{message}"
+    );
+    assert!(!message.contains("  "), "{message}");
     let (_, pane, child) = h.project(Some("claude"));
     assert_eq!(child.spec().program, "claude");
     let args = args(&child);

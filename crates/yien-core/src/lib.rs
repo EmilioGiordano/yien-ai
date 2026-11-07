@@ -293,7 +293,13 @@ pub struct CoreHandle {
     commands: mpsc::Sender<ClientMsg>,
     panes: Links,
     /// Keeps the hook pipe open while any handle lives.
-    #[cfg_attr(not(all(test, windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(all(test, windows)),
+        allow(
+            dead_code,
+            reason = "held for its Drop: closes the pipe, removes the settings file"
+        )
+    )]
     hooks: Option<Arc<hooks::Hooks>>,
     _runtime: Arc<RuntimeGuard>,
 }

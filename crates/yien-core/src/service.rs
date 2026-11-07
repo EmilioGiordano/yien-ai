@@ -110,7 +110,8 @@ pub(crate) async fn run(
             .emit(CoreMsg::Error {
                 pane: None,
                 message: format!(
-                    "Claude Code state detection is off: {reason}. Claude panes still run,                      without the red mark."
+                    "Claude Code state detection is off: {reason}. \
+                     Claude panes still run, without the red mark."
                 ),
             })
             .await;
