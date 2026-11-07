@@ -1134,6 +1134,8 @@ impl Shell {
 
     fn toggle_tab_muted(&mut self, _: &ToggleTabMuted, _: &mut Window, cx: &mut Context<Self>) {
         let Some((tab, muted)) = self.workspace.selected_tab().map(|t| (t.id, !t.muted)) else {
+            self.notice = Some("There is no tab to mute.".to_owned());
+            cx.notify();
             return;
         };
         self.notice = Some(mute_notice(muted, "This tab's notifications"));
