@@ -13,7 +13,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::mpsc;
 use yien_proto::{
-    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId, TabId,
+    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
+    SHELL_PROFILE, TabId,
 };
 
 use crate::actions::*;
@@ -50,8 +51,6 @@ const RESIZE_STEP: f32 = 0.05;
 const MAX_BATCH: usize = 1024;
 /// The profile the Claude shortcuts start.
 const CLAUDE_PROFILE: &str = "claude";
-/// The profile a plain split or tab starts.
-const SHELL_PROFILE: &str = "shell";
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,

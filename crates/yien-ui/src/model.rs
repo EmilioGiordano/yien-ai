@@ -7,8 +7,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo, TabGit, TabId,
-    TabInfo, same_folder,
+    LayoutNode, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SHELL_PROFILE,
+    TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -172,9 +172,6 @@ impl PaneView {
         active || (self.running && agent)
     }
 }
-
-/// The id of the profile that runs the user's shell.
-const SHELL_PROFILE: &str = "shell";
 
 /// One tab: a working directory, maybe a branch, and its panes.
 #[derive(Debug, Clone, PartialEq)]

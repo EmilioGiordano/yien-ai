@@ -40,6 +40,14 @@ pub use path::{folder_key, same_folder};
 /// ```
 pub const PROTO_VERSION: u32 = 6;
 
+/// The id of the built-in profile that runs the user's shell; every other
+/// profile runs an agent.
+///
+/// ```
+/// assert_eq!(yien_proto::ProfileId::new(yien_proto::SHELL_PROFILE).as_str(), "shell");
+/// ```
+pub const SHELL_PROFILE: &str = "shell";
+
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*

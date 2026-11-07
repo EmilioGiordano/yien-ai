@@ -10,8 +10,7 @@ use yien_pty::SpawnSpec;
 use crate::CoreError;
 use crate::shell::ShellCommand;
 
-/// The id of the built-in shell profile.
-pub(crate) const SHELL_PROFILE: &str = "shell";
+pub(crate) use yien_proto::SHELL_PROFILE;
 
 /// The placeholder for a session id YIEN assigns before launch.
 const NEW_UUID: &str = "{new_uuid}";
