@@ -56,6 +56,7 @@ pub(crate) fn folders(snapshot: &SessionSnapshot) -> BTreeSet<String> {
         out.insert(project.root.clone());
         for tab in &project.tabs {
             out.insert(tab.dir.clone());
+            out.extend(tab.worktree.clone());
             out.extend(tab.panes.iter().map(|p| p.cwd.clone()));
         }
     }
@@ -111,7 +112,10 @@ impl Workspace {
                 Some(_) => tab.kept_branch.clone(),
                 None => tab.branch.clone(),
             },
-            worktree: None,
+            worktree: match tab.kept_dir {
+                Some(_) => tab.kept_worktree.clone(),
+                None => tab.worktree.clone(),
+            },
             archived: false,
             muted: tab.muted,
             name: tab.custom_name.clone(),
@@ -286,6 +290,12 @@ impl Workspace {
             Some(_) => (None, record.branch.clone()),
             None => (record.branch.clone(), None),
         };
+        // A tab that fell back to another folder is not on its worktree, so
+        // closing it must not offer to remove that worktree.
+        let (worktree, kept_worktree) = match kept_dir {
+            Some(_) => (None, record.worktree.clone()),
+            None => (record.worktree.clone(), None),
+        };
         self.tabs.push(Tab {
             id: record.id,
             project: project.id,
@@ -304,6 +314,8 @@ impl Workspace {
             branch,
             kept_branch,
             muted: record.muted,
+            worktree,
+            kept_worktree,
         });
         true
     }

@@ -4,6 +4,7 @@
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use yien_proto::PaneId;
 use yien_pty::PtyCloser;
 
 #[derive(Debug, Default)]
@@ -14,7 +15,8 @@ pub(crate) struct Consoles {
 
 #[derive(Debug, Default)]
 struct State {
-    open: Vec<PtyCloser>,
+    /// Each session not known to be closed, with the pane it runs in.
+    open: Vec<(PaneId, PtyCloser)>,
     /// Spawns under way: their sessions are not registered yet.
     spawning: usize,
     /// Sessions registered after the shut, already closing.
@@ -36,6 +38,7 @@ pub(crate) struct Late {
 #[derive(Debug)]
 pub(crate) struct Spawning {
     consoles: Arc<Consoles>,
+    pane: PaneId,
 }
 
 impl Consoles {
@@ -45,7 +48,7 @@ impl Consoles {
 
     /// Announces a spawn. `None` once shut: no program may start while the
     /// app quits.
-    pub fn begin(self: &Arc<Self>) -> Option<Spawning> {
+    pub fn begin(self: &Arc<Self>, pane: PaneId) -> Option<Spawning> {
         let mut state = self.state();
         if state.shut {
             return None;
@@ -53,6 +56,7 @@ impl Consoles {
         state.spawning += 1;
         Some(Spawning {
             consoles: Arc::clone(self),
+            pane,
         })
     }
 
@@ -62,9 +66,22 @@ impl Consoles {
     pub fn shut(&self) -> Vec<PtyCloser> {
         let mut state = self.state();
         state.shut = true;
-        let mut open = std::mem::take(&mut state.open);
-        open.retain(|c| !c.is_closed());
-        open
+        let open = std::mem::take(&mut state.open);
+        open.into_iter()
+            .map(|(_, c)| c)
+            .filter(|c| !c.is_closed())
+            .collect()
+    }
+
+    /// The sessions of `panes` not known to be closed, so a worktree is
+    /// removed only once the programs that ran in it have ended.
+    pub fn closers_of(&self, panes: &[PaneId]) -> Vec<PtyCloser> {
+        self.state()
+            .open
+            .iter()
+            .filter(|(pane, c)| panes.contains(pane) && !c.is_closed())
+            .map(|(_, c)| c.clone())
+            .collect()
     }
 
     /// Waits at most `timeout` for the spawns under way at the shut, and
@@ -102,8 +119,8 @@ impl Spawning {
             state.late.push(closer);
             return;
         }
-        state.open.retain(|c| !c.is_closed());
-        state.open.push(closer);
+        state.open.retain(|(_, c)| !c.is_closed());
+        state.open.push((self.pane, closer));
     }
 }
 
@@ -123,7 +140,7 @@ mod tests {
     use super::*;
 
     fn spawn(backend: &FakePty, consoles: &Arc<Consoles>) -> PtySession {
-        let spawning = consoles.begin().unwrap();
+        let spawning = consoles.begin(PaneId::new(1)).unwrap();
         let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
         spawning.add(session.control().closer());
         session
@@ -142,7 +159,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(consoles.shut().len(), 1);
-        assert!(consoles.begin().is_none());
+        assert!(consoles.begin(PaneId::new(1)).is_none());
         assert!(consoles.shut().is_empty());
     }
 
@@ -150,7 +167,7 @@ mod tests {
     fn a_spawn_under_way_at_the_shut_is_waited_for_and_closed() {
         let backend = FakePty::new();
         let consoles = Arc::new(Consoles::default());
-        let spawning = consoles.begin().unwrap();
+        let spawning = consoles.begin(PaneId::new(1)).unwrap();
         assert!(consoles.shut().is_empty());
 
         let waiter = {
@@ -171,9 +188,28 @@ mod tests {
     }
 
     #[test]
+    fn closers_are_found_by_pane_until_closed() {
+        let backend = FakePty::new();
+        let consoles = Arc::new(Consoles::default());
+        let spawning = consoles.begin(PaneId::new(7)).unwrap();
+        let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
+        spawning.add(session.control().closer());
+        let _other = spawn(&backend, &consoles);
+
+        assert_eq!(consoles.closers_of(&[PaneId::new(7)]).len(), 1);
+        assert!(consoles.closers_of(&[PaneId::new(9)]).is_empty());
+        session
+            .control()
+            .closer()
+            .close(Duration::from_secs(1))
+            .unwrap();
+        assert!(consoles.closers_of(&[PaneId::new(7)]).is_empty());
+    }
+
+    #[test]
     fn waiting_for_a_spawn_that_never_ends_is_bounded() {
         let consoles = Arc::new(Consoles::default());
-        let _spawning = consoles.begin().unwrap();
+        let _spawning = consoles.begin(PaneId::new(1)).unwrap();
         consoles.shut();
         let start = Instant::now();
         let late = consoles.wait_spawns(Duration::from_millis(100));

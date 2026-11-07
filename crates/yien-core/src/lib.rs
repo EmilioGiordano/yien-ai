@@ -38,6 +38,7 @@ mod report;
 mod service;
 mod shell;
 mod workspace;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -223,6 +224,9 @@ pub enum CoreError {
     /// A project folder that is not a folder.
     #[error("{0} is not a folder; choose an existing folder for the project")]
     NotADirectory(String),
+    /// A worktree command named a tab that is not on a worktree of its own.
+    #[error("tab {} is not on a worktree of its own", .0.get())]
+    NoWorktree(TabId),
 }
 
 /// Why a message did not reach the core. The message is handed back.
