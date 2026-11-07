@@ -10,6 +10,7 @@
 
 mod actions;
 mod assets;
+mod attention;
 mod bridge;
 mod catalog;
 mod fonts;
@@ -30,6 +31,7 @@ use gpui_kit::{AppContext, WindowBounds, WindowOptions, px, size};
 use tokio::sync::mpsc;
 use yien_proto::CoreMsg;
 
+pub use attention::{OsAttention, ToastText};
 pub use bridge::{CoreClient, Refused};
 pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
 
@@ -42,17 +44,22 @@ use crate::theme::{Theme, ThemeKind, sync_component_theme};
 /// to the core and `events` brings its events back; closing the window quits,
 /// which drops `client` and lets the core end its panes.
 ///
+/// `attention` shows toasts and the taskbar badge when an agent needs the
+/// user while the window is in the background (RF-ATN-09, -10).
+///
 /// `on_quit` runs once when the app quits, including at Windows logoff or
 /// shutdown, where gpui ends the process without returning from `run`.
 ///
 /// ```no_run
 /// # fn connect() -> (Box<dyn yien_ui::CoreClient>, tokio::sync::mpsc::Receiver<yien_proto::CoreMsg>) { unimplemented!() }
+/// # fn os() -> std::rc::Rc<dyn yien_ui::OsAttention> { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, || println!("bye"));
+/// yien_ui::run(client, events, os(), || println!("bye"));
 /// ```
 pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
+    attention: Rc<dyn OsAttention>,
     on_quit: impl FnOnce() + 'static,
 ) {
     gpui_kit::application()
@@ -79,7 +86,7 @@ pub fn run(
             };
             let link = Rc::new(Link::new(client));
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| Shell::new(link, events, theme, fonts, window, cx))
+                cx.new(|cx| Shell::new(link, events, theme, fonts, attention, window, cx))
             });
             match opened {
                 Ok(_) => cx.activate(true),

@@ -7,8 +7,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SHELL_PROFILE,
-    TabGit, TabId, TabInfo, same_folder,
+    LayoutNode, NeedsReason, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
+    SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -82,6 +82,13 @@ impl From<yien_proto::AgentState> for AgentState {
     }
 }
 
+fn needs_reason(state: yien_proto::AgentState) -> Option<NeedsReason> {
+    match state {
+        yien_proto::AgentState::NeedsYou(reason) => Some(reason),
+        _ => None,
+    }
+}
+
 /// One pane, as its title bar shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneView {
@@ -95,6 +102,8 @@ pub struct PaneView {
     pub profile_id: ProfileId,
     /// What its agent is doing.
     pub state: AgentState,
+    /// Why its agent needs the user, while it does.
+    pub needs_reason: Option<NeedsReason>,
     /// Whether its program is running.
     pub running: bool,
     /// The exit code once it stopped, when the OS reported one.
@@ -118,6 +127,7 @@ impl PaneView {
             profile: String::new(),
             profile_id: ProfileId::new(""),
             state: AgentState::Idle,
+            needs_reason: None,
             running: true,
             exit_code: None,
             exited: false,
@@ -133,6 +143,7 @@ impl PaneView {
             profile: info.profile.clone(),
             profile_id: info.profile_id.clone(),
             state: info.state.into(),
+            needs_reason: needs_reason(info.state),
             running: info.running,
             exit_code: info.exit_code,
             exited: !info.running && info.exit_code.is_some(),
@@ -156,6 +167,7 @@ impl PaneView {
     ///     profile: "Shell".into(),
     ///     profile_id: yien_proto::ProfileId::new("shell"),
     ///     state: AgentState::Idle,
+    ///     needs_reason: None,
     ///     running: true,
     ///     exit_code: None,
     ///     exited: false,
@@ -192,6 +204,8 @@ pub struct TabView {
     pub focused: PaneId,
     /// The pane shown alone, if any (RF-PAN-04).
     pub maximized: Option<PaneId>,
+    /// Its toasts and taskbar flashes are muted (RF-ATN-11).
+    pub muted: bool,
 }
 
 impl TabView {
@@ -205,6 +219,7 @@ impl TabView {
             layout: info.layout.clone(),
             focused: info.focused,
             maximized: info.maximized,
+            muted: info.muted,
         }
     }
 
@@ -256,10 +271,12 @@ pub struct ProjectView {
 ///     tabs: vec![TabInfo {
 ///         id: TabId::new(2), project: ProjectId::new(1), name: "Tab 1".into(), dir: "C:/yien".into(),
 ///         branch: None, layout: LayoutNode::Pane(PaneId::new(3)), focused: PaneId::new(3), maximized: None,
+///         muted: false,
 ///     }],
 ///     panes: vec![],
 ///     active_tab: Some(TabId::new(2)),
 ///     profiles: vec![],
+///     notifications_muted: false,
 /// };
 /// let view = WorkspaceView::from_snapshot(&snapshot);
 /// assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(2)));
@@ -285,6 +302,8 @@ pub struct WorkspaceView {
     last_project: Option<ProjectId>,
     /// The git facts last reported for each tab (RF-CTX-04).
     git: HashMap<TabId, TabGit>,
+    /// Every toast and taskbar flash is muted (RF-ATN-11).
+    notifications_muted: bool,
 }
 
 impl WorkspaceView {
@@ -292,6 +311,7 @@ impl WorkspaceView {
     pub fn from_snapshot(snapshot: &yien_proto::WorkspaceSnapshot) -> Self {
         let mut view = Self {
             profiles: snapshot.profiles.clone(),
+            notifications_muted: snapshot.notifications_muted,
             ..Self::default()
         };
         for project in &snapshot.projects {
@@ -467,6 +487,7 @@ impl WorkspaceView {
             .get_mut(&id)
             .map(|p| {
                 p.state = state.into();
+                p.needs_reason = needs_reason(state);
                 if !p.state.needs_you() {
                     p.needs_you_since = None;
                 }
@@ -489,6 +510,22 @@ impl WorkspaceView {
     /// Every project, in tab-bar order.
     pub fn projects(&self) -> &[ProjectView] {
         &self.projects
+    }
+
+    /// Toasts and flashes were muted or unmuted for every tab.
+    pub fn set_notifications_muted(&mut self, muted: bool) {
+        self.notifications_muted = muted;
+    }
+
+    /// Whether every toast and flash is muted (RF-ATN-11).
+    pub fn notifications_muted(&self) -> bool {
+        self.notifications_muted
+    }
+
+    /// Whether a pane's toasts and flashes are off: all are muted, or its
+    /// tab is (RF-ATN-11). Its red mark and the counter do not change.
+    pub fn alerts_muted(&self, pane: PaneId) -> bool {
+        self.notifications_muted || self.tab_of(pane).is_some_and(|t| t.muted)
     }
 
     /// The profiles a new pane can start with, the shell first.
@@ -818,6 +855,7 @@ mod tests {
             layout: layout(panes),
             focused: PaneId::new(panes[0]),
             maximized: None,
+            muted: false,
         }
     }
 
@@ -869,6 +907,7 @@ mod tests {
             ],
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
+            notifications_muted: false,
         })
     }
 
@@ -1117,6 +1156,7 @@ mod tests {
             panes: vec![],
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
+            notifications_muted: false,
         });
         view.tab_closed(TabId::new(10));
         assert!(view.selected_tab().is_none());
@@ -1334,6 +1374,7 @@ mod tests {
             panes: vec![pane(100, 10, P::Idle)],
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
+            notifications_muted: false,
         });
         assert!(!view.has_no_projects());
         assert_eq!(view.tab_closed(TabId::new(10)), vec![PaneId::new(100)]);

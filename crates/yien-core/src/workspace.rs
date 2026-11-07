@@ -126,6 +126,8 @@ struct Tab {
     branch: Option<String>,
     /// The saved branch that goes with `kept_dir`.
     kept_branch: Option<String>,
+    /// Its toasts and taskbar flashes are muted (RF-ATN-11).
+    muted: bool,
 }
 
 impl Tab {
@@ -181,6 +183,8 @@ pub(crate) struct Workspace {
     active_tab: Option<TabId>,
     window_focused: bool,
     profiles: Vec<ProfileInfo>,
+    /// Every toast and taskbar flash is muted (RF-ATN-11).
+    notifications_muted: bool,
 }
 
 impl Workspace {
@@ -211,6 +215,7 @@ impl Workspace {
             panes: self.panes.iter().map(|(id, p)| pane_info(*id, p)).collect(),
             active_tab: self.active_tab,
             profiles: self.profiles.clone(),
+            notifications_muted: self.notifications_muted,
         }
     }
 
@@ -229,6 +234,7 @@ impl Workspace {
             layout,
             focused: tab.focused,
             maximized: tab.maximized,
+            muted: tab.muted,
         }
     }
 
@@ -372,6 +378,19 @@ impl Workspace {
                 t.custom_name =
                     (!name.is_empty() && name != t.default_name).then(|| name.to_owned());
                 self.emit_tab(tab, &mut fx);
+            }
+            Command::SetTabMuted { tab, muted } => {
+                let t = self.tab_mut(tab)?;
+                if t.muted != muted {
+                    t.muted = muted;
+                    self.emit_tab(tab, &mut fx);
+                }
+            }
+            Command::SetNotificationsMuted { muted } => {
+                if self.notifications_muted != muted {
+                    self.notifications_muted = muted;
+                    fx.push(Effect::Emit(CoreMsg::NotificationsMuted { muted }));
+                }
             }
             Command::NewTab {
                 project,
@@ -585,6 +604,7 @@ impl Workspace {
             kept_dir: None,
             branch: None,
             kept_branch: None,
+            muted: false,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
@@ -1684,6 +1704,33 @@ mod tests {
         let unknown = Command::SetProjectCollapsed {
             project: ProjectId::new(99),
             collapsed: true,
+        };
+        assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
+    #[test]
+    fn rf_atn_11_mutes_are_kept_and_reported_once() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let mute = |muted| Command::SetTabMuted { tab, muted };
+        let fx = run(&mut ws, mute(true));
+        assert!(matches!(emitted(&fx)[..], [CoreMsg::TabUpdated(t)] if t.muted));
+        assert!(run(&mut ws, mute(true)).is_empty());
+        assert!(ws.snapshot().tabs[0].muted);
+        let fx = run(&mut ws, mute(false));
+        assert!(matches!(emitted(&fx)[..], [CoreMsg::TabUpdated(t)] if !t.muted));
+
+        let all = |muted| Command::SetNotificationsMuted { muted };
+        let fx = run(&mut ws, all(true));
+        assert!(matches!(
+            emitted(&fx)[..],
+            [CoreMsg::NotificationsMuted { muted: true }]
+        ));
+        assert!(run(&mut ws, all(true)).is_empty());
+        assert!(ws.snapshot().notifications_muted);
+        let unknown = Command::SetTabMuted {
+            tab: TabId::new(99),
+            muted: true,
         };
         assert!(ws.apply(unknown, &resolve).is_err());
     }

@@ -215,6 +215,19 @@ pub enum Command {
         /// The new name; empty goes back to the automatic name.
         name: String,
     },
+    /// Mutes or unmutes a tab's toasts and taskbar flashes (RF-ATN-11). Its
+    /// red mark, the counter and the badge stay (RF-ATN-16).
+    SetTabMuted {
+        /// The tab.
+        tab: TabId,
+        /// Whether its toasts and flashes are off.
+        muted: bool,
+    },
+    /// Mutes or unmutes every toast and taskbar flash (RF-ATN-11).
+    SetNotificationsMuted {
+        /// Whether toasts and flashes are off.
+        muted: bool,
+    },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
         /// The tab.
@@ -483,6 +496,8 @@ pub struct TabInfo {
     pub focused: PaneId,
     /// The maximized pane, if any (RF-PAN-04).
     pub maximized: Option<PaneId>,
+    /// Its toasts and taskbar flashes are muted (RF-ATN-11).
+    pub muted: bool,
 }
 
 /// A pane as its title bar shows it (RF-PAN-12, RF-PAN-16, RF-PAN-20).
@@ -541,6 +556,8 @@ pub struct WorkspaceSnapshot {
     pub active_tab: Option<TabId>,
     /// The profiles new panes can be started with, the shell first.
     pub profiles: Vec<ProfileInfo>,
+    /// Every toast and taskbar flash is muted (RF-ATN-11).
+    pub notifications_muted: bool,
 }
 
 /// Everything the core tells the UI, in order.
@@ -621,6 +638,12 @@ pub enum CoreMsg {
         /// What git says.
         git: TabGit,
     },
+    /// Toasts and taskbar flashes were muted or unmuted for every tab
+    /// (RF-ATN-11).
+    NotificationsMuted {
+        /// Whether they are off.
+        muted: bool,
+    },
     /// The answer to [`ClientMsg::CopySelection`].
     SelectionText {
         /// The pane.
@@ -682,6 +705,11 @@ mod tests {
                 tab: TabId::new(2),
                 name: "review".into(),
             },
+            Command::SetTabMuted {
+                tab: TabId::new(2),
+                muted: true,
+            },
+            Command::SetNotificationsMuted { muted: true },
             Command::MovePane {
                 pane: PaneId::new(3),
                 target: PaneId::new(4),
@@ -745,6 +773,7 @@ mod tests {
             layout: LayoutNode::Pane(PaneId::new(3)),
             focused: PaneId::new(3),
             maximized: None,
+            muted: true,
         };
         assert_eq!(round_trip(&frame), frame);
         let msgs = [
@@ -777,6 +806,7 @@ mod tests {
                 needs_you_since: None,
                 signal_lost: false,
             }),
+            CoreMsg::NotificationsMuted { muted: true },
             CoreMsg::PaneState {
                 pane: PaneId::new(3),
                 state: AgentState::Error(ErrorReason::UnexpectedExit {

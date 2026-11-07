@@ -4,9 +4,11 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attention;
 mod panic_log;
 
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,10 +66,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Before the window opens, so its taskbar button carries the toasts' app id.
+    let attention = Rc::new(attention::Attention::new());
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
-    yien_ui::run(Box::new(Client(core)), events, move || {
+    yien_ui::run(Box::new(Client(core)), events, attention, move || {
         tracing::info!("yien exiting");
         if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
             tracing::warn!("the session was not saved on quit: {error}");

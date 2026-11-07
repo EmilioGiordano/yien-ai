@@ -66,6 +66,9 @@ pub struct SessionSnapshot {
     pub selected: Selection,
     /// The projects in sidebar order.
     pub projects: Vec<ProjectRecord>,
+    /// Every toast and taskbar flash is muted (RF-ATN-11).
+    #[serde(default)]
+    pub notifications_muted: bool,
 }
 
 impl SessionSnapshot {
@@ -81,6 +84,7 @@ impl SessionSnapshot {
             saved_at,
             selected: Selection::default(),
             projects,
+            notifications_muted: false,
         }
     }
 }
@@ -157,6 +161,7 @@ pub struct ProjectRecord {
 ///     branch: None,
 ///     worktree: None,
 ///     archived: false,
+///     muted: false,
 /// };
 /// assert_eq!(tab.layout.panes(), vec![pane]);
 /// ```
@@ -180,6 +185,9 @@ pub struct TabRecord {
     /// Whether the tab is archived rather than active.
     #[serde(default)]
     pub archived: bool,
+    /// Its toasts and taskbar flashes are muted (RF-ATN-11).
+    #[serde(default)]
+    pub muted: bool,
     /// How the panes are arranged.
     pub layout: LayoutRecord,
     /// Every pane of the tab; exactly the leaves of `layout`.

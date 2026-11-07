@@ -91,6 +91,7 @@ impl Workspace {
                 .map(|t| t.project),
             tab: self.active_tab,
         };
+        snapshot.notifications_muted = self.notifications_muted;
         snapshot
     }
 
@@ -112,6 +113,7 @@ impl Workspace {
             },
             worktree: None,
             archived: false,
+            muted: tab.muted,
             name: tab.custom_name.clone(),
             layout,
             panes,
@@ -165,6 +167,7 @@ impl Workspace {
                 .find(|project| project.id == p)
                 .and_then(|project| project.tabs.first().copied())
         };
+        self.notifications_muted = snapshot.notifications_muted;
         self.active_tab = snapshot
             .selected
             .tab
@@ -300,6 +303,7 @@ impl Workspace {
             kept_dir,
             branch,
             kept_branch,
+            muted: record.muted,
         });
         true
     }
@@ -763,6 +767,22 @@ mod tests {
         assert_eq!(back.to_session(), saved);
         back.apply(rename(""), &resolve).unwrap();
         assert_eq!(back.snapshot().tabs[0].name, "Tab 1");
+    }
+
+    #[test]
+    fn rf_atn_11_mutes_survive_a_restore() {
+        let (mut ws, _) = workspace("shell");
+        let tab = ws.tabs[0].id;
+        ws.apply(Command::SetTabMuted { tab, muted: true }, &resolve)
+            .unwrap();
+        ws.apply(Command::SetNotificationsMuted { muted: true }, &resolve)
+            .unwrap();
+        let saved = ws.to_session();
+        assert!(saved.notifications_muted && saved.projects[0].tabs[0].muted);
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        let snapshot = back.snapshot();
+        assert!(snapshot.notifications_muted && snapshot.tabs[0].muted);
+        assert_eq!(back.to_session(), saved);
     }
 
     #[test]

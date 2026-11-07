@@ -6,7 +6,7 @@ use common::{basic, sample};
 use serde_json::{Map, Value, json};
 use yien_session::{
     CodecError, MemStore, Migration, SCHEMA_VERSION, deserialize, deserialize_with, load,
-    migrate_with, validate,
+    migrate_with, serialize, validate,
 };
 
 const V0: &[u8] = include_bytes!("fixtures/workspace.v0.json");
@@ -86,6 +86,18 @@ fn rf_ses_02_a_v1_file_without_the_optional_fields_still_loads() {
     }
     let bytes = serde_json::to_vec(&doc).unwrap();
     assert_eq!(deserialize(&bytes).unwrap(), basic(1_000));
+}
+
+#[test]
+fn rf_atn_11_mutes_are_saved_and_a_file_without_them_loads_unmuted() {
+    let old = deserialize(V1).unwrap();
+    assert!(!old.notifications_muted);
+    assert!(old.projects[0].tabs.iter().all(|t| !t.muted));
+    let mut muted = sample(1_000);
+    muted.notifications_muted = true;
+    muted.projects[0].tabs[1].muted = true;
+    let bytes = serialize(&muted).unwrap();
+    assert_eq!(deserialize(&bytes).unwrap(), muted);
 }
 
 #[test]
