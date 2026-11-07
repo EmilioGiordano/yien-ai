@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -17,8 +18,8 @@ use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput};
 
 use crate::convert;
-use crate::launch::LaunchPlan;
-use crate::service::Ctx;
+use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::service::{Ctx, HookItem};
 use crate::workspace::PaneEvent;
 
 /// How soon a write refused by a full input queue is tried again. Nothing
@@ -209,6 +210,10 @@ pub(crate) struct PaneSetup {
     /// counts as seen without waiting for the next change.
     pub visible: bool,
     pub seen: bool,
+    /// Hook events for this pane, from the hook pipe.
+    pub hooks: mpsc::Receiver<HookItem>,
+    /// Set by the hook pipe when it had to refuse an event for this pane.
+    pub hooks_lost: Arc<AtomicBool>,
 }
 
 struct Actor {
@@ -229,6 +234,13 @@ struct Actor {
     notice_owed: bool,
     sync: Option<(u64, Instant)>,
     wake_at: Option<Instant>,
+    hooks_lost: Arc<AtomicBool>,
+    /// The profile reports through hooks but this launch has no channel.
+    hooks_missing: bool,
+    /// The "signal lost" mark last reported.
+    signal_lost: bool,
+    /// When the pane entered "needs you", while it is there (RF-ATN-05).
+    needs_since: Option<u64>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -247,6 +259,7 @@ pub(crate) fn spawn(
     }
     let id = setup.id;
     let reports = Arc::clone(&ctx.reports);
+    let hooks = setup.hooks;
     let actor = Actor {
         id,
         plan: setup.plan,
@@ -265,8 +278,12 @@ pub(crate) fn spawn(
         notice_owed: false,
         sync: None,
         wake_at: None,
+        hooks_lost: setup.hooks_lost,
+        hooks_missing: false,
+        signal_lost: false,
+        needs_since: None,
     };
-    let task = tokio::spawn(actor.run(cmds, input));
+    let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
         if let Err(e) = task.await
             && e.is_panic()
@@ -281,6 +298,7 @@ pub(crate) fn spawn(
 enum Wake {
     Cmd(Option<PaneCmd>),
     Input(PaneInput),
+    Hook(HookItem),
     Reader(Option<ReaderMsg>),
     Noticed { owed: bool },
     Timer,
@@ -305,6 +323,7 @@ impl Actor {
         mut self,
         mut cmds: mpsc::Receiver<PaneCmd>,
         mut input: mpsc::Receiver<PaneInput>,
+        mut hooks: mpsc::Receiver<HookItem>,
     ) {
         self.start().await;
         loop {
@@ -319,6 +338,7 @@ impl Actor {
             let wake = tokio::select! {
                 biased;
                 cmd = cmds.recv() => Wake::Cmd(cmd),
+                Some(item) = hooks.recv() => Wake::Hook(item),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
                 room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
@@ -337,10 +357,14 @@ impl Actor {
                 Wake::Cmd(Some(cmd)) => {
                     if matches!(cmd, PaneCmd::Relaunch | PaneCmd::Terminate) {
                         while input.try_recv().is_ok() {}
+                        // Hooks of the old program must not reach the next.
+                        while hooks.try_recv().is_ok() {}
+                        self.hooks_lost.store(false, Ordering::Release);
                     }
                     self.on_cmd(cmd).await;
                 }
                 Wake::Input(input) => self.on_input(input),
+                Wake::Hook(item) => self.on_hook(item),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
                 Wake::Noticed { owed } => self.notice_owed = owed,
@@ -373,13 +397,35 @@ impl Actor {
             size.rows,
         )));
         self.dirty = true;
-        let spec = self.plan.spec(self.id, &self.cwd, size.cols, size.rows);
+        let session_id = if self.plan.preassigns_session() {
+            launch::new_uuid()
+        } else {
+            None
+        };
+        // A relaunch replaces the token, so the old program's hooks are refused.
+        let hooks = self.ctx.hooks.as_deref().filter(|_| self.plan.hooks);
+        let token = hooks.and_then(|h| h.registry.issue(self.id).ok());
+        let fill = Fill {
+            pane: self.id,
+            session_id: session_id.as_deref(),
+            hooks: hooks.zip(token.as_ref()).map(|(h, token)| HookFill {
+                settings_file: &h.settings_file,
+                pipe: &h.pipe,
+                token: token.as_str(),
+            }),
+        };
+        self.hooks_missing = self.plan.hooks && fill.hooks.is_none();
+        let spec = self.plan.spec(&fill, &self.cwd, size.cols, size.rows);
+        if let Some(id) = session_id {
+            self.report(PaneEvent::SessionId(id));
+        }
         let backend = Arc::clone(&self.ctx.backend);
         let spawned = tokio::task::spawn_blocking(move || backend.spawn(spec)).await;
         let session = match spawned {
             Ok(Ok(session)) => session,
             Ok(Err(e)) => {
                 self.report(PaneEvent::Failed(spawn_message(&self.plan, &e)));
+                self.report_signal_lost();
                 return;
             }
             Err(_) => {
@@ -416,6 +462,26 @@ impl Actor {
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
+    }
+
+    fn on_hook(&mut self, item: HookItem) {
+        match item {
+            Ok(event) => self.step(&Signal::Hook(event)),
+            Err(_) => self.step(&Signal::Ambiguous),
+        }
+        if self.hooks_lost.swap(false, Ordering::AcqRel) {
+            self.step(&Signal::SourceLost);
+        }
+    }
+
+    /// Reports the "signal lost" mark when it changes: the launch has no
+    /// hook channel, or the machine lost or could not read its source.
+    fn report_signal_lost(&mut self) {
+        let lost = self.hooks_missing || self.machine.signal_lost();
+        if lost != self.signal_lost {
+            self.signal_lost = lost;
+            self.report(PaneEvent::SignalLost(lost));
+        }
     }
 
     async fn on_cmd(&mut self, cmd: PaneCmd) {
@@ -586,8 +652,15 @@ impl Actor {
                 AgentEffect::Transition { to, .. } => {
                     let state = convert::agent_state(to);
                     if state != self.state {
+                        self.needs_since = match (state.is_red(), self.needs_since) {
+                            (false, _) => None,
+                            (true, Some(since)) => Some(since),
+                            (true, None) => {
+                                Some(self.ctx.attention.fetch_add(1, Ordering::Relaxed) + 1)
+                            }
+                        };
                         self.state = state;
-                        self.report(PaneEvent::State(state));
+                        self.report(PaneEvent::State(state, self.needs_since));
                     }
                 }
                 AgentEffect::CheckScreen => {
@@ -610,6 +683,7 @@ impl Actor {
             let clock_now = self.now();
             Instant::now() + at.saturating_sub(clock_now)
         });
+        self.report_signal_lost();
     }
 
     /// A pane that never drew is due at `now`, the caller's own instant: a
