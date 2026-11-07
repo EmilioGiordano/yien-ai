@@ -213,26 +213,28 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 
 ## Commands
 
+Branch checks (implementer and reviewer):
+
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace        # or cargo test --workspace
-cargo deny check
-cargo xtask check-deps               # layer rule
-cargo xtask trace                    # requirement ids vs tests
+scripts/cargo.sh fmt --all -- --check
+scripts/cargo.sh check -p <crates> --all-targets
+scripts/cargo.sh test -p <crates>
 ```
+
+The full gate (integration only) is listed under "Integration and merge".
 
 `cargo fmt --all` in write mode reformats every crate, uncommitted work included. Run `--check`, then `rustfmt --edition 2024 <file>` on your own files only.
 
 A command that does not exist yet (no workspace, no `xtask`) is skipped and reported as `n/a`, not as a failure.
 
-**Never run the app from an agent** (`cargo run -p yien` or any binary that opens a window). It steals focus. Report what a human must check instead.
+**The implementer, the reviewer and the test engineer never run the app** and never send input to the desktop. The app runs only for UI validation at integration, following "Validating in the UI".
 
 ## Tests
 
 - A test that verifies a requirement starts with its id: `rf_pan_02_divider_keyboard_resize`, `rn_04_ended_session_not_resumed`.
 - Layers 0 and 1: behaviour without a headless test is a review finding.
 - Agent state changes are tested by replaying `.yrec` fixtures, never against a live CLI in CI.
+- A test whose fixture state is built by hand proves little: it can hide a path that real data takes. Prefer state produced by the code under test (save then load, record then replay).
 - `unwrap` and `expect` are fine in tests.
 
 ## Gotchas that already cost time (from foothy)
