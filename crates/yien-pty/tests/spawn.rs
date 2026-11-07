@@ -222,3 +222,13 @@ fn dropping_a_session_does_not_block() {
     drop(driver);
     assert!(start.elapsed() < Duration::from_secs(2));
 }
+
+#[test]
+fn close_ends_the_child_and_reports_the_terminal_closed() {
+    let mut driver = interactive();
+    let closer = driver.session.control().closer();
+    assert!(!closer.is_closed());
+    closer.close(Duration::from_secs(5)).unwrap();
+    assert!(closer.is_closed());
+    assert!(!driver.until_exit().success());
+}
