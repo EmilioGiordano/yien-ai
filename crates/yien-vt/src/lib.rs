@@ -18,19 +18,18 @@
 #![forbid(unsafe_code)]
 
 mod alacritty;
-mod frame;
 pub mod osc_scan;
 mod palette;
 
 use std::time::Duration;
 
 pub use alacritty::{AlacrittyEngine, MAX_MATCHES, MAX_SCROLLBACK};
-pub use frame::{
+pub use osc_scan::{OscSignal, PromptMark};
+pub use palette::{Palette, Rgb};
+pub use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, GridPoint, Link, LinkKind, Match, Modes,
     MouseEncoding, MouseTracking, SelectionKind, Side, Size, ViewportPoint,
 };
-pub use osc_scan::{OscSignal, PromptMark};
-pub use palette::{Palette, Rgb};
 
 /// How long a synchronized update (mode 2026) may stay open before the owner
 /// should call [`VtEngine::flush_sync`]. The same value alacritty uses.

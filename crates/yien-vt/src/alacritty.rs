@@ -16,13 +16,13 @@ use alacritty_terminal::vte::ansi::{
     self, Color, CursorShape as TermCursorShape, CursorStyle, Processor, Timeout,
 };
 
-use crate::frame::{
-    Cell, CellFlags, Cursor, CursorShape, Frame, GridPoint, Link, LinkKind, Match, Modes,
-    MouseEncoding, MouseTracking, SelectionKind, Side, Size, ViewportPoint,
-};
 use crate::osc_scan::OscScanner;
 use crate::palette::{Palette, Rgb};
 use crate::{TitleChange, VtConfig, VtEngine, VtError, VtOutput};
+use yien_proto::frame::{
+    Cell, CellFlags, Cursor, CursorShape, Frame, GridPoint, Link, LinkKind, Match, Modes,
+    MouseEncoding, MouseTracking, SelectionKind, Side, Size, ViewportPoint,
+};
 
 /// The most matches one search returns.
 pub const MAX_MATCHES: usize = 10_000;
@@ -359,6 +359,7 @@ impl VtEngine for AlacrittyEngine {
             history_len: self.term.history_size(),
             background: self.color_at(257),
             cursor_color: self.color_at(258),
+            modes: self.modes(),
         }
     }
 

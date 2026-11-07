@@ -1,56 +1,7 @@
-//! Colours: the RGB type the frame carries and the palette that resolves
-//! terminal colour indices to it.
+//! The palette that resolves terminal colour indices to the RGB colours a
+//! frame carries.
 
-/// A 24-bit colour.
-///
-/// ```
-/// use yien_vt::Rgb;
-///
-/// assert_eq!(Rgb::from_hex(0x0d0c0b), Rgb::new(0x0d, 0x0c, 0x0b));
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Rgb {
-    /// Red.
-    pub r: u8,
-    /// Green.
-    pub g: u8,
-    /// Blue.
-    pub b: u8,
-}
-
-impl Rgb {
-    /// A colour from its components.
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    /// A colour from `0xRRGGBB`; higher bits are ignored.
-    pub const fn from_hex(hex: u32) -> Self {
-        Self {
-            r: (hex >> 16) as u8,
-            g: (hex >> 8) as u8,
-            b: hex as u8,
-        }
-    }
-
-    /// The colour at two thirds of its brightness, as SGR 2 (faint) draws it.
-    ///
-    /// ```
-    /// use yien_vt::Rgb;
-    ///
-    /// assert_eq!(Rgb::new(255, 30, 0).dim(), Rgb::new(170, 20, 0));
-    /// ```
-    pub const fn dim(self) -> Self {
-        const fn scale(c: u8) -> u8 {
-            (c as u16 * 2 / 3) as u8
-        }
-        Self {
-            r: scale(self.r),
-            g: scale(self.g),
-            b: scale(self.b),
-        }
-    }
-}
+pub use yien_proto::frame::Rgb;
 
 /// The colours a frame is resolved with: the 16 ANSI colours, the default
 /// foreground and background, and the cursor. Indices 16 to 255 follow the

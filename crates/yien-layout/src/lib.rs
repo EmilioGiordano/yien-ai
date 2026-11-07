@@ -864,6 +864,56 @@ impl Default for Tree {
     }
 }
 
+/// The structure of a [`Tree`] as plain data, so it can be described outside
+/// the tree (for example in a protocol message).
+///
+/// ```
+/// use yien_layout::{Orientation, Shape, Tree};
+///
+/// let mut tree = Tree::new();
+/// let right = tree.split(0, Orientation::Horizontal).unwrap();
+/// let Shape::Split { orientation, children } = tree.shape() else { unreachable!() };
+/// assert_eq!(orientation, Orientation::Horizontal);
+/// assert_eq!(children, vec![(0.5, Shape::Pane(0)), (0.5, Shape::Pane(right))]);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shape {
+    /// A leaf holding one pane.
+    Pane(PaneId),
+    /// A branch: each child with its flex ratio; the ratios sum to 1.
+    Split {
+        /// How the children are laid out.
+        orientation: Orientation,
+        /// The children in order, each with its flex ratio.
+        children: Vec<(f32, Shape)>,
+    },
+}
+
+impl Tree {
+    /// The tree's structure, from the root down.
+    pub fn shape(&self) -> Shape {
+        self.shape_of(self.root)
+    }
+
+    fn shape_of(&self, node: NodeId) -> Shape {
+        match &self.nodes[node].kind {
+            Kind::Leaf(pane) => Shape::Pane(*pane),
+            Kind::Branch {
+                orientation,
+                children,
+                flex,
+            } => Shape::Split {
+                orientation: *orientation,
+                children: children
+                    .iter()
+                    .zip(flex)
+                    .map(|(&c, &f)| (f, self.shape_of(c)))
+                    .collect(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +927,52 @@ mod tests {
 
     fn assert_close(a: f32, b: f32) {
         assert!((a - b).abs() < 0.01, "{a} != {b}");
+    }
+
+    fn shape_panes(shape: &Shape, out: &mut Vec<PaneId>) {
+        match shape {
+            Shape::Pane(p) => out.push(*p),
+            Shape::Split { children, .. } => {
+                for (_, child) in children {
+                    shape_panes(child, out);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shape_follows_nesting_flex_and_order() {
+        let mut tree = Tree::new();
+        let right = tree.split(0, Orientation::Horizontal).unwrap();
+        let below = tree.split(right, Orientation::Vertical).unwrap();
+        assert!(tree.resize(0, 0.1));
+        let Shape::Split {
+            orientation,
+            children,
+        } = tree.shape()
+        else {
+            panic!("expected a split");
+        };
+        assert_eq!(orientation, Orientation::Horizontal);
+        assert_eq!(children.len(), 2);
+        assert_close(children[0].0, 0.6);
+        assert_close(children[1].0, 0.4);
+        assert_eq!(children[0].1, Shape::Pane(0));
+        assert_eq!(
+            children[1].1,
+            Shape::Split {
+                orientation: Orientation::Vertical,
+                children: vec![(0.5, Shape::Pane(right)), (0.5, Shape::Pane(below))],
+            }
+        );
+        let mut panes = Vec::new();
+        shape_panes(&tree.shape(), &mut panes);
+        assert_eq!(panes, tree.panes());
+    }
+
+    #[test]
+    fn shape_of_a_single_pane_is_a_leaf() {
+        assert_eq!(Tree::new().shape(), Shape::Pane(0));
     }
 
     #[test]
