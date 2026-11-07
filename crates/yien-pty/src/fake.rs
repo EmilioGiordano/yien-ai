@@ -12,6 +12,13 @@ use crate::{
 
 /// The exit code a killed fake child reports, as `TerminateProcess` does in
 /// [`crate::PortablePty`].
+///
+/// ```
+/// use yien_pty::{FakePty, PtyBackend, PtyEvent, SpawnSpec, KILLED_EXIT_CODE};
+/// let session = FakePty::new().spawn(SpawnSpec::new("sh")).unwrap();
+/// session.kill().unwrap();
+/// assert!(matches!(session.events().try_recv(), Ok(PtyEvent::Exited(s)) if s.code == Some(KILLED_EXIT_CODE)));
+/// ```
 pub const KILLED_EXIT_CODE: u32 = 1;
 
 /// A backend whose children are driven by the test through [`FakeChild`].
@@ -144,6 +151,12 @@ impl ChildControl for FakeControl {
 }
 
 /// Something the session sent to a fake child.
+///
+/// ```
+/// use yien_pty::FakeInput;
+/// let input = FakeInput::Resize { cols: 80, rows: 24 };
+/// assert_ne!(input, FakeInput::Bytes(Vec::new()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FakeInput {
     /// Bytes from [`PtySession::write`].
