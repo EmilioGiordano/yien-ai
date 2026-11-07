@@ -38,6 +38,7 @@ const TAB_BAR_WIDTH: f32 = 264.0;
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+const CONFIRM_WIDTH: f32 = 440.0;
 const CONTEXT_BAR_WIDTH: f32 = 380.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
@@ -73,7 +74,17 @@ pub(crate) struct Shell {
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
+    /// The question asked before closing a project that has work running.
+    confirm: Option<ConfirmClose>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A project about to close, and how many panes that would stop.
+struct ConfirmClose {
+    project: ProjectId,
+    name: String,
+    busy: usize,
+    focus: FocusHandle,
 }
 
 /// The palette's model and the widgets drawing it.
@@ -139,6 +150,7 @@ impl Shell {
             split_menu: None,
             menu_closed: None,
             palette: None,
+            confirm: None,
             _subscriptions: vec![activation],
         }
     }
@@ -206,6 +218,7 @@ impl Shell {
             changed = true;
         }
         if changed {
+            self.drop_stale_questions(window, cx);
             self.sync_terminals(window, cx);
         }
         let take = frames_to_take(&ready, changed, &self.visible_panes(), |p| {
@@ -256,10 +269,26 @@ impl Shell {
         }
     }
 
+    /// A question about a project that is gone no longer applies.
+    fn drop_stale_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = self
+            .confirm
+            .as_ref()
+            .is_some_and(|c| self.workspace.project(c.project).is_none());
+        if gone {
+            self.confirm = None;
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    /// Whether an overlay holds the keyboard; closing it gives it back.
+    fn overlay_has_keyboard(&self) -> bool {
+        self.palette.is_some() || self.confirm.is_some()
+    }
+
     /// Moves the keyboard to the selected tab's focused pane when that changes.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The palette keeps the keyboard while open; closing it syncs again.
-        if self.palette.is_some() {
+        if self.overlay_has_keyboard() {
             return;
         }
         let target = keyboard_pane(&self.workspace);
@@ -548,6 +577,7 @@ impl Shell {
             return;
         }
         self.split_menu = None;
+        self.confirm = None;
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
@@ -600,6 +630,12 @@ impl Shell {
         if self.palette.take().is_none() {
             return;
         }
+        self.give_back_keyboard(window, cx);
+    }
+
+    /// Gives the keyboard to the pane the core says is focused, or to the
+    /// window when no tab is open, after an overlay held it.
+    fn give_back_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = match keyboard_after_close(&self.workspace) {
             KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
             KeyboardTo::Window => None,
@@ -732,6 +768,154 @@ impl Shell {
                 cx,
             ),
         }
+    }
+
+    /// Closes the selected tab's project, or the one selected last.
+    fn close_project(&mut self, _: &CloseProject, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.project_for_new_tab() {
+            Some(project) => self.request_close(project, window, cx),
+            None => {
+                self.notice = Some("There is no project to close.".to_owned());
+                cx.notify();
+            }
+        }
+    }
+
+    /// Closes a project at once when only idle shells would stop; otherwise
+    /// asks first, saying how many panes would stop.
+    fn request_close(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.workspace.project(project).map(|p| p.name.clone()) else {
+            return;
+        };
+        let busy = self.workspace.busy_panes_of(project);
+        if busy == 0 {
+            self.command(Command::CloseProject { project }, cx);
+            return;
+        }
+        self.split_menu = None;
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.confirm = Some(ConfirmClose {
+            project,
+            name,
+            busy,
+            focus,
+        });
+        cx.notify();
+    }
+
+    fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(confirm) = self.confirm.take() {
+            self.command(
+                Command::CloseProject {
+                    project: confirm.project,
+                },
+                cx,
+            );
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() {
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    /// The question before closing a project that has work running, over
+    /// the window like the palette. Enter closes it, Escape keeps it.
+    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let confirm = self.confirm.as_ref()?;
+        let t = self.theme;
+        let hover = t.hover;
+        let (panes, are) = match confirm.busy {
+            1 => ("1 pane".to_owned(), "is"),
+            n => (format!("{n} panes"), "are"),
+        };
+        let button = |id: &'static str, label: &'static str, keys: &'static str| {
+            h_flex()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(format!("{label} ({keys})"))
+                .items_center()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(t.line)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(label)
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(t.faint)
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(keys),
+                )
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .items_start()
+                .bg(rgba(0x0000_0059))
+                .child(
+                    v_flex()
+                        .id("confirm-close-project")
+                        .role(Role::Dialog)
+                        .aria_label(format!("Close {}?", confirm.name))
+                        .track_focus(&confirm.focus)
+                        .key_context(CONFIRM_CONTEXT)
+                        .mt(px(PALETTE_TOP))
+                        .w(px(CONFIRM_WIDTH))
+                        .max_w(relative(0.8))
+                        .gap(px(10.0))
+                        .p(px(16.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(t.line)
+                        .bg(t.raised)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.confirm_cancel(&ConfirmCancel, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("Close {}?", confirm.name)),
+                        )
+                        .child(div().text_size(px(13.0)).text_color(t.muted).child(format!(
+                            "{panes} {are} still running an agent or a program; closing the \
+                             project stops them. Nothing on disk is deleted."
+                        )))
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .pt(px(4.0))
+                                .text_size(px(13.0))
+                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.confirm_cancel(&ConfirmCancel, window, cx);
+                                    }),
+                                ))
+                                .child(
+                                    button("confirm-accept", "Close project", "Enter")
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .border_color(t.muted)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_accept(&ConfirmAccept, window, cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
     }
 
     fn toggle_project_fold(
@@ -1166,6 +1350,7 @@ impl Shell {
         let t = self.theme;
         let waiting = self.workspace.needs_you_tabs_of(project);
         let id = project.id;
+        let hover = t.hover;
         let label = if waiting > 0 {
             format!("{}, {waiting} need you", project.name)
         } else {
@@ -1217,6 +1402,26 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
+            .child(
+                div()
+                    .id(("close-project", id.get()))
+                    .role(Role::Button)
+                    .aria_label(format!("Close project {}", project.name))
+                    .ml_auto()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(20.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.request_close(id, window, cx);
+                    }))
+                    .child(svg().path(assets::CLOSE).size(px(12.0)).text_color(t.faint)),
+            )
     }
 
     fn render_tab_row(&self, tab: &TabView, active: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1980,6 +2185,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::relaunch_pane))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::add_project))
+            .on_action(cx.listener(Self::close_project))
+            .on_action(cx.listener(Self::confirm_accept))
+            .on_action(cx.listener(Self::confirm_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_switcher))
             .on_action(cx.listener(Self::palette_up))
@@ -2014,6 +2222,7 @@ impl Render for Shell {
             )
             .child(self.render_status_bar())
             .children(self.render_palette(cx))
+            .children(self.render_confirm(cx))
     }
 }
 
@@ -2070,6 +2279,8 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("project head", "project.fold"),
     ("add project button", "project.add"),
     ("empty state's add project button", "project.add"),
+    ("project head close button", "project.close"),
+    ("close project dialog buttons", "project.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
 ];
