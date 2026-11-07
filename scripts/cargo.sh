@@ -34,7 +34,8 @@ ps_int() {
 }
 avail_mb() { ps_int "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes"; }
 cargo_count() { ps_int "(Get-Process cargo,rustc -ErrorAction SilentlyContinue | Measure-Object).Count"; }
-win_pid_alive() { [ "$(ps_int "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { 1 } else { 0 }")" = "1" ]; }
+# Alive unless PowerShell positively answers 0; an unreadable answer counts as alive.
+win_pid_dead() { [ "$(ps_int "if (Get-Process -Id $1 -ErrorAction SilentlyContinue) { 1 } else { 0 }")" = "0" ]; }
 
 break_stale_lock() {
   [ -d "$lock" ] || return 0
@@ -49,7 +50,7 @@ break_stale_lock() {
     if [ $((now - since)) -gt 600 ]; then rm -rf "$lock"; echo "cargo.sh: removed ownerless lock" >&2; fi
     return 0
   fi
-  if ! win_pid_alive "$pid" || [ $((now - since)) -gt "$stale_after" ]; then
+  if win_pid_dead "$pid" || [ $((now - since)) -gt "$stale_after" ]; then
     rm -rf "$lock"
     echo "cargo.sh: removed stale lock of pid $pid" >&2
   fi
@@ -77,6 +78,12 @@ while true; do
   sleep 20
   waited=$((waited + 20))
 done
-trap 'rm -rf "$lock" 2>/dev/null || true' EXIT INT TERM
+release_lock() {
+  local pid=""
+  read -r pid _ < "$lock/owner" 2>/dev/null || true
+  # The lock may have been broken and retaken by another build.
+  if [ "$pid" = "$my_winpid" ]; then rm -rf "$lock"; fi
+}
+trap release_lock EXIT INT TERM
 
 CARGO_TARGET_DIR="$target_dir" CARGO_BUILD_JOBS="$jobs" cargo "$@"
