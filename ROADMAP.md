@@ -19,7 +19,7 @@ This is plan milestones M0–M2, the core of M3 and the Claude part of M4. Phase
 
 | Step | Branch | State |
 |---|---|---|
-| Agent workflow | `chore/agent-workflow` | in review |
+| Agent workflow | `chore/agent-workflow` | merged |
 | S2 ConPTY spike | `spike/s2-conpty` | next |
 | S1 GPUI spike | `spike/s1-gpui` | next |
 | M0 skeleton: workspace, CI, deny, proto, testkit, xtask, foothy layout and input | `build/workspace-skeleton` and follow-ups | pending |
