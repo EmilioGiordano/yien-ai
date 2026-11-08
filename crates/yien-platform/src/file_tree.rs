@@ -55,8 +55,17 @@ fn walker(dir: &Path, depth: usize) -> WalkBuilder {
         .require_git(true)
         .follow_links(false)
         .max_depth(Some(depth))
-        .filter_entry(|entry| entry.file_name() != ".git");
+        .filter_entry(|entry| !is_git_dir_name(entry.file_name()));
     builder
+}
+
+/// `.git`, and on Windows, where names ignore case, `.GIT` too.
+fn is_git_dir_name(name: &std::ffi::OsStr) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(".git")
+    } else {
+        name == ".git"
+    }
 }
 
 /// The folder `rel` names under `root`: parts joined with `/`, as listings
@@ -296,15 +305,20 @@ impl FileTreeService {
                 done(search(&root, &query, limits, &cancelled));
             });
         if let Err(e) = spawned {
+            // The callback went with the closure; the caller sees it dropped.
             tracing::warn!("could not start a file search: {e}");
         }
+    }
+
+    /// Stops the running search, if any; it ends as cancelled.
+    pub fn cancel_search(&self) {
+        self.latest.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 impl Drop for FileTreeService {
     fn drop(&mut self) {
-        // Moves the number on, so a running search sees itself replaced.
-        self.latest.fetch_add(1, Ordering::AcqRel);
+        self.cancel_search();
     }
 }
 
@@ -554,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn the_service_lists_and_a_newer_search_cancels_the_older() {
+    fn the_service_lists_and_searches() {
         let s = repo("service");
         let service = FileTreeService::start().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -580,5 +594,104 @@ mod tests {
         let found = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(found.end, SearchEnd::Complete);
         assert_eq!(paths(&found), ["alpha.txt"]);
+    }
+
+    #[test]
+    fn rf_ctx_01_a_search_stops_mid_walk_once_cancelled() {
+        let s = Scratch::new("midwalk");
+        for i in 0..40 {
+            s.file(&format!("d{i:02}/hit{i}.txt"));
+        }
+        let asked = std::cell::Cell::new(0);
+        let cancelled = || {
+            asked.set(asked.get() + 1);
+            asked.get() > 10
+        };
+        let found = search(&s.0, "hit", SearchLimits::default(), &cancelled);
+        assert_eq!(found.end, SearchEnd::Cancelled);
+        assert!(
+            !found.hits.is_empty() && found.hits.len() < 40,
+            "{}",
+            found.hits.len()
+        );
+    }
+
+    #[test]
+    fn rf_ctx_01_the_service_cancels_the_older_search() {
+        let s = Scratch::new("cancel");
+        for i in 0..1_000 {
+            s.file(&format!("d{}/hit{i}.txt", i % 50));
+        }
+        let service = FileTreeService::start().unwrap();
+        let (first_tx, first) = mpsc::channel();
+        service.search(
+            s.0.clone(),
+            "hit".into(),
+            Box::new(move |r| {
+                let _ = first_tx.send(r.end);
+            }),
+        );
+        // A newer search moves the number on before the older one has
+        // walked 1,000 entries.
+        let (second_tx, second) = mpsc::channel();
+        service.search(
+            s.0.clone(),
+            "hit99".into(),
+            Box::new(move |r| {
+                let _ = second_tx.send(r);
+            }),
+        );
+        assert_eq!(
+            first.recv_timeout(Duration::from_secs(20)).unwrap(),
+            SearchEnd::Cancelled
+        );
+        let found = second.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(found.end, SearchEnd::Complete);
+        assert_eq!(found.hits.len(), 11, "hit99 and hit990 to hit999");
+        let (third_tx, third) = mpsc::channel();
+        service.search(
+            s.0.clone(),
+            "hit".into(),
+            Box::new(move |r| {
+                let _ = third_tx.send(r.end);
+            }),
+        );
+        service.cancel_search();
+        assert_eq!(
+            third.recv_timeout(Duration::from_secs(20)).unwrap(),
+            SearchEnd::Cancelled
+        );
+    }
+
+    /// A junction needs no privilege, unlike a directory symlink.
+    #[cfg(windows)]
+    #[test]
+    fn rf_ctx_01_a_junction_loop_is_listed_and_never_followed() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let s = Scratch::new("junction");
+        s.file("inner/loop-target.txt");
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(s.0.join("inner").join("back"))
+            .arg(&s.0)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let inner = list_dir(&s.0, "inner").unwrap();
+        let back = inner.entries.iter().find(|e| e.name == "back").unwrap();
+        assert_eq!(back.kind, EntryKind::Link { dir: true });
+        let found = search(&s.0, "loop", SearchLimits::default(), &|| false);
+        assert_eq!(found.end, SearchEnd::Complete);
+        assert_eq!(paths(&found), ["inner/loop-target.txt"]);
+        // Removing the junction, not its target, before the scratch goes.
+        fs::remove_dir(s.0.join("inner").join("back")).unwrap();
     }
 }
