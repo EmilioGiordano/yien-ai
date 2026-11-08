@@ -38,8 +38,12 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024;
 /// The smallest font size kept; smaller values are raised to it.
 pub const MIN_FONT_SIZE: f32 = 8.0;
 
-/// The largest font size kept; larger values are lowered to it.
+/// The largest terminal font size kept; larger values are lowered to it.
 pub const MAX_FONT_SIZE: f32 = 32.0;
+
+/// The largest window text size kept: the title and status bars have fixed
+/// heights, and past this their text is clipped.
+pub const MAX_UI_FONT_SIZE: f32 = 20.0;
 
 /// The size of both fonts when the file does not set one.
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
@@ -61,7 +65,8 @@ pub enum ThemeSetting {
 pub struct FontSetting {
     /// `None` means YIEN's own preference list for the role.
     pub family: Option<String>,
-    /// Always within [`MIN_FONT_SIZE`]..=[`MAX_FONT_SIZE`].
+    /// Always within [`MIN_FONT_SIZE`]..=[`MAX_FONT_SIZE`], and at most
+    /// [`MAX_UI_FONT_SIZE`] for the window.
     pub size: f32,
 }
 

@@ -8,7 +8,8 @@ use toml::de::{DeTable, DeValue};
 
 use crate::schema::{self, KEYS_TABLE, TABLES};
 use crate::{
-    KeyOverride, Loaded, MAX_FILE_BYTES, MAX_FONT_SIZE, MIN_FONT_SIZE, Problem, ThemeSetting,
+    KeyOverride, Loaded, MAX_FILE_BYTES, MAX_FONT_SIZE, MAX_UI_FONT_SIZE, MIN_FONT_SIZE, Problem,
+    ThemeSetting,
 };
 
 /// Parses and checks the file. An `Err` is the first problem that makes the
@@ -17,7 +18,7 @@ use crate::{
 ///
 /// ```
 /// let loaded = yien_config::parse("ui.font.size = 99\ncolour = 1\n").unwrap();
-/// assert_eq!(loaded.config.ui_font.size, yien_config::MAX_FONT_SIZE);
+/// assert_eq!(loaded.config.ui_font.size, yien_config::MAX_UI_FONT_SIZE);
 /// let lines: Vec<usize> = loaded.warnings.iter().map(|w| w.line).collect();
 /// assert_eq!(lines, [1, 2]);
 /// ```
@@ -110,9 +111,11 @@ impl Walk<'_> {
             "terminal.font.family" => {
                 self.loaded.config.terminal_font.family = non_empty(self.string(path, value)?);
             }
-            "ui.font.size" => self.loaded.config.ui_font.size = self.size(path, value)?,
+            "ui.font.size" => {
+                self.loaded.config.ui_font.size = self.size(path, value, MAX_UI_FONT_SIZE)?;
+            }
             "terminal.font.size" => {
-                self.loaded.config.terminal_font.size = self.size(path, value)?;
+                self.loaded.config.terminal_font.size = self.size(path, value, MAX_FONT_SIZE)?;
             }
             // `schema::setting` accepted the path, so this is a key added to
             // the schema without a branch here; the schema test catches it.
@@ -132,7 +135,7 @@ impl Walk<'_> {
     }
 
     /// A size as written, integer or float, brought into range with a warning.
-    fn size(&mut self, path: &str, value: &Spanned<DeValue<'_>>) -> Result<f32, Problem> {
+    fn size(&mut self, path: &str, value: &Spanned<DeValue<'_>>, max: f32) -> Result<f32, Problem> {
         let number = match value.get_ref() {
             DeValue::Integer(i) => i64::from_str_radix(i.as_str(), i.radix())
                 .ok()
@@ -148,7 +151,7 @@ impl Walk<'_> {
         let Some(number) = number.filter(|n| n.is_finite()) else {
             return Err(self.problem(value.span(), format!("{path} must be a finite number")));
         };
-        let (min, max) = (f64::from(MIN_FONT_SIZE), f64::from(MAX_FONT_SIZE));
+        let (min, max) = (f64::from(MIN_FONT_SIZE), f64::from(max));
         let kept = number.clamp(min, max);
         if kept != number {
             self.warn(
@@ -354,11 +357,19 @@ font.size = 18
         assert_eq!(loaded.warnings.len(), 2);
         assert_eq!(loaded.warnings[0].line, 1);
         assert!(loaded.warnings[1].message.contains("out of range"));
+        let loaded = ok("ui.font.size = 21
+");
+        assert_eq!(
+            loaded.config.ui_font.size, MAX_UI_FONT_SIZE,
+            "the window stops at 20"
+        );
+        assert_eq!(loaded.warnings.len(), 1);
         for edge in ["8", "32", "8.0", "0x10"] {
-            let loaded = ok(&format!("ui.font.size = {edge}"));
+            let loaded = ok(&format!("terminal.font.size = {edge}"));
             assert!(loaded.warnings.is_empty(), "{edge}");
         }
         assert_eq!(ok("ui.font.size = 0x10").config.ui_font.size, 16.0);
+        assert!(ok("ui.font.size = 20").warnings.is_empty());
     }
 
     #[test]

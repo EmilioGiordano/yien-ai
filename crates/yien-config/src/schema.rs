@@ -30,7 +30,7 @@ pub const SCHEMA: &[Setting] = &[
     Setting {
         key: "ui.font.size",
         default: "13",
-        doc: "The window's text size in pixels, 8 to 32.",
+        doc: "The window's text size in pixels, 8 to 20.",
     },
     Setting {
         key: "terminal.font.family",
