@@ -191,8 +191,10 @@ pub enum OpenError {
 }
 
 /// Opens `path` in `editor` (a command line, the file appended as its last
-/// argument), or in the OS default app for it when `editor` is `None`. Runs
-/// on a thread of its own and returns at once; `done` gets the outcome.
+/// argument). With no editor, a file of a view-only type ([`VIEW_ONLY`]) goes
+/// to the OS default app; any other file goes to Notepad on Windows and is
+/// refused elsewhere, so the default app never runs a program or script.
+/// Runs on a thread of its own and returns at once; `done` gets the outcome.
 ///
 /// ```no_run
 /// let file = yien_platform::paths::config_file()?;
@@ -216,23 +218,97 @@ pub fn open(
         Some((_, Some(parts))) => Some(parts),
         None => None,
     };
-    if command.is_none() && runs_when_opened(&path) {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        return done(Err(OpenError::WouldRun { name }));
-    }
     let spawned = std::thread::Builder::new()
         .name("yien-open-file".into())
-        .spawn(move || done(open_now(&path, command.as_deref())));
+        .spawn(move || {
+            let outcome = match command {
+                Some(command) => open_now(&path, Some(&command)),
+                None => open_by_type(&path),
+            };
+            done(outcome);
+        });
     if let Err(e) = spawned {
         tracing::warn!("could not start the thread that opens the file: {e}");
     }
 }
 
+/// With no editor: the default app, Notepad or a refusal, by [`route`].
+fn open_by_type(path: &Path) -> Result<(), OpenError> {
+    let pathext = if cfg!(windows) {
+        std::env::var("PATHEXT").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    match route(path, &pathext, cfg!(windows), launches(path)) {
+        Route::DefaultApp => open_now(path, None),
+        Route::Notepad => open_now(path, Some(&["notepad.exe".to_owned()])),
+        Route::Refuse => Err(OpenError::WouldRun {
+            name: path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+        }),
+    }
+}
+
+/// Where a file goes when no editor is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    DefaultApp,
+    Notepad,
+    Refuse,
+}
+
+/// File types whose default app only shows them.
+const VIEW_ONLY: &[&str] = &[
+    "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonc", "toml", "yaml", "yml", "xml",
+    "ini", "cfg", "conf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "pdf", "docx", "xlsx",
+    "pptx", "odt", "ods", "odp",
+];
+
+/// Only a view-only type that no runnable list names and that is not a
+/// launcher goes to the default app; the rest go to Notepad on Windows and
+/// are refused elsewhere. `launches` is the file system's say (an execute
+/// bit, a folder).
+fn route(path: &Path, pathext: &str, windows: bool, launches: bool) -> Route {
+    let viewable = last_extension(path).is_some_and(|e| VIEW_ONLY.contains(&e.as_str()))
+        && !runnable_extension(path, pathext)
+        && !launches;
+    if viewable {
+        Route::DefaultApp
+    } else if windows {
+        Route::Notepad
+    } else {
+        Route::Refuse
+    }
+}
+
+/// The name's last extension, lowercased, after the trailing dots and
+/// spaces Windows drops.
+fn last_extension(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    let name = name.trim_end_matches(['.', ' ']);
+    let (stem, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty() && !ext.is_empty()).then(|| ext.to_owned())
+}
+
+/// Whether the file system marks `path` as something that runs: a folder
+/// (an app bundle) or a file with an execute bit.
+#[cfg(unix)]
+fn launches(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).is_ok_and(|m| m.is_dir() || m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn launches(path: &Path) -> bool {
+    path.is_dir()
+}
+
 /// Extensions the Windows shell runs, or hands to something that runs
-/// them, on its default verb; `PATHEXT` adds to them.
+/// them, on its default verb; `PATHEXT` adds to them. A second guard
+/// behind [`VIEW_ONLY`].
 const RUNNABLE: &[&str] = &[
     "exe",
     "bat",
@@ -263,38 +339,10 @@ const RUNNABLE: &[&str] = &[
     "settingcontent-ms",
 ];
 
-/// Whether the OS default app would run `path` rather than show it.
-#[cfg(windows)]
-fn runs_when_opened(path: &Path) -> bool {
-    let pathext = std::env::var("PATHEXT").unwrap_or_default();
-    runnable_extension(path, &pathext)
-}
-
-/// Whether the OS default app would run `path` rather than show it: a
-/// launcher (`.desktop`, `.app`, `.command`), a folder (an app bundle) or
-/// a file with an execute bit.
-#[cfg(unix)]
-fn runs_when_opened(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    let launcher = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        ["desktop", "app", "command"]
-            .iter()
-            .any(|l| e.eq_ignore_ascii_case(l))
-    });
-    launcher || fs::metadata(path).is_ok_and(|m| m.is_dir() || m.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(any(windows, unix)))]
-fn runs_when_opened(_: &Path) -> bool {
-    true
-}
-
 /// Whether `path`'s name ends in an extension the Windows shell runs:
 /// [`RUNNABLE`] or one of `pathext` (`;`-separated, with dots), ignoring
 /// case as Windows does, and ignoring the trailing dots and spaces Windows
 /// drops from a name.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn runnable_extension(path: &Path, pathext: &str) -> bool {
     let name = path
         .file_name()
@@ -645,39 +693,72 @@ mod tests {
     }
 
     #[test]
-    fn rf_ctx_03_with_no_editor_a_runnable_file_is_refused_not_run() {
-        let name = if cfg!(windows) {
-            "setup.bat"
-        } else {
-            "launch.desktop"
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        open(PathBuf::from(name), None, move |r| {
-            let _ = tx.send(r);
-        });
-        let refused = rx.recv().unwrap();
-        assert!(
-            matches!(&refused, Err(OpenError::WouldRun { name: n }) if n == name),
-            "{refused:?}"
-        );
+    fn rf_ctx_03_with_no_editor_only_view_only_types_reach_the_default_app() {
+        let route_of = |name: &str, windows: bool| route(Path::new(name), "", windows, false);
+        for viewable in [
+            "README.md",
+            "config.toml",
+            "NOTES.TXT",
+            "data.json",
+            "photo.JPG",
+            "report.pdf",
+            "sheet.xlsx",
+            "trailing.md. ",
+        ] {
+            assert_eq!(route_of(viewable, true), Route::DefaultApp, "{viewable:?}");
+            assert_eq!(route_of(viewable, false), Route::DefaultApp, "{viewable:?}");
+        }
+        for other in [
+            "install.sh",
+            "run.py",
+            "main.rs",
+            "setup.bat",
+            "README.lnk",
+            "page.html",
+            "macro.docm",
+            "Makefile",
+            ".md",
+            "notes.md.exe",
+            "launch.desktop",
+            "Tool.app",
+        ] {
+            assert_eq!(route_of(other, true), Route::Notepad, "{other}");
+            assert_eq!(route_of(other, false), Route::Refuse, "{other}");
+        }
+        // The second guard: a type PATHEXT names never reaches the default
+        // app, even one that is otherwise view-only.
+        assert_eq!(route(Path::new("x.md"), ".MD", true, false), Route::Notepad);
+        // An execute bit or a folder overrules the name.
+        assert_eq!(route(Path::new("x.md"), "", false, true), Route::Refuse);
+        assert_eq!(last_extension(Path::new("a.tar.GZ")).as_deref(), Some("gz"));
+        assert_eq!(last_extension(Path::new(".bashrc")), None);
     }
 
+    /// Unix only: on Windows the same file would go to Notepad, which must
+    /// not open while Emilio is at the PC.
     #[cfg(unix)]
     #[test]
-    fn rf_ctx_03_an_executable_file_or_folder_counts_as_runnable_on_unix() {
+    fn rf_ctx_03_with_no_editor_a_script_is_refused_through_the_callback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = scratch("runnable");
-        fs::create_dir_all(dir.join("Tool.app")).unwrap();
-        let plain = dir.join("notes.md");
-        let script = dir.join("build");
-        fs::write(&plain, "").unwrap();
-        fs::write(&script, "").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(!runs_when_opened(&plain));
-        assert!(runs_when_opened(&script));
-        assert!(runs_when_opened(&dir.join("Tool.app")));
-        assert!(runs_when_opened(Path::new("x.command")));
+        let dir = scratch("refused");
+        fs::create_dir_all(&dir).unwrap();
+        let readme = dir.join("README.md");
+        fs::write(&readme, "").unwrap();
+        fs::set_permissions(&readme, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(launches(&readme), "an execute bit");
+        assert!(launches(&dir), "a folder");
+        for file in [dir.join("install.sh"), readme] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            open(file.clone(), None, move |r| {
+                let _ = tx.send(r);
+            });
+            let refused = rx.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert!(
+                matches!(&refused, Err(OpenError::WouldRun { .. })),
+                "{file:?}: {refused:?}"
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
