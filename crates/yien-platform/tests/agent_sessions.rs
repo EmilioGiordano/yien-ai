@@ -203,32 +203,64 @@ fn rf_ses_07_missing_folders_and_other_readers_list_nothing() {
     assert!(codex.is_empty());
 }
 
+/// Every folder and file under `dir`, with each file's bytes, size and
+/// times, sorted.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, u64, SystemTime)> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let meta = fs::metadata(&path).unwrap();
+            if meta.is_dir() {
+                todo.push(path.clone());
+                out.push((path, Vec::new(), 0, meta.modified().unwrap()));
+            } else {
+                let bytes = fs::read(&path).unwrap();
+                out.push((path, bytes, meta.len(), meta.modified().unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 #[test]
 fn rnf_14_listing_changes_nothing_in_the_cli_folder() {
     let home = scratch("untouched");
     let folder = claude(&home).join(claude_project_dir_name(ROOT));
     let path = session(&folder, A, &[prompt(ROOT, "keep me")], hours(5));
-    let snapshot = |dir: &Path| {
-        let mut entries: Vec<(String, Vec<u8>, SystemTime)> = fs::read_dir(dir)
+    session(&folder, B, &[prompt(ROOT, "and me")], hours(6));
+    fs::create_dir_all(folder.join(A).join("subagents")).unwrap();
+    fs::write(folder.join(A).join("subagents").join("x.jsonl"), "x").unwrap();
+    session(
+        &claude(&home).join(claude_project_dir_name(r"C:\Fake\other")),
+        C,
+        &[prompt(r"C:\Fake\other", "not this one")],
+        hours(1),
+    );
+    fs::write(home.join(".claude").join("settings.json"), "{}").unwrap();
+    let before = snapshot(&home);
+
+    // The CLI holds the file open for writing, sharing only reads, as it
+    // does while a session runs; listing must still read it.
+    #[cfg(windows)]
+    let writer = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        File::options()
+            .append(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
             .unwrap()
-            .flatten()
-            .map(|e| {
-                let p = e.path();
-                let meta = fs::metadata(&p).unwrap();
-                let bytes = if meta.is_file() {
-                    fs::read(&p).unwrap()
-                } else {
-                    Vec::new()
-                };
-                (p.display().to_string(), bytes, meta.modified().unwrap())
-            })
-            .collect();
-        entries.sort();
-        entries
     };
-    let before = snapshot(&folder);
-    assert_eq!(read(&home, ROOT).len(), 1);
-    assert_eq!(snapshot(&folder), before);
+    let sessions = read(&home, ROOT);
+    assert_eq!(ids(&sessions), [A, B]);
+    assert_eq!(sessions[0].summary.title.as_deref(), Some("keep me"));
+    #[cfg(windows)]
+    drop(writer);
+
+    assert_eq!(snapshot(&home), before);
     // The CLI can still append to and remove the file.
     fs::write(&path, "more").unwrap();
     fs::remove_file(&path).unwrap();
