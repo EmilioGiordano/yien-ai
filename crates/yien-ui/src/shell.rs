@@ -24,6 +24,7 @@ use crate::assets::{self, state_icon};
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
+use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
 use crate::git::{ContextGit, FileMark};
@@ -2673,9 +2674,13 @@ impl Shell {
             return;
         }
         let Some(root) = root else { return };
-        let mut file = PathBuf::from(root);
-        file.extend(path.split('/').filter(|p| !p.is_empty()));
-        self.open_file(file, cx);
+        match join_relative(root, path) {
+            Some(file) => self.open_file(file, cx),
+            None => {
+                self.notice = Some(format!("{path} is not inside the repository."));
+                cx.notify();
+            }
+        }
     }
 
     fn render_status_bar(&self) -> impl IntoElement {

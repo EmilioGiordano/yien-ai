@@ -87,6 +87,8 @@ enum Search {
         hits: Vec<SearchHit>,
         end: SearchEnd,
     },
+    /// Stopped before it finished: another tab's search replaced it.
+    Interrupted,
 }
 
 /// One tab's tree. The root's listing is asked for by [`FileTree::new`].
@@ -96,6 +98,9 @@ pub(crate) struct FileTree {
     /// Listings by folder, `""` for the root.
     dirs: HashMap<String, Dir>,
     expanded: HashSet<String>,
+    /// Listings asked for and not answered yet, so a folder is not asked
+    /// for twice at once.
+    pending: HashSet<String>,
     tree_cursor: Option<String>,
     hit_cursor: Option<String>,
     query: String,
@@ -112,6 +117,7 @@ impl FileTree {
             root: root.to_owned(),
             dirs,
             expanded: HashSet::new(),
+            pending: HashSet::from([String::new()]),
             tree_cursor: None,
             hit_cursor: None,
             query: String::new(),
@@ -125,11 +131,9 @@ impl FileTree {
         &self.root
     }
 
-    /// `rel` as a path under the root.
-    pub(crate) fn path_of(&self, rel: &str) -> PathBuf {
-        let mut path = PathBuf::from(&self.root);
-        path.extend(rel.split('/').filter(|p| !p.is_empty()));
-        path
+    /// `rel` as a path under the root; `None` when it would leave it.
+    pub(crate) fn path_of(&self, rel: &str) -> Option<PathBuf> {
+        join_relative(&self.root, rel)
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -143,6 +147,7 @@ impl FileTree {
     /// Takes a folder's listing, or why it failed. A folder no one asked
     /// for is ignored.
     pub(crate) fn listed(&mut self, dir: &str, listing: Result<DirListing, String>) {
+        self.pending.remove(dir);
         let Some(slot) = self.dirs.get_mut(dir) else {
             return;
         };
@@ -154,21 +159,33 @@ impl FileTree {
                 sort_entries(&mut entries);
                 Dir::Loaded { entries, truncated }
             }
-            Err(reason) => Dir::Failed(reason),
+            Err(reason) => {
+                // Nothing below a folder that cannot be listed can show.
+                self.expanded.retain(|e| !inside(e, dir));
+                Dir::Failed(reason)
+            }
         };
     }
 
-    /// Expands a folder; its listing is always asked for again, the last
-    /// one shown meanwhile.
+    /// The listings of `dirs` not already asked for, marked as asked.
+    fn ask(&mut self, dirs: impl IntoIterator<Item = String>) -> Vec<String> {
+        dirs.into_iter()
+            .filter(|d| self.pending.insert(d.clone()))
+            .collect()
+    }
+
+    /// Expands a folder; its listing is asked for again unless it already
+    /// is, the last one shown meanwhile.
     pub(crate) fn expand(&mut self, dir: &str) -> Vec<String> {
         self.expanded.insert(dir.to_owned());
         self.dirs.entry(dir.to_owned()).or_insert(Dir::Loading);
-        vec![dir.to_owned()]
+        self.ask([dir.to_owned()])
     }
 
-    /// Collapses a folder; a cursor inside it moves onto it.
+    /// Collapses a folder and every folder inside it; a cursor inside it
+    /// moves onto it.
     pub(crate) fn collapse(&mut self, dir: &str) {
-        self.expanded.remove(dir);
+        self.expanded.retain(|e| e != dir && !inside(e, dir));
         if self.tree_cursor.as_deref().is_some_and(|c| inside(c, dir)) {
             self.tree_cursor = Some(dir.to_owned());
         }
@@ -199,7 +216,7 @@ impl FileTree {
             .retain(|dir, _| dir.is_empty() || expanded.contains(dir));
         let mut dirs: Vec<String> = self.dirs.keys().cloned().collect();
         dirs.sort();
-        dirs
+        self.ask(dirs)
     }
 
     /// The rows to draw: the search's matches while filtering, else the
@@ -356,7 +373,8 @@ impl FileTree {
     }
 
     /// What a click on `path` does: the cursor goes there, and a folder
-    /// expands or collapses. A double click on a file opens it.
+    /// expands or collapses. A double click on a file opens it; on a folder
+    /// its second click is ignored, or the folder would toggle back.
     pub(crate) fn click(&mut self, path: &str, double: bool) -> Activation {
         let row = self.rows().into_iter().find(|r| r.path() == Some(path));
         let Some(row) = row else {
@@ -364,6 +382,7 @@ impl FileTree {
         };
         self.set_cursor(path);
         match row.kind() {
+            Some(kind) if kind.is_dir() && double => Activation::Nothing,
             Some(kind) if kind.is_dir() => self.activate_row(&row),
             Some(_) if double => self.activate_row(&row),
             _ => Activation::Nothing,
@@ -409,19 +428,44 @@ impl FileTree {
             self.search = Search::Idle;
             return None;
         }
+        Some(self.new_search())
+    }
+
+    fn new_search(&mut self) -> SearchRequest {
         self.searches += 1;
         let id = self.searches;
         self.search = Search::Running { id };
-        Some(SearchRequest {
+        SearchRequest {
             id,
-            query: query.to_owned(),
-        })
+            query: self.query.clone(),
+        }
+    }
+
+    /// Whether a search is waiting for its answer.
+    pub(crate) fn searching(&self) -> bool {
+        matches!(self.search, Search::Running { .. })
+    }
+
+    /// Whether the search with this id is the one waiting for its answer.
+    pub(crate) fn awaits(&self, id: u64) -> bool {
+        self.search == (Search::Running { id })
+    }
+
+    /// The search to run again when the tree is shown again: one that was
+    /// interrupted, or whose answer may have been lost while hidden.
+    pub(crate) fn resume_search(&mut self) -> Option<SearchRequest> {
+        let unfinished = matches!(self.search, Search::Running { .. } | Search::Interrupted);
+        (self.filtering() && unfinished).then(|| self.new_search())
     }
 
     /// Takes a search's answer, best matches first; an older search's is
-    /// dropped.
+    /// dropped, and a cancelled one leaves the search unfinished.
     pub(crate) fn searched(&mut self, id: u64, result: SearchResult) {
-        if self.search != (Search::Running { id }) {
+        if !self.awaits(id) {
+            return;
+        }
+        if result.end == SearchEnd::Cancelled {
+            self.search = Search::Interrupted;
             return;
         }
         let mut hits = result.hits;
@@ -443,6 +487,7 @@ impl FileTree {
         match &self.search {
             Search::Idle => None,
             Search::Running { .. } => Some("Searching…".to_owned()),
+            Search::Interrupted => Some("The search was stopped.".to_owned()),
             Search::Done { hits, end } => match end {
                 SearchEnd::Complete if hits.is_empty() => Some(format!(
                     "No file or folder name contains \"{}\".",
@@ -460,6 +505,7 @@ impl FileTree {
                 SearchEnd::TimedOut => {
                     Some("The search ran out of time; the matches so far are shown.".to_owned())
                 }
+                SearchEnd::Unavailable => Some("The file search could not run.".to_owned()),
             },
         }
     }
@@ -472,6 +518,20 @@ fn child(dir: &str, name: &str) -> String {
     } else {
         format!("{dir}/{name}")
     }
+}
+
+/// `rel` (parts joined with `/`) under `root`, or `None` for a part that
+/// would leave it: `.`, `..`, and on Windows a `\` or a drive's `:`.
+pub(crate) fn join_relative(root: &str, rel: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::from(root);
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        let foreign = cfg!(windows) && part.contains(['\\', ':']);
+        if part == "." || part == ".." || foreign {
+            return None;
+        }
+        path.push(part);
+    }
+    Some(path)
 }
 
 /// Whether `path` lies below the folder `dir`.
@@ -669,7 +729,16 @@ mod tests {
         tree.move_cursor(1);
         assert_eq!(tree.activate(), Activation::Open("src/main.rs".into()));
         let expected: PathBuf = ["C:/Code/demo", "src", "main.rs"].iter().collect();
-        assert_eq!(tree.path_of("src/main.rs"), expected);
+        assert_eq!(tree.path_of("src/main.rs"), Some(expected));
+        assert_eq!(tree.path_of("src/../../x"), None);
+        assert_eq!(join_relative("r", "a/./b"), None);
+        assert_eq!(
+            join_relative("r", "a//b"),
+            Some(["r", "a", "b"].iter().collect())
+        );
+        if cfg!(windows) {
+            assert_eq!(join_relative("r", "C:/x"), None);
+        }
         tree.set_cursor("src");
         assert_eq!(tree.activate(), Activation::Nothing);
         assert!(!shown(&tree).contains(&"  main.rs".to_owned()), "collapsed");
@@ -688,7 +757,74 @@ mod tests {
             tree.click("assets", false),
             Activation::List(vec!["assets".into()])
         );
+        // The second click of a double click leaves the folder open.
+        assert_eq!(tree.click("assets", true), Activation::Nothing);
+        assert!(shown(&tree).contains(&"+assets/".to_owned()));
         assert_eq!(tree.click("absent", true), Activation::Nothing);
+    }
+
+    #[test]
+    fn a_folder_is_not_asked_for_twice_at_once() {
+        let mut tree = sample();
+        assert_eq!(tree.expand("src"), ["src"]);
+        tree.collapse("src");
+        assert!(tree.expand("src").is_empty(), "its listing is on the way");
+        assert_eq!(tree.refresh(), [""]);
+        tree.listed("src", listing(&[("main.rs", F)]));
+        assert_eq!(tree.expand("src"), ["src"]);
+    }
+
+    #[test]
+    fn collapsing_or_failing_forgets_the_open_folders_inside() {
+        let mut tree = sample();
+        tree.expand("src");
+        tree.listed("src", listing(&[("ui", D)]));
+        tree.expand("src/ui");
+        tree.listed("src/ui", listing(&[("deep", D)]));
+        tree.collapse("src");
+        tree.expand("src");
+        tree.listed("src", listing(&[("ui", D)]));
+        assert_eq!(tree.refresh(), ["", "src"], "src/ui closed with src");
+        tree.listed("", listing(&[("src", D)]));
+        tree.listed("src", listing(&[("ui", D)]));
+        tree.expand("src/ui");
+        tree.listed("src/ui", listing(&[]));
+        tree.listed("src", Err("gone".into()));
+        assert_eq!(tree.refresh(), ["", "src"], "src/ui went with the failure");
+    }
+
+    #[test]
+    fn rf_ctx_01_an_interrupted_search_runs_again_when_shown() {
+        let mut tree = sample();
+        assert!(tree.resume_search().is_none(), "no query");
+        let first = tree.set_query("main").unwrap();
+        tree.searched(
+            first.id,
+            SearchResult {
+                hits: vec![],
+                end: SearchEnd::Cancelled,
+            },
+        );
+        assert!(!tree.searching());
+        assert_eq!(
+            tree.search_note().as_deref(),
+            Some("The search was stopped.")
+        );
+        let again = tree.resume_search().unwrap();
+        assert_eq!(again.query, "main");
+        assert!(tree.awaits(again.id) && !tree.awaits(first.id));
+        tree.searched(
+            again.id,
+            SearchResult {
+                hits: vec![],
+                end: SearchEnd::Unavailable,
+            },
+        );
+        assert_eq!(
+            tree.search_note().as_deref(),
+            Some("The file search could not run.")
+        );
+        assert!(tree.resume_search().is_none(), "a finished search stays");
     }
 
     #[test]

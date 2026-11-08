@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -13,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use tokio::sync::oneshot;
 use yien_proto::TabId;
-use yien_proto::files::EntryKind;
+use yien_proto::files::{EntryKind, SearchEnd, SearchResult};
 
 use super::Shell;
 use crate::actions::*;
@@ -21,6 +22,9 @@ use crate::assets;
 use crate::file_tree::{Activation, FileTree, Row, SearchRequest};
 use crate::files::{Files, FilesHost};
 use crate::region::Region;
+
+/// How long typing must pause before the filter searches.
+const SEARCH_PAUSE: Duration = Duration::from_millis(100);
 
 /// The height of every tree row, so the list can draw only what shows.
 const ROW_HEIGHT: f32 = 24.0;
@@ -93,8 +97,12 @@ impl Shell {
             return;
         }
         self.files.shown = Some((tab, dir.clone()));
+        let mut resumed = None;
         let requests = match self.files.trees.get_mut(&tab) {
-            Some(tree) if tree.root() == dir => tree.refresh(),
+            Some(tree) if tree.root() == dir => {
+                resumed = tree.resume_search();
+                tree.refresh()
+            }
             _ => {
                 let (mut tree, root) = FileTree::new(&dir);
                 let mut requests = vec![root];
@@ -115,6 +123,9 @@ impl Shell {
             .input
             .update(cx, |input, cx| input.set_value(query, window, cx));
         self.list_folders(tab, requests, cx);
+        if let Some(request) = resumed {
+            self.start_search(tab, request, cx);
+        }
     }
 
     /// Lists the selected tab's folders again after its git facts changed.
@@ -143,7 +154,10 @@ impl Shell {
             );
             let root = root.clone();
             cx.spawn(async move |this, cx| {
-                let Ok(listing) = answer.await else { return };
+                // A host that dropped the callback still ends the wait.
+                let listing = answer
+                    .await
+                    .unwrap_or_else(|_| Err("the listing did not answer".to_owned()));
                 let _ = this.update(cx, |shell, cx| {
                     if let Some(tree) = shell.files.trees.get_mut(&tab)
                         && tree.root() == root
@@ -171,7 +185,10 @@ impl Shell {
             }),
         );
         cx.spawn(async move |this, cx| {
-            let Ok(result) = answer.await else { return };
+            let result = answer.await.unwrap_or(SearchResult {
+                hits: Vec::new(),
+                end: SearchEnd::Unavailable,
+            });
             let _ = this.update(cx, |shell, cx| {
                 if let Some(tree) = shell.files.trees.get_mut(&tab)
                     && tree.root() == root
@@ -196,13 +213,53 @@ impl Shell {
             return;
         }
         let query = input.read(cx).value();
+        self.set_files_query(&query, cx);
+    }
+
+    /// Takes the filter's text: a new query searches once typing pauses,
+    /// and clearing it stops the search that runs.
+    fn set_files_query(&mut self, query: &str, cx: &mut Context<Self>) {
         let Some((tab, tree)) = self.shown_tree() else {
             return;
         };
-        if let Some(request) = tree.set_query(&query) {
-            self.start_search(tab, request, cx);
+        let was_searching = tree.searching();
+        match tree.set_query(query) {
+            Some(request) => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SEARCH_PAUSE).await;
+                    let _ = this.update(cx, |shell, cx| {
+                        let current = shell
+                            .files
+                            .trees
+                            .get(&tab)
+                            .is_some_and(|t| t.awaits(request.id));
+                        if current {
+                            shell.start_search(tab, request, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+            None if was_searching && !tree.searching() => self.files.host.cancel_search(),
+            None => {}
         }
         cx.notify();
+    }
+
+    /// After an activation: a folder match ends the search, so the filter
+    /// is emptied to match.
+    fn sync_filter_text(
+        &mut self,
+        was_filtering: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
+        if was_filtering && !filtering {
+            self.files
+                .input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
     }
 
     /// Opens a file in the configured editor, or the OS default app
@@ -231,7 +288,7 @@ impl Shell {
     fn act(&mut self, tab: TabId, activation: Activation, cx: &mut Context<Self>) {
         match activation {
             Activation::Open(rel) => {
-                let file = self.files.trees.get(&tab).map(|t| t.path_of(&rel));
+                let file = self.files.trees.get(&tab).and_then(|t| t.path_of(&rel));
                 if let Some(file) = file {
                     self.open_file(file, cx);
                 }
@@ -370,13 +427,7 @@ impl Shell {
     ) {
         let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         self.with_tree(cx, FileTree::activate);
-        // A folder match ends the search: the filter shows that.
-        let filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
-        if was_filtering && !filtering {
-            self.files
-                .input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-        }
+        self.sync_filter_text(was_filtering, window, cx);
     }
 
     /// Escape clears the filter, then leaves the context bar.
@@ -390,10 +441,7 @@ impl Shell {
             self.files
                 .input
                 .update(cx, |input, cx| input.set_value("", window, cx));
-            if let Some((_, tree)) = self.shown_tree() {
-                tree.set_query("");
-            }
-            cx.notify();
+            self.set_files_query("", cx);
         } else {
             self.give_back_keyboard(window, cx);
         }
@@ -407,10 +455,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.focus_files(window, cx);
+        let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         if let Some((tab, tree)) = self.shown_tree() {
             let activation = tree.click(&path, double);
             self.act(tab, activation, cx);
         }
+        self.sync_filter_text(was_filtering, window, cx);
     }
 
     /// The tab strip under the branch head: Changes, with its count, and
@@ -578,6 +628,7 @@ impl Shell {
                     .border_1()
                     .border_color(transparent_black())
                     .text_size(t.text(12.5))
+                    .aria_selected(cursor == Some(at))
                     .when(cursor == Some(at), |row| {
                         row.bg(t.hover).when(ringed, |row| row.border_color(t.ai))
                     });

@@ -33,6 +33,7 @@ pub type OpenDone = Box<dyn FnOnce(Option<String>) + Send>;
 ///             end: yien_proto::files::SearchEnd::Complete,
 ///         });
 ///     }
+///     fn cancel_search(&self) {}
 ///     fn open(&self, _file: PathBuf, _editor: Option<String>, done: OpenDone) {
 ///         done(Some("no editor here".into()));
 ///     }
@@ -44,6 +45,8 @@ pub trait FilesHost {
     fn list(&self, root: PathBuf, dir: String, done: ListDone);
     /// Searches `root` by name; a newer search may cancel this one.
     fn search(&self, root: PathBuf, query: String, done: SearchDone);
+    /// Stops the running search, if any.
+    fn cancel_search(&self);
     /// Opens `file` in `editor` (a command line), or in the OS default app
     /// when `None`.
     fn open(&self, file: PathBuf, editor: Option<String>, done: OpenDone);

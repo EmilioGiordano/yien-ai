@@ -84,8 +84,10 @@ pub enum SearchEnd {
     TooManyEntries,
     /// It ran out of time.
     TimedOut,
-    /// A newer search replaced it.
+    /// A newer search replaced it, or it was stopped.
     Cancelled,
+    /// It could not run at all.
+    Unavailable,
 }
 
 /// What a search by name found.

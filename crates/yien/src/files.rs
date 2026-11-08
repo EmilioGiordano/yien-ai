@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use yien_platform::config_file;
 use yien_platform::file_tree::FileTreeService;
+use yien_proto::files::{SearchEnd, SearchResult};
 use yien_ui::{Files, FilesHost, ListDone, OpenDone, SearchDone};
 
 /// Test-only: folders to expand in each tab's tree at start, comma
@@ -30,8 +31,18 @@ impl FilesHost for Host {
     }
 
     fn search(&self, root: PathBuf, query: String, done: SearchDone) {
+        match &self.service {
+            Some(service) => service.search(root, query, done),
+            None => done(SearchResult {
+                hits: Vec::new(),
+                end: SearchEnd::Unavailable,
+            }),
+        }
+    }
+
+    fn cancel_search(&self) {
         if let Some(service) = &self.service {
-            service.search(root, query, done);
+            service.cancel_search();
         }
     }
 
