@@ -22,6 +22,7 @@ use crate::assets;
 use crate::file_tree::{Activation, FileTree, Row, SearchRequest};
 use crate::files::{Files, FilesHost};
 use crate::region::Region;
+use crate::sidebars::{self, Bar};
 
 /// How long typing must pause before the filter searches.
 const SEARCH_PAUSE: Duration = Duration::from_millis(100);
@@ -87,7 +88,7 @@ impl Shell {
         self.files
             .trees
             .retain(|tab, _| workspace.tab(*tab).is_some());
-        let visible = self.context_bar_open && self.context_view == ContextView::Files;
+        let visible = self.bar_shown(Bar::Context) && self.context_view == ContextView::Files;
         let selected = self.workspace.selected_tab().map(|t| (t.id, t.dir.clone()));
         let Some((tab, dir)) = selected.filter(|_| visible) else {
             self.files.shown = None;
@@ -320,7 +321,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.context_bar_open = true;
+        self.change_side_bars(|b| sidebars::show(b, Bar::Context), window, cx);
         self.context_view = ContextView::Files;
         self.sync_files(window, cx);
         self.focus_files(window, cx);
@@ -340,7 +341,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.context_bar_open = true;
+        self.change_side_bars(|b| sidebars::show(b, Bar::Context), window, cx);
         self.context_view = ContextView::Changes;
         self.sync_files(window, cx);
         window.focus(&self.context_focus, cx);
