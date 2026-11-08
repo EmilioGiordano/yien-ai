@@ -181,6 +181,13 @@ pub enum OpenError {
         /// What the OS said.
         reason: String,
     },
+    /// No editor is set and the OS would run the file instead of showing
+    /// it: a program, a script or a shortcut.
+    #[error("{name} would run as a program; set `editor` in config.toml to open it")]
+    WouldRun {
+        /// The file's name.
+        name: String,
+    },
 }
 
 /// Opens `path` in `editor` (a command line, the file appended as its last
@@ -209,12 +216,100 @@ pub fn open(
         Some((_, Some(parts))) => Some(parts),
         None => None,
     };
+    if command.is_none() && runs_when_opened(&path) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        return done(Err(OpenError::WouldRun { name }));
+    }
     let spawned = std::thread::Builder::new()
         .name("yien-open-file".into())
         .spawn(move || done(open_now(&path, command.as_deref())));
     if let Err(e) = spawned {
         tracing::warn!("could not start the thread that opens the file: {e}");
     }
+}
+
+/// Extensions the Windows shell runs, or hands to something that runs
+/// them, on its default verb; `PATHEXT` adds to them.
+const RUNNABLE: &[&str] = &[
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "lnk",
+    "url",
+    "js",
+    "jse",
+    "vbs",
+    "vbe",
+    "wsf",
+    "wsh",
+    "hta",
+    "msi",
+    "msp",
+    "scr",
+    "cpl",
+    "reg",
+    "ps1",
+    "psm1",
+    "appref-ms",
+    "application",
+    "jar",
+    "pif",
+    "inf",
+    "msc",
+    "settingcontent-ms",
+];
+
+/// Whether the OS default app would run `path` rather than show it.
+#[cfg(windows)]
+fn runs_when_opened(path: &Path) -> bool {
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    runnable_extension(path, &pathext)
+}
+
+/// Whether the OS default app would run `path` rather than show it: a
+/// launcher (`.desktop`, `.app`, `.command`), a folder (an app bundle) or
+/// a file with an execute bit.
+#[cfg(unix)]
+fn runs_when_opened(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let launcher = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["desktop", "app", "command"]
+            .iter()
+            .any(|l| e.eq_ignore_ascii_case(l))
+    });
+    launcher || fs::metadata(path).is_ok_and(|m| m.is_dir() || m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn runs_when_opened(_: &Path) -> bool {
+    true
+}
+
+/// Whether `path`'s name ends in an extension the Windows shell runs:
+/// [`RUNNABLE`] or one of `pathext` (`;`-separated, with dots), ignoring
+/// case as Windows does, and ignoring the trailing dots and spaces Windows
+/// drops from a name.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn runnable_extension(path: &Path, pathext: &str) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let name = name.trim_end_matches(['.', ' ']);
+    let listed = pathext
+        .split(';')
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty());
+    RUNNABLE
+        .iter()
+        .map(|e| (*e).to_owned())
+        .chain(listed)
+        .any(|ext| name.ends_with(&format!(".{ext}")))
 }
 
 fn failed(path: &Path, reason: impl ToString) -> OpenError {
@@ -496,6 +591,81 @@ mod tests {
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
         assert!(!batch_safe(&["a&calc".into()], file));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_ctx_03_files_the_windows_shell_would_run_are_recognised() {
+        let ext = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.PY";
+        for runs in [
+            "setup.bat",
+            "SETUP.BAT",
+            ".bat",
+            "README.lnk",
+            "x.js",
+            "x.vbs",
+            "tool.exe",
+            "a.ps1",
+            "site.url",
+            "app.appref-ms",
+            "x.settingcontent-ms",
+            "keys.reg",
+            "run.py",
+            "trailing.bat. ",
+        ] {
+            assert!(runnable_extension(Path::new(runs), ext), "{runs:?}");
+        }
+        for shows in [
+            "config.toml",
+            "main.rs",
+            "notes.md",
+            "Makefile",
+            "batch.txt",
+            "exe",
+            "page.jsx",
+        ] {
+            assert!(!runnable_extension(Path::new(shows), ext), "{shows}");
+        }
+        assert!(
+            !runnable_extension(Path::new("run.py"), ""),
+            "only PATHEXT makes .py runnable"
+        );
+    }
+
+    #[test]
+    fn rf_ctx_03_with_no_editor_a_runnable_file_is_refused_not_run() {
+        let name = if cfg!(windows) {
+            "setup.bat"
+        } else {
+            "launch.desktop"
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        open(PathBuf::from(name), None, move |r| {
+            let _ = tx.send(r);
+        });
+        let refused = rx.recv().unwrap();
+        assert!(
+            matches!(&refused, Err(OpenError::WouldRun { name: n }) if n == name),
+            "{refused:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rf_ctx_03_an_executable_file_or_folder_counts_as_runnable_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("runnable");
+        fs::create_dir_all(dir.join("Tool.app")).unwrap();
+        let plain = dir.join("notes.md");
+        let script = dir.join("build");
+        fs::write(&plain, "").unwrap();
+        fs::write(&script, "").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!runs_when_opened(&plain));
+        assert!(runs_when_opened(&script));
+        assert!(runs_when_opened(&dir.join("Tool.app")));
+        assert!(runs_when_opened(Path::new("x.command")));
         let _ = fs::remove_dir_all(&dir);
     }
 
