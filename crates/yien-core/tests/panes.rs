@@ -638,6 +638,67 @@ fn rf_age_07_a_turn_done_unseen_goes_idle_once_the_window_is_focused() {
 }
 
 #[test]
+fn rf_age_04_profiles_from_the_user_folder_launch_and_are_listed() {
+    let dir = std::env::temp_dir().join(format!("yien-core-user-profiles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let folder = dir.join(yien_agent::PROFILES_DIR);
+    std::fs::create_dir_all(&folder).unwrap();
+    let fake = dir.join("fake-claude");
+    std::fs::write(
+        folder.join("claude.toml"),
+        format!(
+            "schema = 1\nid = \"claude\"\nname = \"Fake Claude\"\n\
+             detect = {{ command = '{}' }}\n\
+             [launch]\nargs = [\"--pane\", \"{{pane_id}}\"]\nenv = {{ MINE = \"1\" }}\n\
+             [[rules]]\nsources = [\"osc133\"]\n",
+            fake.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("mytool.toml"),
+        "schema = 1\nid = \"mytool\"\nname = \"My tool\"\n\
+         detect = { command = \"my-tool\" }\n[[rules]]\nsources = []\n",
+    )
+    .unwrap();
+    std::fs::write(folder.join("bad.toml"), "schema = = 1\n").unwrap();
+    let user = yien_platform::user_profiles::load(&dir);
+    assert_eq!(user.problems.len(), 1, "{:?}", user.problems);
+    let profiles =
+        yien_agent::resolve_profiles(yien_agent::builtin_profiles().unwrap(), user.profiles);
+    let mut h = Harness::start_with(CoreConfig {
+        profiles,
+        ..config()
+    });
+    let snapshot = h.wait_for(|m| match m {
+        CoreMsg::WorkspaceSnapshot(s) => Some(s.clone()),
+        _ => None,
+    });
+    let listed: Vec<(&str, &str)> = snapshot
+        .profiles
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str()))
+        .collect();
+    assert!(listed.contains(&("claude", "Fake Claude")), "{listed:?}");
+    assert!(listed.contains(&("mytool", "My tool")), "{listed:?}");
+
+    let (_, first, _) = h.project();
+    let (claude, child) = h.split(first, Some("claude"));
+    let spec = child.spec();
+    assert_eq!(spec.program, fake.as_os_str(), "the override's program");
+    let pane = claude.get().to_string();
+    assert_eq!(spec.args, ["--pane", pane.as_str()]);
+    assert!(spec.env.iter().any(|(k, v)| k == "MINE" && v == "1"));
+    let (_, child) = h.split(first, Some("mytool"));
+    assert_eq!(child.spec().program, "my-tool");
+    assert!(
+        child.spec().args.is_empty(),
+        "args come from the profile only"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn rf_age_05_the_watchdog_ticks_and_confirms_a_prompt_on_screen() {
     let profile = Profile::from_toml(
         r#"
