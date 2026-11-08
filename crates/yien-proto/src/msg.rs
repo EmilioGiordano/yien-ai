@@ -500,6 +500,28 @@ pub enum ClientMsg {
         /// Whether the window has the focus.
         focused: bool,
     },
+    /// Every pane, present and future, resolves its colours with this
+    /// palette (RF-CFG-02). Screens and scrollback are kept.
+    SetTerminalPalette {
+        /// The palette.
+        palette: TerminalPalette,
+    },
+}
+
+/// The terminal palette that goes with each window theme.
+///
+/// ```
+/// use yien_proto::TerminalPalette;
+///
+/// assert_eq!(TerminalPalette::default(), TerminalPalette::Sumi);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TerminalPalette {
+    /// Ink: light text on a dark grid.
+    #[default]
+    Sumi,
+    /// Paper: dark text on a light grid.
+    Washi,
 }
 
 /// One child of a split, with its share of the space.
@@ -1049,6 +1071,9 @@ mod tests {
                 kind: SelectionKind::Semantic,
             },
             ClientMsg::WindowFocus { focused: true },
+            ClientMsg::SetTerminalPalette {
+                palette: TerminalPalette::Washi,
+            },
         ];
         for msg in msgs {
             assert_eq!(round_trip(&msg), msg);

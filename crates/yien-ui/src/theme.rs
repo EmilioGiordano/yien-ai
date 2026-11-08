@@ -2,6 +2,7 @@
 
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use gpui_kit::{App, Hsla, Pixels, Rgba, px, rgb, rgba};
+use yien_proto::TerminalPalette;
 
 use crate::git::FileMark;
 use crate::model::AgentState;
@@ -18,6 +19,14 @@ impl ThemeKind {
         match self {
             Self::Sumi => Self::Washi,
             Self::Washi => Self::Sumi,
+        }
+    }
+
+    /// The palette the core resolves terminal colours with under this theme.
+    pub(crate) fn terminal_palette(self) -> TerminalPalette {
+        match self {
+            Self::Sumi => TerminalPalette::Sumi,
+            Self::Washi => TerminalPalette::Washi,
         }
     }
 }
@@ -50,6 +59,8 @@ pub(crate) struct Theme {
     pub(crate) term_text: Rgba,
     pub(crate) term_muted: Rgba,
     pub(crate) term_faint: Rgba,
+    /// Behind selected terminal cells, which keep their own text colour.
+    pub(crate) term_selection: Rgba,
 }
 
 impl Theme {
@@ -96,6 +107,7 @@ impl Theme {
             term_text: rgb(0xe9e6dd),
             term_muted: rgb(0xa19d93),
             term_faint: rgb(0x7d796f),
+            term_selection: rgb(0x55514a),
         }
     }
 
@@ -122,6 +134,9 @@ impl Theme {
             term_text: rgb(0x23211e),
             term_muted: rgb(0x5c5952),
             term_faint: rgb(0x6f6c64),
+            // --ai-wash at 14 % over --term-bg: `term_strong` is too dark for
+            // the coloured text selected cells keep.
+            term_selection: rgb(0xdee2e8),
         }
     }
 
@@ -256,6 +271,45 @@ mod tests {
                 assert!(ratio >= 4.5, "{kind:?}: {name} is {ratio:.2}:1");
             }
         }
+    }
+
+    #[test]
+    fn rf_cfg_02_each_theme_picks_its_terminal_palette() {
+        assert_eq!(ThemeKind::Sumi.terminal_palette(), TerminalPalette::Sumi);
+        assert_eq!(ThemeKind::Washi.terminal_palette(), TerminalPalette::Washi);
+        assert_eq!(
+            ThemeKind::default().terminal_palette(),
+            TerminalPalette::default(),
+            "the core starts with the palette of the window's first theme"
+        );
+    }
+
+    #[test]
+    fn rnf_18_selected_terminal_text_meets_aa_in_both_themes() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let ratio = contrast(t.term_text, t.term_selection);
+            assert!(ratio >= 4.5, "{kind:?}: selected text is {ratio:.2}:1");
+        }
+        let sumi = Theme::of(ThemeKind::Sumi);
+        assert_eq!(sumi.term_selection, sumi.term_strong, "sumi is unchanged");
+    }
+
+    #[test]
+    fn rnf_18_selected_washi_colours_stay_readable() {
+        // `yien_vt::Palette::washi()`, ANSI 1-6 and 9-14; yien-ui cannot
+        // depend on yien-vt.
+        let colours = [
+            0xd11f28, 0x3e6b24, 0x8a5a12, 0x2f4f8f, 0x8a3d7c, 0x1f6b66, 0xd9444a, 0x5a8a34,
+            0xa86f12, 0x4a6cb5, 0xa8559a, 0x2f8781,
+        ];
+        let t = Theme::of(ThemeKind::Washi);
+        for hex in colours {
+            let ratio = contrast(rgb(hex), t.term_selection);
+            assert!(ratio >= 3.0, "{hex:06x} on the selection is {ratio:.2}:1");
+        }
+        let ratio = contrast(t.term_selection, t.term_bg);
+        assert!(ratio > 1.2, "the selection shows on the grid: {ratio:.2}:1");
     }
 
     #[test]
