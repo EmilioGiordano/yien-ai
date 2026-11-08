@@ -293,7 +293,7 @@ impl Shell {
             .map(|dialog| self.dismiss_on_window_commands(dialog, cx))
             .child(
                 div()
-                    .text_size(px(15.0))
+                    .text_size(t.text(15.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child(title),
             )
@@ -314,19 +314,24 @@ impl Shell {
             )
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(t.text(12.5))
                     .text_color(t.muted)
                     .child(prompt.hint.clone()),
             )
             .when_some(prompt.error.clone(), |d, error| {
-                d.child(div().text_size(px(12.5)).text_color(t.ochre).child(error))
+                d.child(
+                    div()
+                        .text_size(t.text(12.5))
+                        .text_color(t.ochre)
+                        .child(error),
+                )
             })
             .child(
                 h_flex()
                     .justify_end()
                     .gap(px(8.0))
                     .pt(px(4.0))
-                    .text_size(px(13.0))
+                    .text_size(t.text(13.0))
                     .child(
                         self.dialog_button("worktree-prompt-cancel", "Cancel", "Esc")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -407,20 +412,20 @@ impl Shell {
             .map(|dialog| self.dismiss_on_window_commands(dialog, cx))
             .child(
                 div()
-                    .text_size(px(15.0))
+                    .text_size(t.text(15.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(t.text(13.0))
                     .text_color(t.muted)
                     .child(q.detail()),
             )
             .when(q.step == Step::Choose, |d| {
                 d.child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(t.text(12.5))
                         .text_color(t.faint)
                         .child(q.work_text()),
                 )
@@ -430,7 +435,7 @@ impl Shell {
                     .justify_end()
                     .gap(px(8.0))
                     .pt(px(4.0))
-                    .text_size(px(13.0)),
+                    .text_size(t.text(13.0)),
             );
         Some(scrim(dialog))
     }
@@ -459,7 +464,7 @@ impl Shell {
             .child(label)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(t.text(11.5))
                     .text_color(t.faint)
                     .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                     .child(keys),

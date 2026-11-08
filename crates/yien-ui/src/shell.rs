@@ -1111,7 +1111,7 @@ impl Shell {
                 .child(label)
                 .child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(t.text(11.5))
                         .text_color(t.faint)
                         .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                         .child(keys),
@@ -1149,17 +1149,22 @@ impl Shell {
                         .map(|dialog| self.close_on_window_commands(dialog, cx))
                         .child(
                             div()
-                                .text_size(px(15.0))
+                                .text_size(t.text(15.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(format!("Close {}?", confirm.name)),
                         )
-                        .child(div().text_size(px(13.0)).text_color(t.muted).child(detail))
+                        .child(
+                            div()
+                                .text_size(t.text(13.0))
+                                .text_color(t.muted)
+                                .child(detail),
+                        )
                         .child(
                             h_flex()
                                 .justify_end()
                                 .gap(px(8.0))
                                 .pt(px(4.0))
-                                .text_size(px(13.0))
+                                .text_size(t.text(13.0))
                                 .child(button("confirm-cancel", "Cancel", "Esc").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.confirm_cancel(&ConfirmCancel, window, cx);
@@ -1348,7 +1353,7 @@ impl Shell {
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(13.0))
+                .text_size(t.text(13.0))
                 .text_color(t.muted)
                 .child(project)
                 .child("/")
@@ -1429,7 +1434,7 @@ impl Shell {
             .border_1()
             .border_color(t.line)
             .bg(t.bg)
-            .text_size(px(13.0))
+            .text_size(t.text(13.0))
             .text_color(t.faint)
             .whitespace_nowrap()
             .overflow_hidden()
@@ -1441,7 +1446,7 @@ impl Shell {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_size(t.text(11.0))
                     .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                     .child(PALETTE_KEYS),
             )
@@ -1470,7 +1475,7 @@ impl Shell {
         let none = rows.is_empty().then(|| {
             div()
                 .p(px(14.0))
-                .text_size(px(13.0))
+                .text_size(t.text(13.0))
                 .text_color(t.muted)
                 .child(format!("{empty} \"{}\".", model.query()))
         });
@@ -1507,7 +1512,7 @@ impl Shell {
                                 .py(px(8.0))
                                 .border_b_1()
                                 .border_color(t.line)
-                                .text_size(px(14.5))
+                                .text_size(t.text(14.5))
                                 .child(
                                     Input::new(&open.input)
                                         .appearance(false)
@@ -1587,13 +1592,13 @@ impl Shell {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(13.5))
+                    .text_size(t.text(13.5))
                     .child(text),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.0))
+                    .text_size(t.text(12.0))
                     .text_color(hint_color)
                     .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                     .child(entry.hint.clone()),
@@ -1626,7 +1631,7 @@ impl Shell {
             .py(px(3.0))
             .rounded_full()
             .border_1()
-            .text_size(px(12.5))
+            .text_size(t.text(12.5))
             .font_weight(FontWeight::MEDIUM)
             .map(|pill| {
                 if waiting > 0 {
@@ -1672,7 +1677,7 @@ impl Shell {
             .pl(px(12.0))
             .pr(px(6.0))
             .pt(px(6.0))
-            .text_size(px(11.5))
+            .text_size(t.text(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(t.faint)
             .child(div().flex_1().child("Projects"))
@@ -1745,7 +1750,7 @@ impl Shell {
             .px(px(6.0))
             .pt(px(10.0))
             .pb(px(4.0))
-            .text_size(px(12.5))
+            .text_size(t.text(12.5))
             .text_color(t.muted)
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(id, cx)))
@@ -1759,7 +1764,7 @@ impl Shell {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(13.0))
+                    .text_size(t.text(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.text)
                     .child(project.name.clone()),
@@ -1768,7 +1773,7 @@ impl Shell {
                 head.child(
                     div()
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(t.text(12.0))
                         .text_color(t.shu)
                         .child(format!("{waiting} need you")),
                 )
@@ -1864,7 +1869,7 @@ impl Shell {
                         .gap(px(8.0))
                         .min_w_0()
                         .whitespace_nowrap()
-                        .text_size(px(12.0))
+                        .text_size(t.text(12.0))
                         .text_color(t.faint)
                         .child(
                             div()
@@ -1953,7 +1958,7 @@ impl Shell {
                 .when_some(self.fonts.display.clone(), |d, family| {
                     d.font_family(family)
                 })
-                .text_size(px(18.0))
+                .text_size(t.text(18.0))
                 .child("No tab is open");
         };
         let rects = tab.rects();
@@ -1991,12 +1996,12 @@ impl Shell {
                     .when_some(self.fonts.display.clone(), |d, family| {
                         d.font_family(family)
                     })
-                    .text_size(px(18.0))
+                    .text_size(t.text(18.0))
                     .child("No project is open"),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(t.text(13.0))
                     .text_color(t.faint)
                     .child("Add a folder to start working in it."),
             )
@@ -2013,7 +2018,7 @@ impl Shell {
                     .border_1()
                     .border_color(t.line)
                     .bg(t.raised)
-                    .text_size(px(13.5))
+                    .text_size(t.text(13.5))
                     .text_color(t.text)
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
@@ -2024,7 +2029,7 @@ impl Shell {
                     .child("Add project")
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(t.text(11.5))
                             .text_color(t.faint)
                             .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                             .child(ADD_PROJECT_KEYS),
@@ -2057,7 +2062,7 @@ impl Shell {
             .border_b_1()
             .border_color(t.term_line)
             .whitespace_nowrap()
-            .text_size(px(12.5))
+            .text_size(t.text(12.5))
             .text_color(t.term_muted)
             .when(focused, |h| h.bg(t.term_raised))
             .child(glyph(pane.state, &t))
@@ -2075,7 +2080,7 @@ impl Shell {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(12.0))
+                        .text_size(t.text(12.0))
                         .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                         .child(tab.dir.clone()),
                 )
@@ -2119,7 +2124,7 @@ impl Shell {
                 .border_b_1()
                 .border_color(t.term_line)
                 .bg(t.term_raised)
-                .text_size(px(12.0))
+                .text_size(t.text(12.0))
                 .child(div().flex_1().min_w_0().text_color(t.ochre).child(what))
                 .child(
                     div()
@@ -2274,7 +2279,7 @@ impl Shell {
             .border_1()
             .border_color(t.term_strong)
             .bg(t.term_bg)
-            .text_size(px(12.5))
+            .text_size(t.text(12.5))
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.menu_closed = this
@@ -2315,7 +2320,7 @@ impl Shell {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.5))
+                    .text_size(t.text(12.5))
                     .text_color(t.faint)
                     .child(no_tab_label(&self.workspace)),
             );
@@ -2343,14 +2348,14 @@ impl Shell {
                 .px(px(6.0))
                 .py(px(4.0))
                 .rounded(px(5.0))
-                .text_size(px(12.5))
+                .text_size(t.text(12.5))
                 .when_some(mono.clone(), |d, family| d.font_family(family))
                 .child(
                     div()
                         .flex_none()
                         .w(px(16.0))
                         .text_center()
-                        .text_size(px(11.5))
+                        .text_size(t.text(11.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.mark_color(file.mark))
                         .child(file.mark.letter()),
@@ -2397,7 +2402,7 @@ impl Shell {
                             .border_1()
                             .border_color(t.line)
                             .bg(t.bg)
-                            .text_size(px(12.5))
+                            .text_size(t.text(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .when_some(mono.clone(), |d, family| d.font_family(family))
                             .child(
@@ -2423,7 +2428,7 @@ impl Shell {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_size(px(12.0))
+                            .text_size(t.text(12.0))
                             .text_color(t.faint)
                             .when_some(mono.clone(), |d, family| d.font_family(family))
                             .child(git.place),
@@ -2439,7 +2444,7 @@ impl Shell {
                                 .rounded_full()
                                 .border_1()
                                 .border_color(t.line)
-                                .text_size(px(11.0))
+                                .text_size(t.text(11.0))
                                 .text_color(t.muted)
                                 .when_some(mono.clone(), |d, family| d.font_family(family))
                                 .child("dirty"),
@@ -2452,7 +2457,7 @@ impl Shell {
                                 .aria_label(format!("Ahead and behind the upstream: {text}"))
                                 .flex_none()
                                 .whitespace_nowrap()
-                                .text_size(px(12.0))
+                                .text_size(t.text(12.0))
                                 .text_color(t.muted)
                                 .when_some(mono.clone(), |d, family| d.font_family(family))
                                 .child(text),
@@ -2468,13 +2473,13 @@ impl Shell {
                         .px(px(12.0))
                         .pt(px(10.0))
                         .pb(px(6.0))
-                        .text_size(px(12.5))
+                        .text_size(t.text(12.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.muted)
                         .child("Changes")
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(t.text(11.0))
                                 .font_weight(FontWeight::NORMAL)
                                 .text_color(t.faint)
                                 .when_some(mono.clone(), |d, family| d.font_family(family))
@@ -2489,7 +2494,7 @@ impl Shell {
                         .when(!repository, |d| d.pt(px(10.0)))
                         .px(px(12.0))
                         .pb(px(8.0))
-                        .text_size(px(12.5))
+                        .text_size(t.text(12.5))
                         .text_color(t.muted)
                         .child(note),
                 )
@@ -2510,7 +2515,7 @@ impl Shell {
                             div()
                                 .px(px(6.0))
                                 .py(px(4.0))
-                                .text_size(px(12.0))
+                                .text_size(t.text(12.0))
                                 .text_color(t.faint)
                                 .child(format!("and {hidden} more")),
                         )
@@ -2534,7 +2539,7 @@ impl Shell {
             .bg(t.panel)
             .whitespace_nowrap()
             .overflow_hidden()
-            .text_size(px(11.5))
+            .text_size(t.text(11.5))
             .text_color(t.faint)
             .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
             .child(format!(
@@ -2682,7 +2687,7 @@ impl Render for Shell {
             .size_full()
             .bg(t.panel)
             .text_color(t.text)
-            .text_size(px(14.0))
+            .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
             .child(self.render_title_bar(cx))
             .child(

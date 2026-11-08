@@ -464,7 +464,7 @@ impl TerminalPane {
             .border_b_1()
             .border_color(t.term_line)
             .bg(t.term_raised)
-            .text_size(px(12.0))
+            .text_size(t.text(12.0))
             .child(
                 div()
                     .flex_1()
@@ -536,7 +536,7 @@ impl Render for TerminalPane {
                 .border_t_1()
                 .border_color(t.term_line)
                 .bg(t.term_raised)
-                .text_size(px(12.0))
+                .text_size(t.text(12.0))
                 .text_color(t.ochre)
                 .occlude()
                 .child(text)

@@ -1,7 +1,7 @@
 //! The two palettes of the prototype: sumi (ink, dark) and washi (paper, light).
 
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
-use gpui_kit::{App, Hsla, Rgba, rgb, rgba};
+use gpui_kit::{App, Hsla, Pixels, Rgba, px, rgb, rgba};
 
 use crate::git::FileMark;
 use crate::model::AgentState;
@@ -22,9 +22,15 @@ impl ThemeKind {
     }
 }
 
+/// The window text size the prototype's sizes are drawn at.
+pub(crate) const BASE_UI_SIZE: f32 = 13.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Theme {
     pub(crate) kind: ThemeKind,
+    /// The configured window text size (`ui.font.size`); every text size
+    /// is scaled by it over [`BASE_UI_SIZE`].
+    pub(crate) ui_size: f32,
     pub(crate) bg: Rgba,
     pub(crate) panel: Rgba,
     pub(crate) raised: Rgba,
@@ -54,9 +60,15 @@ impl Theme {
         }
     }
 
+    /// A text size of the prototype, `base` at 13 px, at the configured size.
+    pub(crate) fn text(&self, base: f32) -> Pixels {
+        px(base * self.ui_size / BASE_UI_SIZE)
+    }
+
     fn sumi() -> Self {
         Self {
             kind: ThemeKind::Sumi,
+            ui_size: BASE_UI_SIZE,
             bg: rgb(0x0d0c0b),
             panel: rgb(0x141311),
             raised: rgb(0x1c1a17),
@@ -82,6 +94,7 @@ impl Theme {
     fn washi() -> Self {
         Self {
             kind: ThemeKind::Washi,
+            ui_size: BASE_UI_SIZE,
             bg: rgb(0xf7f6f0),
             panel: rgb(0xefede5),
             raised: rgb(0xfbfaf6),
@@ -282,6 +295,16 @@ mod tests {
                 assert!(ratio >= 3.0, "{kind:?}: the ring is {ratio:.2}:1");
             }
         }
+    }
+
+    #[test]
+    fn rf_cfg_02_text_sizes_follow_the_configured_ui_size() {
+        let t = Theme::of(ThemeKind::Sumi);
+        assert_eq!(t.text(12.5), px(12.5), "13 px draws the prototype's sizes");
+        let big = Theme { ui_size: 26.0, ..t };
+        assert_eq!(big.text(12.5), px(25.0));
+        assert_eq!(big.kind, t.kind);
+        assert_eq!(big.shu, t.shu);
     }
 
     #[test]
