@@ -12,7 +12,7 @@ use yien_proto::{Command, PaneId};
 use super::{Shell, TITLE_BAR_HEIGHT, glyph};
 use crate::actions::*;
 use crate::model::AgentState;
-use crate::tray::{TrayRow, keep_cursor, move_cursor, tray_rows};
+use crate::tray::{TrayRow, keep_cursor, list_index, move_cursor, tray_rows};
 
 const TRAY_WIDTH: f32 = 400.0;
 const TRAY_LIST_HEIGHT: f32 = 360.0;
@@ -24,6 +24,7 @@ pub(super) struct Tray {
     cursor: Option<PaneId>,
     /// Where the cursor's row was, for when its pane leaves the list.
     index: usize,
+    scroll: ScrollHandle,
 }
 
 impl Tray {
@@ -33,6 +34,7 @@ impl Tray {
             focus,
             cursor: None,
             index: 0,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -79,7 +81,7 @@ impl Shell {
         }
     }
 
-    fn close_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tray.take().is_some() {
             self.give_back_keyboard(window, cx);
         }
@@ -101,6 +103,9 @@ impl Shell {
                 .iter()
                 .position(|r| Some(r.pane) == tray.cursor)
                 .unwrap_or(0);
+            if let Some(item) = tray.cursor.and_then(|pane| list_index(&rows, pane)) {
+                tray.scroll.scroll_to_item(item);
+            }
             cx.notify();
         }
     }
@@ -130,7 +135,13 @@ impl Shell {
 
     /// Focuses the next pane whose agent finished a turn, oldest first
     /// (RF-ATN-14). Seeing it turns it idle (RF-AGE-07).
-    pub(super) fn jump_to_done(&mut self, _: &JumpToDone, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn jump_to_done(
+        &mut self,
+        _: &JumpToDone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tray(window, cx);
         match self.workspace.next_done(self.focused_pane()) {
             Some(pane) => self.command(Command::FocusPane { pane }, cx),
             None => {
@@ -236,6 +247,7 @@ impl Shell {
                         .id("attention-tray-list")
                         .role(Role::ListBox)
                         .aria_label("Agents that need you, failed or finished")
+                        .track_scroll(&tray.scroll)
                         .overflow_y_scroll()
                         .max_h(px(TRAY_LIST_HEIGHT))
                         .pb(px(6.0))

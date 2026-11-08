@@ -7,8 +7,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, NeedsReason, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
-    SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
+    LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
+    ProjectInfo, SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -135,8 +135,8 @@ pub struct PaneView {
     /// attention order, lower first (RF-ATN-13, RF-ATN-14).
     pub attention_since: Option<u64>,
     /// While it needs the user: what its agent asks, when its hooks said
-    /// (RF-ATN-13).
-    pub question: Option<String>,
+    /// (RF-ATN-13). Its `Debug` shows only the length.
+    pub question: Option<PendingQuestion>,
     /// Its agent's state cannot be told, so it shows idle (RN-02).
     pub signal_lost: bool,
     /// The agent session it names, once known (RF-SES-07).
@@ -180,7 +180,7 @@ impl PaneView {
             exited: !info.running && info.exit_code.is_some(),
             needs_you_since: info.needs_you_since,
             attention_since: info.attention_since,
-            question: info.question.as_ref().map(|q| q.as_str().to_owned()),
+            question: info.question.clone(),
             signal_lost: info.signal_lost,
             session_id: info.session_id.clone(),
             runs_session: info.runs_session,
@@ -883,8 +883,10 @@ impl WorkspaceView {
         self.tabs_of(project).next().map(|t| t.id)
     }
 
-    /// The tab `by` steps from the selected one in tab-bar order, wrapping
-    /// around; the first tab when nothing is selected.
+    /// The tab `by` steps from the selected one in the projects' order,
+    /// wrapping around; the first tab when nothing is selected. It keeps that
+    /// order while the tab bar is grouped by state (RF-ATN-07), so Ctrl+Tab
+    /// does not jump around as states change.
     pub fn tab_after(&self, by: isize) -> Option<TabId> {
         let ids: Vec<TabId> = self.tabs_in_order().map(|t| t.id).collect();
         let len = isize::try_from(ids.len()).ok().filter(|&n| n > 0)?;

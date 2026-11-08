@@ -5,8 +5,9 @@ use yien_proto::{NeedsReason, PaneId, TabId};
 
 use crate::model::{AgentState, WorkspaceView};
 
-/// One pane in the attention tray.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One pane in the attention tray. Its `Debug` leaves out the detail, which
+/// may be the agent's question (plan §5.4).
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct TrayRow {
     pub(crate) pane: PaneId,
     pub(crate) tab: TabId,
@@ -17,6 +18,17 @@ pub(crate) struct TrayRow {
     pub(crate) profile: String,
     /// What it asks, or what happened.
     pub(crate) detail: String,
+}
+
+impl std::fmt::Debug for TrayRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrayRow")
+            .field("pane", &self.pane)
+            .field("tab", &self.tab)
+            .field("state", &self.state)
+            .field("detail_chars", &self.detail.chars().count())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The states the tray lists, in the order it lists them.
@@ -54,7 +66,7 @@ pub(crate) fn tray_rows(workspace: &WorkspaceView) -> Vec<TrayRow> {
 fn detail(pane: &crate::model::PaneView) -> String {
     match pane.state {
         AgentState::NeedsYou => match (&pane.question, pane.needs_reason) {
-            (Some(question), _) => question.clone(),
+            (Some(question), _) => question.as_str().to_owned(),
             (None, Some(NeedsReason::Permission)) => "Asks for permission".to_owned(),
             (None, Some(NeedsReason::Question)) => "Has a question".to_owned(),
             (None, Some(NeedsReason::Blocked)) => "Is blocked".to_owned(),
@@ -80,6 +92,17 @@ pub(crate) fn keep_cursor(
         rows.get(old_index.min(rows.len().saturating_sub(1)))
             .map(|r| r.pane)
     })
+}
+
+/// Where `pane`'s row sits among the tray list's children, which put a
+/// head before each state's rows.
+pub(crate) fn list_index(rows: &[TrayRow], pane: PaneId) -> Option<usize> {
+    let at = rows.iter().position(|r| r.pane == pane)?;
+    let heads = 1 + rows[..=at]
+        .windows(2)
+        .filter(|w| w[0].state != w[1].state)
+        .count();
+    Some(at + heads)
 }
 
 /// The tray's cursor moved by `by` rows, wrapping around.
@@ -325,6 +348,29 @@ mod tests {
             Some(PaneId::new(100))
         );
         assert_eq!(keep_cursor(&[], Some(PaneId::new(1)), 0), None);
+    }
+
+    #[test]
+    fn rf_atn_13_the_scroll_target_counts_the_section_heads() {
+        let rows = tray_rows(&view());
+        let at = |id| list_index(&rows, PaneId::new(id));
+        // Needs you: head, 201, 102; error: head, 110, 202; done: head, 200, 100.
+        assert_eq!(at(201), Some(1));
+        assert_eq!(at(102), Some(2));
+        assert_eq!(at(110), Some(4));
+        assert_eq!(at(202), Some(5));
+        assert_eq!(at(200), Some(7));
+        assert_eq!(at(100), Some(8));
+        assert_eq!(at(999), None);
+    }
+
+    #[test]
+    fn rf_atn_13_a_row_never_shows_its_question_in_debug() {
+        let view = view();
+        let rows = tray_rows(&view);
+        assert_eq!(rows[0].detail, "Permission to use Bash");
+        assert!(!format!("{rows:?}").contains("Bash"), "{rows:?}");
+        assert!(!format!("{view:?}").contains("Bash"));
     }
 
     #[test]
