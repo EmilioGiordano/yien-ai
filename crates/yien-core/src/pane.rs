@@ -79,7 +79,10 @@ pub(crate) enum PaneCmd {
         visible: bool,
         seen: bool,
     },
-    Relaunch,
+    /// Start the program again, as the workspace's launch number `launch`.
+    Relaunch {
+        launch: u64,
+    },
     Terminate,
 }
 
@@ -240,6 +243,8 @@ pub(crate) struct PaneSetup {
     pub wait_for_size: bool,
     /// The palette the UI asked for last; every engine of this pane uses it.
     pub palette: Palette,
+    /// The workspace's number for the launch this actor starts with.
+    pub launch: u64,
 }
 
 /// A pane that has not started its program yet because it waits for the
@@ -301,6 +306,9 @@ struct Actor {
     /// came with its token (Claude sends `SessionStart` once a resume
     /// works). Its exit is then the session ending, never a failed resume.
     launch_alive: bool,
+    /// The workspace's number for the current launch, carried by the session
+    /// reports so the workspace can drop those of a launch it replaced.
+    launch: u64,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -362,6 +370,7 @@ pub(crate) fn spawn(
         resumed_at: None,
         failed_resume: None,
         launch_alive: false,
+        launch: setup.launch,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -449,7 +458,7 @@ impl Actor {
             match wake {
                 Wake::Cmd(None) => break,
                 Wake::Cmd(Some(cmd)) => {
-                    if matches!(cmd, PaneCmd::Relaunch | PaneCmd::Terminate) {
+                    if matches!(cmd, PaneCmd::Relaunch { .. } | PaneCmd::Terminate) {
                         while input.try_recv().is_ok() {}
                         // Hooks of the old program must not reach the next.
                         while hooks.try_recv().is_ok() {}
@@ -564,7 +573,10 @@ impl Actor {
         };
         self.hooks_missing = self.plan.hooks && fill.hooks.is_none();
         if let Some(id) = &session_id {
-            self.report(PaneEvent::SessionId(id.clone()));
+            self.report(PaneEvent::SessionId {
+                id: id.clone(),
+                launch: self.launch,
+            });
         }
         let mut spawned = self.spawn(&fill, size.cols, size.rows).await;
         if let (Some(h), Ok(Err(PtyError::UnsafeBatchArgument { .. }))) = (&hooks, &spawned) {
@@ -733,7 +745,8 @@ impl Actor {
                     self.step(&Signal::Seen(seen));
                 }
             }
-            PaneCmd::Relaunch => {
+            PaneCmd::Relaunch { launch } => {
+                self.launch = launch;
                 if let Some(agent) = self.agent_plan.take() {
                     self.plan = agent;
                     self.reset_machine();
@@ -969,12 +982,17 @@ impl Actor {
                     let verdict = evaluate_screen(&self.plan.screen, &rows);
                     self.step(&Signal::Screen(verdict));
                 }
-                AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId(id)),
+                AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId {
+                    id,
+                    launch: self.launch,
+                }),
                 // `/exit` and `/logout` are the user ending the session (RN-04);
                 // `other` also comes when YIEN itself stops the program.
                 AgentEffect::SessionEnded(
                     SessionEndReason::PromptInputExit | SessionEndReason::Logout,
-                ) => self.report(PaneEvent::EndedByUser),
+                ) => self.report(PaneEvent::EndedByUser {
+                    launch: self.launch,
+                }),
                 AgentEffect::MarkRed
                 | AgentEffect::ClearRed
                 | AgentEffect::Notify
@@ -1308,6 +1326,7 @@ mod tests {
                 fallback: None,
                 wait_for_size: false,
                 palette: Palette::default(),
+                launch: 0,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {
@@ -1403,9 +1422,15 @@ mod tests {
         use yien_agent::SessionStartSource;
         let pane = Solo::start(Vec::new(), false);
         pane.collect(Duration::from_millis(100));
-        pane.cmds.try_send(PaneCmd::Relaunch).unwrap();
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 1 }).unwrap();
         let relaunched = pane.collect(Duration::from_millis(200));
         assert!(relaunched.contains(&PaneEvent::Started), "{relaunched:?}");
+        assert!(
+            relaunched
+                .iter()
+                .any(|e| matches!(e, PaneEvent::SessionId { launch: 1, .. })),
+            "{relaunched:?}"
+        );
         let stale = "11111111-1111-4111-8111-111111111111".to_owned();
         let session = SessionStart {
             session_id: Some(stale.clone()),
@@ -1415,7 +1440,12 @@ mod tests {
             pane.hooks.try_send(hook(1, event)).unwrap();
         }
         let events = pane.collect(SETTLE);
-        assert!(!events.contains(&PaneEvent::SessionId(stale)), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::SessionId { id, .. } if *id == stale)),
+            "{events:?}"
+        );
         assert!(
             matches!(last_state(&events), None | Some(AgentState::Idle)),
             "{events:?}"
@@ -1425,6 +1455,27 @@ mod tests {
         let events = pane.collect(SETTLE);
         assert!(
             matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn rn_04_a_hook_session_names_the_launch_it_came_from() {
+        use yien_agent::HookEvent::SessionStart;
+        use yien_agent::SessionStartSource;
+        let pane = Solo::start(Vec::new(), false);
+        pane.collect(Duration::from_millis(100));
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 4 }).unwrap();
+        pane.collect(Duration::from_millis(200));
+        let id = "22222222-2222-4222-8222-222222222222".to_owned();
+        let session = SessionStart {
+            session_id: Some(id.clone()),
+            source: SessionStartSource::Clear,
+        };
+        pane.hooks.try_send(hook(2, session)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            events.contains(&PaneEvent::SessionId { id, launch: 4 }),
             "{events:?}"
         );
     }

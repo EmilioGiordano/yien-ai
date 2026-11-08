@@ -283,6 +283,48 @@ fn rf_pan_19_a_crashed_pane_given_commands_before_its_relaunch_still_draws_and_i
     );
 }
 
+#[test]
+fn rn_04_a_crashed_pane_relaunched_reports_its_session_as_the_new_launch() {
+    use yien_proto::{Orientation, ProfileId};
+
+    let mut h = Harness::start();
+    let (shell, _) = h.project();
+    h.send(ClientMsg::Command(Command::SplitPane {
+        pane: shell,
+        orientation: Orientation::Horizontal,
+        profile: Some(ProfileId::new("claude")),
+    }));
+    let pane = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) if t.focused != shell => Some(t.focused),
+        _ => None,
+    });
+    let child = h.child();
+    h.send(ClientMsg::Scroll {
+        pane,
+        delta: PANIC_IN_ACTOR,
+    });
+    h.failure(pane);
+    wait_until(|| child.was_killed());
+
+    // The relaunch clears the session; only a report of launch 1 names one.
+    h.send(ClientMsg::Command(Command::RelaunchPane { pane }));
+    let again = h.child();
+    let args: Vec<String> = again
+        .spec()
+        .args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args[0], "--session-id");
+    let id = args[1].clone();
+    h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane && p.session_id.as_deref() == Some(&*id) => {
+            Some(())
+        }
+        _ => None,
+    });
+}
+
 /// Red through the real hook pipe, then the actor dies: the pane must not
 /// keep a red mark nothing can clear.
 #[cfg(windows)]

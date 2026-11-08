@@ -447,8 +447,8 @@ fn rf_ses_04_a_terminated_claude_session_launches_fresh() {
     let (store, claude, session) = first_run();
     let mut again = Run::start(&store);
     again.children(2);
-    // The resume reports its session id before it starts; a terminate handled
-    // before that report lets the report clear the end.
+    // The resume reports its session id before it starts; the terminate is
+    // sent once it runs, so the end is saved from this launch.
     again.wait_for(|m| match m {
         CoreMsg::PaneUpdated(p) if p.id == claude && p.running => Some(()),
         _ => None,
@@ -545,6 +545,34 @@ fn rf_ses_01_the_quit_save_waits_no_longer_than_asked() {
 }
 
 #[test]
+fn rf_ses_01_the_quit_save_gives_up_on_its_own_slow_write_which_still_lands() {
+    let store = Slow::default();
+    // No debounced write runs, so the quit save's write is the only one.
+    let config = CoreConfig {
+        save_debounce: TIMEOUT * 10,
+        ..CoreConfig::default()
+    };
+    let mut run = Run::configured(store.clone(), config);
+    let first = run.first_pane();
+    // Handled by the command loop, so the workspace was handed to the writer.
+    run.split(first, None);
+    assert!(!store.stalled());
+    let asked = Duration::from_millis(200);
+    let started = Instant::now();
+    let result = run.core.save_session(asked);
+    let took = started.elapsed();
+    assert!(
+        matches!(result, Err(SessionSaveError::TimedOut)),
+        "{result:?}"
+    );
+    assert!(took >= asked && took < TIMEOUT, "{took:?}");
+    wait_until(|| store.stalled());
+    assert!(store.0.saved().is_none());
+    store.open();
+    wait_until(|| store.0.saved().is_some());
+}
+
+#[test]
 fn rf_ses_01_nothing_after_the_quit_save_reaches_the_store() {
     let store = Shared::default();
     let mut run = Run::start(&store);
@@ -574,17 +602,18 @@ fn rf_ses_01_the_quit_shutdown_leaves_the_saved_session_as_it_was() {
 
 #[test]
 fn rf_ses_01_nothing_after_the_shutdown_reaches_the_store_even_without_the_quit_save() {
-    let store = Shared::default();
-    let mut run = Run::start(&store);
+    let store = Slow::default();
+    let mut run = Run::start_on(store.clone());
     let first = run.first_pane();
-    wait_until(|| store.saved().is_some());
+    // The debounced write is under way when saving stops; it may still land.
+    wait_until(|| store.stalled());
     run.core.shutdown(TIMEOUT).unwrap();
-    // A write already under way when saving stopped may still land.
-    std::thread::sleep(Duration::from_millis(300));
-    let saved = store.file("workspace.json").unwrap();
+    store.open();
+    wait_until(|| store.0.saved().is_some());
+    let saved = store.0.file("workspace.json").unwrap();
     run.split(first, None);
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(store.file("workspace.json").unwrap(), saved);
+    assert_eq!(store.0.file("workspace.json").unwrap(), saved);
 }
 
 #[test]

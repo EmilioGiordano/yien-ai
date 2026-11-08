@@ -94,6 +94,8 @@ struct PaneHandle {
     slot: Arc<FrameSlot>,
     visible: bool,
     seen: bool,
+    /// The workspace's number for the pane's current launch.
+    launch: u64,
 }
 
 struct Service {
@@ -426,9 +428,9 @@ impl Service {
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
         let (hooks_tx, hooks) = mpsc::channel(PANE_HOOK_QUEUE);
         let hooks_lost = Arc::new(AtomicBool::new(false));
-        let (slot, visible, seen) = self.panes.get(&pane).map_or_else(
-            || (Arc::default(), false, false),
-            |h| (Arc::clone(&h.slot), h.visible, h.seen),
+        let (slot, visible, seen, launch) = self.panes.get(&pane).map_or_else(
+            || (Arc::default(), false, false, 0),
+            |h| (Arc::clone(&h.slot), h.visible, h.seen, h.launch),
         );
         let setup = PaneSetup {
             id: pane,
@@ -447,6 +449,7 @@ impl Service {
             resume,
             wait_for_size,
             palette: self.palette,
+            launch,
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -468,6 +471,7 @@ impl Service {
                 slot,
                 visible,
                 seen,
+                launch,
             },
         );
     }
@@ -480,12 +484,13 @@ impl Service {
 
     /// Relaunches the pane's program; an actor that crashed is started again
     /// at the pane's last size and view.
-    async fn relaunch(&mut self, pane: PaneId) {
-        let Some(handle) = self.panes.get(&pane) else {
+    async fn relaunch(&mut self, pane: PaneId, launch: u64) {
+        let Some(handle) = self.panes.get_mut(&pane) else {
             return;
         };
+        handle.launch = launch;
         let tx = handle.tx.clone();
-        if tx.send(PaneCmd::Relaunch).await.is_ok() {
+        if tx.send(PaneCmd::Relaunch { launch }).await.is_ok() {
             return;
         }
         if let Some(h) = self.panes.get(&pane) {
@@ -589,7 +594,7 @@ impl Service {
                     self.start_pane(pane, *plan, cwd, size, resume, true);
                 }
                 Effect::Stop { pane } => self.stop_pane(pane),
-                Effect::Relaunch { pane } => self.relaunch(pane).await,
+                Effect::Relaunch { pane, launch } => self.relaunch(pane, launch).await,
                 Effect::Terminate { pane } => self.to_pane(pane, PaneCmd::Terminate).await,
                 Effect::AddWorktree(job) => self.run_job(move || worktree::add(job)),
                 Effect::ListAgentSessions {
