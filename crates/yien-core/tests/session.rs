@@ -566,7 +566,7 @@ fn rf_ses_01_the_quit_save_gives_up_on_its_own_slow_write_which_still_lands() {
         "{result:?}"
     );
     assert!(took >= asked && took < TIMEOUT, "{took:?}");
-    assert!(store.stalled());
+    wait_until(|| store.stalled());
     assert!(store.0.saved().is_none());
     store.open();
     wait_until(|| store.0.saved().is_some());
