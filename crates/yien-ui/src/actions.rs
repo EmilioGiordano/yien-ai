@@ -23,6 +23,12 @@ pub(crate) const RENAME_CONTEXT: &str = "YienRename";
 /// Key context of a question the window asks before acting.
 pub(crate) const CONFIRM_CONTEXT: &str = "YienConfirm";
 
+/// Key context of the prompt for a new worktree tab's branch.
+pub(crate) const WORKTREE_PROMPT_CONTEXT: &str = "YienWorktreePrompt";
+
+/// Key context of the question asked before closing a worktree tab.
+pub(crate) const WORKTREE_CLOSE_CONTEXT: &str = "YienWorktreeClose";
+
 /// Key context of the tab bar while it holds the keyboard (RF-NAV-08).
 pub(crate) const TAB_BAR_CONTEXT: &str = "YienTabBar";
 
@@ -87,6 +93,22 @@ actions!(
         /// Opens a tab with Claude Code in the selected tab's project
         /// (RF-PAN-18).
         NewClaudeTab,
+        /// Asks for a branch name and opens a tab on a new worktree of the
+        /// selected tab's project (RF-ESP-05).
+        NewWorktreeTab,
+        /// Creates the worktree tab named in the prompt.
+        WorktreePromptConfirm,
+        /// Leaves the worktree prompt without creating anything.
+        WorktreePromptCancel,
+        /// Closes the worktree tab and keeps its worktree (RF-ESP-07).
+        WorktreeKeep,
+        /// Closes the worktree tab and removes its worktree, asking again
+        /// first when it holds work (RN-08).
+        WorktreeRemove,
+        /// Confirms removing a worktree that holds work (RN-08).
+        WorktreeRemoveAnyway,
+        /// Leaves the tab and its worktree as they are.
+        WorktreeCancel,
         /// Splits the focused pane, Claude Code on the right (RF-PAN-18).
         SplitRightClaude,
         /// Starts the focused pane's program again once it has stopped
@@ -176,6 +198,7 @@ pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const SWITCHER_KEYS: &str = "Ctrl+Shift+O";
 pub(crate) const TAB_NUMBER_KEYS: &str = "Ctrl+1..9";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
+pub(crate) const NEW_WORKTREE_TAB_KEYS: &str = "Ctrl+Shift+N";
 pub(crate) const REGION_KEYS: &str = "F6";
 
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -191,6 +214,9 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
     let rename = format!("{RENAME_CONTEXT} > Input");
     let rename = Some(rename.as_str());
     let confirm = Some(CONFIRM_CONTEXT);
+    let prompt = format!("{WORKTREE_PROMPT_CONTEXT} > Input");
+    let prompt = Some(prompt.as_str());
+    let close = Some(WORKTREE_CLOSE_CONTEXT);
     let tab_bar = Some(TAB_BAR_CONTEXT);
     let context_bar = Some(CONTEXT_BAR_CONTEXT);
     let mut all = vec![
@@ -207,6 +233,12 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", RenameCancel, rename),
         KeyBinding::new("enter", ConfirmAccept, confirm),
         KeyBinding::new("escape", ConfirmCancel, confirm),
+        KeyBinding::new("enter", WorktreePromptConfirm, prompt),
+        KeyBinding::new("escape", WorktreePromptCancel, prompt),
+        KeyBinding::new("enter", WorktreeKeep, close),
+        KeyBinding::new("alt-r", WorktreeRemove, close),
+        KeyBinding::new("ctrl-enter", WorktreeRemoveAnyway, close),
+        KeyBinding::new("escape", WorktreeCancel, close),
         KeyBinding::new("up", TabBarUp, tab_bar),
         KeyBinding::new("down", TabBarDown, tab_bar),
         KeyBinding::new("enter", TabBarSelect, tab_bar),
@@ -255,6 +287,12 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(RenameCancel),
         Box::new(ConfirmAccept),
         Box::new(ConfirmCancel),
+        Box::new(WorktreePromptConfirm),
+        Box::new(WorktreePromptCancel),
+        Box::new(WorktreeKeep),
+        Box::new(WorktreeRemove),
+        Box::new(WorktreeRemoveAnyway),
+        Box::new(WorktreeCancel),
         Box::new(TabBarUp),
         Box::new(TabBarDown),
         Box::new(TabBarSelect),
@@ -371,6 +409,28 @@ mod tests {
         assert!(first_is("enter", &stack, &RenameConfirm));
         assert!(first_is("escape", &stack, &RenameCancel));
         assert_eq!(matches("enter", &TERMINAL_STACK), 0);
+    }
+
+    #[test]
+    fn rf_esp_05_the_worktree_prompt_opens_from_a_terminal_and_owns_enter_and_escape() {
+        assert!(first_is("ctrl-shift-n", &TERMINAL_STACK, &NewWorktreeTab));
+        let stack = ["Root", CONTEXT, WORKTREE_PROMPT_CONTEXT, "Input"];
+        assert!(first_is("enter", &stack, &WorktreePromptConfirm));
+        assert!(first_is("escape", &stack, &WorktreePromptCancel));
+    }
+
+    #[test]
+    fn rf_esp_07_the_worktree_question_answers_by_keyboard() {
+        let stack = ["Root", CONTEXT, WORKTREE_CLOSE_CONTEXT];
+        assert!(first_is("enter", &stack, &WorktreeKeep));
+        assert!(first_is("alt-r", &stack, &WorktreeRemove));
+        assert!(first_is("ctrl-enter", &stack, &WorktreeRemoveAnyway));
+        assert!(first_is("escape", &stack, &WorktreeCancel));
+        // A stray letter typed into the question removes nothing.
+        assert_eq!(matches("r", &stack), 0);
+        for keys in ["alt-r", "ctrl-enter"] {
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
     }
 
     #[test]

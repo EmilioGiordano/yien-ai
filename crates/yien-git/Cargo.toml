@@ -1,6 +1,6 @@
 [package]
 name = "yien-git"
-description = "Read-only git facts for a tab: branch, worktree, dirty flag, ahead/behind, changed files, and a cheap change watcher."
+description = "Git facts for a tab (branch, worktree, dirty flag, ahead/behind, changed files, a cheap change watcher) and linked worktree add, list and remove."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

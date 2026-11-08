@@ -23,6 +23,7 @@ use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneIn
 use crate::persist::{self, Opened, Writer};
 use crate::report::Reports;
 use crate::workspace::{Effect, Workspace};
+use crate::worktree::{self, Done};
 use crate::{CoreConfig, CoreError, PANE_INPUT_QUEUE};
 
 /// What every pane actor shares.
@@ -101,7 +102,12 @@ struct Service {
     git_sent: HashMap<TabId, TabGit>,
     /// Tabs whose folder git has looked at.
     git_probed: HashSet<TabId>,
+    /// Where worktree jobs report back.
+    jobs: mpsc::Sender<Done>,
 }
+
+/// Worktree jobs waiting for the service; a job waits for room.
+const WORKTREE_JOBS: usize = 16;
 
 pub(crate) async fn run(
     ctx: Ctx,
@@ -123,6 +129,7 @@ pub(crate) async fn run(
         Some((git, reports)) => (Some(git), Some(reports)),
         None => (None, None),
     };
+    let (jobs, mut done) = mpsc::channel(WORKTREE_JOBS);
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
         ctx,
@@ -132,6 +139,7 @@ pub(crate) async fn run(
         git,
         git_sent: HashMap::new(),
         git_probed: HashSet::new(),
+        jobs,
     };
     let mut notices = opened.notices;
     let mut restored = Vec::new();
@@ -202,6 +210,7 @@ pub(crate) async fn run(
                 Some(report) => service.on_git(report).await,
                 None => git_reports = None,
             },
+            Some(job) = done.recv() => service.on_worktree(job).await,
         }
         service.sync_git();
     }
@@ -269,6 +278,74 @@ impl Service {
         if changed {
             self.publish();
         }
+    }
+
+    /// Runs a worktree job on a blocking thread; its result comes back
+    /// through `jobs`, so the command loop never waits for git.
+    fn run_job(&self, job: impl FnOnce() -> Done + Send + 'static) {
+        let jobs = self.jobs.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = jobs.blocking_send(job());
+        });
+    }
+
+    /// Applies what a worktree job found.
+    async fn on_worktree(&mut self, done: Done) {
+        let msg = match done {
+            Done::Added {
+                project,
+                worktree,
+                branch,
+            } => {
+                let config = Arc::clone(&self.ctx.config);
+                let resolve = |profile: Option<&ProfileId>| {
+                    launch::resolve(profile, &config.profiles, &config.shell)
+                };
+                match self
+                    .ws
+                    .open_worktree_tab(project, worktree.clone(), branch.clone(), &resolve)
+                {
+                    Ok(fx) => {
+                        self.execute(fx).await;
+                        self.publish();
+                        return;
+                    }
+                    Err(e) => CoreMsg::Error {
+                        pane: None,
+                        message: format!(
+                            "The worktree {worktree} on branch {branch} was created, but no tab \
+                             could open on it: {e}. It stays on disk."
+                        ),
+                    },
+                }
+            }
+            Done::AddFailed { message, .. } => CoreMsg::Error {
+                pane: None,
+                message,
+            },
+            Done::Checked {
+                tab,
+                worktree,
+                check,
+            } => CoreMsg::WorktreeChecked {
+                tab,
+                worktree,
+                check,
+            },
+            Done::Removed { worktree, branch } => CoreMsg::Notice {
+                message: match branch {
+                    Some(branch) => {
+                        format!("Removed the worktree {worktree}; branch {branch} is kept.")
+                    }
+                    None => format!("Removed the worktree {worktree}."),
+                },
+            },
+            Done::RemoveFailed { worktree, message } => CoreMsg::Error {
+                pane: None,
+                message: format!("The worktree {worktree} was kept: {message}"),
+            },
+        };
+        self.emit(msg).await;
     }
 
     /// Hands the workspace to the writer; it writes only what changed.
@@ -463,6 +540,14 @@ impl Service {
                 Effect::Stop { pane } => self.stop_pane(pane),
                 Effect::Relaunch { pane } => self.relaunch(pane).await,
                 Effect::Terminate { pane } => self.to_pane(pane, PaneCmd::Terminate).await,
+                Effect::AddWorktree(job) => self.run_job(move || worktree::add(job)),
+                Effect::CheckWorktree { tab, worktree } => {
+                    self.run_job(move || worktree::check(tab, worktree));
+                }
+                Effect::RemoveWorktree(job) => {
+                    let consoles = Arc::clone(&self.ctx.consoles);
+                    self.run_job(move || worktree::remove(job, &consoles));
+                }
                 Effect::View {
                     pane,
                     visible,
@@ -552,6 +637,9 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::SetTabMuted { .. }
         | Command::SetNotificationsMuted { .. }
         | Command::NewTab { .. }
+        | Command::NewWorktreeTab { .. }
+        | Command::CheckWorktree { .. }
+        | Command::RemoveWorktreeTab { .. }
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }
         | Command::FocusDirection { .. } => None,

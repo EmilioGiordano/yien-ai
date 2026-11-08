@@ -15,6 +15,7 @@ use crate::convert;
 use crate::launch::LaunchPlan;
 
 mod session;
+pub(crate) mod worktree;
 
 use session::Kept;
 pub(crate) use session::{Disk, folders};
@@ -47,6 +48,12 @@ pub(crate) enum Effect {
     Relaunch { pane: PaneId },
     /// Terminate the pane's program, keeping the pane.
     Terminate { pane: PaneId },
+    /// Create a worktree for a new tab of `project` (RF-ESP-05).
+    AddWorktree(worktree::AddJob),
+    /// Tell the UI what removing a tab's worktree would lose (RN-08).
+    CheckWorktree { tab: TabId, worktree: String },
+    /// Remove a worktree once the panes that ran in it have closed.
+    RemoveWorktree(worktree::RemoveJob),
     /// Whether the pane is drawn and whether the user sees it (RN-07).
     View {
         pane: PaneId,
@@ -132,6 +139,10 @@ struct Tab {
     kept_branch: Option<String>,
     /// Its toasts and taskbar flashes are muted (RF-ATN-11).
     muted: bool,
+    /// The linked worktree it was opened on, which is `dir` (RF-ESP-05).
+    worktree: Option<String>,
+    /// The saved worktree that goes with `kept_dir`.
+    kept_worktree: Option<String>,
 }
 
 impl Tab {
@@ -242,6 +253,7 @@ impl Workspace {
             focused: tab.focused,
             maximized: tab.maximized,
             muted: tab.muted,
+            worktree: tab.worktree.clone(),
         }
     }
 
@@ -369,7 +381,7 @@ impl Workspace {
                         tabs: Vec::new(),
                         collapsed: false,
                     });
-                    self.new_tab(id, None, plan, &mut fx)?;
+                    self.new_tab(id, None, plan, None, &mut fx)?;
                 }
             }
             Command::CloseProject { project } => self.close_project(project, &mut fx)?,
@@ -408,8 +420,26 @@ impl Workspace {
                     return Err(CoreError::UnknownProject(project));
                 }
                 let plan = resolve(profile.as_ref())?;
-                self.new_tab(project, name, plan, &mut fx)?;
+                self.new_tab(project, name, plan, None, &mut fx)?;
             }
+            Command::NewWorktreeTab {
+                project,
+                branch,
+                base,
+            } => fx.push(self.add_worktree(project, branch, base)?),
+            Command::CheckWorktree { tab } => {
+                let worktree = self
+                    .tab(tab)?
+                    .worktree
+                    .clone()
+                    .ok_or(CoreError::NoWorktree(tab))?;
+                fx.push(Effect::CheckWorktree { tab, worktree });
+            }
+            Command::RemoveWorktreeTab {
+                tab,
+                discard_changes,
+                confirmed,
+            } => self.remove_worktree_tab(tab, discard_changes, confirmed, &mut fx)?,
             Command::CloseTab { tab } => self.close_tab(tab, &mut fx)?,
             Command::SelectTab { tab } => self.select(tab, &mut fx)?,
             Command::SplitPane {
@@ -553,7 +583,7 @@ impl Workspace {
             Some(tab) => self.select(tab, fx),
             None => {
                 let plan = resolve(None)?;
-                self.new_tab(project, None, plan, fx)
+                self.new_tab(project, None, plan, None, fx)
             }
         }
     }
@@ -578,11 +608,14 @@ impl Workspace {
         Ok(ta)
     }
 
+    /// Opens a tab on the project's folder, or on `worktree` (its folder and
+    /// branch), which also names the tab until the user renames it.
     fn new_tab(
         &mut self,
         project: ProjectId,
         name: Option<String>,
         plan: LaunchPlan,
+        worktree: Option<(String, String)>,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
         let tab_id = TabId::new(self.next()?);
@@ -594,8 +627,10 @@ impl Workspace {
             .ok_or(CoreError::UnknownProject(project))?;
         p.tabs.push(tab_id);
         let custom_name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-        let default_name = format!("Tab {}", p.tabs.len());
-        let dir = p.root.clone();
+        let (default_name, dir, branch, worktree) = match worktree {
+            Some((dir, branch)) => (branch.clone(), dir.clone(), Some(branch), Some(dir)),
+            None => (format!("Tab {}", p.tabs.len()), p.root.clone(), None, None),
+        };
         let tree = Tree::new();
         let leaves = tree.panes().into_iter().map(|leaf| (leaf, pane)).collect();
         self.tabs.push(Tab {
@@ -609,9 +644,11 @@ impl Workspace {
             focused: pane,
             maximized: None,
             kept_dir: None,
-            branch: None,
+            branch,
             kept_branch: None,
             muted: false,
+            worktree,
+            kept_worktree: None,
         });
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));

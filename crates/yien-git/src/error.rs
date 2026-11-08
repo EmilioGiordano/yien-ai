@@ -38,6 +38,14 @@ pub enum GitError {
     /// git did not finish in time and was killed.
     #[error("git did not answer within {} ms", .0.as_millis())]
     Timeout(Duration),
+    /// git exited, but its output pipe stayed open past the deadline: a
+    /// program it started still holds it. `success` says whether git itself
+    /// reported success, so a write may have happened.
+    #[error("git exited{} but a program it started kept its output open", if *.success { " successfully" } else { "" })]
+    PipeHeld {
+        /// git's own exit status was success.
+        success: bool,
+    },
     /// git printed more than the byte limit and was stopped.
     #[error("git printed more than {0} bytes")]
     OutputTooLarge(usize),

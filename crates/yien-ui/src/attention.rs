@@ -534,6 +534,7 @@ mod tests {
             focused: PaneId::new(id),
             maximized: None,
             muted: false,
+            worktree: None,
         };
         WorkspaceView::from_snapshot(&WorkspaceSnapshot {
             projects: vec![ProjectInfo {
@@ -620,6 +621,7 @@ mod tests {
             focused: PaneId::new(1),
             maximized: None,
             muted: true,
+            worktree: None,
         });
         assert!(one.alerts_muted(PaneId::new(1)) && !one.alerts_muted(PaneId::new(2)));
         for muted in [all, one] {

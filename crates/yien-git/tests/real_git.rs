@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use yien_git::{
     AheadBehind, Change, ChangedFile, FileStatus, Git, GitError, GitWatcher, Head, WatchOptions,
+    WorktreeError, WorktreeState, default_worktree_path,
 };
 
 // Helpers sit in a cfg(test) module so clippy's allow-unwrap-in-tests covers them.
@@ -15,10 +16,39 @@ use yien_git::{
 mod support {
     use super::*;
 
+    /// How many sandboxes may run git at once in this test binary.
+    const MAX_SANDBOXES: usize = 4;
+
+    static RUNNING: Mutex<usize> = Mutex::new(0);
+    static FREED: Condvar = Condvar::new();
+
+    /// A slot among [`MAX_SANDBOXES`]; dropping it frees the slot.
+    struct Slot;
+
+    impl Slot {
+        fn take() -> Self {
+            let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            while *running >= MAX_SANDBOXES {
+                running = FREED.wait(running).unwrap_or_else(PoisonError::into_inner);
+            }
+            *running += 1;
+            Self
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            *running = running.saturating_sub(1);
+            FREED.notify_one();
+        }
+    }
+
     /// A temp folder holding repositories and an empty global git config, removed on drop.
     pub struct Sandbox {
         pub dir: PathBuf,
         config: PathBuf,
+        _slot: Slot,
     }
 
     impl Sandbox {
@@ -31,6 +61,7 @@ mod support {
                 eprintln!("git not found, skipping");
                 return None;
             }
+            let slot = Slot::take();
             static NEXT: AtomicU32 = AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "yien-git-it-{}-{}",
@@ -41,7 +72,11 @@ mod support {
             std::fs::create_dir_all(&dir).unwrap();
             let config = dir.join("gitconfig");
             std::fs::write(&config, "").unwrap();
-            Some(Self { dir, config })
+            Some(Self {
+                dir,
+                config,
+                _slot: slot,
+            })
         }
 
         /// Runs a setup command, isolated from the user's global and system git config.
@@ -99,7 +134,8 @@ mod support {
     }
 
     pub fn git() -> Git {
-        Git::new().with_timeout(Duration::from_secs(20))
+        // Generous: a loaded machine (a build, other test runs) slows git a lot.
+        Git::new().with_timeout(Duration::from_secs(120))
     }
 
     pub fn same(a: &Path, b: &Path) -> bool {
@@ -488,4 +524,306 @@ fn rnf_14_partial_clone_never_fetches() {
         "status hung: {result:?}"
     );
     assert!(!marker.exists(), "the repository's ssh command ran");
+}
+
+/// Whether `branch` exists in the repository at `root`.
+fn has_branch(sb: &Sandbox, root: &Path, branch: &str) -> bool {
+    let full = format!("refs/heads/{branch}");
+    sb.git_may_fail(root, &["rev-parse", "--verify", "--quiet", &full])
+}
+
+#[test]
+fn rf_esp_05_add_list_and_remove_keep_the_branch() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("app");
+    let path = default_worktree_path(&root, "feat/x").unwrap();
+    assert!(same(path.parent().unwrap().parent().unwrap(), &sb.dir));
+
+    git().add_worktree(&root, "feat/x", &path, None).unwrap();
+    assert!(path.join("a.txt").is_file());
+    let list = git().worktrees(&root).unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].main && same(&list[0].path, &root));
+    assert!(same(&list[1].path, &path));
+    assert_eq!(list[1].branch.as_deref(), Some("feat/x"));
+    let info = git().info(&path).unwrap();
+    assert!(info.repo.linked_worktree);
+    assert_eq!(info.status.head.branch(), Some("feat/x"));
+    assert_eq!(
+        git().worktree_state(&path).unwrap(),
+        WorktreeState::default()
+    );
+
+    git().remove_worktree(&root, &path, false).unwrap();
+    assert!(!path.exists());
+    assert_eq!(git().worktrees(&root).unwrap().len(), 1);
+    assert!(has_branch(&sb, &root, "feat/x"), "the branch was deleted");
+}
+
+#[test]
+fn rf_esp_05_a_base_is_where_the_branch_starts() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("based");
+    let first = sb.git(&root, &["rev-parse", "HEAD"]);
+    sb.git(&root, &["tag", "v1"]);
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    sb.git(&root, &["commit", "-q", "-am", "second"]);
+
+    let path = sb.dir.join("from-tag");
+    git()
+        .add_worktree(&root, "fix/old", &path, Some("v1"))
+        .unwrap();
+    assert_eq!(sb.git(&path, &["rev-parse", "HEAD"]), first);
+}
+
+#[test]
+fn rf_esp_05_add_failures_are_typed_and_leave_nothing() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("fails");
+    let free = sb.dir.join("free");
+
+    let err = git().add_worktree(&root, "main", &free, None).unwrap_err();
+    assert!(
+        matches!(err, WorktreeError::BranchExists(ref b) if b == "main"),
+        "{err:?}"
+    );
+    for bad in ["bad..name", "-x", "a b", "@{-1}", "", "x.lock"] {
+        let err = git().add_worktree(&root, bad, &free, None).unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::InvalidBranch(_)),
+            "{bad}: {err:?}"
+        );
+    }
+    for base in ["nope", "--orphan", "HEAD~5"] {
+        let err = git()
+            .add_worktree(&root, "feat/a", &free, Some(base))
+            .unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::UnknownBase(_)),
+            "{base}: {err:?}"
+        );
+    }
+    let taken = sb.dir.join("taken");
+    std::fs::create_dir_all(&taken).unwrap();
+    let err = git()
+        .add_worktree(&root, "feat/a", &taken, None)
+        .unwrap_err();
+    assert!(matches!(err, WorktreeError::PathTaken(_)), "{err:?}");
+    let plain = sb.dir.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    // Inside an enclosing repository the add would write to it: skip then.
+    if matches!(git().discover(&plain), Err(GitError::NotARepository)) {
+        let err = git()
+            .add_worktree(&plain, "feat/a", &free, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::Git(GitError::NotARepository)),
+            "{err:?}"
+        );
+    } else {
+        eprintln!("temp dir sits inside a repo, skipping the not-a-repository case");
+    }
+
+    assert!(!free.exists());
+    assert!(!has_branch(&sb, &root, "feat/a"));
+    assert_eq!(git().worktrees(&root).unwrap().len(), 1);
+}
+
+#[test]
+fn rn_08_dirty_and_unpushed_work_is_detected_and_kept() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("work");
+    let path = sb.dir.join("work-wt");
+    git().add_worktree(&root, "feat/w", &path, None).unwrap();
+
+    std::fs::write(path.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(path.join("new.txt"), "new\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!(state.changed, 2);
+    assert_eq!(state.unpushed, 0);
+    assert!(state.has_work());
+
+    let err = git().remove_worktree(&root, &path, false).unwrap_err();
+    assert!(matches!(err, WorktreeError::Dirty(_)), "{err:?}");
+    assert!(
+        path.join("new.txt").is_file(),
+        "a refused removal deleted files"
+    );
+
+    sb.git(&path, &["add", "-A"]);
+    sb.git(&path, &["commit", "-q", "-m", "work"]);
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!((state.changed, state.unpushed), (0, 1));
+    let tip = sb.git(&path, &["rev-parse", "HEAD"]);
+
+    std::fs::write(path.join("scratch.txt"), "lost\n").unwrap();
+    git().remove_worktree(&root, &path, true).unwrap();
+    assert!(!path.exists());
+    assert_eq!(sb.git(&root, &["rev-parse", "refs/heads/feat/w"]), tip);
+}
+
+#[test]
+fn rn_08_unpushed_counts_against_the_upstream() {
+    let Some(sb) = Sandbox::new() else { return };
+    let origin = sb.repo("origin");
+    let clone = sb.dir.join("clone");
+    sb.git(
+        &sb.dir,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let path = sb.dir.join("clone-wt");
+    git()
+        .add_worktree(&clone, "feat/u", &path, Some("origin/main"))
+        .unwrap();
+    sb.git(&path, &["branch", "-q", "--set-upstream-to=origin/main"]);
+    std::fs::write(path.join("a.txt"), "x\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "one"]);
+    std::fs::write(path.join("a.txt"), "y\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "two"]);
+    assert_eq!(git().worktree_state(&path).unwrap().unpushed, 2);
+}
+
+#[test]
+fn locked_and_main_worktrees_are_not_removed() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("locks");
+    let path = sb.dir.join("locked-wt");
+    git().add_worktree(&root, "feat/l", &path, None).unwrap();
+    sb.git(&root, &["worktree", "lock", path.to_str().unwrap()]);
+
+    let err = git().remove_worktree(&root, &path, true).unwrap_err();
+    assert!(matches!(err, WorktreeError::Locked(_)), "{err:?}");
+    let err = git().remove_worktree(&root, &root, true).unwrap_err();
+    assert!(matches!(err, WorktreeError::NotLinked(_)), "{err:?}");
+    let err = git()
+        .remove_worktree(&root, &sb.dir.join("elsewhere"), true)
+        .unwrap_err();
+    assert!(matches!(err, WorktreeError::NotLinked(_)), "{err:?}");
+    assert!(path.join("a.txt").is_file());
+    assert!(root.join("a.txt").is_file());
+}
+
+#[test]
+fn worktree_add_and_remove_run_no_repo_hook_or_filter() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("hooks");
+    let hooks = root.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let mut markers = Vec::new();
+    for hook in ["post-checkout", "reference-transaction"] {
+        let marker = sb.dir.join(format!("{hook}.marker"));
+        let script = format!("#!/bin/sh\n{}\n", Sandbox::marker_command(&marker));
+        std::fs::write(hooks.join(hook), script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(hooks.join(hook), mode).unwrap();
+        }
+        markers.push(marker);
+    }
+    let smudge = sb.dir.join("smudge.marker");
+    let smudge_cmd = format!("{}; cat", Sandbox::marker_command(&smudge));
+    sb.git(&root, &["config", "filter.evil.smudge", &smudge_cmd]);
+    std::fs::write(root.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    sb.git(&root, &["add", ".gitattributes"]);
+    sb.git(&root, &["commit", "-q", "-m", "attributes"]);
+    markers.push(smudge);
+    for marker in &markers {
+        let _ = std::fs::remove_file(marker);
+    }
+
+    let path = sb.dir.join("hooks-wt");
+    git().add_worktree(&root, "feat/h", &path, None).unwrap();
+    git().remove_worktree(&root, &path, true).unwrap();
+    for marker in &markers {
+        assert!(!marker.exists(), "{} ran", marker.display());
+    }
+
+    // The same add through plain git runs them, so the test can see a run.
+    let control = sb.dir.join("control-wt");
+    sb.git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/c",
+            control.to_str().unwrap(),
+        ],
+    );
+    for marker in &markers {
+        assert!(
+            marker.exists(),
+            "{} did not run under plain git",
+            marker.display()
+        );
+    }
+}
+
+#[test]
+fn rn_08_ignored_files_and_untracked_folders_are_counted() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("ignored");
+    std::fs::write(root.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+    sb.git(&root, &["add", ".gitignore"]);
+    sb.git(&root, &["commit", "-q", "-m", "ignore"]);
+    let path = sb.dir.join("ignored-wt");
+    git().add_worktree(&root, "feat/i", &path, None).unwrap();
+    assert_eq!(
+        git().worktree_state(&path).unwrap(),
+        WorktreeState::default()
+    );
+
+    std::fs::write(path.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(path.join("node_modules/pkg")).unwrap();
+    std::fs::write(path.join("node_modules/pkg/index.js"), "x\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!((state.changed, state.ignored), (0, 2));
+    assert!(state.has_work(), "ignored files are lost on removal");
+    assert!(state.ignored_examples.contains(&".env".to_owned()));
+    assert!(state.ignored_examples.contains(&"node_modules/".to_owned()));
+    assert_eq!(state.entries, ["ignored .env", "ignored node_modules/"]);
+
+    std::fs::create_dir_all(path.join("new/deep")).unwrap();
+    for name in ["new/a.txt", "new/b.txt", "new/deep/c.txt"] {
+        std::fs::write(path.join(name), "n\n").unwrap();
+    }
+    std::fs::write(path.join("a.txt"), "edited\n").unwrap();
+    let state = git().worktree_state(&path).unwrap();
+    assert_eq!(state.changed, 4);
+    assert_eq!(
+        state.entries,
+        [
+            "changed ? new/a.txt",
+            "changed ? new/b.txt",
+            "changed ? new/deep/c.txt",
+            "changed M a.txt",
+            "ignored .env",
+            "ignored node_modules/",
+        ]
+    );
+}
+
+#[test]
+fn rn_08_commits_on_a_detached_head_are_flagged() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("detached");
+    let path = sb.dir.join("detached-wt");
+    git().add_worktree(&root, "feat/d", &path, None).unwrap();
+    sb.git(&path, &["switch", "-q", "--detach"]);
+    std::fs::write(path.join("a.txt"), "loose\n").unwrap();
+    sb.git(&path, &["commit", "-q", "-am", "loose"]);
+    let state = git().worktree_state(&path).unwrap();
+    assert!(state.detached);
+    assert_eq!(state.unpushed, 1);
+    // The stranded commit is part of what a removal must not change unseen.
+    let head = sb.git(&path, &["rev-parse", "HEAD"]);
+    assert_eq!(state.entries, [format!("head {head}")]);
 }

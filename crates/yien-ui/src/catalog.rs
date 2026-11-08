@@ -128,6 +128,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         NewClaudeTab,
         ["ctrl-shift-a"]
     ),
+    command!(
+        "tab.new_worktree",
+        "tab: new worktree tab…",
+        NewWorktreeTab,
+        ["ctrl-shift-n"]
+    ),
     command!("tab.rename", "tab: rename tab", RenameTab, []),
     command!("tab.next", "tab: next tab", NextTab, ["ctrl-tab"]),
     command!(
@@ -467,6 +473,7 @@ mod tests {
             ("palette.open", PALETTE_KEYS),
             ("switcher.open", SWITCHER_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
+            ("tab.new_worktree", NEW_WORKTREE_TAB_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

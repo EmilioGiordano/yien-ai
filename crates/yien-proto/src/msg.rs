@@ -228,6 +228,38 @@ pub enum Command {
         /// Whether toasts and flashes are off.
         muted: bool,
     },
+    /// Opens a tab on a new linked worktree with its own new branch
+    /// (RF-ESP-05). The worktree goes beside the repository, in
+    /// `<repo>-wt/<branch>`; a failure opens no tab and says why.
+    NewWorktreeTab {
+        /// The project whose repository gets the worktree.
+        project: ProjectId,
+        /// The new branch, which must not exist yet.
+        branch: String,
+        /// Where the branch starts: a branch, tag or commit; the project's
+        /// current `HEAD` when `None`.
+        base: Option<String>,
+    },
+    /// Asks what removing a worktree tab's worktree would lose; answered
+    /// with [`CoreMsg::WorktreeChecked`] (RF-ESP-07, RN-08).
+    CheckWorktree {
+        /// The tab.
+        tab: TabId,
+    },
+    /// Closes a worktree tab, terminating its panes, and then removes its
+    /// worktree folder. The branch is never deleted. Without
+    /// `discard_changes` a worktree with uncommitted changes is kept. Right
+    /// before removing, git looks again: if the worktree holds more than
+    /// `confirmed`, it is kept. A worktree another tab still uses is kept
+    /// (RF-ESP-07, RN-08).
+    RemoveWorktreeTab {
+        /// The tab.
+        tab: TabId,
+        /// Delete uncommitted changes too; only after the user confirmed it.
+        discard_changes: bool,
+        /// What the user was shown and agreed to lose.
+        confirmed: WorktreeWork,
+    },
     /// Closes a tab and terminates its panes (RF-ESP-03).
     CloseTab {
         /// The tab.
@@ -498,6 +530,141 @@ pub struct TabInfo {
     pub maximized: Option<PaneId>,
     /// Its toasts and taskbar flashes are muted (RF-ATN-11).
     pub muted: bool,
+    /// The linked worktree the tab was opened on, which is `dir`; `None`
+    /// for a tab on the project's main working copy (RF-ESP-05).
+    pub worktree: Option<String>,
+}
+
+/// What a worktree holds that a removal would delete or strand (RN-08):
+/// the counts the question names, and a fingerprint of the files behind
+/// them, so a removal can tell that nothing new arrived since the user
+/// confirmed, even when the counts stayed the same.
+///
+/// ```
+/// use yien_proto::{WorktreeFiles, WorktreeWork};
+/// let seen = WorktreeWork {
+///     changed: 1,
+///     ignored: 1,
+///     files: WorktreeFiles::of(["changed M a.txt", "ignored .env"]),
+///     ..Default::default()
+/// };
+/// let now = WorktreeWork {
+///     ignored: 1,
+///     files: WorktreeFiles::of(["ignored .env"]),
+///     ..Default::default()
+/// };
+/// assert!(now.any());
+/// assert!(now.within(&seen));
+/// assert!(!seen.within(&now));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorktreeWork {
+    /// Changed and untracked files, each counted.
+    pub changed: u32,
+    /// Ignored files and folders; every removal deletes them.
+    pub ignored: u32,
+    /// Commits not pushed, or on no other branch.
+    pub unpushed: u32,
+    /// HEAD is detached, so unpushed commits are lost on removal.
+    pub detached: bool,
+    /// The changed files with their status, the ignored entries and, when
+    /// detached commits would be lost, the commit.
+    pub files: WorktreeFiles,
+}
+
+impl WorktreeWork {
+    /// Whether there is anything at all.
+    pub fn any(&self) -> bool {
+        self.changed > 0 || self.ignored > 0 || self.unpushed > 0
+    }
+
+    /// Whether this holds nothing `other` did not: no count is higher, the
+    /// head is as detached as it was, and every file is one `other` had.
+    pub fn within(&self, other: &WorktreeWork) -> bool {
+        self.changed <= other.changed
+            && self.ignored <= other.ignored
+            && self.unpushed <= other.unpushed
+            && self.detached == other.detached
+            && self.files.within(&other.files)
+    }
+}
+
+/// A fingerprint of the entries a removal would delete or strand: one hash
+/// per entry, or, past [`WorktreeFiles::MAX_EACH`] entries, one hash of
+/// them all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeFiles {
+    /// A sorted hash per entry.
+    Each(Vec<u64>),
+    /// One hash of every entry, for a set too big to send entry by entry.
+    Whole(u64),
+}
+
+impl Default for WorktreeFiles {
+    fn default() -> Self {
+        Self::Each(Vec::new())
+    }
+}
+
+impl WorktreeFiles {
+    /// How many entries are fingerprinted one by one.
+    pub const MAX_EACH: usize = 4096;
+
+    /// The fingerprint of `entries`, in any order.
+    pub fn of<I, S>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut hashes: Vec<u64> = entries
+            .into_iter()
+            .map(|e| fnv1a(e.as_ref().as_bytes()))
+            .collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+        if hashes.len() <= Self::MAX_EACH {
+            return Self::Each(hashes);
+        }
+        let bytes: Vec<u8> = hashes.iter().flat_map(|h| h.to_le_bytes()).collect();
+        Self::Whole(fnv1a(&bytes))
+    }
+
+    /// Whether every entry here is one of `other`'s. A whole-set hash only
+    /// matches the same whole set; it never vouches for a part of it.
+    pub fn within(&self, other: &WorktreeFiles) -> bool {
+        match (self, other) {
+            (Self::Each(mine), Self::Each(theirs)) => {
+                mine.iter().all(|h| theirs.binary_search(h).is_ok())
+            }
+            (Self::Whole(mine), Self::Whole(theirs)) => mine == theirs,
+            _ => false,
+        }
+    }
+}
+
+/// 64-bit FNV-1a: stable across processes and builds, unlike `std`'s hasher.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// What removing a worktree would lose, as [`CoreMsg::WorktreeChecked`]
+/// reports it (RN-08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeCheck {
+    /// git looked.
+    Checked {
+        /// The counts.
+        work: WorktreeWork,
+        /// A few of the ignored entries, to name them.
+        ignored_examples: Vec<String>,
+    },
+    /// git could not tell; the reason says why.
+    Failed {
+        /// For the user.
+        reason: String,
+    },
 }
 
 /// A pane as its title bar shows it (RF-PAN-12, RF-PAN-16, RF-PAN-20).
@@ -644,6 +811,20 @@ pub enum CoreMsg {
         /// Whether they are off.
         muted: bool,
     },
+    /// The answer to [`Command::CheckWorktree`].
+    WorktreeChecked {
+        /// The tab.
+        tab: TabId,
+        /// The worktree folder.
+        worktree: String,
+        /// What git found.
+        check: WorktreeCheck,
+    },
+    /// Something the user asked for finished; the message says what.
+    Notice {
+        /// For the user.
+        message: String,
+    },
     /// The answer to [`ClientMsg::CopySelection`].
     SelectionText {
         /// The pane.
@@ -664,6 +845,29 @@ pub enum CoreMsg {
 mod tests {
     use super::*;
     use crate::frame::{Cell, CellFlags, Frame, Modes, MouseTracking, Rgb, Size};
+
+    #[test]
+    fn rn_08_other_files_with_the_same_counts_are_not_within() {
+        let seen = WorktreeFiles::of(["changed M a.txt", "changed ? b.txt"]);
+        let swapped = WorktreeFiles::of(["changed ? b.txt", "changed ? c.txt"]);
+        assert!(!swapped.within(&seen));
+        assert!(WorktreeFiles::of(["changed ? b.txt"]).within(&seen));
+        assert!(WorktreeFiles::default().within(&seen));
+        // The status is part of the entry.
+        assert!(!WorktreeFiles::of(["changed D a.txt"]).within(&seen));
+    }
+
+    #[test]
+    fn rn_08_a_whole_set_hash_vouches_only_for_the_same_set() {
+        let many: Vec<String> = (0..=WorktreeFiles::MAX_EACH)
+            .map(|i| format!("changed ? f{i}"))
+            .collect();
+        let whole = WorktreeFiles::of(&many);
+        assert!(matches!(whole, WorktreeFiles::Whole(_)));
+        assert!(whole.within(&WorktreeFiles::of(many.iter().rev())));
+        assert!(!WorktreeFiles::of(&many[1..]).within(&whole));
+        assert!(!whole.within(&WorktreeFiles::of(&many[1..])));
+    }
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -710,6 +914,28 @@ mod tests {
                 muted: true,
             },
             Command::SetNotificationsMuted { muted: true },
+            Command::NewWorktreeTab {
+                project: ProjectId::new(1),
+                branch: "feat/x".into(),
+                base: Some("main".into()),
+            },
+            Command::NewWorktreeTab {
+                project: ProjectId::new(1),
+                branch: "fix/y".into(),
+                base: None,
+            },
+            Command::CheckWorktree { tab: TabId::new(2) },
+            Command::RemoveWorktreeTab {
+                tab: TabId::new(2),
+                discard_changes: true,
+                confirmed: WorktreeWork {
+                    changed: 2,
+                    ignored: 1,
+                    unpushed: 0,
+                    detached: false,
+                    files: WorktreeFiles::of(["changed M a.txt", "ignored .env"]),
+                },
+            },
             Command::MovePane {
                 pane: PaneId::new(3),
                 target: PaneId::new(4),
@@ -774,6 +1000,7 @@ mod tests {
             focused: PaneId::new(3),
             maximized: None,
             muted: true,
+            worktree: Some("C:/Code/yien-wt/feat-x".into()),
         };
         assert_eq!(round_trip(&frame), frame);
         let msgs = [
@@ -807,6 +1034,30 @@ mod tests {
                 signal_lost: false,
             }),
             CoreMsg::NotificationsMuted { muted: true },
+            CoreMsg::WorktreeChecked {
+                tab: TabId::new(2),
+                worktree: "C:/Code/yien-wt/feat-x".into(),
+                check: WorktreeCheck::Checked {
+                    work: WorktreeWork {
+                        changed: 3,
+                        ignored: 2,
+                        unpushed: 1,
+                        detached: true,
+                        files: WorktreeFiles::Whole(7),
+                    },
+                    ignored_examples: vec![".env".into(), "node_modules/".into()],
+                },
+            },
+            CoreMsg::WorktreeChecked {
+                tab: TabId::new(2),
+                worktree: "C:/Code/yien-wt/feat-x".into(),
+                check: WorktreeCheck::Failed {
+                    reason: "git was not found".into(),
+                },
+            },
+            CoreMsg::Notice {
+                message: "Removed the worktree.".into(),
+            },
             CoreMsg::PaneState {
                 pane: PaneId::new(3),
                 state: AgentState::Error(ErrorReason::UnexpectedExit {

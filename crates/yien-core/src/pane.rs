@@ -618,7 +618,7 @@ impl Actor {
         cols: u16,
         rows: u16,
     ) -> Result<Result<yien_pty::PtySession, PtyError>, tokio::task::JoinError> {
-        let Some(spawning) = self.ctx.consoles.begin() else {
+        let Some(spawning) = self.ctx.consoles.begin(self.id) else {
             return Ok(Err(PtyError::Closed));
         };
         let spec = self.plan.spec(fill, &self.cwd, cols, rows);

@@ -116,8 +116,9 @@ impl Git {
         Ok(parse_status(&out)?)
     }
 
-    /// `-c` settings that switch off every filter the repository's own config defines.
-    fn repo_filter_overrides(&self, dir: &Path) -> Result<Vec<String>, GitError> {
+    /// `-c` settings that switch off every filter the repository's own config
+    /// defines, smudge included for the checkout of a new worktree.
+    pub(crate) fn repo_filter_overrides(&self, dir: &Path) -> Result<Vec<String>, GitError> {
         let listing = self.run(
             dir,
             &[
@@ -126,7 +127,7 @@ impl Git {
                 "--show-scope",
                 "--name-only",
                 "--get-regexp",
-                r"^filter\..*\.(clean|process|required)$",
+                r"^filter\..*\.(clean|smudge|process|required)$",
             ],
         );
         match listing {

@@ -56,6 +56,7 @@ pub(crate) fn folders(snapshot: &SessionSnapshot) -> BTreeSet<String> {
         out.insert(project.root.clone());
         for tab in &project.tabs {
             out.insert(tab.dir.clone());
+            out.extend(tab.worktree.clone());
             out.extend(tab.panes.iter().map(|p| p.cwd.clone()));
         }
     }
@@ -111,7 +112,10 @@ impl Workspace {
                 Some(_) => tab.kept_branch.clone(),
                 None => tab.branch.clone(),
             },
-            worktree: None,
+            worktree: match tab.kept_dir {
+                Some(_) => tab.kept_worktree.clone(),
+                None => tab.worktree.clone(),
+            },
             archived: false,
             muted: tab.muted,
             name: tab.custom_name.clone(),
@@ -287,6 +291,12 @@ impl Workspace {
             Some(_) => (None, record.branch.clone()),
             None => (record.branch.clone(), None),
         };
+        // A tab that fell back to another folder is not on its worktree, so
+        // closing it must not offer to remove that worktree.
+        let (worktree, kept_worktree) = match kept_dir {
+            Some(_) => (None, record.worktree.clone()),
+            None => (record.worktree.clone(), None),
+        };
         self.tabs.push(Tab {
             id: record.id,
             project: project.id,
@@ -305,6 +315,8 @@ impl Workspace {
             branch,
             kept_branch,
             muted: record.muted,
+            worktree,
+            kept_worktree,
         });
         true
     }
@@ -464,7 +476,7 @@ fn shape(layout: &LayoutRecord, order: &[PaneId]) -> Option<Shape> {
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{Command, Orientation};
+    use yien_proto::{Command, Orientation, TabId};
 
     use super::*;
     use crate::launch;
@@ -746,6 +758,54 @@ mod tests {
         let info = back.snapshot().tabs.into_iter().find(|t| t.id == tab);
         assert_eq!(info.unwrap().branch.as_deref(), Some("feat/x"));
         assert_eq!(back.to_session(), saved);
+    }
+
+    /// A project with a shell tab and a tab on worktree `WT`; returns that tab.
+    fn worktree_workspace() -> (Workspace, TabId) {
+        let (mut ws, _) = workspace("shell");
+        let project = ws.projects[0].id;
+        ws.open_worktree_tab(project, WT.into(), "feat/x".into(), &resolve)
+            .unwrap();
+        let tab = ws.active_tab.unwrap();
+        (ws, tab)
+    }
+
+    const WT: &str = "C:/Code/yien-wt/feat-x";
+
+    #[test]
+    fn rf_esp_05_a_worktree_tab_restores_into_its_worktree() {
+        let (ws, tab) = worktree_workspace();
+        let saved = ws.to_session();
+        let record = &saved.projects[0].tabs[2];
+        assert_eq!(record.worktree.as_deref(), Some(WT));
+        assert_eq!(record.dir, WT);
+        let (back, fx, notes) = restore(&saved, &all_exist(&saved));
+        assert!(notes.is_empty(), "{notes:?}");
+        let info = back.snapshot().tabs.into_iter().find(|t| t.id == tab);
+        let info = info.unwrap();
+        assert_eq!(info.worktree.as_deref(), Some(WT));
+        assert_eq!(spawn_of(&fx, info.focused).1, WT);
+        assert_eq!(back.to_session(), saved);
+    }
+
+    #[test]
+    fn rf_esp_05_a_vanished_worktree_falls_back_to_the_project_with_a_notice() {
+        let (ws, tab) = worktree_workspace();
+        let saved = ws.to_session();
+        let mut disk = all_exist(&saved);
+        disk.existing.remove(WT);
+        let (back, fx, notes) = restore(&saved, &disk);
+        assert!(notes.iter().any(|n| n.contains(WT)), "{notes:?}");
+        let info = back.snapshot().tabs.into_iter().find(|t| t.id == tab);
+        let info = info.unwrap();
+        assert_eq!(info.dir, ROOT);
+        assert_eq!(spawn_of(&fx, info.focused).1, ROOT);
+        assert_eq!(info.worktree, None, "closing it must not offer a removal");
+        assert_eq!(
+            back.to_session().projects[0].tabs[2].worktree.as_deref(),
+            Some(WT),
+            "the saved worktree is kept for when it comes back"
+        );
     }
 
     #[test]
