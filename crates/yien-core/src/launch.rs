@@ -212,7 +212,7 @@ pub(crate) fn resolve(
         Some(detect) => (
             detect.command.clone(),
             found.launch.args.clone(),
-            detect.command.clone(),
+            ShellCommand::new(&detect.command).display_name(),
         ),
         None => (
             shell.program.clone(),
@@ -283,6 +283,19 @@ mod tests {
         assert!(plan.machine.declares(Source::Osc133));
         assert!(!plan.hooks);
         assert!(!plan.preassigns_session());
+    }
+
+    #[test]
+    fn rf_age_04_a_profile_with_a_full_path_is_named_by_its_file() {
+        let profile = Profile::from_toml(
+            "schema = 1\nid = \"mine\"\nname = \"Mine\"\n\
+             detect = { command = 'D:/tools/bin/my-tool.cmd' }\n[[rules]]\nsources = []\n",
+        )
+        .unwrap();
+        let plan = resolve(Some(&ProfileId::new("mine")), &[profile], &shell()).unwrap();
+        assert_eq!(plan.program, "D:/tools/bin/my-tool.cmd");
+        assert_eq!(plan.default_name, "my-tool");
+        assert_eq!(claude().default_name, "claude");
     }
 
     #[test]
