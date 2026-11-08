@@ -145,6 +145,11 @@ mod support {
 
 use support::{Sandbox, git, same};
 
+/// How long a test waits for an event it expects: generous, since a loaded
+/// machine (a build, other test runs) slows git and threads a lot. The wait
+/// ends as soon as the event comes.
+const EVENT_WAIT: Duration = Duration::from_secs(60);
+
 #[test]
 fn clean_repo_on_a_branch() {
     let Some(sb) = Sandbox::new() else { return };
@@ -363,7 +368,7 @@ fn watcher_reports_a_branch_switch() {
     assert!(rx.try_recv().is_err(), "no change, no callback");
 
     sb.git(&root, &["switch", "-q", "-c", "other"]);
-    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Change::Git));
+    assert_eq!(rx.recv_timeout(EVENT_WAIT), Ok(Change::Git));
     assert_eq!(git().status(&root).unwrap().head.branch(), Some("other"));
 
     let start = Instant::now();
@@ -372,6 +377,26 @@ fn watcher_reports_a_branch_switch() {
         start.elapsed() < Duration::from_secs(10),
         "drop stops the thread"
     );
+}
+
+/// The watcher reads the files before `spawn` returns, so a change made right
+/// after is seen even when its thread starts late.
+#[test]
+fn watcher_sees_a_change_made_as_soon_as_it_starts() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("eager");
+    let repo = git().discover(&root).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let options = WatchOptions {
+        interval: Duration::from_millis(20),
+        refresh: None,
+    };
+    let _watcher = GitWatcher::spawn(&repo, options, move |c| {
+        let _ = tx.send(c);
+    })
+    .unwrap();
+    sb.git(&root, &["switch", "-q", "-c", "other"]);
+    assert_eq!(rx.recv_timeout(EVENT_WAIT), Ok(Change::Git));
 }
 
 #[test]
@@ -388,7 +413,7 @@ fn watcher_refreshes_for_work_tree_edits() {
         let _ = tx.send(c);
     })
     .unwrap();
-    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Change::Refresh));
+    assert_eq!(rx.recv_timeout(EVENT_WAIT), Ok(Change::Refresh));
 }
 
 #[test]
@@ -574,6 +599,86 @@ fn rf_esp_05_a_base_is_where_the_branch_starts() {
         .add_worktree(&root, "fix/old", &path, Some("v1"))
         .unwrap();
     assert_eq!(sb.git(&path, &["rev-parse", "HEAD"]), first);
+}
+
+/// Adds and listings at once on one repository all succeed: a listing
+/// meeting a registration another add is still writing is tried again, and
+/// adds in this process take turns.
+#[test]
+fn rf_esp_05_adds_and_lists_at_once_all_succeed() {
+    const ADDS: usize = 6;
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("burst");
+    let start = std::sync::Barrier::new(ADDS + 1);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let lister = s.spawn(|| {
+            start.wait();
+            let mut lists = 0_u32;
+            while !done.load(Ordering::Acquire) {
+                git().worktrees(&root).unwrap();
+                lists += 1;
+            }
+            lists
+        });
+        let adds: Vec<_> = (0..ADDS)
+            .map(|i| {
+                let (root, start) = (&root, &start);
+                let path = sb.dir.join("burst-wt").join(format!("n{i}"));
+                s.spawn(move || {
+                    start.wait();
+                    git().add_worktree(root, &format!("feat/n{i}"), &path, None)
+                })
+            })
+            .collect();
+        // Joined before any assert, so a failed add cannot leave the lister spinning.
+        let added: Vec<_> = adds.into_iter().map(|a| a.join().unwrap()).collect();
+        done.store(true, Ordering::Release);
+        let lists = lister.join().unwrap();
+        for result in added {
+            result.unwrap();
+        }
+        assert!(lists > 0);
+    });
+    let list = git().worktrees(&root).unwrap();
+    assert_eq!(list.len(), ADDS + 1);
+    for i in 0..ADDS {
+        assert!(has_branch(&sb, &root, &format!("feat/n{i}")));
+        assert!(
+            sb.dir
+                .join("burst-wt")
+                .join(format!("n{i}"))
+                .join("a.txt")
+                .is_file()
+        );
+    }
+}
+
+/// A registration whose `commondir` is still empty, as while `git worktree
+/// add` writes it, makes git itself fail every listing; yien tries again a
+/// bounded number of times, then reports git's error.
+#[test]
+fn a_half_written_registration_fails_the_listing_until_it_is_written() {
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("half");
+    let wt = sb.dir.join("half-wt");
+    git().add_worktree(&root, "feat/h", &wt, None).unwrap();
+    let commondir = root
+        .join(".git")
+        .join("worktrees")
+        .join("half-wt")
+        .join("commondir");
+    let written = std::fs::read(&commondir).unwrap();
+    std::fs::write(&commondir, "").unwrap();
+
+    let err = git().worktrees(&root).unwrap_err();
+    assert!(
+        matches!(&err, GitError::Failed { message, .. } if message.contains("commondir")),
+        "{err:?}"
+    );
+
+    std::fs::write(&commondir, written).unwrap();
+    assert_eq!(git().worktrees(&root).unwrap().len(), 2);
 }
 
 #[test]
