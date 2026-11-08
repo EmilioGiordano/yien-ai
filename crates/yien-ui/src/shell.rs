@@ -369,8 +369,9 @@ impl Shell {
             }
             let link = Rc::clone(&self.link);
             let family = self.fonts.mono.clone();
+            let size = crate::terminal::DEFAULT_FONT_SIZE;
             let theme = self.theme;
-            let view = cx.new(|cx| TerminalPane::new(pane, link, family, theme, window, cx));
+            let view = cx.new(|cx| TerminalPane::new(pane, link, family, size, theme, window, cx));
             self.terminals.insert(pane, view);
         }
     }
