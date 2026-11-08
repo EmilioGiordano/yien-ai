@@ -447,8 +447,8 @@ fn rf_ses_04_a_terminated_claude_session_launches_fresh() {
     let (store, claude, session) = first_run();
     let mut again = Run::start(&store);
     again.children(2);
-    // The resume reports its session id before it starts; a terminate handled
-    // before that report lets the report clear the end.
+    // The resume reports its session id before it starts; the terminate is
+    // sent once it runs, so the end is saved from this launch.
     again.wait_for(|m| match m {
         CoreMsg::PaneUpdated(p) if p.id == claude && p.running => Some(()),
         _ => None,
