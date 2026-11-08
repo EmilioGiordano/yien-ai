@@ -1,5 +1,5 @@
-//! The palette that resolves terminal colour indices to the RGB colours a
-//! frame carries.
+//! The palettes that resolve terminal colour indices to the RGB colours a
+//! frame carries: sumi (dark, the default) and washi (light).
 
 pub use yien_proto::frame::Rgb;
 
@@ -58,6 +58,56 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// The light terminal theme that goes with washi (paper): the prototype's
+    /// light `--term-*` tokens, with ANSI colours dark enough to read on its
+    /// background (normal ones at 4.5:1, bright ones at 3:1).
+    ///
+    /// ```
+    /// use yien_vt::{Palette, Rgb};
+    ///
+    /// let washi = Palette::washi();
+    /// assert_eq!(washi.background, Rgb::from_hex(0xfbfaf6));
+    /// assert_ne!(washi, Palette::default());
+    /// ```
+    pub const fn washi() -> Self {
+        Self {
+            ansi: [
+                Rgb::from_hex(0x23211e), // black: --term-text
+                Rgb::from_hex(0xd11f28), // red: --term-shu
+                Rgb::from_hex(0x3e6b24), // green
+                Rgb::from_hex(0x8a5a12), // yellow: --term-ochre
+                Rgb::from_hex(0x2f4f8f), // blue: --term-ai
+                Rgb::from_hex(0x8a3d7c), // magenta
+                Rgb::from_hex(0x1f6b66), // cyan
+                Rgb::from_hex(0x6f6c64), // white: --term-faint
+                Rgb::from_hex(0x5c5952), // bright black: --term-muted
+                Rgb::from_hex(0xd9444a), // bright red
+                Rgb::from_hex(0x5a8a34), // bright green
+                Rgb::from_hex(0xa86f12), // bright yellow
+                Rgb::from_hex(0x4a6cb5), // bright blue
+                Rgb::from_hex(0xa8559a), // bright magenta
+                Rgb::from_hex(0x2f8781), // bright cyan
+                Rgb::from_hex(0x8a867c), // bright white
+            ],
+            foreground: Rgb::from_hex(0x23211e),
+            background: Rgb::from_hex(0xfbfaf6),
+            cursor: Rgb::from_hex(0x23211e),
+        }
+    }
+
+    /// Whether the background is lighter than the text.
+    ///
+    /// ```
+    /// use yien_vt::Palette;
+    ///
+    /// assert!(Palette::washi().is_light());
+    /// assert!(!Palette::default().is_light());
+    /// ```
+    pub fn is_light(&self) -> bool {
+        let luma = |c: Rgb| 299 * u32::from(c.r) + 587 * u32::from(c.g) + 114 * u32::from(c.b);
+        luma(self.background) > luma(self.foreground)
+    }
+
     /// The colour of a 256-colour index (SGR 38;5 and 48;5).
     pub fn indexed(&self, index: u8) -> Rgb {
         const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -99,5 +149,87 @@ mod tests {
         assert_eq!(p.background, Rgb::from_hex(0x0d0c0b));
         assert_eq!(p.foreground, Rgb::from_hex(0xe9e6dd));
         assert_eq!(p.ansi[1], Rgb::from_hex(0xe8333c));
+    }
+
+    #[test]
+    fn sumi_is_unchanged() {
+        let hex = |p: &Palette| {
+            let mut all: Vec<u32> = p.ansi.iter().map(to_hex).collect();
+            all.extend([
+                to_hex(&p.foreground),
+                to_hex(&p.background),
+                to_hex(&p.cursor),
+            ]);
+            all
+        };
+        assert_eq!(
+            hex(&Palette::default()),
+            [
+                0x1c1a17, 0xe8333c, 0x8fb573, 0xd6a24c, 0x8fa8dc, 0xc08fb5, 0x7fb4b0, 0xa19d93,
+                0x7d796f, 0xf0605f, 0xa9c98f, 0xe6bc6e, 0xadc0e8, 0xd4a9cb, 0x9fcbc7, 0xe9e6dd,
+                0xe9e6dd, 0x0d0c0b, 0xe9e6dd,
+            ]
+        );
+    }
+
+    #[test]
+    fn washi_follows_the_light_prototype_tokens() {
+        let p = Palette::washi();
+        assert_eq!(p.background, Rgb::from_hex(0xfbfaf6), "--term-bg");
+        assert_eq!(p.foreground, Rgb::from_hex(0x23211e), "--term-text");
+        assert_eq!(p.ansi[1], Rgb::from_hex(0xd11f28), "--term-shu");
+        assert_eq!(p.ansi[3], Rgb::from_hex(0x8a5a12), "--term-ochre");
+        assert_eq!(p.ansi[4], Rgb::from_hex(0x2f4f8f), "--term-ai");
+    }
+
+    #[test]
+    fn rnf_18_default_text_meets_aa_in_both_palettes() {
+        for (name, p) in [("sumi", Palette::default()), ("washi", Palette::washi())] {
+            let ratio = contrast(p.foreground, p.background);
+            assert!(ratio >= 4.5, "{name}: text is {ratio:.2}:1");
+            let ratio = contrast(p.cursor, p.background);
+            assert!(ratio >= 3.0, "{name}: cursor is {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn rnf_18_ansi_colours_read_on_their_background() {
+        // Sumi's black is its raised surface by design, so it is not text.
+        let checks = [
+            ("sumi", Palette::default(), 1),
+            ("washi", Palette::washi(), 0),
+        ];
+        for (name, p, first) in checks {
+            for (i, &colour) in p.ansi.iter().enumerate().skip(first) {
+                let ratio = contrast(colour, p.background);
+                assert!(ratio >= 3.0, "{name}: ANSI {i} is {ratio:.2}:1");
+            }
+        }
+        let washi = Palette::washi();
+        for (i, &colour) in washi.ansi.iter().enumerate().take(8) {
+            let ratio = contrast(colour, washi.background);
+            assert!(ratio >= 4.5, "washi: normal ANSI {i} is {ratio:.2}:1");
+        }
+    }
+
+    fn to_hex(c: &Rgb) -> u32 {
+        u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+    }
+
+    fn luminance(c: Rgb) -> f64 {
+        let channel = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+
+    fn contrast(a: Rgb, b: Rgb) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 }
