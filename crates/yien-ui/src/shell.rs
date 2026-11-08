@@ -26,6 +26,7 @@ use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
 use crate::fonts::Fonts;
 use crate::git::ContextGit;
+use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
     AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
@@ -73,6 +74,10 @@ pub(crate) struct Shell {
     /// The notice the last settings reading put up, so the next valid one
     /// can take it down.
     settings_notice: Option<String>,
+    /// gpui-kit's bindings, and the settings' rebinds now in the keymap
+    /// on top of them (RF-CFG-03).
+    base_keys: Vec<KeyBinding>,
+    rebinds: Rebinds,
     tab_bar_open: bool,
     context_bar_open: bool,
     focus: FocusHandle,
@@ -144,6 +149,7 @@ impl Shell {
         mut events: mpsc::Receiver<CoreMsg>,
         os: Rc<dyn OsAttention>,
         settings: Settings,
+        base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -213,6 +219,8 @@ impl Shell {
             settings: SettingsModel::default(),
             settings_host: settings.host,
             settings_notice: None,
+            base_keys,
+            rebinds: Rebinds::new(),
             tab_bar_open: true,
             context_bar_open: true,
             focus,

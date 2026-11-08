@@ -16,6 +16,7 @@ mod catalog;
 mod fonts;
 mod git;
 mod grid;
+mod keys;
 mod layout;
 mod matcher;
 mod model;
@@ -30,7 +31,7 @@ mod worktree;
 use std::rc::Rc;
 
 use gpui_kit::component::TitleBar;
-use gpui_kit::{AppContext, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{AppContext, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tokio::sync::mpsc;
 use yien_proto::CoreMsg;
 
@@ -92,6 +93,9 @@ pub fn run(
             })
             .detach();
             gpui_kit::init(cx);
+            // gpui-kit's own keys, bound again whenever the settings rebind ours.
+            let base_keys: Vec<KeyBinding> =
+                cx.key_bindings().borrow().bindings().cloned().collect();
             actions::bind_keys(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
             // The window opens in the default palette; the settings are
@@ -104,7 +108,7 @@ pub fn run(
             };
             let link = Rc::new(Link::new(client));
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| Shell::new(link, events, attention, settings, window, cx))
+                cx.new(|cx| Shell::new(link, events, attention, settings, base_keys, window, cx))
             });
             match opened {
                 Ok(_) => cx.activate(true),

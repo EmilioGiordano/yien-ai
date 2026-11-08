@@ -6,8 +6,9 @@ use gpui_kit::*;
 use tokio::sync::{mpsc, oneshot};
 
 use super::Shell;
-use crate::actions::{OpenConfigFile, ToggleTheme};
+use crate::actions::{self, OpenConfigFile, ToggleTheme};
 use crate::fonts::Fonts;
+use crate::keys;
 use crate::settings::{ConfigUpdate, Notice};
 use crate::theme::{Theme, sync_component_theme};
 
@@ -52,11 +53,15 @@ impl Shell {
                 tracing::warn!("the settings file could not be read: {why}");
             }
         }
+        let loaded = matches!(update, ConfigUpdate::Loaded(_));
         let mut notices = Vec::new();
         if let Notice::Show(text) = self.settings.apply(update) {
             notices.push(text);
         }
         notices.extend(self.apply_look(window, cx));
+        if loaded {
+            notices.extend(self.apply_keys(cx));
+        }
         if notices.is_empty() {
             if self.notice.is_some() && self.notice == self.settings_notice {
                 self.notice = None;
@@ -103,6 +108,20 @@ impl Shell {
         }
         self.fonts = fonts;
         cx.notify();
+        notices
+    }
+
+    /// Rebuilds the keymap when the `[keys]` table changed what is bound:
+    /// gpui-kit's keys first, then the catalog's with the rebinds.
+    fn apply_keys(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        let (rebinds, notices) = keys::plan(&self.settings.config().keys);
+        if rebinds != self.rebinds {
+            cx.clear_key_bindings();
+            cx.bind_keys(self.base_keys.iter().cloned());
+            cx.bind_keys(actions::bindings_with(&rebinds));
+            tracing::info!(rebound = rebinds.len(), "key bindings rebuilt");
+            self.rebinds = rebinds;
+        }
         notices
     }
 
