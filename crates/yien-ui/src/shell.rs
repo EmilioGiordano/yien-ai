@@ -16,7 +16,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
-    SHELL_PROFILE, TabGit, TabId,
+    SHELL_PROFILE, TabGit, TabId, TerminalPalette,
 };
 
 use crate::actions::*;
@@ -70,6 +70,8 @@ const CLAUDE_PROFILE: &str = "claude";
 pub(crate) struct Shell {
     workspace: WorkspaceView,
     theme: Theme,
+    /// The terminal palette the core has taken, `None` until it took one.
+    palette_sent: Option<TerminalPalette>,
     fonts: Fonts,
     /// The terminals' font size from the settings (RF-CFG-02).
     terminal_size: f32,
@@ -230,6 +232,7 @@ impl Shell {
             workspace: WorkspaceView::default(),
             // `apply_config` below sets both from the settings.
             theme: Theme::of(ThemeKind::default()),
+            palette_sent: None,
             fonts: Fonts::default(),
             terminal_size: crate::terminal::DEFAULT_FONT_SIZE,
             settings: SettingsModel::default(),
@@ -284,6 +287,7 @@ impl Shell {
     /// that announced one. Events for panes or tabs the UI no longer knows
     /// are dropped.
     fn apply(&mut self, batch: Vec<CoreMsg>, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_palette(cx);
         let mut ready: BTreeSet<PaneId> = BTreeSet::new();
         let mut changed = false;
         let mut git_changed = Vec::new();

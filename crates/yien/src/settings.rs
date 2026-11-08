@@ -6,8 +6,9 @@ use std::io;
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
-use yien_config::Loaded;
+use yien_config::{Loaded, ThemeSetting};
 use yien_platform::config_file::{self, Watcher};
+use yien_proto::TerminalPalette;
 use yien_ui::{ConfigUpdate, Settings, SettingsHost};
 
 /// Opens the file through the platform layer.
@@ -68,6 +69,21 @@ pub(crate) fn start() -> (Settings, Option<Watcher>) {
     (settings, watcher)
 }
 
+/// The palette panes start on, from the first reading: `None` when the
+/// window decides, as for `system`, which follows the OS appearance only
+/// the window reads.
+pub(crate) fn start_palette(initial: &ConfigUpdate) -> Option<TerminalPalette> {
+    let theme = match initial {
+        ConfigUpdate::Loaded(loaded) => loaded.config.theme,
+        ConfigUpdate::Invalid(_) | ConfigUpdate::Unreadable(_) => ThemeSetting::default(),
+    };
+    match theme {
+        ThemeSetting::Sumi => Some(TerminalPalette::Sumi),
+        ThemeSetting::Washi => Some(TerminalPalette::Washi),
+        ThemeSetting::System => None,
+    }
+}
+
 /// What one read of the file means for the window. A removed file keeps
 /// the last valid settings; it is not written again until the next start.
 fn reading(text: io::Result<Option<String>>) -> ConfigUpdate {
@@ -78,5 +94,34 @@ fn reading(text: io::Result<Option<String>>) -> ConfigUpdate {
         },
         Ok(None) => ConfigUpdate::Unreadable("the file was removed".into()),
         Err(error) => ConfigUpdate::Unreadable(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn palette_for(text: &str) -> Option<TerminalPalette> {
+        start_palette(&reading(Ok(Some(text.to_owned()))))
+    }
+
+    #[test]
+    fn rf_cfg_02_panes_start_on_the_file_theme() {
+        assert_eq!(
+            palette_for("theme = \"washi\""),
+            Some(TerminalPalette::Washi)
+        );
+        assert_eq!(palette_for("theme = \"sumi\""), Some(TerminalPalette::Sumi));
+        assert_eq!(palette_for(""), Some(TerminalPalette::Sumi), "the default");
+        assert_eq!(
+            palette_for("theme = 3"),
+            Some(TerminalPalette::Sumi),
+            "invalid"
+        );
+        assert_eq!(
+            palette_for("theme = \"system\""),
+            None,
+            "the window decides"
+        );
     }
 }

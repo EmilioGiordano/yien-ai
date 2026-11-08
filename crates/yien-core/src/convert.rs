@@ -4,6 +4,13 @@
 use yien_agent as agent;
 use yien_proto as proto;
 
+pub(crate) fn palette(p: proto::TerminalPalette) -> yien_vt::Palette {
+    match p {
+        proto::TerminalPalette::Sumi => yien_vt::Palette::default(),
+        proto::TerminalPalette::Washi => yien_vt::Palette::washi(),
+    }
+}
+
 pub(crate) fn orientation(o: proto::Orientation) -> yien_layout::Orientation {
     match o {
         proto::Orientation::Horizontal => yien_layout::Orientation::Horizontal,

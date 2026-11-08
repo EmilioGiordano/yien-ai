@@ -4,9 +4,11 @@
 
 use gpui_kit::*;
 use tokio::sync::{mpsc, oneshot};
+use yien_proto::{ClientMsg, TerminalPalette};
 
 use super::Shell;
 use crate::actions::{self, OpenConfigFile, ToggleTheme};
+use crate::bridge::{Sent, deliver};
 use crate::fonts::Fonts;
 use crate::keys;
 use crate::settings::{ConfigUpdate, Notice};
@@ -109,8 +111,24 @@ impl Shell {
             }
         }
         self.fonts = fonts;
+        self.sync_palette(cx);
         cx.notify();
         notices
+    }
+
+    /// Sends the theme's terminal palette until the core has taken it; a
+    /// message refused by a full queue is sent again on the next call.
+    pub(super) fn sync_palette(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.theme.kind.terminal_palette();
+        if self.palette_sent == Some(wanted) {
+            return;
+        }
+        let sent = deliver(
+            &self.link,
+            ClientMsg::SetTerminalPalette { palette: wanted },
+            cx,
+        );
+        self.palette_sent = palette_taken(self.palette_sent, wanted, sent);
     }
 
     /// Rebuilds the keymap when the `[keys]` table changed what is bound:
@@ -168,4 +186,36 @@ fn system_dark(window: &Window) -> bool {
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     )
+}
+
+/// The palette the core holds after sending `wanted`: a queued message
+/// reaches it in order, a refused one leaves what it had.
+fn palette_taken(
+    before: Option<TerminalPalette>,
+    wanted: TerminalPalette,
+    sent: Sent,
+) -> Option<TerminalPalette> {
+    match sent {
+        Sent::Delivered | Sent::Queued => Some(wanted),
+        Sent::Full | Sent::Stopped => before,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sent, TerminalPalette, palette_taken};
+
+    #[test]
+    fn rf_cfg_02_a_refused_palette_is_sent_again() {
+        let washi = TerminalPalette::Washi;
+        assert_eq!(palette_taken(None, washi, Sent::Delivered), Some(washi));
+        assert_eq!(palette_taken(None, washi, Sent::Queued), Some(washi));
+        let sumi = Some(TerminalPalette::Sumi);
+        assert_eq!(
+            palette_taken(sumi, washi, Sent::Full),
+            sumi,
+            "still differs"
+        );
+        assert_eq!(palette_taken(None, washi, Sent::Stopped), None);
+    }
 }

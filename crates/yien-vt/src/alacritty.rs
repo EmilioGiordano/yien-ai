@@ -187,9 +187,19 @@ impl AlacrittyEngine {
             256 | 267 => p.foreground,
             257 => p.background,
             258 => p.cursor,
-            259..267 => p.indexed(u8::try_from(index - 259).unwrap_or(0)).dim(),
-            268 => p.foreground.dim(),
+            259..267 => self.faint(p.indexed(u8::try_from(index - 259).unwrap_or(0))),
+            268 => self.faint(p.foreground),
             _ => p.foreground,
+        }
+    }
+
+    /// SGR 2 (faint): towards black on a dark palette, towards the
+    /// background on a light one, where darker would read as bold.
+    fn faint(&self, colour: Rgb) -> Rgb {
+        if self.palette.is_light() {
+            third_towards(colour, self.color_at(257))
+        } else {
+            colour.dim()
         }
     }
 
@@ -205,7 +215,7 @@ impl AlacrittyEngine {
         let mut fg = self.resolve(cell.fg);
         let mut bg = self.resolve(cell.bg);
         if cell.flags.contains(Flags::DIM) {
-            fg = fg.dim();
+            fg = self.faint(fg);
         }
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut fg, &mut bg);
@@ -312,6 +322,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(term_size(cols, rows));
+    }
+
+    fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
     }
 
     fn size(&self) -> Size {
@@ -616,6 +630,12 @@ fn to_term_selection(kind: SelectionKind) -> SelectionType {
         SelectionKind::Semantic => SelectionType::Semantic,
         SelectionKind::Lines => SelectionType::Lines,
     }
+}
+
+/// A third of the way from `from` to `to`, as [`Rgb::dim`] goes to black.
+fn third_towards(from: Rgb, to: Rgb) -> Rgb {
+    let mix = |a: u8, b: u8| ((2 * u16::from(a) + u16::from(b)) / 3) as u8;
+    Rgb::new(mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b))
 }
 
 #[cfg(test)]
