@@ -65,6 +65,8 @@ pub(crate) fn setting(key: &str) -> Option<&'static Setting> {
 /// The file written on first run: every setting commented out at its
 /// default, so the file only holds what the user changes (plan §7.4).
 /// `commands` are the catalog's `(id, title)` pairs, listed for `[keys]`.
+/// The file is never rewritten, so that list goes stale as the catalog grows;
+/// the file says so.
 ///
 /// ```
 /// let text = yien_config::default_file(&[("pane.close", "pane: close")]);
@@ -90,7 +92,10 @@ pub fn default_file(commands: &[(&str, &str)]) -> String {
          # \"theme.toggle\" = [\"ctrl-shift-l\", \"f12\"]\n",
     );
     if !commands.is_empty() {
-        out.push_str("\n# Command ids:\n");
+        out.push_str(
+            "\n# Command ids, as of the YIEN that wrote this file; newer versions may add\n\
+             # more, and this file is never rewritten to list them.\n",
+        );
         let width = commands.iter().map(|(id, _)| id.len()).max().unwrap_or(0);
         for (id, title) in commands {
             out.push_str(&format!("#   {id:<width$}  {title}\n"));
