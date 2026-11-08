@@ -4,7 +4,7 @@
 //! thread; nothing here touches the disk.
 
 use tokio::sync::mpsc;
-use yien_config::{Config, Loaded, Problem, ThemeSetting};
+use yien_config::{Config, Loaded, Problem, TabGrouping, ThemeSetting};
 
 use crate::theme::ThemeKind;
 
@@ -63,6 +63,9 @@ pub(crate) struct SettingsModel {
     config: Config,
     /// The theme the toggle picked, until the file is next applied.
     toggled: Option<ThemeKind>,
+    /// Whether the grouping toggle picked tabs by state, until the file is
+    /// next applied (RF-ATN-07).
+    grouping_toggled: Option<bool>,
 }
 
 impl SettingsModel {
@@ -77,6 +80,7 @@ impl SettingsModel {
             ConfigUpdate::Loaded(loaded) => {
                 self.config = loaded.config;
                 self.toggled = None;
+                self.grouping_toggled = None;
                 match loaded.warnings.as_slice() {
                     [] => Notice::Clear,
                     [only] => Notice::Show(format!("{FILE}: {only}.")),
@@ -106,6 +110,23 @@ impl SettingsModel {
     pub(crate) fn toggle_theme(&mut self, system_dark: bool) -> ThemeKind {
         let next = self.theme(system_dark).toggled();
         self.toggled = Some(next);
+        next
+    }
+}
+
+impl SettingsModel {
+    /// Whether the tab bar lists tabs by state: the toggle's choice, or the
+    /// file's `ui.tabs.group` (RF-ATN-07).
+    pub(crate) fn groups_by_state(&self) -> bool {
+        self.grouping_toggled
+            .unwrap_or(self.config.tab_grouping == TabGrouping::State)
+    }
+
+    /// The toggle: the other grouping for this session only. The file is
+    /// never written; its value wins again when it is next applied.
+    pub(crate) fn toggle_grouping(&mut self) -> bool {
+        let next = !self.groups_by_state();
+        self.grouping_toggled = Some(next);
         next
     }
 }
@@ -161,6 +182,22 @@ mod tests {
         // A valid save wins, whatever it changed.
         m.apply(loaded("theme = \"sumi\"\nui.font.size = 14"));
         assert_eq!(m.theme(false), ThemeKind::Sumi);
+    }
+
+    #[test]
+    fn rf_atn_07_the_grouping_toggle_holds_until_the_file_is_applied() {
+        let mut m = SettingsModel::default();
+        assert!(!m.groups_by_state(), "by project by default");
+        m.apply(loaded("ui.tabs.group = \"state\""));
+        assert!(m.groups_by_state());
+        assert!(!m.toggle_grouping());
+        assert!(!m.groups_by_state());
+        m.apply(invalid("ui.tabs.group = 3"));
+        assert!(!m.groups_by_state(), "an invalid save keeps the toggle");
+        m.apply(loaded("ui.tabs.group = \"state\""));
+        assert!(m.groups_by_state(), "a valid save wins");
+        assert!(!m.toggle_grouping());
+        assert!(m.toggle_grouping());
     }
 
     #[test]
