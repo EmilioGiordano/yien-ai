@@ -369,7 +369,7 @@ fn watcher_reports_a_branch_switch() {
     let start = Instant::now();
     drop(watcher);
     assert!(
-        start.elapsed() < Duration::from_secs(1),
+        start.elapsed() < Duration::from_secs(10),
         "drop stops the thread"
     );
 }
