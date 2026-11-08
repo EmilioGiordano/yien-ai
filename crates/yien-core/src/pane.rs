@@ -259,31 +259,83 @@ pub(crate) struct PaneSetup {
 pub(crate) const RESTORED_MARK: &str = "\u{2500}\u{2500} restored ";
 
 /// The line below a restored screen: dim, in the identity blue (palette
-/// index 4, so it follows a palette switch), as wide as the pane.
+/// index 4, so it follows a palette switch), as wide as the pane. What is
+/// below it is cleared, whatever the restored bytes left there.
 fn restored_line(cols: u16) -> Vec<u8> {
     let rule = usize::from(cols).saturating_sub(RESTORED_MARK.chars().count() + 1);
-    let mut line = b"\r\n\x1b[0;2;34m".to_vec();
+    let mut line = b"\x1b[0;2;34m".to_vec();
     line.extend_from_slice(RESTORED_MARK.as_bytes());
     line.extend_from_slice("\u{2500}".repeat(rule).as_bytes());
-    line.extend_from_slice(b"\x1b[0m\r\n");
+    line.extend_from_slice(b"\x1b[0m\r\n\x1b[J");
     line
 }
 
-/// The rows the running program drew: below the restored screen's mark,
-/// while this launch shows one. In a pane narrower than the mark, its part
-/// that fits counts; under seven columns no row is taken for it.
-fn program_rows(frame: &Frame, restored: bool) -> Vec<String> {
+/// Feeds a restored screen into a fresh engine, then its line. Returns the
+/// line's row counted from the top of the scrollback, so text a program
+/// prints later never stands in for it. Replies, title and signals are
+/// dropped: none of it is the program's.
+fn show_restored(engine: &mut dyn VtEngine, dump: &[u8], cols: u16) -> usize {
+    engine.feed(dump);
+    engine.feed(DUMP_END);
+    engine.feed(b"\r\n");
+    let frame = engine.frame();
+    let row = frame.cursor.map_or(0, |c| usize::from(c.point.row));
+    engine.feed(&restored_line(cols));
+    frame.history_len + row
+}
+
+/// The live screen, whatever the user scrolled to.
+fn live_frame(engine: &mut dyn VtEngine) -> Frame {
+    let frame = engine.frame();
+    if frame.display_offset == 0 {
+        return frame;
+    }
+    engine.scroll_to_bottom();
+    let live = engine.frame();
+    engine.scroll(i32::try_from(frame.display_offset).unwrap_or(i32::MAX));
+    live
+}
+
+/// The rows of the live screen the running program drew: below the
+/// restored screen's line, while it is where it was put (`mark`). Once it
+/// scrolled off, or a clear or reflow moved it, every row counts.
+fn program_rows(engine: &mut dyn VtEngine, mark: Option<usize>) -> Vec<String> {
+    let frame = live_frame(engine);
     let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
-    if !restored {
+    let Some(at) = mark.and_then(|m| m.checked_sub(frame.history_len)) else {
         return rows;
-    }
+    };
+    // In a pane narrower than the mark, the part that fits.
     let fits = usize::from(frame.size.cols).max(7);
-    let mark: String = RESTORED_MARK.chars().take(fits).collect();
-    let mark = mark.trim_end();
-    match rows.iter().rposition(|row| row.starts_with(mark)) {
-        Some(mark) => rows[mark + 1..].to_vec(),
-        None => rows,
+    let prefix: String = RESTORED_MARK.chars().take(fits).collect();
+    match rows.get(at) {
+        Some(row) if row.starts_with(prefix.trim_end()) => rows[at + 1..].to_vec(),
+        _ => rows,
     }
+}
+
+/// Where the restored line is after a resize reflowed the buffer: the same
+/// one among the marks, counted from the top. `None` when it is gone.
+fn reanchor(
+    engine: &mut dyn VtEngine,
+    mark: usize,
+    resize: impl FnOnce(&mut dyn VtEngine),
+) -> Option<usize> {
+    let marks = |engine: &mut dyn VtEngine| -> Vec<usize> {
+        let history = engine.frame().history_len;
+        engine
+            .search(RESTORED_MARK.trim_end())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| {
+                usize::try_from(i64::try_from(history).ok()? + i64::from(m.start.line)).ok()
+            })
+            .collect()
+    };
+    let nth = marks(engine).iter().filter(|&&at| at <= mark).count();
+    resize(engine);
+    nth.checked_sub(1)
+        .and_then(|i| marks(engine).get(i).copied())
 }
 
 /// A pane that has not started its program yet because it waits for the
@@ -352,8 +404,9 @@ struct Actor {
     /// The saved screen, until a launch shows it; kept for the shell a failed
     /// resume falls back to.
     restored: Option<Vec<u8>>,
-    /// This launch's screen starts with the restored one.
-    shows_restored: bool,
+    /// The restored line's row from the top of the scrollback, while this
+    /// launch's screen starts with a restored one.
+    restored_mark: Option<usize>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -418,7 +471,7 @@ pub(crate) fn spawn(
         launch: setup.launch,
         screen: setup.screen,
         restored: setup.restored,
-        shows_restored: false,
+        restored_mark: None,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -597,13 +650,13 @@ impl Actor {
         } else {
             self.restored.take()
         };
-        self.shows_restored = restored.is_some();
+        self.restored_mark = None;
         if let Some(dump) = restored {
-            let mut engine = lock(&self.engine);
-            // Its replies, title and signals are dropped: none of it is the program's.
-            engine.feed(&dump);
-            engine.feed(DUMP_END);
-            engine.feed(&restored_line(size.cols));
+            let engine = Arc::clone(&self.engine);
+            let shown = tokio::task::spawn_blocking(move || {
+                show_restored(&mut **lock(&engine), &dump, size.cols)
+            });
+            self.restored_mark = shown.await.ok();
         }
         self.screen.attach(Arc::clone(&self.engine));
         self.dirty = true;
@@ -677,9 +730,9 @@ impl Actor {
         let engine = Arc::clone(&self.engine);
         let screen = Arc::clone(&self.screen);
         let feed = move |bytes: &[u8]| {
-            screen.changed();
             let mut engine = lock(&engine);
             let out = engine.feed(bytes);
+            screen.changed();
             let sync = engine.sync_pending().then(|| engine.sync_generation());
             ReaderMsg::Output { out, sync }
         };
@@ -762,11 +815,15 @@ impl Actor {
             PaneCmd::Resize { cols, rows } => {
                 let size = {
                     let mut engine = lock(&self.engine);
-                    engine.resize(cols, rows);
+                    let resize = |e: &mut dyn VtEngine| e.resize(cols, rows);
+                    match self.restored_mark {
+                        Some(mark) => self.restored_mark = reanchor(&mut **engine, mark, resize),
+                        None => resize(&mut **engine),
+                    }
+                    self.screen.changed();
                     engine.size()
                 };
                 self.outbox.resize = Some((size.cols, size.rows));
-                self.screen.changed();
                 self.dirty = true;
                 self.flush();
                 if self.pending.take().is_some() {
@@ -906,8 +963,7 @@ impl Actor {
             self.sync = None;
             self.absorb(out);
         }
-        let frame = lock(&self.engine).frame();
-        let rows = program_rows(&frame, self.shows_restored);
+        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
         let failure = resume::resume_failed(code, elapsed, &rows)?;
         Some((failure, resume::last_words(&rows)))
@@ -1046,8 +1102,7 @@ impl Actor {
                     }
                 }
                 AgentEffect::CheckScreen => {
-                    let frame = lock(&self.engine).frame();
-                    let rows = program_rows(&frame, self.shows_restored);
+                    let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                     let verdict = evaluate_screen(&self.plan.screen, &rows);
                     self.step(&Signal::Screen(verdict));
@@ -1567,33 +1622,79 @@ mod tests {
         );
     }
 
-    /// A restored screen of `old`, its line, then `new`, at `cols` wide.
-    fn restored_frame(cols: u16, old: &[u8], new: &[u8]) -> Frame {
+    /// An engine showing a restored screen of `old`, its line, then `new`,
+    /// at `cols` wide, and the line's row.
+    fn restored_engine(cols: u16, old: &[u8], new: &[u8]) -> (Box<dyn VtEngine>, usize) {
         let mut engine = alacritty(&VtConfig::default(), cols, 12);
-        engine.feed(old);
-        engine.feed(DUMP_END);
-        engine.feed(&restored_line(cols));
+        let mark = show_restored(engine.as_mut(), old, cols);
         engine.feed(new);
-        engine.frame()
+        (engine, mark)
+    }
+
+    fn dump_of(text: &[u8]) -> Vec<u8> {
+        let mut engine = alacritty(&VtConfig::default(), 40, 12);
+        engine.feed(text);
+        engine.screen_dump(yien_vt::DumpLimits::default())
     }
 
     #[test]
     fn rf_ses_10_screen_rules_read_only_what_the_program_drew() {
-        let frame = restored_frame(40, b"Allow this? (y/n)", b"fresh");
+        let (mut engine, mark) = restored_engine(40, &dump_of(b"Allow this? (y/n)"), b"fresh");
         assert_eq!(
-            program_rows(&frame, true),
+            program_rows(engine.as_mut(), Some(mark)),
             vec!["fresh", "", "", "", "", "", "", "", "", ""]
         );
-        assert!(program_rows(&frame, false)[0].contains("Allow"));
+        assert!(program_rows(engine.as_mut(), None)[0].contains("Allow"));
         for cols in [8, 12, 13] {
-            let frame = restored_frame(cols, b"old", b"fresh");
-            let rows = program_rows(&frame, true);
+            let (mut engine, mark) = restored_engine(cols, &dump_of(b"old"), b"fresh");
+            let rows = program_rows(engine.as_mut(), Some(mark));
             assert!(!rows.iter().any(|r| r == "old"), "{cols} columns: {rows:?}");
             assert!(
                 rows.iter().any(|r| r == "fresh"),
                 "{cols} columns: {rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn rf_ses_10_a_mark_the_program_prints_does_not_hide_its_rows() {
+        let fake = format!("Allow this? (y/n)\r\n{RESTORED_MARK}\r\nmore");
+        let (mut engine, mark) = restored_engine(40, &dump_of(b"old"), fake.as_bytes());
+        let rows = program_rows(engine.as_mut(), Some(mark));
+        assert!(rows.iter().any(|r| r.contains("Allow")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r == "old"), "{rows:?}");
+    }
+
+    #[test]
+    fn rf_ses_10_scrolling_back_does_not_bring_restored_rows_into_the_rules() {
+        let (mut engine, mark) = restored_engine(40, &dump_of(b"Allow this? (y/n)"), b"fresh");
+        engine.scroll(5);
+        let rows = program_rows(engine.as_mut(), Some(mark));
+        assert!(!rows.iter().any(|r| r.contains("Allow")), "{rows:?}");
+        assert_eq!(rows[0], "fresh");
+    }
+
+    #[test]
+    fn rf_ses_10_rows_below_the_restored_text_are_cleared() {
+        // A dump only puts text above its end; whatever lands below is erased.
+        let mut engine = alacritty(&VtConfig::default(), 40, 12);
+        engine.feed(b"\r\n\r\n\r\nDo you want to proceed? (y/n)\x1b[H");
+        let mark = show_restored(engine.as_mut(), &dump_of(b"old"), 40);
+        let rows = program_rows(engine.as_mut(), Some(mark));
+        assert!(!rows.iter().any(|r| r.contains("proceed")), "{rows:?}");
+    }
+
+    #[test]
+    fn rf_ses_10_a_resize_keeps_the_mark_and_a_clear_drops_it() {
+        let old = dump_of(b"one two three four five six seven eight nine ten");
+        let (mut engine, mark) = restored_engine(40, &old, b"fresh");
+        let moved = reanchor(engine.as_mut(), mark, |e| e.resize(12, 12)).unwrap();
+        let rows = program_rows(engine.as_mut(), Some(moved));
+        assert!(rows.iter().any(|r| r == "fresh"), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("one")), "{rows:?}");
+        engine.feed(b"\x1b[H\x1b[2J\x1b[3JAllow this? (y/n)");
+        let rows = program_rows(engine.as_mut(), Some(moved));
+        assert!(rows[0].contains("Allow"), "{rows:?}");
     }
 
     #[test]
