@@ -13,8 +13,10 @@ use yien_git::WatchOptions;
 use yien_proto::{ClientMsg, Command, CoreMsg, GitFacts, GitFileStatus, GitHead, TabGit, TabId};
 use yien_pty::FakePty;
 
-/// git on a busy machine can be slow; the watcher itself polls every 20 ms.
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a test waits for an event it expects. git on a loaded machine
+/// (a build, other test runs) can take seconds per call; the wait ends as
+/// soon as the event comes, and the watcher itself polls every 20 ms.
+const TIMEOUT: Duration = Duration::from_secs(120);
 
 #[cfg(test)]
 mod support {
@@ -104,7 +106,8 @@ mod support {
                         interval: Duration::from_millis(20),
                         refresh: Some(Duration::from_millis(200)),
                     },
-                    timeout: Duration::from_secs(20),
+                    // Test-only: one git call may take this long under load.
+                    timeout: Duration::from_secs(60),
                 }),
                 ..CoreConfig::default()
             };

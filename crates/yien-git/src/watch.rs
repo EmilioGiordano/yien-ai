@@ -76,7 +76,8 @@ pub struct GitWatcher {
 
 impl GitWatcher {
     /// Starts watching `repo`. `on_change` runs on the watcher thread and should
-    /// return quickly, for example by sending on a channel.
+    /// return quickly, for example by sending on a channel. The files are first
+    /// read before this returns, so any later change is reported.
     ///
     /// Fails only if the OS cannot start a thread.
     pub fn spawn(
@@ -89,15 +90,17 @@ impl GitWatcher {
         let interval = options.interval.max(MIN_INTERVAL);
         let refresh = options.refresh;
         let (stop, stop_rx) = mpsc::channel::<()>();
+        // Read before the thread starts, which on a loaded machine can be
+        // late: a change made once `spawn` returns is then always seen.
+        let mut poller = Poller::new(
+            read_stamps(&git_dir, &common_dir),
+            Instant::now(),
+            interval / 2,
+            refresh,
+        );
         let thread = thread::Builder::new()
             .name("yien-git-watch".to_owned())
             .spawn(move || {
-                let mut poller = Poller::new(
-                    read_stamps(&git_dir, &common_dir),
-                    Instant::now(),
-                    interval / 2,
-                    refresh,
-                );
                 loop {
                     match stop_rx.recv_timeout(interval) {
                         Err(RecvTimeoutError::Timeout) => {}

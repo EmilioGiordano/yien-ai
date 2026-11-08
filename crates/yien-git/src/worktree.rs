@@ -2,9 +2,25 @@
 //! branch, inspect one before it is removed, and remove one. Removing never
 //! deletes the branch.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use crate::{FileStatus, Git, GitError, Head, parse_status};
+
+/// How many times a worktree listing is tried while another git process
+/// is half-way through registering a worktree.
+const LIST_ATTEMPTS: u32 = 6;
+
+/// The first pause between those tries; it doubles each time (under a second in all).
+const LIST_BACKOFF: Duration = Duration::from_millis(25);
+
+/// One lock per repository (its common git dir) for this process's worktree
+/// adds and removals: git dies listing a registration another one is writing
+/// or deleting ("failed to read .git/worktrees/<name>/commondir"), and has no lock.
+static WRITES: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 /// One entry of `git worktree list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +215,8 @@ pub fn default_worktree_path(main_root: &Path, branch: &str) -> Option<PathBuf> 
 
 impl Git {
     /// Every worktree of the repository containing `dir`, the main one first.
+    /// A registration another git process is still writing makes git fail;
+    /// the listing is tried again a few times, then that error returned.
     ///
     /// ```no_run
     /// for wt in yien_git::Git::new().worktrees(std::path::Path::new("."))? {
@@ -207,8 +225,39 @@ impl Git {
     /// # Ok::<(), yien_git::GitError>(())
     /// ```
     pub fn worktrees(&self, dir: &Path) -> Result<Vec<Worktree>, GitError> {
-        let out = self.run(dir, &["worktree", "list", "--porcelain", "-z"])?;
-        Ok(parse_worktrees(&out))
+        Ok(parse_worktrees(&self.list_worktrees(dir)?))
+    }
+
+    /// `git worktree list --porcelain -z`, tried again while a registration
+    /// is half-written (see [`WRITES`]). Listing writes nothing, so a retry is safe.
+    pub(crate) fn list_worktrees(&self, dir: &Path) -> Result<Vec<u8>, GitError> {
+        let mut pause = LIST_BACKOFF;
+        let mut attempt = 1;
+        loop {
+            match self.run(dir, &["worktree", "list", "--porcelain", "-z"]) {
+                Err(e) if half_written_registration(&e) && attempt < LIST_ATTEMPTS => {
+                    tracing::debug!(attempt, "worktree list met a half-written registration");
+                    thread::sleep(pause);
+                    pause = pause.saturating_mul(2);
+                    attempt += 1;
+                }
+                done => return done,
+            }
+        }
+    }
+
+    /// Takes this process's worktree write lock of the repository containing `dir`.
+    fn write_lock(&self, dir: &Path) -> Result<Arc<Mutex<()>>, GitError> {
+        let out = self.run(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let common = PathBuf::from(String::from_utf8_lossy(&out).trim());
+        let key = common.canonicalize().unwrap_or(common);
+        let mut locks = WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+        // Forget the locks nobody holds, so the map stays small.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        Ok(Arc::clone(locks.entry(key).or_default()))
     }
 
     /// Adds a worktree at `path` on a new branch `branch`, started from
@@ -247,6 +296,8 @@ impl Git {
         }
         let path_arg = path.to_string_lossy();
         let overrides = self.repo_filter_overrides(dir)?;
+        let lock = self.write_lock(dir)?;
+        let _writing = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let args = ["worktree", "add", "-q", "-b", branch, "--", &path_arg, base];
         match self.run_write(dir, &overrides, &args) {
             Ok(_) => Ok(()),
@@ -427,6 +478,8 @@ impl Git {
         path: &Path,
         discard_changes: bool,
     ) -> Result<(), WorktreeError> {
+        let lock = self.write_lock(dir)?;
+        let _writing = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = self
             .worktrees(dir)?
             .into_iter()
@@ -456,6 +509,14 @@ impl Git {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// git failed reading a registration another git process is writing or
+/// deleting: an empty `commondir`, or a file gone between git's check and its read.
+fn half_written_registration(err: &GitError) -> bool {
+    matches!(err, GitError::Failed { message, .. }
+        if message.contains("failed to read")
+            && (message.contains("worktrees/") || message.contains("worktrees\\")))
 }
 
 /// A changed file's status as one stable word for [`WorktreeState::entries`].
@@ -594,6 +655,34 @@ mod tests {
             message: "fatal: C:/secret".into(),
         });
         assert_eq!(err.kind(), "git failed");
+    }
+
+    #[test]
+    fn only_a_half_written_registration_is_retried() {
+        let failed = |message: &str| GitError::Failed {
+            code: Some(128),
+            message: message.into(),
+        };
+        assert!(half_written_registration(&failed(
+            "fatal: failed to read .git/worktrees/feat-a/commondir: No error"
+        )));
+        assert!(half_written_registration(&failed(
+            "fatal: failed to read /src/app/.git/worktrees/x/commondir: Success"
+        )));
+        assert!(half_written_registration(&failed(
+            "fatal: failed to read '.git/worktrees/n5/locked': No such file or directory"
+        )));
+        // Windows, a file a removal is deleting.
+        assert!(half_written_registration(&failed(
+            "fatal: failed to read .git/worktrees/n2/commondir: Permission denied"
+        )));
+        assert!(!half_written_registration(&failed(
+            "fatal: not a valid path: worktrees/commondir"
+        )));
+        assert!(!half_written_registration(&failed(
+            "fatal: failed to read x"
+        )));
+        assert!(!half_written_registration(&GitError::NotARepository));
     }
 
     #[test]

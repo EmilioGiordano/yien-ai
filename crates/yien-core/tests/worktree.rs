@@ -20,7 +20,10 @@ use yien_proto::{ClientMsg, Command, CoreMsg, ProjectId, TabInfo, WorktreeCheck,
 
 use yien_pty::{FakePty, PtyBackend};
 
-const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a test waits for an event it expects: past the core's own
+/// 120 s worktree write timeout, so a slow git under load ends in the core's
+/// error, not here. The wait ends as soon as the event comes.
+const TIMEOUT: Duration = Duration::from_secs(180);
 
 /// A temp folder with an empty global git config, removed on drop.
 struct Sandbox {
@@ -312,6 +315,40 @@ fn rn_08_a_dirty_worktree_is_kept_unless_its_changes_are_discarded() {
     h.outcome().unwrap();
     assert!(!b_dir.exists());
     assert!(sb.has_branch(&root, "feat/a") && sb.has_branch(&root, "feat/b"));
+}
+
+/// Several adds at once on one repository: each `git worktree add` lists the
+/// worktrees, and git dies on one whose registration another add is still
+/// writing ("failed to read .git/worktrees/<name>/commondir"). yien-git
+/// serializes them per repository, so every tab opens.
+#[test]
+fn rf_esp_05_worktrees_added_at_once_all_open() {
+    const ADDS: usize = 6;
+    let Some(sb) = Sandbox::new() else { return };
+    let root = sb.repo("burst");
+    let mut h = Harness::fake();
+    let project = h.open(&root);
+    for i in 0..ADDS {
+        h.send(Command::NewWorktreeTab {
+            project,
+            branch: format!("feat/n{i}"),
+            base: None,
+        });
+    }
+    let mut branches: Vec<String> = (0..ADDS)
+        .map(|_| h.worktree_tab().branch.unwrap())
+        .collect();
+    branches.sort();
+    let expected: Vec<String> = (0..ADDS).map(|i| format!("feat/n{i}")).collect();
+    assert_eq!(branches, expected);
+    for i in 0..ADDS {
+        let dir = sb.dir.join("burst-wt").join(format!("feat-n{i}"));
+        assert!(
+            dir.join("a.txt").is_file(),
+            "{} is not checked out",
+            dir.display()
+        );
+    }
 }
 
 /// With a real shell working in the worktree, the removal waits for it to end.
