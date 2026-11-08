@@ -270,13 +270,17 @@ fn restored_line(cols: u16) -> Vec<u8> {
 }
 
 /// The rows the running program drew: below the restored screen's mark,
-/// while this launch shows one.
+/// while this launch shows one. In a pane narrower than the mark, its part
+/// that fits counts; under seven columns no row is taken for it.
 fn program_rows(frame: &Frame, restored: bool) -> Vec<String> {
     let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
     if !restored {
         return rows;
     }
-    match rows.iter().rposition(|row| row.starts_with(RESTORED_MARK)) {
+    let fits = usize::from(frame.size.cols).max(7);
+    let mark: String = RESTORED_MARK.chars().take(fits).collect();
+    let mark = mark.trim_end();
+    match rows.iter().rposition(|row| row.starts_with(mark)) {
         Some(mark) => rows[mark + 1..].to_vec(),
         None => rows,
     }
@@ -1561,6 +1565,35 @@ mod tests {
             events.contains(&PaneEvent::SessionId { id, launch: 4 }),
             "{events:?}"
         );
+    }
+
+    /// A restored screen of `old`, its line, then `new`, at `cols` wide.
+    fn restored_frame(cols: u16, old: &[u8], new: &[u8]) -> Frame {
+        let mut engine = alacritty(&VtConfig::default(), cols, 12);
+        engine.feed(old);
+        engine.feed(DUMP_END);
+        engine.feed(&restored_line(cols));
+        engine.feed(new);
+        engine.frame()
+    }
+
+    #[test]
+    fn rf_ses_10_screen_rules_read_only_what_the_program_drew() {
+        let frame = restored_frame(40, b"Allow this? (y/n)", b"fresh");
+        assert_eq!(
+            program_rows(&frame, true),
+            vec!["fresh", "", "", "", "", "", "", "", "", ""]
+        );
+        assert!(program_rows(&frame, false)[0].contains("Allow"));
+        for cols in [8, 12, 13] {
+            let frame = restored_frame(cols, b"old", b"fresh");
+            let rows = program_rows(&frame, true);
+            assert!(!rows.iter().any(|r| r == "old"), "{cols} columns: {rows:?}");
+            assert!(
+                rows.iter().any(|r| r == "fresh"),
+                "{cols} columns: {rows:?}"
+            );
+        }
     }
 
     #[test]
