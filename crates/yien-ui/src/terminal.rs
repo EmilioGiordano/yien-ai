@@ -712,7 +712,7 @@ impl Element for TerminalElement {
                 bounds.origin.y + px(row as f32 * m.cell_h),
             )
         };
-        let selection = to_rgb(theme.term_strong);
+        let selection = to_rgb(theme.term_selection);
         let mut quads = Vec::new();
         let mut text = Vec::new();
         let cursor = frame.cursor.and_then(|c| {
