@@ -3,10 +3,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_layout::{Shape, Tree};
-use yien_proto::{AgentState, PaneId, ProjectId, TabId};
+use yien_proto::{AgentState, PaneId, ProjectId, SideBar, SideBars, TabId};
 use yien_session::{
     AgentRecord, LayoutRecord, PaneRecord, ProjectRecord, ResumeAction, Selection, SessionRef,
-    SessionSnapshot, TabRecord, resume_plan,
+    SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord, resume_plan,
 };
 
 use super::{Effect, Pane, Project, Tab, Workspace};
@@ -93,6 +93,7 @@ impl Workspace {
             tab: self.active_tab,
         };
         snapshot.notifications_muted = self.notifications_muted;
+        snapshot.side_bars = side_bars_record(&self.side_bars);
         snapshot
     }
 
@@ -172,6 +173,7 @@ impl Workspace {
                 .and_then(|project| project.tabs.first().copied())
         };
         self.notifications_muted = snapshot.notifications_muted;
+        self.side_bars = side_bars(&snapshot.side_bars);
         self.active_tab = snapshot
             .selected
             .tab
@@ -426,6 +428,30 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
             ended_explicitly: p.ended_explicitly,
         }),
         last_command: None,
+    }
+}
+
+fn side_bars_record(bars: &SideBars) -> SideBarsRecord {
+    let bar = |b: &SideBar| SideBarRecord {
+        hidden: b.hidden,
+        width: b.width,
+    };
+    SideBarsRecord {
+        tab_bar: bar(&bars.tab_bar),
+        context_bar: bar(&bars.context_bar),
+        review: bars.review,
+    }
+}
+
+fn side_bars(record: &SideBarsRecord) -> SideBars {
+    let bar = |b: &SideBarRecord| SideBar {
+        hidden: b.hidden,
+        width: b.width,
+    };
+    SideBars {
+        tab_bar: bar(&record.tab_bar),
+        context_bar: bar(&record.context_bar),
+        review: record.review,
     }
 }
 
@@ -1035,6 +1061,29 @@ mod tests {
         assert_eq!(back.to_session(), saved);
         back.apply(rename(""), &resolve).unwrap();
         assert_eq!(back.snapshot().tabs[0].name, "Tab 1");
+    }
+
+    #[test]
+    fn rf_nav_10_the_side_bars_survive_a_save_and_a_restore() {
+        let (mut ws, _) = workspace("shell");
+        let bars = SideBars {
+            tab_bar: SideBar {
+                hidden: true,
+                width: Some(300.0),
+            },
+            context_bar: SideBar {
+                hidden: false,
+                width: Some(612.0),
+            },
+            review: true,
+        };
+        ws.apply(Command::SetSideBars { bars }, &resolve).unwrap();
+        assert_eq!(ws.snapshot().side_bars, bars);
+        let bytes = yien_session::serialize(&ws.to_session()).unwrap();
+        let saved = yien_session::deserialize(&bytes).unwrap();
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot().side_bars, bars);
+        assert_eq!(back.to_session(), saved);
     }
 
     #[test]

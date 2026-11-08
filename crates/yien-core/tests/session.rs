@@ -16,7 +16,10 @@ use tokio::sync::mpsc::error::TryRecvError;
 use yien_core::{
     Core, CoreConfig, CoreHandle, HookConfig, SessionSaveError, SessionStore, ShellCommand,
 };
-use yien_proto::{ClientMsg, Command, CoreMsg, Orientation, PaneId, ProfileId, WorkspaceSnapshot};
+use yien_proto::{
+    ClientMsg, Command, CoreMsg, Orientation, PaneId, ProfileId, SideBar, SideBars,
+    WorkspaceSnapshot,
+};
 use yien_pty::{FakeChild, FakePty};
 use yien_session::{MemStore, SessionSnapshot, Store, StoreError, load};
 
@@ -354,6 +357,36 @@ fn rf_ses_01_changes_are_saved_without_quitting() {
             .saved()
             .is_some_and(|s| s.projects[0].tabs[0].panes.len() == 2)
     });
+}
+
+#[test]
+fn rf_nav_10_the_side_bars_come_back_after_a_restart() {
+    let store = Shared::default();
+    let bars = SideBars {
+        tab_bar: SideBar {
+            hidden: false,
+            width: Some(320.0),
+        },
+        context_bar: SideBar {
+            hidden: true,
+            width: None,
+        },
+        review: false,
+    };
+    {
+        let mut run = Run::start(&store);
+        assert_eq!(run.snapshot().side_bars, SideBars::default());
+        run.first_pane();
+        run.command(Command::SetSideBars { bars });
+        wait_until(|| {
+            store
+                .saved()
+                .is_some_and(|s| s.side_bars.tab_bar.width == Some(320.0))
+        });
+        run.save();
+    }
+    let mut run = Run::start(&store);
+    assert_eq!(run.snapshot().side_bars, bars);
 }
 
 #[test]
