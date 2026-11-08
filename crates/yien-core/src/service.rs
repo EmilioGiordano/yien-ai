@@ -531,9 +531,10 @@ impl Service {
                 let fx = self.ws.set_window_focus(focused);
                 self.execute(fx).await;
             }
-            ClientMsg::SetTerminalPalette { palette } => {
-                let palette = convert::palette(palette);
+            ClientMsg::SetTerminalPalette { palette: named } => {
+                let palette = convert::palette(named);
                 if palette != self.palette {
+                    tracing::debug!(palette = ?named, panes = self.panes.len(), "terminal palette changed");
                     self.palette = palette;
                     let txs: Vec<_> = self.panes.values().map(|h| h.tx.clone()).collect();
                     for tx in txs {
