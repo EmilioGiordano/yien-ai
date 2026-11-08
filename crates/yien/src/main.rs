@@ -71,6 +71,11 @@ fn main() -> ExitCode {
         cli_dirs: CliDirs::from_env(),
         ..CoreConfig::default()
     };
+    let (settings, settings_watcher) = settings::start();
+    let config = match settings::start_palette(&settings.initial) {
+        Some(palette) => config.with_terminal_palette(palette),
+        None => config,
+    };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {
         Ok(started) => started,
         Err(error) => {
@@ -81,7 +86,6 @@ fn main() -> ExitCode {
     };
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
-    let (settings, settings_watcher) = settings::start();
     let files = files::start();
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
