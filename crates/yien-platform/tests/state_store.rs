@@ -66,3 +66,26 @@ fn rf_ses_06_generations_rotate_through_the_real_files() {
     assert!(!dir.join("workspace.5.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rf_ses_10_files_are_listed_removed_and_read_within_a_limit() {
+    let dir = scratch("list");
+    let mut store = FileStore::new(&dir);
+    assert!(store.list().unwrap().is_empty());
+    store.remove("missing").unwrap();
+    store.write_atomic("2.vt", b"two").unwrap();
+    store.write_atomic("1.vt", b"one!").unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    assert_eq!(store.list().unwrap(), vec!["1.vt", "2.vt"]);
+    assert_eq!(
+        store.read_at_most("1.vt", 4).unwrap().as_deref(),
+        Some(&b"one!"[..])
+    );
+    assert_eq!(store.read_at_most("1.vt", 3).unwrap(), None);
+    assert_eq!(store.read_at_most("3.vt", 3).unwrap(), None);
+    store.remove("1.vt").unwrap();
+    assert_eq!(store.list().unwrap(), vec!["2.vt"]);
+    assert!(store.remove("../2.vt").is_err());
+    assert!(store.read_at_most("a/b", 9).is_err());
+    let _ = fs::remove_dir_all(&dir);
+}
