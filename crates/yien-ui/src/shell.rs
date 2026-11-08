@@ -3022,6 +3022,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
             .on_action(cx.listener(Self::toggle_context_bar))
+            .on_action(cx.listener(Self::toggle_review_mode))
             .on_drag_move(cx.listener(Self::on_bar_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))

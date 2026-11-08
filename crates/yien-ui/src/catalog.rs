@@ -87,6 +87,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-d"]
     ),
     command!(
+        "context_bar.review",
+        "changes: toggle review mode",
+        ToggleReviewMode,
+        ["ctrl-shift-r"]
+    ),
+    command!(
         "region.next",
         "workspace: move focus to next area",
         FocusNextRegion,
@@ -530,6 +536,7 @@ mod tests {
         for (id, label) in [
             ("tab_bar.toggle", TAB_BAR_KEYS),
             ("context_bar.toggle", CONTEXT_BAR_KEYS),
+            ("context_bar.review", REVIEW_KEYS),
             ("theme.toggle", THEME_KEYS),
             ("tab.next", NEXT_TAB_KEYS),
             ("region.next", REGION_KEYS),

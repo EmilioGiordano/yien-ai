@@ -1,4 +1,4 @@
-//! Hiding and resizing the side bars (RF-NAV-10). The model is
+//! Hiding, resizing and widening the side bars (RF-NAV-10). The model is
 //! `crate::sidebars`; this draws the edges and keeps the core told, so the
 //! session saves the bars.
 
@@ -101,6 +101,21 @@ impl Shell {
         self.change_side_bars(|b| sidebars::toggle(b, Bar::Context), window, cx);
     }
 
+    /// Widens the context bar to review the changes, or back (RF-NAV-10).
+    /// Entering review shows the change list, as the prototype does.
+    pub(super) fn toggle_review_mode(
+        &mut self,
+        _: &ToggleReviewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.side_bars.review {
+            self.context_view = super::ContextView::Changes;
+        }
+        self.change_side_bars(sidebars::toggle_review, window, cx);
+        self.sync_files(window, cx);
+    }
+
     /// Follows a drag of a bar's edge; the root gets every move of it, so
     /// the pointer may leave the thin edge.
     pub(super) fn on_bar_drag(
@@ -158,5 +173,21 @@ impl Shell {
             Bar::Tab => edge.right_0(),
             Bar::Context => edge.left_0(),
         })
+    }
+}
+
+/// The review button's label, as the prototype's.
+pub(super) fn review_label(review: bool) -> &'static str {
+    if review { "Exit review" } else { "Review" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review_label;
+
+    #[test]
+    fn rf_nav_10_the_review_button_says_what_it_does() {
+        assert_eq!(review_label(false), "Review");
+        assert_eq!(review_label(true), "Exit review");
     }
 }

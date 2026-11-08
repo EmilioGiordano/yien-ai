@@ -53,6 +53,8 @@ actions!(
         ToggleTabBar,
         /// Shows or hides the context bar.
         ToggleContextBar,
+        /// Widens the context bar to review changes, or back (RF-NAV-10).
+        ToggleReviewMode,
         /// Selects the next tab in the tab bar.
         NextTab,
         /// Selects the previous tab in the tab bar.
@@ -236,6 +238,7 @@ actions!(
 /// The keys, with the label the status bar shows for each.
 pub(crate) const TAB_BAR_KEYS: &str = "Ctrl+Shift+E";
 pub(crate) const CONTEXT_BAR_KEYS: &str = "Ctrl+Shift+D";
+pub(crate) const REVIEW_KEYS: &str = "Ctrl+Shift+R";
 pub(crate) const THEME_KEYS: &str = "Ctrl+Shift+L";
 pub(crate) const NEXT_TAB_KEYS: &str = "Ctrl+Tab";
 pub(crate) const SPLIT_RIGHT_KEYS: &str = "Alt+Shift+=";

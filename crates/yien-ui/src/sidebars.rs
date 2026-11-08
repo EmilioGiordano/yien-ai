@@ -82,6 +82,14 @@ pub(crate) fn show(bars: &mut SideBars, bar: Bar) {
     bar.of_mut(bars).hidden = false;
 }
 
+/// Turns review mode on, showing the context bar, or back off.
+pub(crate) fn toggle_review(bars: &mut SideBars) {
+    bars.review = !bars.review;
+    if bars.review {
+        bars.context_bar.hidden = false;
+    }
+}
+
 /// Puts `bar` back at its default width; the context bar also leaves
 /// review mode.
 pub(crate) fn reset(bars: &mut SideBars, bar: Bar) {
@@ -260,6 +268,21 @@ mod tests {
     }
 
     #[test]
+    fn rf_nav_10_review_mode_widens_the_context_bar_and_toggles_back() {
+        let mut bars = sized(None, Some(420.0));
+        bars.context_bar.hidden = true;
+        toggle_review(&mut bars);
+        assert!(bars.review && shown(&bars, Bar::Context));
+        let wide = drawn(&bars, 1920.0).context_bar.unwrap();
+        assert_eq!(wide, 1920.0 * REVIEW_SHARE);
+        // The review width is not dragged; the saved width waits for it.
+        assert!(!drag_to(&mut bars, Bar::Context, 900.0, 1920.0));
+        toggle_review(&mut bars);
+        assert!(!bars.review);
+        assert_eq!(drawn(&bars, 1920.0).context_bar, Some(420.0));
+    }
+
+    #[test]
     fn rf_nav_10_a_narrow_window_shrinks_both_bars_in_proportion() {
         let bars = sized(Some(400.0), Some(600.0));
         let window = 960.0;
@@ -274,16 +297,22 @@ mod tests {
     }
 
     #[test]
-    fn rf_nav_10_a_saved_review_mode_draws_its_share_of_the_window() {
-        let bars = SideBars {
-            review: true,
-            ..SideBars::default()
-        };
-        let d = drawn(&bars, 1920.0);
-        assert_eq!(d.context_bar, Some(1920.0 * REVIEW_SHARE));
-        let d = drawn(&bars, 960.0);
+    fn rf_nav_10_review_mode_yields_to_the_panes_in_the_smallest_window() {
+        let mut bars = SideBars::default();
+        toggle_review(&mut bars);
+        let window = 960.0;
+        let d = drawn(&bars, window);
         let used = d.tab_bar.unwrap() + d.context_bar.unwrap();
-        assert!((960.0 - used - PANES_MIN).abs() < 0.01, "{d:?}");
+        assert!((window - used - PANES_MIN).abs() < 0.01, "{d:?}");
+        assert!(d.context_bar.unwrap() > d.tab_bar.unwrap());
+        // With the tab bar hidden the context bar alone yields.
+        toggle(&mut bars, Bar::Tab);
+        let d = drawn(&bars, window);
+        assert_eq!(d.tab_bar, None);
+        assert_eq!(d.context_bar, Some(window * REVIEW_SHARE));
+        // A window narrower than the pane minimum draws no bar width.
+        let d = drawn(&bars, 200.0);
+        assert_eq!(d.context_bar, Some(0.0));
     }
 
     #[test]
