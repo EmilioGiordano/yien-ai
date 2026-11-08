@@ -10,8 +10,8 @@ use std::io::{self, BufRead, BufReader, Read};
 
 use serde::Deserialize;
 
-/// The most bytes read from one session file. The title is near the start;
-/// past this the file is not read, and its prompt count is unknown.
+/// The most bytes read from one session file. Reading stops sooner, once
+/// the title and the folder are known; both are near the start.
 pub const SESSION_READ_BUDGET: u64 = 256 * 1024;
 
 /// The longest record kept for parsing; a longer one (a pasted image, a large
@@ -33,9 +33,6 @@ pub struct SessionSummary {
     /// The folder the session started in, from its first record that names
     /// one.
     pub cwd: Option<String>,
-    /// How many prompts the user typed; `None` when the file was not read to
-    /// its end.
-    pub prompts: Option<u32>,
 }
 
 impl std::fmt::Debug for SessionSummary {
@@ -46,7 +43,6 @@ impl std::fmt::Debug for SessionSummary {
                 &self.title.as_ref().map(|t| t.chars().count()),
             )
             .field("cwd", &self.cwd)
-            .field("prompts", &self.prompts)
             .finish()
     }
 }
@@ -128,8 +124,8 @@ pub fn is_session_id(id: &str) -> bool {
         })
 }
 
-/// Reads the summary of one Claude Code session file: its first prompt, its
-/// folder and, when the whole file fits in `budget` bytes, its prompt count.
+/// Reads the summary of one Claude Code session file: its first prompt and
+/// its folder. Reading stops as soon as both are known.
 ///
 /// At most `budget + 1` bytes are read, and no record longer than
 /// [`MAX_RECORD_BYTES`] is held. Lines that are not JSON, or not the shape
@@ -146,7 +142,6 @@ pub fn is_session_id(id: &str) -> bool {
 /// let summary = read_claude_session(file.as_bytes(), 1024)?;
 /// assert_eq!(summary.title.as_deref(), Some("fix the build"));
 /// assert_eq!(summary.cwd.as_deref(), Some(r"C:\Code\yien"));
-/// assert_eq!(summary.prompts, Some(1));
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn read_claude_session(reader: impl Read, budget: u64) -> io::Result<SessionSummary> {
@@ -155,9 +150,11 @@ pub fn read_claude_session(reader: impl Read, budget: u64) -> io::Result<Session
         read: 0,
     };
     let mut summary = SessionSummary::default();
-    let mut prompts = 0u32;
     let mut line = Vec::new();
-    while let Some(kept) = lines.next(&mut line)? {
+    while summary.title.is_none() || summary.cwd.is_none() {
+        let Some(kept) = lines.next(&mut line)? else {
+            break;
+        };
         // A line that ends past the budget was cut by it.
         if !kept || lines.read > budget {
             continue;
@@ -168,16 +165,9 @@ pub fn read_claude_session(reader: impl Read, budget: u64) -> io::Result<Session
         if summary.cwd.is_none() {
             summary.cwd = record.cwd.clone().filter(|c| !c.is_empty());
         }
-        let Some(prompt) = record.prompt() else {
-            continue;
-        };
-        prompts = prompts.saturating_add(1);
         if summary.title.is_none() {
-            summary.title = one_line(prompt);
+            summary.title = record.prompt().and_then(one_line);
         }
-    }
-    if lines.read <= budget {
-        summary.prompts = Some(prompts);
     }
     Ok(summary)
 }
@@ -403,7 +393,6 @@ mod tests {
         );
         let summary = read(&file(&lines));
         assert_eq!(summary.title.as_deref(), Some("what is this?"));
-        assert_eq!(summary.prompts, Some(2));
         assert_eq!(summary.cwd.as_deref(), Some(r"C:\Code\yien"));
     }
 
@@ -429,7 +418,6 @@ mod tests {
         bytes.extend_from_slice(b"\n\xff\xfe not utf-8\n");
         let summary = read_claude_session(bytes.as_slice(), SESSION_READ_BUDGET).unwrap();
         assert_eq!(summary.title.as_deref(), Some("the real one"));
-        assert_eq!(summary.prompts, Some(1));
     }
 
     #[test]
@@ -458,48 +446,56 @@ mod tests {
         let text = file(&[huge, user("after the blob")]);
         let summary = read_claude_session(text.as_bytes(), u64::MAX - 1).unwrap();
         assert_eq!(summary.title.as_deref(), Some("after the blob"));
-        assert_eq!(summary.prompts, Some(1));
     }
 
-    #[test]
-    fn rf_ses_07_a_huge_file_is_read_only_up_to_the_budget() {
-        let mut text = file(&[user("near the start")]);
-        let filler = r#"{"type":"assistant","message":{"content":"filler"}}"#;
-        while text.len() < 4 * 1024 * 1024 {
-            text.push_str(filler);
+    const FILLER: &str = r#"{"type":"assistant","message":{"content":"filler"}}"#;
+
+    /// `lines`, then filler records up to `size` bytes.
+    fn padded(lines: &[String], size: usize) -> String {
+        let mut text = file(lines);
+        while text.len() < size {
+            text.push_str(FILLER);
             text.push('\n');
         }
-        text.push_str(&user("far past the budget"));
-        text.push('\n');
+        text
+    }
+
+    fn counted(text: &str, budget: u64) -> (SessionSummary, u64) {
         let taken = Rc::new(Cell::new(0));
         let reader = Counting {
             inner: text.as_bytes(),
             taken: Rc::clone(&taken),
         };
-        let budget = 64 * 1024;
         let summary = read_claude_session(reader, budget).unwrap();
-        assert!(taken.get() <= budget + 1, "read {} bytes", taken.get());
-        assert_eq!(summary.title.as_deref(), Some("near the start"));
-        assert_eq!(
-            summary.prompts, None,
-            "the count is unknown past the budget"
-        );
-
-        // A prompt that only appears past the budget is not found.
-        let late = format!("{filler}\n{}\n", user("late"));
-        let summary = read_claude_session(late.as_bytes(), 10).unwrap();
-        assert_eq!(summary.title, None);
-        assert_eq!(summary.prompts, None);
+        (summary, taken.get())
     }
 
     #[test]
-    fn rf_ses_07_a_file_that_fits_the_budget_exactly_is_complete() {
+    fn rf_ses_07_reading_stops_once_the_title_and_folder_are_known() {
+        let text = padded(&[user("near the start")], 4 * 1024 * 1024);
+        let (summary, taken) = counted(&text, SESSION_READ_BUDGET);
+        assert_eq!(summary.title.as_deref(), Some("near the start"));
+        assert_eq!(summary.cwd.as_deref(), Some(r"C:\Code\yien"));
+        // One buffer of the reader, not the budget.
+        assert!(taken <= 16 * 1024, "read {taken} bytes");
+    }
+
+    #[test]
+    fn rf_ses_07_a_huge_file_is_read_only_up_to_the_budget() {
+        let mut text = padded(&[], 4 * 1024 * 1024);
+        text.push_str(&user("far past the budget"));
+        text.push('\n');
+        let budget = 64 * 1024;
+        let (summary, taken) = counted(&text, budget);
+        assert!(taken <= budget + 1, "read {taken} bytes");
+        assert_eq!(summary.title, None);
+
+        // A record the budget cuts in half is not read either.
         let text = file(&[user("fits")]);
         let len = text.len() as u64;
         let summary = read_claude_session(text.as_bytes(), len).unwrap();
-        assert_eq!(summary.prompts, Some(1));
+        assert_eq!(summary.title.as_deref(), Some("fits"));
         let summary = read_claude_session(text.as_bytes(), len - 1).unwrap();
-        assert_eq!(summary.prompts, None);
         assert_eq!(summary.title, None, "its only line was cut by the budget");
     }
 

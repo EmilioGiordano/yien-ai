@@ -730,7 +730,6 @@ mod tests {
             id: id.into(),
             title: title.map(yien_proto::SessionTitle::new),
             modified_ms: NOW - ago,
-            prompts: None,
         }
     }
 

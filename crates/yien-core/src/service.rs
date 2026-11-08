@@ -644,7 +644,6 @@ fn past_sessions(config: &CoreConfig, root: &str) -> (Vec<AgentSession>, Option<
                 id: s.id,
                 title: s.summary.title.map(SessionTitle::new),
                 modified_ms: s.modified_ms,
-                prompts: s.summary.prompts,
             })),
             Err(error) => failed = Some(error.to_string()),
         }

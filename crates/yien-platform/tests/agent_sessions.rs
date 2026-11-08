@@ -95,7 +95,6 @@ fn rf_ses_07_a_projects_sessions_are_listed_newest_first() {
         .map(|s| s.summary.title.as_deref())
         .collect();
     assert_eq!(titles, [Some("newest"), Some("middle"), Some("oldest")]);
-    assert_eq!(sessions[0].summary.prompts, Some(2));
     assert!(sessions[0].modified_ms > sessions[1].modified_ms);
 
     let capped = list(
@@ -176,12 +175,7 @@ fn rf_ses_07_broken_and_huge_files_still_list() {
         sessions[0].summary.title.as_deref(),
         Some("after the noise")
     );
-    assert_eq!(sessions[0].summary.prompts, Some(1));
     assert_eq!(sessions[1].summary.title.as_deref(), Some("big one"));
-    assert_eq!(
-        sessions[1].summary.prompts, None,
-        "read only up to the budget"
-    );
     assert_eq!(sessions[2].summary.title, None);
 }
 

@@ -115,8 +115,6 @@ pub struct AgentSession {
     pub title: Option<SessionTitle>,
     /// When it last changed, in milliseconds since the Unix epoch.
     pub modified_ms: u64,
-    /// How many prompts were typed, when the whole file was read.
-    pub prompts: Option<u32>,
 }
 
 /// How a split lays out its children.
@@ -1145,14 +1143,12 @@ mod tests {
                         id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
                         title: Some(SessionTitle::new("fix the build")),
                         modified_ms: 1_762_500_000_000,
-                        prompts: Some(4),
                     },
                     AgentSession {
                         profile: ProfileId::new("claude"),
                         id: "5f1c2a3b-0000-4000-8000-0123456789ab".into(),
                         title: None,
                         modified_ms: 0,
-                        prompts: None,
                     },
                 ],
             },
@@ -1281,7 +1277,6 @@ mod tests {
                 id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
                 title: Some(SessionTitle::new("secret plan")),
                 modified_ms: 1,
-                prompts: Some(1),
             }],
         };
         let shown = format!("{msg:?}");

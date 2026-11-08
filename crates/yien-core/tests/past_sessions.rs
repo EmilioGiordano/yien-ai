@@ -171,7 +171,6 @@ fn rf_ses_07_the_core_lists_a_projects_sessions_newest_first() {
         .collect();
     assert_eq!(titles, ["newest", "middle", "oldest"]);
     assert!(sessions.iter().all(|s| s.profile.as_str() == "claude"));
-    assert!(sessions.iter().all(|s| s.prompts == Some(1)));
     assert!(sessions[0].modified_ms > sessions[1].modified_ms);
 }
 
