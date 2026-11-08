@@ -407,6 +407,62 @@ fn rf_pan_14_faint_and_hidden_are_resolved() {
 }
 
 #[test]
+fn rf_cfg_02_a_palette_change_recolours_and_keeps_the_screen() {
+    let (sumi, washi) = (Palette::default(), Palette::washi());
+    let mut e = engine(20, 3);
+    numbered_lines(&mut e, 10);
+    e.feed(b"\x1b[31mR\x1b[0m\x1b[38;2;1;2;3mT\x1b[0m\x1b[93mY\x1b[0mx");
+    let before = e.frame();
+    assert_eq!(before.background, sumi.background);
+    e.set_palette(washi);
+    let after = e.frame();
+    assert_eq!(render(&after), render(&before), "same text");
+    assert_eq!(after.history_len, before.history_len, "scrollback kept");
+    let row = after.lines.len() - 1;
+    let cells = &after.lines[row];
+    assert_eq!(after.background, washi.background);
+    assert_eq!(after.cursor_color, washi.cursor);
+    assert_eq!(cells[0].fg, washi.ansi[1]);
+    assert_eq!(cells[1].fg, Rgb::new(1, 2, 3), "truecolor is the program's");
+    assert_eq!(cells[2].fg, washi.ansi[11]);
+    assert_eq!(cells[3].fg, washi.foreground);
+    assert_eq!(cells[3].bg, washi.background);
+    e.set_palette(sumi);
+    assert_eq!(e.frame(), before, "switching back gives the same frame");
+}
+
+#[test]
+fn rf_cfg_02_program_colours_survive_a_palette_change() {
+    let mut e = engine(10, 3);
+    e.feed(b"\x1b]11;rgb:20/30/40\x07\x1b]4;1;rgb:10/20/30\x07\x1b[31mX");
+    e.set_palette(Palette::washi());
+    let frame = e.frame();
+    assert_eq!(frame.background, Rgb::new(0x20, 0x30, 0x40));
+    assert_eq!(frame.lines[0][0].fg, Rgb::new(0x10, 0x20, 0x30));
+}
+
+#[test]
+fn rf_cfg_02_colour_queries_answer_with_the_current_palette() {
+    let mut e = engine(10, 3);
+    e.set_palette(Palette::washi());
+    let out = e.feed(b"\x1b]11;?\x07");
+    let reply = String::from_utf8(out.replies).unwrap();
+    assert!(reply.contains("rgb:fbfb/fafa/f6f6"), "{reply:?}");
+}
+
+#[test]
+fn rf_cfg_02_faint_text_fades_towards_a_light_background() {
+    let washi = Palette::washi();
+    let mut e = engine(10, 3);
+    e.set_palette(washi);
+    e.feed(b"\x1b[2mA");
+    let faint = e.frame().lines[0][0].fg;
+    let luma = |c: Rgb| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
+    assert!(luma(faint) > luma(washi.foreground), "lighter, not bolder");
+    assert!(luma(faint) < luma(washi.background));
+}
+
+#[test]
 fn rf_pan_14_mouse_modes_are_reported() {
     let mut e = engine(10, 3);
     assert_eq!(e.modes().mouse, MouseTracking::Off);
