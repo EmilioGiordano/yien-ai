@@ -2,6 +2,8 @@
 //! folder, already read, turned into profiles and the problems that kept
 //! some of them out. Reading the folder is the platform layer's job.
 
+use std::collections::BTreeMap;
+
 use crate::profile::{Profile, ProfileError};
 
 /// The folder under YIEN's config dir that holds user profiles.
@@ -87,12 +89,59 @@ pub struct UserProfiles {
     pub profiles: Vec<Profile>,
     /// Problems in file name order.
     pub problems: Vec<ProfileProblem>,
+    /// Ids a skipped file was meant to define, by its name or its `id`,
+    /// with that file's name. A built-in profile with such an id must not
+    /// run in its place: the user meant to replace it.
+    pub broken: BTreeMap<String, String>,
+}
+
+impl UserProfiles {
+    /// Records that `file` was skipped, with the id it meant to define if
+    /// its text tells, and the id its name gives.
+    pub fn skipped(&mut self, file: &str, id: Option<String>) {
+        for id in id.into_iter().chain(stem_id(file)) {
+            self.broken.entry(id).or_insert_with(|| file.to_owned());
+        }
+    }
+
+    /// Drops broken ids that a valid file defines after all, and the shell,
+    /// which stays the fallback every pane needs.
+    pub fn settle(&mut self) {
+        let defined: Vec<String> = self.profiles.iter().map(|p| p.id.clone()).collect();
+        self.broken
+            .retain(|id, _| id != "shell" && !defined.contains(id));
+    }
+}
+
+/// The profile id a file name gives: its name without `.toml`, when that is
+/// a valid id.
+fn stem_id(file: &str) -> Option<String> {
+    let lower = file.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".toml")?;
+    let ok = !stem.is_empty()
+        && stem.len() <= 64
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+    ok.then(|| stem.to_owned())
+}
+
+/// The `id` string of a profile text that did not validate, if it parses
+/// that far.
+fn raw_id(text: &str) -> Option<String> {
+    let root = toml::de::DeTable::parse(text).ok()?;
+    let (_, value) = root.get_ref().iter().find(|(k, _)| k.get_ref() == "id")?;
+    match value.get_ref() {
+        toml::de::DeValue::String(id) => Some(id.to_string()),
+        _ => None,
+    }
 }
 
 /// Parses each `(file name, text)` with the built-in schema and checks.
 /// Files go in name order; an invalid file is skipped and the rest still
 /// load; when two files define one id the first by name wins. Merge the
-/// result over the built-in profiles with [`crate::resolve_profiles`].
+/// result over the built-in profiles with [`crate::resolve_profiles`],
+/// after dropping the built-in ids in [`UserProfiles::broken`].
 ///
 /// ```
 /// use yien_agent::{builtin_profiles, load_user_profiles, resolve_profiles};
@@ -146,6 +195,7 @@ pub fn load_user_profiles(mut files: Vec<(String, String)>) -> UserProfiles {
                     ProfileError::Syntax { message, .. } => message.clone(),
                     other => other.to_string(),
                 };
+                loaded.skipped(&file, raw_id(&text));
                 loaded.problems.push(ProfileProblem {
                     place: error.place(&text),
                     file,
@@ -155,6 +205,7 @@ pub fn load_user_profiles(mut files: Vec<(String, String)>) -> UserProfiles {
             }
         }
     }
+    loaded.settle();
     loaded
 }
 
@@ -236,6 +287,38 @@ mod tests {
             loaded.problems[0].to_string(),
             "profiles/n.toml: rules: at least one [[rules]] entry is required; \
              this profile is skipped"
+        );
+    }
+
+    #[test]
+    fn rf_age_04_a_broken_override_names_the_ids_it_meant_to_replace() {
+        let loaded = load_user_profiles(vec![
+            file(
+                "claude.toml",
+                "schema = 1\nid = \"claude\"\nname = = \"X\"\n",
+            ),
+            file("other.toml", "schema = 1\nid = \"codex\"\nname = \"X\"\n"),
+            file("shell.toml", "schema = = 1\n"),
+            file("Bad Name.toml", "schema = = 1\n"),
+            file("mine.toml", profile("mine", "Mine")),
+            file("mine-broken.toml", "schema = 1\nid = \"mine\"\n"),
+        ]);
+        let broken: Vec<(&str, &str)> = loaded
+            .broken
+            .iter()
+            .map(|(id, f)| (id.as_str(), f.as_str()))
+            .collect();
+        // claude by its name (the id did not parse); codex by its id and
+        // "other" by its name; never the shell; never an id a valid file
+        // defines; never a name that is no id.
+        assert_eq!(
+            broken,
+            [
+                ("claude", "claude.toml"),
+                ("codex", "other.toml"),
+                ("mine-broken", "mine-broken.toml"),
+                ("other", "other.toml"),
+            ]
         );
     }
 
