@@ -901,7 +901,15 @@ impl Actor {
             self.retry_at = None;
             return;
         };
-        self.retry_at = match self.outbox.drain(&session.control) {
+        let resizing = self.outbox.resize;
+        let drained = self.outbox.drain(&session.control);
+        if let Some((cols, rows)) = resizing
+            && self.outbox.resize.is_none()
+            && !matches!(drained, Err(Blocked::Closed))
+        {
+            tracing::debug!(pane = self.id.get(), cols, rows, "pseudo terminal resized");
+        }
+        self.retry_at = match drained {
             Ok(()) => None,
             Err(Blocked::Full) => Some(Instant::now() + RETRY_AFTER),
             Err(Blocked::Closed) => {
