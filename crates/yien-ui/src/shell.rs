@@ -39,7 +39,7 @@ use crate::palette::{
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
 };
 use crate::region::{self, Region};
-use crate::settings::{Settings, SettingsHost, SettingsModel};
+use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
 
@@ -81,6 +81,8 @@ pub(crate) struct Shell {
     /// The notice the last settings reading put up, so the next valid one
     /// can take it down.
     settings_notice: Option<String>,
+    /// The notice for profile files skipped at start (RF-AGE-04).
+    profiles_notice: Option<String>,
     /// The installed font families, listed again at each settings reading.
     installed_fonts: Vec<String>,
     /// gpui-kit's bindings, and the settings' rebinds now in the keymap
@@ -238,6 +240,7 @@ impl Shell {
             settings: SettingsModel::default(),
             settings_host: settings.host,
             settings_notice: None,
+            profiles_notice: None,
             installed_fonts: Vec::new(),
             base_keys,
             rebinds: Rebinds::new(),
@@ -271,6 +274,8 @@ impl Shell {
             keyboard_in_bar: false,
             _subscriptions: vec![activation, appearance],
         };
+        shell.profiles_notice = profiles_notice(&settings.profile_problems);
+        shell.notice.clone_from(&shell.profiles_notice);
         shell.apply_config(settings.initial, window, cx);
         shell
     }

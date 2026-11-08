@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 yien-proto = { workspace = true }
 yien-core = { workspace = true }
+yien-agent = { workspace = true }
 yien-pty = { workspace = true }
 yien-ui = { workspace = true }
 yien-platform = { workspace = true }

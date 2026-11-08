@@ -7,6 +7,7 @@
 mod attention;
 mod files;
 mod panic_log;
+mod profiles;
 mod settings;
 
 use std::process::ExitCode;
@@ -60,7 +61,9 @@ fn main() -> ExitCode {
     };
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
+    let (profiles, profile_problems) = profiles::load();
     let config = CoreConfig {
+        profiles,
         hooks,
         session: session_store(),
         start_project: yien_platform::paths::start_dir()
@@ -71,7 +74,7 @@ fn main() -> ExitCode {
         cli_dirs: CliDirs::from_env(),
         ..CoreConfig::default()
     };
-    let (settings, settings_watcher) = settings::start();
+    let (settings, settings_watcher) = settings::start(profile_problems);
     let config = match settings::start_palette(&settings.initial) {
         Some(palette) => config.with_terminal_palette(palette),
         None => config,

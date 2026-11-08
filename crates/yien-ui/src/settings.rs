@@ -46,6 +46,53 @@ pub struct Settings {
     pub updates: mpsc::UnboundedReceiver<ConfigUpdate>,
     /// Opens the file.
     pub host: Box<dyn SettingsHost>,
+    /// The user's profile files that were skipped at start, each naming the
+    /// file and, when it can, the line and column (RF-AGE-04).
+    pub profile_problems: Vec<String>,
+}
+
+/// The status bar notice and the settings' own part of it after a reading
+/// that gave `notices`. `profiles`, the start's profile notice, stays
+/// beside the settings' text while the bar still shows it; a valid reading
+/// takes down only the settings' part.
+pub(crate) fn after_reading(
+    notice: Option<&str>,
+    settings_notice: Option<&str>,
+    profiles: Option<&str>,
+    notices: &[String],
+) -> (Option<String>, Option<String>) {
+    let join = |a: Option<&str>, b: Option<&str>| match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (a, b) => a.or(b).map(str::to_owned),
+    };
+    let profiles_up = profiles.filter(|p| notice.is_some_and(|n| n.contains(p)));
+    let settings_up = settings_notice
+        .is_some_and(|s| notice == Some(s) || notice == join(Some(s), profiles_up).as_deref());
+    if notices.is_empty() {
+        let notice = if settings_up {
+            profiles_up.map(str::to_owned)
+        } else {
+            notice.map(str::to_owned)
+        };
+        (notice, None)
+    } else {
+        let text = notices.join(" ");
+        (join(Some(&text), profiles_up), Some(text))
+    }
+}
+
+/// The status bar notice for the profile files skipped at start: the first
+/// problem and how many more there are.
+pub(crate) fn profiles_notice(problems: &[String]) -> Option<String> {
+    match problems {
+        [] => None,
+        [only] => Some(format!("{only}.")),
+        [first, rest @ ..] => Some(format!(
+            "{first} (and {} more profile problem{}).",
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        )),
+    }
 }
 
 /// What the status bar does after a reading.
@@ -161,6 +208,43 @@ mod tests {
         // A valid save wins, whatever it changed.
         m.apply(loaded("theme = \"sumi\"\nui.font.size = 14"));
         assert_eq!(m.theme(false), ThemeKind::Sumi);
+    }
+
+    #[test]
+    fn rf_age_04_skipped_profile_files_are_one_notice() {
+        assert_eq!(profiles_notice(&[]), None);
+        let one = "profiles/bad.toml, line 3, column 8: expected a value; this profile is skipped";
+        assert_eq!(profiles_notice(&[one.into()]), Some(format!("{one}.")));
+        assert_eq!(
+            profiles_notice(&[one.into(), "b".into(), "c".into()]),
+            Some(format!("{one} (and 2 more profile problems)."))
+        );
+        assert_eq!(
+            profiles_notice(&[one.into(), "b".into()]),
+            Some(format!("{one} (and 1 more profile problem)."))
+        );
+    }
+
+    #[test]
+    fn rf_age_04_the_profile_notice_outlives_the_settings_notice() {
+        let p = Some("P.");
+        let bad = ["C.".to_owned()];
+        // At start: the profile notice is up, the settings add theirs.
+        let (notice, settings) = after_reading(p, None, p, &bad);
+        assert_eq!(notice.as_deref(), Some("C. P."));
+        assert_eq!(settings.as_deref(), Some("C."));
+        // A valid save takes down only the settings' part.
+        let (notice, settings) = after_reading(notice.as_deref(), settings.as_deref(), p, &[]);
+        assert_eq!(notice.as_deref(), Some("P."));
+        assert_eq!(settings, None);
+        // Once another notice replaced it, the profile notice stays down.
+        let (notice, _) = after_reading(Some("Nobody is waiting for you."), None, p, &bad);
+        assert_eq!(notice.as_deref(), Some("C."));
+        let (notice, _) = after_reading(Some("other"), Some("C."), p, &[]);
+        assert_eq!(notice.as_deref(), Some("other"));
+        // Without profile problems it is the settings notice alone.
+        let (notice, _) = after_reading(Some("C."), Some("C."), None, &[]);
+        assert_eq!(notice, None);
     }
 
     #[test]
