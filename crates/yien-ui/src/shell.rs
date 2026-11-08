@@ -102,6 +102,9 @@ pub(crate) struct Shell {
     side_bars_saved: Option<SideBars>,
     /// How wide the bars were drawn at the last render.
     bar_widths: Drawn,
+    /// How far right of a bar's edge the pointer grabbed it, so a drag
+    /// moves the edge without jumping to the pointer.
+    bar_grab: f32,
     /// What the context bar shows under the branch head.
     context_view: ContextView,
     /// The Files view (RF-CTX-01).
@@ -287,6 +290,7 @@ impl Shell {
             side_bars: SideBars::default(),
             side_bars_saved: None,
             bar_widths: sidebars::drawn(&SideBars::default(), 0.0),
+            bar_grab: 0.0,
             context_view: if files.seeded() {
                 ContextView::Files
             } else {

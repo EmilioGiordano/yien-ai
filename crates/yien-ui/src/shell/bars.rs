@@ -125,7 +125,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let bar = event.drag(cx).0;
-        let x = event.event.position.x.as_f32();
+        let x = event.event.position.x.as_f32() - self.bar_grab;
         let width = window.viewport_size().width.as_f32();
         if sidebars::drag_to(&mut self.side_bars, bar, x, width) {
             cx.notify();
@@ -163,6 +163,14 @@ impl Shell {
             .w(px(EDGE_WIDTH))
             .cursor_col_resize()
             .hover(move |s| s.bg(wash))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, _| {
+                    let width = window.viewport_size().width.as_f32();
+                    this.bar_grab = sidebars::edge_x(&this.side_bars, bar, width)
+                        .map_or(0.0, |edge| event.position.x.as_f32() - edge);
+                }),
+            )
             .on_drag(BarDrag(bar), |_, _, _, cx| cx.new(|_| NoGhost))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
