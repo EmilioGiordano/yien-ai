@@ -107,6 +107,9 @@ fn editor_launch(
                 "the editor {program} is a relative path, which would resolve against \
                  YIEN's own folder; set its full path in config.toml"
             ),
+            yien_which::WhichError::Missing => {
+                format!("the editor {program} does not exist; check its full path in config.toml")
+            }
             _ => format!(
                 "the editor {program} was not found on PATH (the current folder is not \
                  searched); set its full path in config.toml"
