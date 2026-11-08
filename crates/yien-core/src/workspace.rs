@@ -544,6 +544,8 @@ impl Workspace {
                 p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
+            // Answered by the core in the next change.
+            Command::ListAgentSessions { .. } | Command::ResumeAgentSession { .. } => {}
         }
         self.refresh_views(&mut fx);
         debug_assert_eq!(self.check(), Ok(()));

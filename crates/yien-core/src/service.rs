@@ -642,7 +642,9 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::RemoveWorktreeTab { .. }
         | Command::CloseTab { .. }
         | Command::SelectTab { .. }
-        | Command::FocusDirection { .. } => None,
+        | Command::FocusDirection { .. }
+        | Command::ListAgentSessions { .. }
+        | Command::ResumeAgentSession { .. } => None,
     }
 }
 

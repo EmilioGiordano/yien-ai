@@ -285,6 +285,7 @@ impl Shell {
                     self.notice = Some(message);
                 }
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
+                CoreMsg::AgentSessions { .. } => continue,
             }
             changed = true;
         }
