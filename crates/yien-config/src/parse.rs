@@ -207,7 +207,7 @@ impl Walk<'_> {
                 start,
                 KeyOverride {
                     command: command.get_ref().to_string(),
-                    chords: list.into_iter().filter(|c| !c.trim().is_empty()).collect(),
+                    chords: list,
                     line: Problem::at(self.text, start, "").line,
                 },
             ));
@@ -395,8 +395,13 @@ font.size = 18
         assert_eq!((p.line, p.column), (2, 27));
         let p = err("keys = \"ctrl-w\"\n");
         assert!(p.message.contains("keys must be a table"), "{p}");
-        let blank = ok("[keys]\n\"pane.close\" = [\"\", \" \"]\n");
-        assert!(blank.config.keys[0].chords.is_empty());
+        // Blank chords are kept for the UI to report; only `[]` is empty.
+        let blank = ok("[keys]
+\"pane.close\" = [\"\", \" \"]
+\"pane.split_down\" = []
+");
+        assert_eq!(blank.config.keys[0].chords, ["", " "]);
+        assert!(blank.config.keys[1].chords.is_empty());
     }
 
     #[test]

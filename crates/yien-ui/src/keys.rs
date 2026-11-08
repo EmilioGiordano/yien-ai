@@ -18,8 +18,56 @@ const FILE: &str = yien_config::FILE_NAME;
 /// A chord's steps, compared by modifiers and key only.
 type Chord = Vec<(Modifiers, String)>;
 
+/// Keys gpui's Windows layer reports by name; any other key is one character.
+const NAMED_KEYS: &[&str] = &[
+    "space",
+    "backspace",
+    "enter",
+    "tab",
+    "up",
+    "down",
+    "right",
+    "left",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "back",
+    "forward",
+    "escape",
+    "insert",
+    "delete",
+    "menu",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+    "f13",
+    "f14",
+    "f15",
+    "f16",
+    "f17",
+    "f18",
+    "f19",
+    "f20",
+    "f21",
+    "f22",
+    "f23",
+    "f24",
+];
+
 /// The rebinds the table asks for and the notices it gives. Entries with an
-/// unknown id and chords that do not parse are left out.
+/// unknown id and chords that are not valid are left out; an entry left with
+/// no valid chord keeps the command's default keys, unless it was written as
+/// an empty list, which unbinds it.
 pub(crate) fn plan(table: &[KeyOverride]) -> (Rebinds, Vec<String>) {
     let mut rebinds = Rebinds::new();
     let mut lines = HashMap::new();
@@ -34,14 +82,16 @@ pub(crate) fn plan(table: &[KeyOverride]) -> (Rebinds, Vec<String>) {
         };
         let mut chords = Vec::new();
         for chord in &entry.chords {
-            if parse_chord(chord).is_some() {
-                chords.push(chord.trim().to_owned());
-            } else {
-                notices.push(format!(
-                    "{FILE}: line {}: \"{chord}\" is not a key chord, ignored.",
+            match check_chord(chord) {
+                Ok(()) => chords.push(chord.trim().to_owned()),
+                Err(why) => notices.push(format!(
+                    "{FILE}: line {}: \"{chord}\" {why}, ignored.",
                     entry.line
-                ));
+                )),
             }
+        }
+        if chords.is_empty() && !entry.chords.is_empty() {
+            continue;
         }
         rebinds.insert(spec.id, chords);
         lines.insert(spec.id, entry.line);
@@ -91,6 +141,28 @@ fn conflicts(rebinds: &Rebinds, lines: &HashMap<&'static str, usize>) -> Vec<Str
         }
     }
     notices
+}
+
+/// Whether a chord written in the file is one gpui can bind and Windows can
+/// send, and if not, why, as the end of a sentence.
+fn check_chord(chord: &str) -> Result<(), String> {
+    let steps: Vec<&str> = chord.split_whitespace().collect();
+    if steps.is_empty() {
+        return Err("is empty".into());
+    }
+    for step in steps {
+        // gpui splits on "-" only: "ctrl+shift+p" would be one unknown key.
+        if step.contains('+') && step != "+" && !step.ends_with("-+") {
+            return Err("joins keys with \"+\"; write them with \"-\", as in ctrl-shift-p".into());
+        }
+        let key = Keystroke::parse(step)
+            .map_err(|_| "is not a key chord".to_owned())?
+            .key;
+        if key.chars().count() != 1 && !NAMED_KEYS.contains(&key.as_str()) {
+            return Err(format!("names no key \"{key}\""));
+        }
+    }
+    Ok(())
 }
 
 fn parse_chord(chord: &str) -> Option<Chord> {
@@ -149,6 +221,50 @@ mod tests {
                 "config.toml: line 3: \"ctrl-a-b\" is not a key chord, ignored.",
             ]
         );
+    }
+
+    #[test]
+    fn rf_cfg_03_only_bad_chords_keep_the_default_keys() {
+        let (rebinds, notices) = plan(&table(
+            "[keys]
+\"pane.close\" = \"ctrl+shift+q\"
+\"tab.new\" = [\"ctrl-foo\", \"\"]
+\"tab.rename\" = []
+",
+        ));
+        assert!(
+            !rebinds.contains_key("pane.close"),
+            "a typo does not unbind"
+        );
+        assert!(!rebinds.contains_key("tab.new"));
+        assert!(rebinds["tab.rename"].is_empty(), "an empty list unbinds");
+        assert_eq!(
+            notices,
+            [
+                "config.toml: line 2: \"ctrl+shift+q\" joins keys with \"+\"; write them with \"-\", as in ctrl-shift-p, ignored.",
+                "config.toml: line 3: \"ctrl-foo\" names no key \"foo\", ignored.",
+                "config.toml: line 3: \"\" is empty, ignored.",
+            ]
+        );
+    }
+
+    #[test]
+    fn rf_cfg_03_plus_and_named_keys_are_accepted() {
+        for chord in [
+            "alt-+",
+            "ctrl-shift-enter",
+            "f24",
+            "ctrl-k ctrl-t",
+            "shift-pageup",
+            "+",
+        ] {
+            assert_eq!(check_chord(chord), Ok(()), "{chord}");
+        }
+        for spec in CATALOG {
+            for keys in spec.keys {
+                assert_eq!(check_chord(keys), Ok(()), "{}", spec.id);
+            }
+        }
     }
 
     #[test]

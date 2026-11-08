@@ -86,7 +86,8 @@ pub struct KeyOverride {
     /// A command id of the UI's catalog, such as `pane.split_right`. Not
     /// checked here: the catalog lives in the UI.
     pub command: String,
-    /// Chords in gpui notation (`ctrl-shift-p`); empty unbinds the command.
+    /// Chords as written, in gpui notation (`ctrl-shift-p`); an empty list
+    /// (`[]`) unbinds the command.
     pub chords: Vec<String>,
     /// The line the entry is on, for notices.
     pub line: usize,
