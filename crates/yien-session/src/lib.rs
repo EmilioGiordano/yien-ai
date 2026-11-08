@@ -59,6 +59,7 @@
 mod codec;
 mod generations;
 mod model;
+mod past;
 mod restore;
 mod store;
 mod validate;
@@ -74,6 +75,10 @@ pub use generations::{
 pub use model::{
     AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, Selection,
     SessionRef, SessionSnapshot, TabRecord,
+};
+pub use past::{
+    MAX_RECORD_BYTES, SESSION_READ_BUDGET, SessionSummary, TITLE_CHARS, claude_dir_matches,
+    claude_project_dir_name, is_session_id, read_claude_session,
 };
 pub use restore::{ResumeAction, missing_dirs, resume_plan};
 #[cfg(feature = "fs")]

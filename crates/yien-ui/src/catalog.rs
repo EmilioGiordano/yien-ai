@@ -105,6 +105,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-j"]
     ),
     command!(
+        "agent.resume_session",
+        "agent: resume a past session…",
+        ResumePastSession,
+        []
+    ),
+    command!(
         "notifications.mute",
         "notifications: mute / unmute notifications",
         ToggleNotificationsMuted,

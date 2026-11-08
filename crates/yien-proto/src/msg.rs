@@ -72,6 +72,51 @@ impl fmt::Debug for InputBytes {
     }
 }
 
+/// The title of a past agent session: the first prompt the user typed in
+/// it, on one line. Its `Debug` shows only the length, so a prompt never
+/// reaches a log (plan §5.4).
+///
+/// ```
+/// let title = yien_proto::SessionTitle::new("fix the build");
+/// assert_eq!(format!("{title:?}"), "SessionTitle(13 chars)");
+/// assert_eq!(title.as_str(), "fix the build");
+/// ```
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionTitle(String);
+
+impl SessionTitle {
+    /// Wraps a title.
+    pub fn new(title: impl Into<String>) -> Self {
+        Self(title.into())
+    }
+
+    /// The title as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SessionTitle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SessionTitle({} chars)", self.0.chars().count())
+    }
+}
+
+/// A past session of an agent CLI, as its own files describe it
+/// (RF-SES-07).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    /// The profile whose CLI owns it, which resumes it.
+    pub profile: ProfileId,
+    /// The CLI's session id.
+    pub id: String,
+    /// The first prompt typed, if one was found.
+    pub title: Option<SessionTitle>,
+    /// When it last changed, in milliseconds since the Unix epoch.
+    pub modified_ms: u64,
+}
+
 /// How a split lays out its children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Orientation {
@@ -346,6 +391,26 @@ pub enum Command {
     TerminatePane {
         /// The pane.
         pane: PaneId,
+    },
+    /// Asks for the project's past agent sessions, read from each CLI's own
+    /// files; always answered with [`CoreMsg::AgentSessions`], empty when the
+    /// project is gone or nothing could be read (RF-SES-07).
+    ListAgentSessions {
+        /// The project.
+        project: ProjectId,
+        /// Chosen by the UI and sent back with the answer, so an answer to
+        /// an earlier request can be told apart.
+        request: u64,
+    },
+    /// Resumes a past agent session in a new tab on the project's folder
+    /// (RF-SES-07). A session a pane already runs is focused instead.
+    ResumeAgentSession {
+        /// The project the session was listed for.
+        project: ProjectId,
+        /// The profile that resumes it.
+        profile: ProfileId,
+        /// The CLI's session id.
+        session_id: String,
     },
 }
 
@@ -699,6 +764,10 @@ pub struct PaneInfo {
     /// The agent's structured channel is unavailable or failed, so its state
     /// cannot be told and stays idle (RN-02): the "signal lost" mark.
     pub signal_lost: bool,
+    /// The pane's own program is starting or running: not exited, and not
+    /// a stand-in shell after a failed resume. Only then does `session_id`
+    /// name a session that runs here (RF-SES-07).
+    pub runs_session: bool,
 }
 
 /// An agent profile a pane can be started with (RF-AGE-01, RF-PAN-18).
@@ -819,6 +888,16 @@ pub enum CoreMsg {
         worktree: String,
         /// What git found.
         check: WorktreeCheck,
+    },
+    /// The answer to [`Command::ListAgentSessions`]: the project's past
+    /// sessions, newest first.
+    AgentSessions {
+        /// The project.
+        project: ProjectId,
+        /// The request this answers.
+        request: u64,
+        /// Its sessions; empty when it has none or they could not be read.
+        sessions: Vec<AgentSession>,
     },
     /// Something the user asked for finished; the message says what.
     Notice {
@@ -941,6 +1020,15 @@ mod tests {
                 target: PaneId::new(4),
                 zone: DropZone::Top,
             },
+            Command::ListAgentSessions {
+                project: ProjectId::new(1),
+                request: 7,
+            },
+            Command::ResumeAgentSession {
+                project: ProjectId::new(1),
+                profile: ProfileId::new("claude"),
+                session_id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
+            },
         ];
         for command in commands {
             assert_eq!(round_trip(&command), command);
@@ -1032,6 +1120,7 @@ mod tests {
                 session_id: Some("4f1c".into()),
                 needs_you_since: None,
                 signal_lost: false,
+                runs_session: true,
             }),
             CoreMsg::NotificationsMuted { muted: true },
             CoreMsg::WorktreeChecked {
@@ -1057,6 +1146,29 @@ mod tests {
             },
             CoreMsg::Notice {
                 message: "Removed the worktree.".into(),
+            },
+            CoreMsg::AgentSessions {
+                project: ProjectId::new(1),
+                request: 7,
+                sessions: vec![
+                    AgentSession {
+                        profile: ProfileId::new("claude"),
+                        id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
+                        title: Some(SessionTitle::new("fix the build")),
+                        modified_ms: 1_762_500_000_000,
+                    },
+                    AgentSession {
+                        profile: ProfileId::new("claude"),
+                        id: "5f1c2a3b-0000-4000-8000-0123456789ab".into(),
+                        title: None,
+                        modified_ms: 0,
+                    },
+                ],
+            },
+            CoreMsg::AgentSessions {
+                project: ProjectId::new(2),
+                request: u64::MAX,
+                sessions: vec![],
             },
             CoreMsg::PaneState {
                 pane: PaneId::new(3),
@@ -1168,6 +1280,23 @@ mod tests {
             layout.panes(),
             [PaneId::new(1), PaneId::new(2), PaneId::new(3)]
         );
+    }
+
+    #[test]
+    fn rf_ses_07_a_listing_never_shows_a_title_in_debug() {
+        let msg = CoreMsg::AgentSessions {
+            project: ProjectId::new(1),
+            request: 1,
+            sessions: vec![AgentSession {
+                profile: ProfileId::new("claude"),
+                id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
+                title: Some(SessionTitle::new("secret plan")),
+                modified_ms: 1,
+            }],
+        };
+        let shown = format!("{msg:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("SessionTitle(11 chars)"), "{shown}");
     }
 
     #[test]

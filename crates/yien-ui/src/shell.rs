@@ -35,7 +35,7 @@ use crate::model::{
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, switcher_entries,
+    keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
 };
 use crate::region::{self, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel};
@@ -105,6 +105,8 @@ pub(crate) struct Shell {
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
+    /// The last past-sessions request sent; each list waits for its own.
+    session_requests: u64,
     /// The question asked before closing a project that has work running.
     confirm: Option<ConfirmClose>,
     /// The tab whose name is being edited in place (RF-ESP-16).
@@ -252,6 +254,7 @@ impl Shell {
             split_menu: None,
             menu_closed: None,
             palette: None,
+            session_requests: 0,
             confirm: None,
             renaming: None,
             worktree_prompt: None,
@@ -331,10 +334,26 @@ impl Shell {
                 CoreMsg::NotificationsMuted { muted } => {
                     self.workspace.set_notifications_muted(muted);
                 }
-                CoreMsg::Error { message, .. } | CoreMsg::Notice { message } => {
+                CoreMsg::Error { pane, message } => {
                     self.notice = Some(message);
+                    // Only an error about no pane can answer a palette
+                    // request; a pane's own error leaves the list waiting.
+                    if pane.is_none()
+                        && let Some(open) = self.palette.as_mut()
+                    {
+                        open.model.stop_waiting();
+                    }
                 }
+                CoreMsg::Notice { message } => self.notice = Some(message),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
+                CoreMsg::AgentSessions {
+                    project,
+                    request,
+                    sessions,
+                } => {
+                    self.sessions_listed(project, request, &sessions, cx);
+                    continue;
+                }
             }
             changed = true;
         }
@@ -846,6 +865,38 @@ impl Shell {
         self.toggle_palette(Mode::Switcher, window, cx);
     }
 
+    /// Lists the selected project's past agent sessions (RF-SES-07). The
+    /// list opens at once and fills when the core has read them.
+    fn resume_past_session(
+        &mut self,
+        _: &ResumePastSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_palette(Mode::Sessions, window, cx);
+    }
+
+    /// Fills the open sessions list with the core's answer for its project.
+    fn sessions_listed(
+        &mut self,
+        project: ProjectId,
+        request: u64,
+        sessions: &[yien_proto::AgentSession],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.palette.as_mut() else {
+            return;
+        };
+        if open.model.sessions_of() != Some(project) {
+            return;
+        }
+        let entries = session_entries(project, sessions, &self.workspace, now_ms());
+        if open.model.set_sessions(project, request, entries) {
+            open.scroll.scroll_to_item(0);
+            cx.notify();
+        }
+    }
+
     /// Opens the palette in `mode`, or closes it when it is already open in
     /// that mode. Typing then goes to its input, not the terminal.
     fn toggle_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
@@ -857,6 +908,17 @@ impl Shell {
             self.close_palette(window, cx);
             return;
         }
+        let sessions_of = match mode {
+            Mode::Sessions => match self.workspace.project_for_new_tab() {
+                Some(project) => Some(project),
+                None => {
+                    self.notice = Some("Add a project to list its past sessions.".to_owned());
+                    cx.notify();
+                    return;
+                }
+            },
+            _ => None,
+        };
         self.split_menu = None;
         self.confirm = None;
         self.finish_rename(true, window, cx);
@@ -875,12 +937,22 @@ impl Shell {
         let placeholder = match mode {
             Mode::Commands => "Execute a command…",
             Mode::Switcher => "Go to a tab, pane or project. Type > for commands",
+            Mode::Sessions => "Resume a past session…",
         };
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let input_events = cx.subscribe_in(&input, window, Self::on_palette_input);
         window.focus(&input.focus_handle(cx), cx);
+        let model = match sessions_of {
+            Some(project) => {
+                self.session_requests += 1;
+                let request = self.session_requests;
+                self.command(Command::ListAgentSessions { project, request }, cx);
+                Palette::sessions(project, request)
+            }
+            None => Palette::new(mode, commands, places),
+        };
         self.palette = Some(OpenPalette {
-            model: Palette::new(mode, commands, places),
+            model,
             input,
             scroll: ScrollHandle::new(),
             _input_events: input_events,
@@ -976,6 +1048,18 @@ impl Shell {
                     self.split_pane(pane, orientation, Some(profile), cx);
                 }
             }
+            Target::Resume {
+                project,
+                profile,
+                session_id,
+            } => self.command(
+                Command::ResumeAgentSession {
+                    project,
+                    profile,
+                    session_id,
+                },
+                cx,
+            ),
         }
     }
 
@@ -1515,16 +1599,21 @@ impl Shell {
                 Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
             })
             .collect();
-        let (label, empty) = match model.listing() {
-            Mode::Commands => ("Command palette", "No command matches"),
-            Mode::Switcher => ("Go to a tab, pane or project", "Nothing matches"),
+        let label = match model.listing() {
+            Mode::Commands => "Command palette",
+            Mode::Switcher => "Go to a tab, pane or project",
+            Mode::Sessions => "Past sessions",
         };
+        let project = model
+            .sessions_of()
+            .and_then(|id| self.workspace.project(id))
+            .map_or("this project", |p| p.name.as_str());
         let none = rows.is_empty().then(|| {
             div()
                 .p(px(14.0))
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(format!("{empty} \"{}\".", model.query()))
+                .child(model.empty_text(project))
         });
         Some(
             div()
@@ -2707,6 +2796,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::swap_down))
             .on_action(cx.listener(Self::toggle_maximize))
             .on_action(cx.listener(Self::jump_to_needs_you))
+            .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_claude_tab))
             .on_action(cx.listener(Self::new_worktree_tab))
@@ -2831,6 +2921,14 @@ fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
 
 fn toggled(on: bool) -> Toggled {
     if on { Toggled::True } else { Toggled::False }
+}
+
+/// The wall clock in milliseconds since the Unix epoch, for how long ago a
+/// past session changed.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The catalog command behind each mouse control above, so every one has a

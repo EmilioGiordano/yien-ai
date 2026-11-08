@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 8);
+//! assert_eq!(PROTO_VERSION, 9);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -28,9 +28,10 @@ use serde::{Deserialize, Serialize};
 
 pub use git::{GitFacts, GitFile, GitFileStatus, GitHead, GitUpstream, MAX_GIT_FILES, TabGit};
 pub use msg::{
-    AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason, InputBytes,
-    LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId, ProfileInfo,
-    ProjectInfo, TabInfo, WorkspaceSnapshot, WorktreeCheck, WorktreeFiles, WorktreeWork,
+    AgentSession, AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason,
+    InputBytes, LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, ProfileId,
+    ProfileInfo, ProjectInfo, SessionTitle, TabInfo, WorkspaceSnapshot, WorktreeCheck,
+    WorktreeFiles, WorktreeWork,
 };
 pub use path::{folder_key, same_folder};
 
@@ -39,7 +40,7 @@ pub use path::{folder_key, same_folder};
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 8;
+pub const PROTO_VERSION: u32 = 9;
 
 /// The id of the built-in profile that runs the user's shell; every other
 /// profile runs an agent.
