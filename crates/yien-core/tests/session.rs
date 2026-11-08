@@ -602,17 +602,18 @@ fn rf_ses_01_the_quit_shutdown_leaves_the_saved_session_as_it_was() {
 
 #[test]
 fn rf_ses_01_nothing_after_the_shutdown_reaches_the_store_even_without_the_quit_save() {
-    let store = Shared::default();
-    let mut run = Run::start(&store);
+    let store = Slow::default();
+    let mut run = Run::start_on(store.clone());
     let first = run.first_pane();
-    wait_until(|| store.saved().is_some());
+    // The debounced write is under way when saving stops; it may still land.
+    wait_until(|| store.stalled());
     run.core.shutdown(TIMEOUT).unwrap();
-    // A write already under way when saving stopped may still land.
-    std::thread::sleep(Duration::from_millis(300));
-    let saved = store.file("workspace.json").unwrap();
+    store.open();
+    wait_until(|| store.0.saved().is_some());
+    let saved = store.0.file("workspace.json").unwrap();
     run.split(first, None);
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(store.file("workspace.json").unwrap(), saved);
+    assert_eq!(store.0.file("workspace.json").unwrap(), saved);
 }
 
 #[test]
