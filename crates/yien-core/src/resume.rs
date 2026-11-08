@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use yien_agent::{HookEvent, NotificationKind};
+
 /// How soon after a resume launch an exit with an error code counts as the
 /// resume failing: an agent that resumed and then ended with an error later
 /// is the user's session ending, not the resume.
@@ -81,6 +83,29 @@ pub(crate) fn resume_failed(
     match code {
         Some(code) if code != 0 && elapsed <= EXIT_GRACE => Some(ResumeFailure::ExitedEarly(code)),
         _ => None,
+    }
+}
+
+/// Whether a hook shows that a resumed launch reached a working
+/// conversation, so its exit is the session ending and never a failed
+/// resume. Only events of a turn or a dialog count. `SessionStart` does not:
+/// Claude Code fires it at launch, `--resume` included, before it has loaded
+/// the conversation, and v2.1.319 still printed "No conversation found" and
+/// exited 1 after it. `SessionEnd` does not either, since a CLI that fails
+/// ends its session too, nor a notification of another kind (sign-in and
+/// quota notices can come before any conversation).
+pub(crate) fn proves_conversation(event: &HookEvent) -> bool {
+    match event {
+        HookEvent::SessionStart { .. } | HookEvent::SessionEnd(_) => false,
+        HookEvent::Notification(kind) => *kind != NotificationKind::Other,
+        HookEvent::UserPromptSubmit
+        | HookEvent::PreToolUse
+        | HookEvent::PostToolUse
+        | HookEvent::PostToolUseFailure
+        | HookEvent::PermissionRequest
+        | HookEvent::UnattributedPermissionRequest
+        | HookEvent::Stop
+        | HookEvent::StopFailure => true,
     }
 }
 
@@ -173,6 +198,56 @@ mod tests {
         let cut = last_words(&[long.as_str()]).unwrap();
         assert_eq!(cut.chars().count(), SAID_CHARS + 1);
         assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn rf_ses_11_only_a_turn_or_a_dialog_proves_a_conversation() {
+        use yien_agent::{SessionEndReason, SessionStartSource};
+        for source in [
+            SessionStartSource::Startup,
+            SessionStartSource::Resume,
+            SessionStartSource::Clear,
+            SessionStartSource::Compact,
+            SessionStartSource::Fork,
+            SessionStartSource::Other,
+        ] {
+            let start = HookEvent::SessionStart {
+                session_id: Some("4f1c-9a".to_owned()),
+                source,
+            };
+            assert!(!proves_conversation(&start), "{source:?}");
+        }
+        for reason in [
+            SessionEndReason::Clear,
+            SessionEndReason::Resume,
+            SessionEndReason::Logout,
+            SessionEndReason::PromptInputExit,
+            SessionEndReason::Other,
+        ] {
+            assert!(!proves_conversation(&HookEvent::SessionEnd(reason)));
+        }
+        assert!(!proves_conversation(&HookEvent::Notification(
+            NotificationKind::Other
+        )));
+        for kind in [
+            NotificationKind::PermissionPrompt,
+            NotificationKind::Elicitation,
+            NotificationKind::AgentNeedsInput,
+        ] {
+            assert!(proves_conversation(&HookEvent::Notification(kind)));
+        }
+        for event in [
+            HookEvent::UserPromptSubmit,
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::PostToolUseFailure,
+            HookEvent::PermissionRequest,
+            HookEvent::UnattributedPermissionRequest,
+            HookEvent::Stop,
+            HookEvent::StopFailure,
+        ] {
+            assert!(proves_conversation(&event), "{event:?}");
+        }
     }
 
     #[test]
