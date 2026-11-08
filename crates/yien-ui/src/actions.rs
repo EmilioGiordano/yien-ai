@@ -86,6 +86,9 @@ actions!(
         /// Focuses the next pane that needs the user, the one waiting
         /// longest first (RF-ATN-05).
         JumpToNeedsYou,
+        /// Lists the selected project's past agent sessions to resume one
+        /// (RF-SES-07).
+        ResumePastSession,
         /// Turns every toast and taskbar flash off or back on (RF-ATN-11).
         ToggleNotificationsMuted,
         /// Turns the selected tab's toasts and taskbar flashes off or back
@@ -523,6 +526,30 @@ mod tests {
             "pane.close is unbound"
         );
         assert!(dispatched("ctrl-shift-p")[0].partial_eq(&ToggleCommandPalette));
+    }
+
+    #[test]
+    fn rf_ses_07_the_resume_command_takes_a_chord_from_the_settings_file() {
+        let (rebinds, notices) = crate::keys::plan(
+            &yien_config::parse(
+                "[keys]
+\"agent.resume_session\" = \"ctrl-alt-o\"
+",
+            )
+            .unwrap()
+            .config
+            .keys,
+        );
+        assert!(notices.is_empty());
+        let keymap = Keymap::new(bindings_with(&rebinds));
+        let stack: Vec<KeyContext> = TERMINAL_STACK
+            .iter()
+            .map(|c| KeyContext::parse(c).unwrap())
+            .collect();
+        let found = keymap
+            .bindings_for_input(&[Keystroke::parse("ctrl-alt-o").unwrap()], &stack)
+            .0;
+        assert!(found[0].action().partial_eq(&ResumePastSession));
     }
 
     #[test]

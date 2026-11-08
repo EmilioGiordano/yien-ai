@@ -41,7 +41,7 @@ pub use machine::{
 };
 pub use profile::{
     AgentKind, Confirms, Detect, Launch, MAX_PROFILE_BYTES, PROFILE_SCHEMA, Profile, ProfileError,
-    Rule, RuleChoice, ScreenRule, SessionIdMode, builtin_profiles, evaluate_screen,
+    Rule, RuleChoice, ScreenRule, SessionIdMode, SessionReader, builtin_profiles, evaluate_screen,
     resolve_profiles,
 };
 pub use signal::{

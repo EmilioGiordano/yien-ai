@@ -114,6 +114,18 @@ pub enum SessionIdMode {
     FromList,
 }
 
+/// Where an agent keeps its past sessions, and so which reader lists them
+/// (RF-SES-07, 04 §4.6). The files are the agent's own and only read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionReader {
+    /// Claude Code: `~/.claude/projects/<encoded folder>/<id>.jsonl`.
+    ClaudeProjects,
+    /// Codex: `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`. Not read
+    /// yet; it lists nothing.
+    CodexSessions,
+}
+
 /// What a screen rule confirms. Only "needs you" exists: a screen rule never
 /// lights the red mark alone, it confirms a weaker signal (ADR-08).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -164,6 +176,8 @@ pub struct Launch {
     pub resume: Vec<String>,
     /// How the session id is learned; `None` for agents without sessions.
     pub session_id: Option<SessionIdMode>,
+    /// Which reader lists the agent's past sessions; `None` lists none.
+    pub sessions: Option<SessionReader>,
     /// Extra environment variables.
     pub env: BTreeMap<String, String>,
 }
@@ -306,6 +320,8 @@ struct RawLaunch {
     resume: Vec<String>,
     #[serde(default)]
     session_id: Option<SessionIdMode>,
+    #[serde(default)]
+    sessions: Option<SessionReader>,
     #[serde(default)]
     env: BTreeMap<String, String>,
 }
@@ -451,6 +467,7 @@ impl Profile {
                 args: raw.launch.args,
                 resume: raw.launch.resume,
                 session_id: raw.launch.session_id,
+                sessions: raw.launch.sessions,
                 env: raw.launch.env,
             },
             rules,
@@ -603,6 +620,23 @@ mod tests {
 
     fn err(text: &str) -> ProfileError {
         Profile::from_toml(text).unwrap_err()
+    }
+
+    #[test]
+    fn rf_ses_07_a_profile_declares_the_reader_of_its_past_sessions() {
+        let profiles = builtin_profiles().unwrap();
+        let reader = |id: &str| {
+            profiles
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.launch.sessions)
+        };
+        assert_eq!(reader("claude"), Some(SessionReader::ClaudeProjects));
+        assert_eq!(reader("codex"), Some(SessionReader::CodexSessions));
+        assert_eq!(reader("shell"), None);
+        assert_eq!(Profile::from_toml(MINIMAL).unwrap().launch.sessions, None);
+        let unknown = format!("{MINIMAL}[launch]\nsessions = \"aider-history\"\n");
+        assert!(matches!(err(&unknown), ProfileError::Syntax { .. }));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use yien_core::{Core, CoreConfig, CoreHandle, GitConfig, HookConfig, SendError, SessionStore};
 use yien_platform::LogGuard;
+use yien_platform::agent_sessions::CliDirs;
 use yien_platform::single_instance::{self, Claim, Instance};
 use yien_platform::state_store::FileStore;
 use yien_proto::frame::Frame;
@@ -66,6 +67,7 @@ fn main() -> ExitCode {
         size_wait: SIZE_WAIT,
         ui_wait: UI_WAIT,
         git: Some(GitConfig::default()),
+        cli_dirs: CliDirs::from_env(),
         ..CoreConfig::default()
     };
     let (core, events) = match Core::start(Arc::new(PortablePty::new()), config) {

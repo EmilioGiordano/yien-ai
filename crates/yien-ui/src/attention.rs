@@ -561,6 +561,7 @@ mod tests {
                     session_id: None,
                     needs_you_since: state.is_red().then_some(*id),
                     signal_lost: false,
+                    runs_session: true,
                 })
                 .collect(),
             active_tab: Some(TabId::new(states[0].0)),
