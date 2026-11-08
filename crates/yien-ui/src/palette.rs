@@ -1,10 +1,11 @@
-//! The command palette and the switcher as plain data (RF-NAV-01 to 04): the
-//! rows each one offers, the query, the ranked matches and the selection.
-//! The window draws it and runs what it returns.
+//! The command palette, the switcher and the past sessions list as plain
+//! data (RF-NAV-01 to 04, RF-SES-07): the rows each one offers, the query,
+//! the ranked matches and the selection. The window draws it and runs what
+//! it returns.
 
 use std::ops::Range;
 
-use yien_proto::{Orientation, PaneId, ProfileId, ProjectId, TabId};
+use yien_proto::{AgentSession, Orientation, PaneId, ProfileId, ProjectId, TabId};
 
 use crate::catalog::{CATALOG, ProfileSplit};
 use crate::matcher::{Match, rank};
@@ -17,6 +18,8 @@ pub(crate) enum Mode {
     Commands,
     /// "Go to": projects, tabs and panes (RF-NAV-04).
     Switcher,
+    /// "Resume a past session" of one project (RF-SES-07).
+    Sessions,
 }
 
 /// What running a row does.
@@ -32,10 +35,17 @@ pub(crate) enum Target {
     Tab(TabId),
     /// Focus the pane, selecting its tab.
     Pane(PaneId),
+    /// Resume a past agent session in a new pane.
+    Resume {
+        project: ProjectId,
+        profile: ProfileId,
+        session_id: String,
+    },
 }
 
-/// One row the palette can show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row the palette can show. Its `Debug` leaves the text out: a past
+/// session's row shows the user's prompt, which must never reach a log.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     /// The text the query matches.
     pub(crate) text: String,
@@ -48,7 +58,18 @@ pub(crate) struct Entry {
     pub(crate) target: Target,
 }
 
-/// A row that matches the query.
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("text_chars", &self.text.chars().count())
+            .field("hint", &self.hint)
+            .field("state", &self.state)
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A row that matches the query: an index and match positions, no text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Row {
     /// Index into the source list.
@@ -66,6 +87,12 @@ pub(crate) struct Palette {
     query: String,
     rows: Vec<Row>,
     selected: usize,
+    /// In [`Mode::Sessions`]: the project listed, the request its answer
+    /// carries, whether it is still being read, and whether that failed.
+    sessions_of: Option<ProjectId>,
+    request: u64,
+    loading: bool,
+    failed: bool,
 }
 
 /// In the switcher, a query that starts with this lists commands instead,
@@ -83,17 +110,84 @@ impl Palette {
             query: String::new(),
             rows: Vec::new(),
             selected: 0,
+            sessions_of: None,
+            request: 0,
+            loading: false,
+            failed: false,
         };
         palette.refilter();
         palette
     }
 
-    pub(crate) fn mode(&self) -> Mode {
-        self.mode
+    /// The past sessions list of `project`, empty while they are read; the
+    /// core's answer to `request` fills it ([`Palette::set_sessions`]).
+    pub(crate) fn sessions(project: ProjectId, request: u64) -> Self {
+        let mut palette = Self::new(Mode::Sessions, Vec::new(), Vec::new());
+        palette.sessions_of = Some(project);
+        palette.request = request;
+        palette.loading = true;
+        palette
     }
 
-    pub(crate) fn query(&self) -> &str {
-        &self.query
+    /// Fills the sessions list with `entries` when they answer the request
+    /// it waits for; an answer for another project or an earlier request is
+    /// ignored, so it cannot reset the list or the selection. The query is
+    /// kept and the best match selected.
+    pub(crate) fn set_sessions(
+        &mut self,
+        project: ProjectId,
+        request: u64,
+        entries: Vec<Entry>,
+    ) -> bool {
+        if self.mode != Mode::Sessions
+            || self.sessions_of != Some(project)
+            || self.request != request
+            || !(self.loading || self.failed)
+        {
+            return false;
+        }
+        self.places = entries;
+        self.loading = false;
+        self.failed = false;
+        self.refilter();
+        true
+    }
+
+    /// Stops waiting for sessions after the core reported an error, so the
+    /// list does not say it is reading forever; a late answer still fills it.
+    pub(crate) fn stop_waiting(&mut self) -> bool {
+        if !self.loading {
+            return false;
+        }
+        self.loading = false;
+        self.failed = true;
+        true
+    }
+
+    /// The project whose sessions this lists, in [`Mode::Sessions`].
+    pub(crate) fn sessions_of(&self) -> Option<ProjectId> {
+        self.sessions_of
+    }
+
+    /// What the list says when no row shows; `project` names the project of
+    /// a sessions list.
+    pub(crate) fn empty_text(&self, project: &str) -> String {
+        match self.listing() {
+            Mode::Commands => format!("No command matches \"{}\".", self.search()),
+            Mode::Switcher => format!("Nothing matches \"{}\".", self.query),
+            Mode::Sessions if self.loading => "Reading past sessions…".to_owned(),
+            Mode::Sessions if self.failed => {
+                "Past sessions could not be read; the status bar says why.".to_owned()
+            }
+            Mode::Sessions if self.places.is_empty() => {
+                format!("No past sessions for {project}.")
+            }
+            Mode::Sessions => format!("No session matches \"{}\".", self.query),
+        }
+    }
+
+    pub(crate) fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// The list the query runs on now: the switcher lists commands while the
@@ -108,7 +202,7 @@ impl Palette {
     fn source(&self) -> &[Entry] {
         match self.listing() {
             Mode::Commands => &self.commands,
-            Mode::Switcher => &self.places,
+            Mode::Switcher | Mode::Sessions => &self.places,
         }
     }
 
@@ -201,9 +295,6 @@ pub(crate) fn command_entries(
 /// the selected one last, so Enter on an empty query goes back to the
 /// previous tab (RF-NAV-05); then every pane; then the projects. Each shows
 /// its agent state, red when it needs you (RN-01).
-///
-/// Previous sessions (RF-SES-07) join this list once session restore can
-/// list them: one more source appended here, with its own [`Target`].
 pub(crate) fn switcher_entries(ws: &WorkspaceView) -> Vec<Entry> {
     let selected = ws.selected_tab().map(|t| t.id);
     let project_name = |id: ProjectId| {
@@ -267,6 +358,78 @@ pub(crate) fn switcher_entries(ws: &WorkspaceView) -> Vec<Entry> {
         });
     }
     entries
+}
+
+/// The rows of a sessions list (RF-SES-07): each session's title, how long
+/// ago it changed and the start of its id. A session a pane already runs is
+/// marked open, and its row goes to that pane.
+pub(crate) fn session_entries(
+    project: ProjectId,
+    sessions: &[AgentSession],
+    ws: &WorkspaceView,
+    now_ms: u64,
+) -> Vec<Entry> {
+    sessions
+        .iter()
+        .map(|s| {
+            let text = s
+                .title
+                .as_ref()
+                .map_or_else(|| NO_TITLE.to_owned(), |t| t.as_str().to_owned());
+            let id: String = s.id.chars().take(ID_PREFIX).collect();
+            let when = relative_time(s.modified_ms, now_ms);
+            let (hint, state, target) = match ws.pane_with_session(&s.id) {
+                Some(pane) => (
+                    format!("{when} · {id} · open"),
+                    Some(ws.pane(pane).state),
+                    Target::Pane(pane),
+                ),
+                None => (
+                    format!("{when} · {id}"),
+                    None,
+                    Target::Resume {
+                        project,
+                        profile: s.profile.clone(),
+                        session_id: s.id.clone(),
+                    },
+                ),
+            };
+            Entry {
+                text,
+                dim: 0,
+                hint,
+                state,
+                target,
+            }
+        })
+        .collect()
+}
+
+/// A session row with no prompt found shows this.
+const NO_TITLE: &str = "(no prompt)";
+
+/// The characters of a session id a row shows.
+const ID_PREFIX: usize = 8;
+
+/// How long before `now_ms` the time `then_ms` was, in the largest unit
+/// that fits: "just now", "5 min ago", "3 h ago", "2 d ago", "4 mo ago". A
+/// time in the future (a clock moved back) is "just now".
+pub(crate) fn relative_time(then_ms: u64, now_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(then_ms) / 1000;
+    let (mins, hours, days) = (secs / 60, secs / 3600, secs / 86_400);
+    if mins == 0 {
+        "just now".to_owned()
+    } else if hours == 0 {
+        format!("{mins} min ago")
+    } else if days == 0 {
+        format!("{hours} h ago")
+    } else if days < 30 {
+        format!("{days} d ago")
+    } else if days < 365 {
+        format!("{} mo ago", days / 30)
+    } else {
+        format!("{} y ago", days / 365)
+    }
 }
 
 /// The pane that has the keyboard whenever the palette is closed: the
@@ -375,6 +538,7 @@ mod tests {
             session_id: None,
             needs_you_since: state.is_red().then_some(id),
             signal_lost: false,
+            runs_session: true,
         }
     }
 
@@ -598,6 +762,227 @@ mod tests {
                 Orientation::Vertical
             ))
         );
+    }
+
+    const NOW: u64 = 1_762_500_000_000;
+    const HOUR: u64 = 3_600_000;
+
+    fn past(id: &str, title: Option<&str>, ago: u64) -> AgentSession {
+        AgentSession {
+            profile: ProfileId::new("claude"),
+            id: id.into(),
+            title: title.map(yien_proto::SessionTitle::new),
+            modified_ms: NOW - ago,
+        }
+    }
+
+    fn listed(ws: &WorkspaceView) -> Palette {
+        let sessions = [
+            past(
+                "aaaaaaaa-0000-4000-8000-000000000001",
+                Some("fix the build"),
+                HOUR,
+            ),
+            past(
+                "bbbbbbbb-0000-4000-8000-000000000002",
+                Some("write the docs"),
+                3 * HOUR,
+            ),
+            past("cccccccc-0000-4000-8000-000000000003", None, 50 * HOUR),
+        ];
+        let mut palette = Palette::sessions(ProjectId::new(1), 1);
+        let entries = session_entries(ProjectId::new(1), &sessions, ws, NOW);
+        assert!(palette.set_sessions(ProjectId::new(1), 1, entries));
+        palette
+    }
+
+    #[test]
+    fn rf_ses_07_the_list_shows_title_age_and_id_start() {
+        let palette = listed(&workspace());
+        assert_eq!(
+            texts(&palette),
+            ["fix the build", "write the docs", "(no prompt)"]
+        );
+        let hints: Vec<String> = palette
+            .rows()
+            .iter()
+            .filter_map(|r| palette.entry(r))
+            .map(|e| e.hint.clone())
+            .collect();
+        assert_eq!(
+            hints,
+            [
+                "1 h ago · aaaaaaaa",
+                "3 h ago · bbbbbbbb",
+                "2 d ago · cccccccc"
+            ]
+        );
+        assert_eq!(
+            palette.target(),
+            Some(Target::Resume {
+                project: ProjectId::new(1),
+                profile: ProfileId::new("claude"),
+                session_id: "aaaaaaaa-0000-4000-8000-000000000001".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rf_ses_07_typing_filters_the_sessions() {
+        let mut palette = listed(&workspace());
+        palette.set_query("docs");
+        assert_eq!(texts(&palette), ["write the docs"]);
+        assert!(matches!(
+            palette.target(),
+            Some(Target::Resume { session_id, .. }) if session_id.starts_with("bbbbbbbb")
+        ));
+        palette.set_query("zzz");
+        assert_eq!(palette.target(), None);
+        assert_eq!(palette.empty_text("yien"), "No session matches \"zzz\".");
+    }
+
+    #[test]
+    fn rf_ses_07_the_list_says_when_it_reads_and_when_there_is_none() {
+        let mut palette = Palette::sessions(ProjectId::new(1), 5);
+        assert!(palette.rows().is_empty());
+        assert_eq!(palette.empty_text("yien"), "Reading past sessions…");
+        // An answer for another project or request leaves it waiting.
+        assert!(!palette.set_sessions(ProjectId::new(2), 5, Vec::new()));
+        assert!(!palette.set_sessions(ProjectId::new(1), 4, Vec::new()));
+        assert_eq!(palette.empty_text("yien"), "Reading past sessions…");
+        assert!(palette.set_sessions(ProjectId::new(1), 5, Vec::new()));
+        assert_eq!(palette.empty_text("yien"), "No past sessions for yien.");
+        assert_eq!(palette.sessions_of(), Some(ProjectId::new(1)));
+        // Only a sessions list takes sessions.
+        let mut commands = Palette::new(Mode::Commands, commands(), Vec::new());
+        assert!(!commands.set_sessions(ProjectId::new(1), 0, Vec::new()));
+        assert!(!commands.stop_waiting());
+    }
+
+    #[test]
+    fn rf_ses_07_an_error_stops_the_waiting_and_a_late_answer_still_fills() {
+        let mut palette = Palette::sessions(ProjectId::new(1), 2);
+        assert!(palette.stop_waiting());
+        assert_eq!(
+            palette.empty_text("yien"),
+            "Past sessions could not be read; the status bar says why."
+        );
+        assert!(!palette.stop_waiting());
+        let sessions = [past(
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Some("fix the build"),
+            HOUR,
+        )];
+        let entries = session_entries(ProjectId::new(1), &sessions, &workspace(), NOW);
+        assert!(palette.set_sessions(ProjectId::new(1), 2, entries));
+        assert_eq!(texts(&palette), ["fix the build"]);
+    }
+
+    #[test]
+    fn rf_ses_07_a_second_answer_does_not_reset_the_list() {
+        let mut palette = listed(&workspace());
+        palette.move_by(1);
+        let selected = palette.target();
+        assert!(!palette.set_sessions(ProjectId::new(1), 1, Vec::new()));
+        assert_eq!(palette.rows().len(), 3);
+        assert_eq!(palette.target(), selected);
+    }
+
+    #[test]
+    fn rf_ses_07_a_query_typed_while_reading_applies_to_the_answer() {
+        let mut palette = Palette::sessions(ProjectId::new(1), 1);
+        palette.set_query("docs");
+        let sessions = [
+            past(
+                "aaaaaaaa-0000-4000-8000-000000000001",
+                Some("fix the build"),
+                HOUR,
+            ),
+            past(
+                "bbbbbbbb-0000-4000-8000-000000000002",
+                Some("write the docs"),
+                HOUR,
+            ),
+        ];
+        let entries = session_entries(ProjectId::new(1), &sessions, &workspace(), NOW);
+        palette.set_sessions(ProjectId::new(1), 1, entries);
+        assert_eq!(texts(&palette), ["write the docs"]);
+    }
+
+    #[test]
+    fn rf_ses_07_a_session_whose_pane_stopped_resumes_again() {
+        for stopped in ["exited", "stand-in"] {
+            let mut ws = workspace();
+            let mut pane = pane(101, 10, "claude", P::Idle);
+            pane.session_id = Some("bbbbbbbb-0000-4000-8000-000000000002".into());
+            pane.runs_session = false;
+            if stopped == "exited" {
+                pane.running = false;
+                pane.exit_code = Some(0);
+            }
+            ws.pane_updated(&pane);
+            let mut palette = listed(&ws);
+            palette.set_query("docs");
+            let entry = palette.entry(&palette.rows()[0]).unwrap();
+            assert_eq!(entry.hint, "3 h ago · bbbbbbbb", "{stopped}");
+            assert_eq!(entry.state, None, "{stopped}");
+            assert!(
+                matches!(palette.target(), Some(Target::Resume { .. })),
+                "{stopped}"
+            );
+        }
+        // An exit reported as a delta stops it too.
+        let mut ws = workspace();
+        let mut pane = pane(101, 10, "claude", P::Idle);
+        pane.session_id = Some("bbbbbbbb-0000-4000-8000-000000000002".into());
+        ws.pane_updated(&pane);
+        assert_eq!(
+            ws.pane_with_session("bbbbbbbb-0000-4000-8000-000000000002"),
+            Some(PaneId::new(101))
+        );
+        ws.pane_exited(PaneId::new(101), Some(0));
+        assert_eq!(
+            ws.pane_with_session("bbbbbbbb-0000-4000-8000-000000000002"),
+            None
+        );
+    }
+
+    #[test]
+    fn rf_ses_07_a_session_already_open_is_marked_and_goes_to_its_pane() {
+        let mut ws = workspace();
+        let mut running = pane(101, 10, "claude", NEEDS);
+        running.session_id = Some("BBBBBBBB-0000-4000-8000-000000000002".into());
+        ws.pane_updated(&running);
+        let mut palette = listed(&ws);
+        palette.set_query("docs");
+        let entry = palette.entry(&palette.rows()[0]).unwrap();
+        assert_eq!(entry.hint, "3 h ago · bbbbbbbb · open");
+        assert_eq!(entry.state, Some(AgentState::NeedsYou));
+        assert_eq!(palette.target(), Some(Target::Pane(PaneId::new(101))));
+    }
+
+    #[test]
+    fn rf_ses_07_a_row_never_shows_its_text_in_debug() {
+        let palette = listed(&workspace());
+        let shown = format!("{palette:?}");
+        assert!(!shown.contains("fix the build"), "{shown}");
+        assert!(shown.contains("text_chars: 13"), "{shown}");
+    }
+
+    #[test]
+    fn rf_ses_07_ages_read_in_the_largest_unit_that_fits() {
+        let at = |ago_ms: u64| relative_time(NOW - ago_ms, NOW);
+        assert_eq!(at(0), "just now");
+        assert_eq!(at(59_000), "just now");
+        assert_eq!(at(60_000), "1 min ago");
+        assert_eq!(at(HOUR - 1), "59 min ago");
+        assert_eq!(at(HOUR), "1 h ago");
+        assert_eq!(at(24 * HOUR - 1), "23 h ago");
+        assert_eq!(at(24 * HOUR), "1 d ago");
+        assert_eq!(at(29 * 24 * HOUR), "29 d ago");
+        assert_eq!(at(45 * 24 * HOUR), "1 mo ago");
+        assert_eq!(at(800 * 24 * HOUR), "2 y ago");
+        assert_eq!(relative_time(NOW + HOUR, NOW), "just now");
     }
 
     #[test]
