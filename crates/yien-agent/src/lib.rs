@@ -29,6 +29,7 @@ mod hooks;
 mod machine;
 mod profile;
 mod signal;
+mod user;
 mod version;
 
 pub use hooks::{
@@ -47,5 +48,8 @@ pub use profile::{
 pub use signal::{
     AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
     SessionEndReason, SessionStartSource, Signal, Source,
+};
+pub use user::{
+    MAX_USER_PROFILES, PROFILES_DIR, ProblemKind, ProfileProblem, UserProfiles, load_user_profiles,
 };
 pub use version::{Version, VersionError, VersionReq};
