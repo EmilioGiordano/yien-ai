@@ -45,7 +45,7 @@ mod worktree;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -185,6 +185,11 @@ pub struct CoreConfig {
     /// Where the agent CLIs keep their own data, read for past sessions
     /// (RF-SES-07). The default names no folder, so nothing is listed.
     pub cli_dirs: CliDirs,
+    /// Profile ids whose user file was skipped, with that file's name as
+    /// the user reads it (`profiles/claude.toml`). Such an id never falls
+    /// back to a built-in profile: starting it fails with a notice naming
+    /// the file (RF-AGE-04).
+    pub broken_profiles: BTreeMap<String, String>,
 }
 
 impl Default for CoreConfig {
@@ -208,6 +213,7 @@ impl Default for CoreConfig {
             start_project: None,
             git: None,
             cli_dirs: CliDirs::default(),
+            broken_profiles: BTreeMap::new(),
         }
     }
 }
@@ -253,6 +259,14 @@ pub enum CoreError {
     /// A split asked for a profile nobody defined.
     #[error("there is no profile named \"{0}\"; pick one from the list of profiles")]
     UnknownProfile(String),
+    /// A profile whose user file was skipped at start.
+    #[error("the profile \"{id}\" did not load: fix {file} and restart YIEN")]
+    BrokenProfile {
+        /// The profile's id.
+        id: String,
+        /// The file, as `profiles/<name>.toml`.
+        file: String,
+    },
     /// Swapping or moving panes across tabs.
     #[error("panes {} and {} are in different tabs; move panes only within a tab", .0.get(), .1.get())]
     DifferentTabs(PaneId, PaneId),

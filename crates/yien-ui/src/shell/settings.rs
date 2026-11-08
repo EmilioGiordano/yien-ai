@@ -11,7 +11,7 @@ use crate::actions::{self, OpenConfigFile, ToggleTheme};
 use crate::bridge::{Sent, deliver};
 use crate::fonts::Fonts;
 use crate::keys;
-use crate::settings::{ConfigUpdate, Notice};
+use crate::settings::{ConfigUpdate, Notice, after_reading};
 use crate::theme::{Theme, sync_component_theme};
 
 impl Shell {
@@ -71,16 +71,12 @@ impl Shell {
             self.workspace.set_group_by_state(grouped);
             self.tab_cursor = None;
         }
-        if notices.is_empty() {
-            if self.notice.is_some() && self.notice == self.settings_notice {
-                self.notice = None;
-            }
-            self.settings_notice = None;
-        } else {
-            let text = notices.join(" ");
-            self.notice = Some(text.clone());
-            self.settings_notice = Some(text);
-        }
+        (self.notice, self.settings_notice) = after_reading(
+            self.notice.as_deref(),
+            self.settings_notice.as_deref(),
+            self.profiles_notice.as_deref(),
+            &notices,
+        );
         cx.notify();
     }
 

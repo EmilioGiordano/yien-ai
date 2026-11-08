@@ -7,8 +7,8 @@ use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV};
 use yien_proto::{PaneId, ProfileId};
 use yien_pty::SpawnSpec;
 
-use crate::CoreError;
 use crate::shell::ShellCommand;
+use crate::{CoreConfig, CoreError};
 
 pub(crate) use yien_proto::SHELL_PROFILE;
 
@@ -150,6 +150,27 @@ fn fill_template(template: &str, fill: &Fill<'_>) -> Option<String> {
     Some(out)
 }
 
+/// A profile program as a pane name: its file name, without the extension
+/// only when it is one Windows runs a program by (`claude.cmd` is
+/// `claude`, `python3.12` stays as it is).
+fn program_name(command: &str) -> String {
+    let file = command
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|f| !f.is_empty())
+        .unwrap_or(command);
+    match file.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && ["exe", "cmd", "bat", "com", "ps1"]
+                    .contains(&ext.to_ascii_lowercase().as_str()) =>
+        {
+            stem.to_owned()
+        }
+        _ => file.to_owned(),
+    }
+}
+
 /// A random (version 4) UUID, or `None` when the OS random generator fails.
 pub(crate) fn new_uuid() -> Option<String> {
     let mut bytes = [0u8; 16];
@@ -169,6 +190,24 @@ fn format_uuid(mut b: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// [`resolve`] against the core's profiles, refusing an id whose user file
+/// was skipped rather than starting anything else in its place.
+pub(crate) fn resolve_in(
+    profile: Option<&ProfileId>,
+    config: &CoreConfig,
+) -> Result<LaunchPlan, CoreError> {
+    if let Some(id) = profile
+        && let Some(file) = config.broken_profiles.get(id.as_str())
+        && !config.profiles.iter().any(|p| p.id == id.as_str())
+    {
+        return Err(CoreError::BrokenProfile {
+            id: id.as_str().to_owned(),
+            file: file.clone(),
+        });
+    }
+    resolve(profile, &config.profiles, &config.shell)
 }
 
 /// Resolves `profile` (the shell when `None`) against the known profiles.
@@ -212,7 +251,7 @@ pub(crate) fn resolve(
         Some(detect) => (
             detect.command.clone(),
             found.launch.args.clone(),
-            detect.command.clone(),
+            program_name(&detect.command),
         ),
         None => (
             shell.program.clone(),
@@ -283,6 +322,28 @@ mod tests {
         assert!(plan.machine.declares(Source::Osc133));
         assert!(!plan.hooks);
         assert!(!plan.preassigns_session());
+    }
+
+    #[test]
+    fn rf_age_04_a_profile_with_a_full_path_is_named_by_its_file() {
+        let profile = Profile::from_toml(
+            "schema = 1\nid = \"mine\"\nname = \"Mine\"\n\
+             detect = { command = 'D:/tools/bin/my-tool.cmd' }\n[[rules]]\nsources = []\n",
+        )
+        .unwrap();
+        let plan = resolve(Some(&ProfileId::new("mine")), &[profile], &shell()).unwrap();
+        assert_eq!(plan.program, "D:/tools/bin/my-tool.cmd");
+        assert_eq!(plan.default_name, "my-tool");
+        assert_eq!(claude().default_name, "claude");
+        for (command, name) in [
+            ("python3.12", "python3.12"),
+            (r"C:\Tools\Agent.EXE", "Agent"),
+            ("/usr/bin/run.sh", "run.sh"),
+            ("tool.ps1", "tool"),
+            (".cmd", ".cmd"),
+        ] {
+            assert_eq!(program_name(command), name, "{command}");
+        }
     }
 
     #[test]

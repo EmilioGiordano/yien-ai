@@ -5,9 +5,9 @@
 
 use std::ops::Range;
 
-use yien_proto::{AgentSession, Orientation, PaneId, ProfileId, ProjectId, TabId};
+use yien_proto::{AgentSession, Orientation, PaneId, ProfileId, ProfileInfo, ProjectId, TabId};
 
-use crate::catalog::{CATALOG, ProfileSplit};
+use crate::catalog::{CATALOG, profile_splits, profile_tabs};
 use crate::matcher::{Match, rank};
 use crate::model::{AgentState, WorkspaceView};
 
@@ -29,6 +29,8 @@ pub(crate) enum Target {
     Command(usize),
     /// Split the focused pane and start this profile in the new one.
     Split(ProfileId, Orientation),
+    /// Open a tab running this profile.
+    NewTab(ProfileId),
     /// Select the project's most recent tab.
     Project(ProjectId),
     /// Select the tab.
@@ -264,11 +266,11 @@ impl Palette {
 }
 
 /// The catalog as palette rows, each with the keys `shortcut` reads for it
-/// from the live keymap, followed by a split for each profile (RF-NAV-02,
-/// RF-NAV-03).
+/// from the live keymap, followed by a new tab and a split for each profile
+/// (RF-NAV-02, RF-NAV-03, RF-AGE-04).
 pub(crate) fn command_entries(
     shortcut: impl Fn(usize) -> Option<String>,
-    splits: Vec<ProfileSplit>,
+    profiles: &[ProfileInfo],
 ) -> Vec<Entry> {
     let mut entries: Vec<Entry> = CATALOG
         .iter()
@@ -281,7 +283,14 @@ pub(crate) fn command_entries(
             target: Target::Command(at),
         })
         .collect();
-    entries.extend(splits.into_iter().map(|split| Entry {
+    entries.extend(profile_tabs(profiles).into_iter().map(|tab| Entry {
+        dim: "tab:".len(),
+        text: tab.title,
+        hint: String::new(),
+        state: None,
+        target: Target::NewTab(tab.profile),
+    }));
+    entries.extend(profile_splits(profiles).into_iter().map(|split| Entry {
         dim: "pane:".len(),
         text: split.title,
         hint: String::new(),
@@ -576,7 +585,7 @@ mod tests {
     }
 
     fn commands() -> Vec<Entry> {
-        command_entries(|_| None, Vec::new())
+        command_entries(|_| None, &[])
     }
 
     fn texts(palette: &Palette) -> Vec<String> {
@@ -641,10 +650,7 @@ mod tests {
     #[test]
     fn rf_nav_03_each_command_row_carries_its_shortcut() {
         let split = command_index("pane.split_right");
-        let entries = command_entries(
-            |at| (at == split).then(|| "Alt+Shift+=".to_owned()),
-            Vec::new(),
-        );
+        let entries = command_entries(|at| (at == split).then(|| "Alt+Shift+=".to_owned()), &[]);
         assert_eq!(entries[split].hint, "Alt+Shift+=");
         assert_eq!(entries[split].dim, "pane:".len());
         assert!(entries.iter().filter(|e| e.hint.is_empty()).count() == CATALOG.len() - 1);
@@ -753,7 +759,7 @@ mod tests {
             id: ProfileId::new("claude"),
             name: "Claude Code".into(),
         }];
-        let entries = command_entries(|_| None, crate::catalog::profile_splits(&profiles));
+        let entries = command_entries(|_| None, &profiles);
         assert_eq!(entries.len(), CATALOG.len() + 1);
         let mut palette = Palette::new(Mode::Commands, entries, Vec::new());
         palette.set_query("split down with claude");
@@ -762,6 +768,30 @@ mod tests {
             Some(Target::Split(
                 ProfileId::new("claude"),
                 Orientation::Vertical
+            ))
+        );
+    }
+
+    #[test]
+    fn rf_age_04_the_palette_lists_a_profile_added_by_the_user() {
+        let info = |id: &str, name: &str| yien_proto::ProfileInfo {
+            id: ProfileId::new(id),
+            name: name.into(),
+        };
+        let profiles = [info("shell", "Shell"), info("mytool", "My tool")];
+        let entries = command_entries(|_| None, &profiles);
+        let mut palette = Palette::new(Mode::Commands, entries, Vec::new());
+        palette.set_query("new tab with my tool");
+        assert_eq!(
+            palette.target(),
+            Some(Target::NewTab(ProfileId::new("mytool")))
+        );
+        palette.set_query("split right with my tool");
+        assert_eq!(
+            palette.target(),
+            Some(Target::Split(
+                ProfileId::new("mytool"),
+                Orientation::Horizontal
             ))
         );
     }

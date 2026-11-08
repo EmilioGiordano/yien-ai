@@ -7,6 +7,7 @@
 mod attention;
 mod files;
 mod panic_log;
+mod profiles;
 mod settings;
 
 use std::process::ExitCode;
@@ -62,7 +63,10 @@ fn main() -> ExitCode {
     };
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
+    let user_profiles = profiles::load();
     let config = CoreConfig {
+        profiles: user_profiles.profiles,
+        broken_profiles: user_profiles.broken,
         hooks,
         session: session_store(),
         screens: screen_store(),
@@ -74,7 +78,7 @@ fn main() -> ExitCode {
         cli_dirs: CliDirs::from_env(),
         ..CoreConfig::default()
     };
-    let (settings, settings_watcher) = settings::start();
+    let (settings, settings_watcher) = settings::start(user_profiles.notices);
     let config = match settings::start_palette(&settings.initial) {
         Some(palette) => config.with_terminal_palette(palette),
         None => config,

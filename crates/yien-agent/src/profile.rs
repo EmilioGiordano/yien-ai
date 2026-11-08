@@ -19,6 +19,7 @@ pub const PROFILE_SCHEMA: u32 = 1;
 pub const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
 const MAX_REGEX_BYTES: usize = 1 << 20;
+const MAX_NAME_CHARS: usize = 64;
 const MAX_SCREEN_ROWS: u16 = 200;
 const PLACEHOLDERS: &[&str] = &[
     "new_uuid",
@@ -48,10 +49,12 @@ pub enum ProfileError {
         max: usize,
     },
     /// The TOML does not parse, or a value has the wrong type.
-    #[error("line {line}: {message}")]
+    #[error("line {line}, column {column}: {message}")]
     Syntax {
         /// 1-based line of the error.
         line: usize,
+        /// 1-based column of the error, in characters.
+        column: usize,
         /// What is wrong.
         message: String,
     },
@@ -73,6 +76,84 @@ fn invalid(field: impl Into<String>, reason: impl Into<String>) -> ProfileError 
         field: field.into(),
         reason: reason.into(),
     }
+}
+
+impl ProfileError {
+    /// The 1-based line and column in `text` (the profile this error came
+    /// from) that the error points at: the bad value, or the nearest table
+    /// that holds a missing key. `None` for a file too large to read and
+    /// for a missing top-level key.
+    ///
+    /// ```
+    /// let text = "schema = 1\nid = \"Bad Id\"\nname = \"X\"\n[[rules]]\nsources = []\n";
+    /// let err = yien_agent::Profile::from_toml(text).unwrap_err();
+    /// assert_eq!(err.place(text), Some((2, 6)));
+    /// ```
+    pub fn place(&self, text: &str) -> Option<(usize, usize)> {
+        match self {
+            ProfileError::TooLarge { .. } => None,
+            ProfileError::Syntax { line, column, .. } => Some((*line, *column)),
+            ProfileError::UnsupportedSchema(_) => locate(text, "schema"),
+            ProfileError::Invalid { field, .. } => locate(text, field),
+        }
+    }
+}
+
+/// Where the value at a field path such as `rules[0].screen[1].pattern`
+/// starts, or the deepest part of the path that exists.
+fn locate(text: &str, field: &str) -> Option<(usize, usize)> {
+    let root = toml::de::DeTable::parse(text).ok()?;
+    let mut table = root.get_ref();
+    let mut found: Option<usize> = None;
+    for segment in field.split('.') {
+        let (key, indexes) = match segment.find('[') {
+            Some(at) => (&segment[..at], &segment[at..]),
+            None => (segment, ""),
+        };
+        let Some((_, value)) = table.iter().find(|(k, _)| k.get_ref() == key) else {
+            break;
+        };
+        let mut value = value;
+        found = Some(value.span().start);
+        for index in indexes.split('[').filter(|i| !i.is_empty()) {
+            let item = index
+                .trim_end_matches(']')
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| match value.get_ref() {
+                    toml::de::DeValue::Array(items) => items.get(i),
+                    _ => None,
+                });
+            let Some(item) = item else {
+                return found.map(|at| line_column(text, at));
+            };
+            value = item;
+            found = Some(value.span().start);
+        }
+        match value.get_ref() {
+            toml::de::DeValue::Table(inner) => table = inner,
+            _ => break,
+        }
+    }
+    found.map(|at| line_column(text, at))
+}
+
+/// The 1-based line and column (in characters) of a byte offset, clamped to
+/// the text and to a character boundary. A byte order mark is not a column.
+fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let mut end = offset.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let before = &text[..end];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let column = before[line_start..]
+        .chars()
+        .filter(|&c| c != '\u{feff}')
+        .count()
+        + 1;
+    (line, column)
 }
 
 /// Which agent a profile drives.
@@ -356,6 +437,15 @@ fn build_regex(field: &str, pattern: &str) -> Result<Regex, ProfileError> {
         .map_err(|e| invalid(field, format!("invalid regular expression: {e}")))
 }
 
+/// A NUL ends a string at the OS boundary, so what runs would differ from
+/// what the profile says.
+fn check_no_nul(field: &str, value: &str) -> Result<(), ProfileError> {
+    if value.contains('\0') {
+        return Err(invalid(field, "must not contain a NUL character"));
+    }
+    Ok(())
+}
+
 fn check_placeholders(field: &str, value: &str) -> Result<(), ProfileError> {
     let mut rest = value;
     while let Some(open) = rest.find('{') {
@@ -388,12 +478,10 @@ impl Profile {
             });
         }
         let raw: RawProfile = toml::from_str(text).map_err(|e| {
-            let offset = e.span().map_or(0, |s| s.start).min(text.len());
-            let line = text
-                .get(..offset)
-                .map_or(1, |prefix| prefix.matches('\n').count() + 1);
+            let (line, column) = line_column(text, e.span().map_or(0, |s| s.start));
             ProfileError::Syntax {
                 line,
+                column,
                 message: e.message().trim().to_owned(),
             }
         })?;
@@ -416,12 +504,22 @@ impl Profile {
         if raw.name.trim().is_empty() {
             return Err(invalid("name", "must not be empty"));
         }
+        if raw.name.chars().count() > MAX_NAME_CHARS || raw.name.chars().any(char::is_control) {
+            return Err(invalid(
+                "name",
+                format!("use at most {MAX_NAME_CHARS} characters and no control characters"),
+            ));
+        }
 
         let detect = match raw.detect {
             None => None,
             Some(d) => {
                 if d.command.trim().is_empty() {
                     return Err(invalid("detect.command", "must not be empty"));
+                }
+                check_no_nul("detect.command", &d.command)?;
+                for (i, arg) in d.version_args.iter().enumerate() {
+                    check_no_nul(&format!("detect.version_args[{i}]"), arg)?;
                 }
                 let pattern = d.version_regex.as_deref().unwrap_or(DEFAULT_VERSION_REGEX);
                 Some(Detect {
@@ -433,12 +531,22 @@ impl Profile {
         };
 
         for (i, arg) in raw.launch.args.iter().enumerate() {
+            check_no_nul(&format!("launch.args[{i}]"), arg)?;
             check_placeholders(&format!("launch.args[{i}]"), arg)?;
         }
         for (i, arg) in raw.launch.resume.iter().enumerate() {
+            check_no_nul(&format!("launch.resume[{i}]"), arg)?;
             check_placeholders(&format!("launch.resume[{i}]"), arg)?;
         }
         for (key, value) in &raw.launch.env {
+            // An environment block cannot hold these in a name.
+            if key.is_empty() || key.contains(['=', '\0']) {
+                return Err(invalid(
+                    format!("launch.env.{}", key.escape_debug()),
+                    "a variable name must not be empty or contain '=' or a NUL",
+                ));
+            }
+            check_no_nul(&format!("launch.env.{key}"), value)?;
             check_placeholders(&format!("launch.env.{key}"), value)?;
         }
         if !raw.launch.resume.is_empty()
@@ -799,6 +907,80 @@ sources = []
             ProfileError::Syntax { line, .. } => assert_eq!(line, 5),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn rf_age_04_errors_point_at_their_line_and_column() {
+        let text = "schema = 1\nid = \"x\"\n  name = = \"X\"\n";
+        let e = err(text);
+        assert!(
+            matches!(
+                e,
+                ProfileError::Syntax {
+                    line: 3,
+                    column: 10,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+        assert_eq!(e.place(text), Some((3, 10)));
+        assert!(e.to_string().starts_with("line 3, column 10: "), "{e}");
+
+        let text = format!(
+            "{MINIMAL}[launch]\nargs = [\"ok\", \"{{nope}}\"]\nenv = {{ A = \"{{bad}}\" }}\n"
+        );
+        assert_eq!(err(&text).place(&text), Some((7, 15)));
+        let text = MINIMAL.replace("[[rules]]", "[launch]\nenv = { A = \"{bad}\" }\n[[rules]]");
+        assert_eq!(err(&text).place(&text), Some((5, 13)));
+        let text = format!("\u{feff}{}", MINIMAL.replace("\"x\"", "\"X\""));
+        assert_eq!(
+            err(&text).place(&text),
+            Some((2, 6)),
+            "the BOM is no column"
+        );
+        let big = format!("{MINIMAL}# {}", "x".repeat(MAX_PROFILE_BYTES));
+        assert_eq!(err(&big).place(&big), None);
+    }
+
+    #[test]
+    fn rf_age_04_names_env_keys_and_nul_characters_are_checked() {
+        let field = |text: &str| match err(text) {
+            ProfileError::Invalid { field, .. } => field,
+            other => panic!("{other:?}"),
+        };
+        let with = |launch: &str| MINIMAL.replace("[[rules]]", &format!("{launch}\n[[rules]]"));
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"\" = \"x\" }")),
+            "launch.env."
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"A=B\" = \"x\" }")),
+            "launch.env.A=B"
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"A\\u0000\" = \"x\" }")),
+            "launch.env.A\\0"
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { A = \"x\\u0000y\" }")),
+            "launch.env.A"
+        );
+        assert_eq!(
+            field(&with("[launch]\nargs = [\"ok\", \"a\\u0000\"]")),
+            "launch.args[1]"
+        );
+        assert_eq!(
+            field(&with("detect = { command = \"a\\u0000b\" }")),
+            "detect.command"
+        );
+        let long = MINIMAL.replace("\"X\"", &format!("\"{}\"", "n".repeat(65)));
+        assert_eq!(field(&long), "name");
+        assert!(
+            Profile::from_toml(&MINIMAL.replace("\"X\"", &format!("\"{}\"", "é".repeat(64))))
+                .is_ok()
+        );
+        assert_eq!(field(&MINIMAL.replace("\"X\"", "\"a\\tb\"")), "name");
     }
 
     #[test]

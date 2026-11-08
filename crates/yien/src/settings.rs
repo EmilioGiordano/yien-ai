@@ -34,8 +34,9 @@ impl SettingsHost for Host {
 
 /// The first reading, the watcher sending the later ones, and the opener,
 /// with the watcher to stop on quit. Without a data dir the window runs on
-/// the defaults.
-pub(crate) fn start() -> (Settings, Option<Watcher>) {
+/// the defaults. `profile_problems` go to the status bar with the first
+/// reading.
+pub(crate) fn start(profile_problems: Vec<String>) -> (Settings, Option<Watcher>) {
     let (send, updates) = mpsc::unbounded_channel();
     let path = yien_platform::paths::config_file()
         .inspect_err(|e| tracing::warn!("no data dir, the settings file is off: {e}"))
@@ -45,6 +46,7 @@ pub(crate) fn start() -> (Settings, Option<Watcher>) {
             initial: ConfigUpdate::Loaded(Loaded::default()),
             updates,
             host: Box::new(Host { path }),
+            profile_problems,
         };
         return (settings, None);
     };
@@ -65,6 +67,7 @@ pub(crate) fn start() -> (Settings, Option<Watcher>) {
         initial,
         updates,
         host: Box::new(Host { path }),
+        profile_problems,
     };
     (settings, watcher)
 }

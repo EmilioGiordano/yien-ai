@@ -30,6 +30,7 @@ mod machine;
 mod profile;
 mod question;
 mod signal;
+mod user;
 mod version;
 
 pub use hooks::{
@@ -49,5 +50,8 @@ pub use question::{MAX_QUESTION_CHARS, claude_hook_question};
 pub use signal::{
     AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
     SessionEndReason, SessionStartSource, Signal, Source,
+};
+pub use user::{
+    MAX_USER_PROFILES, PROFILES_DIR, ProblemKind, ProfileProblem, UserProfiles, load_user_profiles,
 };
 pub use version::{Version, VersionError, VersionReq};

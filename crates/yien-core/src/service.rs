@@ -171,9 +171,8 @@ pub(crate) async fn run(
     let mut restored = Vec::new();
     if let Some(snapshot) = &opened.snapshot {
         let config = Arc::clone(&service.ctx.config);
-        let resolve = |profile: Option<&yien_proto::ProfileId>| {
-            launch::resolve(profile, &config.profiles, &config.shell)
-        };
+        let resolve =
+            |profile: Option<&yien_proto::ProfileId>| launch::resolve_in(profile, &config);
         let (fx, notes) = service.ws.restore(snapshot, &resolve, &opened.disk);
         restored = fx;
         notices.extend(notes);
@@ -353,9 +352,7 @@ impl Service {
                 branch,
             } => {
                 let config = Arc::clone(&self.ctx.config);
-                let resolve = |profile: Option<&ProfileId>| {
-                    launch::resolve(profile, &config.profiles, &config.shell)
-                };
+                let resolve = |profile: Option<&ProfileId>| launch::resolve_in(profile, &config);
                 match self
                     .ws
                     .open_worktree_tab(project, worktree.clone(), branch.clone(), &resolve)
@@ -623,9 +620,8 @@ impl Service {
         }
         let pane = command_pane(&command);
         let config = Arc::clone(&self.ctx.config);
-        let resolve = |profile: Option<&yien_proto::ProfileId>| {
-            launch::resolve(profile, &config.profiles, &config.shell)
-        };
+        let resolve =
+            |profile: Option<&yien_proto::ProfileId>| launch::resolve_in(profile, &config);
         match self.ws.apply(command, &resolve) {
             Ok(fx) => {
                 self.execute(fx).await;
