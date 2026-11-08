@@ -760,6 +760,10 @@ pub struct PaneInfo {
     /// The agent's structured channel is unavailable or failed, so its state
     /// cannot be told and stays idle (RN-02): the "signal lost" mark.
     pub signal_lost: bool,
+    /// The pane's own program is starting or running: not exited, and not
+    /// a stand-in shell after a failed resume. Only then does `session_id`
+    /// name a session that runs here (RF-SES-07).
+    pub runs_session: bool,
 }
 
 /// An agent profile a pane can be started with (RF-AGE-01, RF-PAN-18).
@@ -1109,6 +1113,7 @@ mod tests {
                 session_id: Some("4f1c".into()),
                 needs_you_since: None,
                 signal_lost: false,
+                runs_session: true,
             }),
             CoreMsg::NotificationsMuted { muted: true },
             CoreMsg::WorktreeChecked {

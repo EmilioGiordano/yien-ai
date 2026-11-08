@@ -117,8 +117,10 @@ pub struct PaneView {
     pub needs_you_since: Option<u64>,
     /// Its agent's state cannot be told, so it shows idle (RN-02).
     pub signal_lost: bool,
-    /// The agent session it runs, once known (RF-SES-07).
+    /// The agent session it names, once known (RF-SES-07).
     pub session_id: Option<String>,
+    /// Its own program is starting or running, so that session runs here.
+    pub runs_session: bool,
 }
 
 impl PaneView {
@@ -137,6 +139,7 @@ impl PaneView {
             needs_you_since: None,
             signal_lost: false,
             session_id: None,
+            runs_session: false,
         }
     }
 
@@ -154,6 +157,7 @@ impl PaneView {
             needs_you_since: info.needs_you_since,
             signal_lost: info.signal_lost,
             session_id: info.session_id.clone(),
+            runs_session: info.runs_session,
         }
     }
 
@@ -179,6 +183,7 @@ impl PaneView {
     ///     needs_you_since: None,
     ///     signal_lost: false,
     ///     session_id: None,
+    ///     runs_session: true,
     /// };
     /// assert!(!shell.is_busy());
     /// let claude = PaneView { profile_id: yien_proto::ProfileId::new("claude"), ..shell };
@@ -513,6 +518,7 @@ impl WorkspaceView {
                 p.running = false;
                 p.exit_code = code;
                 p.exited = true;
+                p.runs_session = false;
             })
             .is_some()
     }
@@ -600,14 +606,17 @@ impl WorkspaceView {
             .unwrap_or_else(|| PaneView::placeholder(id))
     }
 
-    /// The pane that runs agent session `id`, if any; ids compare without
-    /// case (RF-SES-07).
+    /// The pane whose own program runs agent session `id`, if any; a pane
+    /// that stopped or runs a stand-in shell does not count. Ids compare
+    /// without case (RF-SES-07).
     pub fn pane_with_session(&self, id: &str) -> Option<PaneId> {
         self.all_panes().into_iter().find(|pane| {
-            self.panes
-                .get(pane)
-                .and_then(|p| p.session_id.as_deref())
-                .is_some_and(|s| s.eq_ignore_ascii_case(id))
+            self.panes.get(pane).is_some_and(|p| {
+                p.runs_session
+                    && p.session_id
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(id))
+            })
         })
     }
 
@@ -952,6 +961,7 @@ mod tests {
             session_id: None,
             needs_you_since: state.is_red().then_some(id),
             signal_lost: false,
+            runs_session: true,
         }
     }
 

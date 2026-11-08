@@ -496,6 +496,7 @@ mod tests {
             session_id: None,
             needs_you_since: state.is_red().then_some(id),
             signal_lost: false,
+            runs_session: true,
         }
     }
 
@@ -833,6 +834,44 @@ mod tests {
         let entries = session_entries(ProjectId::new(1), &sessions, &workspace(), NOW);
         palette.set_sessions(ProjectId::new(1), entries);
         assert_eq!(texts(&palette), ["write the docs"]);
+    }
+
+    #[test]
+    fn rf_ses_07_a_session_whose_pane_stopped_resumes_again() {
+        for stopped in ["exited", "stand-in"] {
+            let mut ws = workspace();
+            let mut pane = pane(101, 10, "claude", P::Idle);
+            pane.session_id = Some("bbbbbbbb-0000-4000-8000-000000000002".into());
+            pane.runs_session = false;
+            if stopped == "exited" {
+                pane.running = false;
+                pane.exit_code = Some(0);
+            }
+            ws.pane_updated(&pane);
+            let mut palette = listed(&ws);
+            palette.set_query("docs");
+            let entry = palette.entry(&palette.rows()[0]).unwrap();
+            assert_eq!(entry.hint, "3 h ago · bbbbbbbb", "{stopped}");
+            assert_eq!(entry.state, None, "{stopped}");
+            assert!(
+                matches!(palette.target(), Some(Target::Resume { .. })),
+                "{stopped}"
+            );
+        }
+        // An exit reported as a delta stops it too.
+        let mut ws = workspace();
+        let mut pane = pane(101, 10, "claude", P::Idle);
+        pane.session_id = Some("bbbbbbbb-0000-4000-8000-000000000002".into());
+        ws.pane_updated(&pane);
+        assert_eq!(
+            ws.pane_with_session("bbbbbbbb-0000-4000-8000-000000000002"),
+            Some(PaneId::new(101))
+        );
+        ws.pane_exited(PaneId::new(101), Some(0));
+        assert_eq!(
+            ws.pane_with_session("bbbbbbbb-0000-4000-8000-000000000002"),
+            None
+        );
     }
 
     #[test]

@@ -277,6 +277,7 @@ impl Workspace {
                     visible: false,
                     seen: false,
                     standin: None,
+                    stopped: false,
                 },
             );
             fx.push(Effect::Spawn {
