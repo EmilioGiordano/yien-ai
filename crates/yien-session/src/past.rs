@@ -49,29 +49,19 @@ impl std::fmt::Debug for SessionSummary {
 
 /// The name Claude Code gives the folder of a project's sessions: the
 /// project folder with every character other than an ASCII letter or digit
-/// turned into `-`, one per UTF-16 unit, as the CLI does. A `\\?\` prefix
-/// and trailing separators are dropped first.
+/// turned into `-`, one per UTF-16 unit, as the CLI does. The folder is
+/// first written the way the CLI sees it: trimmed, without a `\\?\` prefix,
+/// repeated separators or trailing separators.
 ///
 /// ```
 /// use yien_session::claude_project_dir_name;
 ///
 /// assert_eq!(claude_project_dir_name(r"C:\Users\me\My App.v2"), "C--Users-me-My-App-v2");
-/// assert_eq!(claude_project_dir_name("C:/Code/yien/"), "C--Code-yien");
+/// assert_eq!(claude_project_dir_name("C:/Code//yien/"), "C--Code-yien");
 /// assert_eq!(claude_project_dir_name("/home/me/.config"), "-home-me--config");
 /// ```
 pub fn claude_project_dir_name(root: &str) -> String {
-    let root = root
-        .strip_prefix(r"\\?\")
-        .or_else(|| root.strip_prefix("//?/"))
-        .unwrap_or(root);
-    let mut root = root;
-    while root.len() > 1
-        && (root.ends_with('/') || root.ends_with('\\'))
-        && !root.ends_with(":\\")
-        && !root.ends_with(":/")
-    {
-        root = &root[..root.len() - 1];
-    }
+    let root = plain_root(root);
     let mut name = String::with_capacity(root.len());
     for ch in root.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -83,6 +73,54 @@ pub fn claude_project_dir_name(root: &str) -> String {
         }
     }
     name
+}
+
+/// `root` as a process sees its own folder, case kept: surrounding spaces
+/// trimmed, a `\\?\` prefix dropped (`\\?\UNC\server` becomes
+/// `\\server`), repeated separators collapsed (a UNC path keeps its two
+/// leading ones) and trailing separators dropped, except a drive's or the
+/// root's. Both `\` and `/` count as separators.
+fn plain_root(root: &str) -> String {
+    let is_sep = |c: char| c == '\\' || c == '/';
+    let root = root.trim();
+    let unc = [r"\\?\UNC\", "//?/UNC/", r"\\?\unc\", "//?/unc/"]
+        .iter()
+        .find_map(|p| root.strip_prefix(p));
+    let (lead, rest) = match unc {
+        Some(rest) => (r"\\", rest),
+        None => match root
+            .strip_prefix(r"\\?\")
+            .or_else(|| root.strip_prefix("//?/"))
+        {
+            Some(rest) => ("", rest),
+            None => {
+                let mut chars = root.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(a), Some(b)) if is_sep(a) && is_sep(b) => (&root[..2], &root[2..]),
+                    _ => ("", root),
+                }
+            }
+        },
+    };
+    let mut out = String::with_capacity(root.len());
+    out.push_str(lead);
+    let mut last_sep = !lead.is_empty();
+    for ch in rest.chars() {
+        let sep = is_sep(ch);
+        if sep && last_sep {
+            continue;
+        }
+        out.push(ch);
+        last_sep = sep;
+    }
+    while out.len() > lead.len().max(1)
+        && out.ends_with(is_sep)
+        && !out.ends_with(":\\")
+        && !out.ends_with(":/")
+    {
+        out.pop();
+    }
+    out
 }
 
 /// Whether the session folder `name` belongs to the project at `root`.
@@ -396,6 +434,12 @@ mod tests {
             (r"\\?\C:\Code\yien\", "C--Code-yien"),
             ("C:/Code/yien", "C--Code-yien"),
             (r"C:\", "C--"),
+            (r"  C:\Code\\yien//  ", "C--Code-yien"),
+            (r"\\?\UNC\server\share\proj", "--server-share-proj"),
+            (r"\\server\\share\proj\", "--server-share-proj"),
+            ("//server/share", "--server-share"),
+            ("/", "-"),
+            ("C:/", "C--"),
             ("/srv/app", "-srv-app"),
             ("C:\\C\u{f3}digo", "C--C-digo"),
             ("C:\\a\u{1f600}b", "C--a--b"),
