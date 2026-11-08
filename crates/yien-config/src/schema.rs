@@ -33,6 +33,11 @@ pub const SCHEMA: &[Setting] = &[
         doc: "The window's text size in pixels, 8 to 20.",
     },
     Setting {
+        key: "ui.tabs.group",
+        default: "\"project\"",
+        doc: "How the tab bar lists tabs: \"project\" (under their projects) or \"state\"               (needs you, error, done, working, idle). The palette switches it until the               file is next saved.",
+    },
+    Setting {
         key: "terminal.font.family",
         default: "\"\"",
         doc: "The terminals' font; use a monospaced one. Empty: the first installed of \
@@ -52,7 +57,7 @@ pub const SCHEMA: &[Setting] = &[
 ];
 
 /// Tables that only group other keys.
-pub(crate) const TABLES: &[&str] = &["ui", "ui.font", "terminal", "terminal.font"];
+pub(crate) const TABLES: &[&str] = &["ui", "ui.font", "ui.tabs", "terminal", "terminal.font"];
 
 /// The table that maps command ids to chords (RF-CFG-03).
 pub(crate) const KEYS_TABLE: &str = "keys";

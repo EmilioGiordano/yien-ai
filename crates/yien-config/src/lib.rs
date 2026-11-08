@@ -60,6 +60,17 @@ pub enum ThemeSetting {
     System,
 }
 
+/// How the tab bar lists tabs (RF-ATN-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabGrouping {
+    /// Under their projects, in the user's order.
+    #[default]
+    Project,
+    /// In sections by their most urgent agent state: needs you, error,
+    /// done, working, idle; the user's order within each.
+    State,
+}
+
 /// One font role: a family and a size in logical pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontSetting {
@@ -105,6 +116,8 @@ pub struct Config {
     /// `editor`: the command "open in editor" runs, `None` for the OS
     /// default (RF-CTX-03).
     pub editor: Option<String>,
+    /// `ui.tabs.group`: how the tab bar lists tabs (RF-ATN-07).
+    pub tab_grouping: TabGrouping,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
 }
