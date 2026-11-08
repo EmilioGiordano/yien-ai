@@ -998,8 +998,10 @@ fn the_shutdown_closes_every_pane() {
     let (_, first, first_child) = h.project();
     let (_, second_child) = h.split(first, None);
     let started = Instant::now();
-    assert_eq!(h.core.shutdown(TIMEOUT).unwrap(), 2);
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // Far longer than the check below, so returning in time means it never
+    // waited for the deadline.
+    assert_eq!(h.core.shutdown(TIMEOUT * 4).unwrap(), 2);
+    assert!(started.elapsed() < TIMEOUT, "{:?}", started.elapsed());
     for child in [&first_child, &second_child] {
         assert!(child.was_killed() && child.was_closed());
     }
@@ -1019,7 +1021,8 @@ fn the_shutdown_returns_within_its_bound_when_a_pane_never_closes() {
         matches!(result, Err(ShutdownError::TimedOut { open: 1, total: 2 })),
         "{result:?}"
     );
-    assert!(took >= bound && took < Duration::from_secs(1), "{took:?}");
+    // The stuck pane never closes, so only giving up at the bound returns.
+    assert!(took >= bound && took < TIMEOUT, "{took:?}");
     for child in [&first_child, &stuck] {
         assert!(child.was_killed() && child.was_closed());
     }
