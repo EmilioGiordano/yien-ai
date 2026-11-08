@@ -406,16 +406,12 @@ fn write_jobs(
     jobs: Vec<Job>,
     deadline: Option<Instant>,
 ) -> (Vec<(PaneId, u64)>, usize) {
+    // Every tracked pane has a file, written now or before: each gets a share.
+    let limits = share(jobs.len());
     let jobs: Vec<Job> = jobs
         .into_iter()
         .filter(|job| job.source.changes() != job.written)
         .collect();
-    let limits = DumpLimits {
-        max_bytes: SCREEN_LIMITS
-            .max_bytes
-            .min(SCREENS_TOTAL_BYTES / jobs.len().max(1)),
-        ..SCREEN_LIMITS
-    };
     let total = jobs.len();
     let mut written = Vec::new();
     for (done, job) in jobs.into_iter().enumerate() {
@@ -442,6 +438,16 @@ fn write_jobs(
     (written, 0)
 }
 
+/// What one pane's file keeps when `panes` panes have files.
+fn share(panes: usize) -> DumpLimits {
+    DumpLimits {
+        max_bytes: SCREEN_LIMITS
+            .max_bytes
+            .min(SCREENS_TOTAL_BYTES / panes.max(1)),
+        ..SCREEN_LIMITS
+    }
+}
+
 /// Removes the screens of panes that no longer exist.
 fn prune(store: &ScreenStore, known: &HashSet<u64>) {
     let mut files = store.lock();
@@ -464,6 +470,67 @@ fn prune(store: &ScreenStore, known: &HashSet<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rf_ses_10_every_tracked_pane_shares_the_total() {
+        assert_eq!(share(0).max_bytes, SCREEN_LIMITS.max_bytes);
+        assert_eq!(share(32).max_bytes, SCREEN_LIMITS.max_bytes);
+        assert_eq!(share(64).max_bytes, SCREENS_TOTAL_BYTES / 64);
+        assert!(share(1_000).max_bytes * 1_000 <= SCREENS_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn rf_ses_10_one_changed_pane_of_many_keeps_only_its_share() {
+        let store = ScreenStore::new(MemFiles::default());
+        let jobs: Vec<Job> = (1..=64)
+            .map(|id| {
+                let source = Arc::new(ScreenSource::default());
+                let mut engine =
+                    yien_vt::AlacrittyEngine::new(yien_vt::VtConfig::default(), 80, 10);
+                if id == 1 {
+                    for i in 0..20_000 {
+                        yien_vt::VtEngine::feed(&mut engine, format!("line {i}\r\n").as_bytes());
+                    }
+                }
+                let engine: Engine = Arc::new(Mutex::new(Box::new(engine)));
+                source.attach(engine);
+                let written = if id == 1 { 0 } else { source.changes() };
+                Job {
+                    pane: PaneId::new(id),
+                    source,
+                    written,
+                }
+            })
+            .collect();
+        let (written, left) = write_jobs(&store, jobs, None);
+        assert_eq!((written.len(), left), (1, 0));
+        let bytes = store.lock().read("1.vt", u64::MAX).unwrap().unwrap();
+        assert!(
+            bytes.len() <= SCREENS_TOTAL_BYTES / 64 + 64,
+            "{}",
+            bytes.len()
+        );
+    }
+
+    #[derive(Default)]
+    struct MemFiles(std::collections::BTreeMap<String, Vec<u8>>);
+
+    impl ScreenFiles for MemFiles {
+        fn read(&self, name: &str, _: u64) -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(self.0.get(name).cloned())
+        }
+        fn write(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+            self.0.insert(name.to_owned(), bytes.to_vec());
+            Ok(())
+        }
+        fn remove(&mut self, name: &str) -> Result<(), StoreError> {
+            self.0.remove(name);
+            Ok(())
+        }
+        fn list(&self) -> Result<Vec<String>, StoreError> {
+            Ok(self.0.keys().cloned().collect())
+        }
+    }
 
     #[test]
     fn only_screen_files_belong_to_a_pane() {
