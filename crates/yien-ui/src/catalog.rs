@@ -254,6 +254,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleTheme,
         ["ctrl-shift-l"]
     ),
+    command!(
+        "settings.open_config",
+        "settings: open config file",
+        OpenConfigFile,
+        []
+    ),
 ];
 
 /// A split that starts a given profile, as the split menu offers

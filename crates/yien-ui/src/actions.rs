@@ -40,6 +40,8 @@ actions!(
     [
         /// Switches between the sumi and washi themes.
         ToggleTheme,
+        /// Opens the settings file in the configured editor (RF-CFG-01).
+        OpenConfigFile,
         /// Shows or hides the tab bar.
         ToggleTabBar,
         /// Shows or hides the context bar.
