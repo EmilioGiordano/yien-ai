@@ -278,8 +278,8 @@ enum Route {
 
 /// File types whose default app only shows them.
 const VIEW_ONLY: &[&str] = &[
-    "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonc", "toml", "yaml", "yml", "xml",
-    "ini", "cfg", "conf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "pdf", "docx", "xlsx",
+    "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonc", "toml", "yaml", "yml", "ini",
+    "cfg", "conf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "pdf", "docx", "xlsx",
     "pptx", "odt", "ods", "odp",
 ];
 
@@ -775,6 +775,7 @@ mod tests {
             "notes.md.exe",
             "launch.desktop",
             "Tool.app",
+            "data.xml",
         ] {
             assert_eq!(route_of(other, true), Route::Notepad, "{other}");
             assert_eq!(route_of(other, false), Route::Refuse, "{other}");
