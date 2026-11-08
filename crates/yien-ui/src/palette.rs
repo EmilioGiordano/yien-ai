@@ -43,8 +43,9 @@ pub(crate) enum Target {
     },
 }
 
-/// One row the palette can show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row the palette can show. Its `Debug` leaves the text out: a past
+/// session's row shows the user's prompt, which must never reach a log.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     /// The text the query matches.
     pub(crate) text: String,
@@ -57,7 +58,18 @@ pub(crate) struct Entry {
     pub(crate) target: Target,
 }
 
-/// A row that matches the query.
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("text_chars", &self.text.chars().count())
+            .field("hint", &self.hint)
+            .field("state", &self.state)
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A row that matches the query: an index and match positions, no text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Row {
     /// Index into the source list.
@@ -947,6 +959,14 @@ mod tests {
         assert_eq!(entry.hint, "3 h ago · bbbbbbbb · open");
         assert_eq!(entry.state, Some(AgentState::NeedsYou));
         assert_eq!(palette.target(), Some(Target::Pane(PaneId::new(101))));
+    }
+
+    #[test]
+    fn rf_ses_07_a_row_never_shows_its_text_in_debug() {
+        let palette = listed(&workspace());
+        let shown = format!("{palette:?}");
+        assert!(!shown.contains("fix the build"), "{shown}");
+        assert!(shown.contains("text_chars: 13"), "{shown}");
     }
 
     #[test]
