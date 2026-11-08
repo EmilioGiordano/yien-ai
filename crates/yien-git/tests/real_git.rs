@@ -138,12 +138,48 @@ mod support {
         Git::new().with_timeout(Duration::from_secs(120))
     }
 
+    /// Runs `op(0..n)` on `n` threads started together while another thread
+    /// lists `root`'s worktrees until they end; each listing must succeed.
+    pub fn at_once_while_listing<T: Send>(
+        root: &Path,
+        n: usize,
+        op: impl Fn(usize) -> T + Sync,
+    ) -> Vec<T> {
+        let start = std::sync::Barrier::new(n + 1);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let lister = s.spawn(|| {
+                start.wait();
+                let mut lists = 0_u32;
+                while !done.load(Ordering::Acquire) {
+                    git().worktrees(root).unwrap();
+                    lists += 1;
+                }
+                lists
+            });
+            let ops: Vec<_> = (0..n)
+                .map(|i| {
+                    let (start, op) = (&start, &op);
+                    s.spawn(move || {
+                        start.wait();
+                        op(i)
+                    })
+                })
+                .collect();
+            // Joined before the lister, so a failed op cannot leave it spinning.
+            let results: Vec<T> = ops.into_iter().map(|o| o.join().unwrap()).collect();
+            done.store(true, Ordering::Release);
+            assert!(lister.join().unwrap() > 0);
+            results
+        })
+    }
+
     pub fn same(a: &Path, b: &Path) -> bool {
         a.canonicalize().unwrap() == b.canonicalize().unwrap()
     }
 }
 
-use support::{Sandbox, git, same};
+use support::{Sandbox, at_once_while_listing, git, same};
 
 /// How long a test waits for an event it expects: generous, since a loaded
 /// machine (a build, other test runs) slows git and threads a lot. The wait
@@ -601,56 +637,37 @@ fn rf_esp_05_a_base_is_where_the_branch_starts() {
     assert_eq!(sb.git(&path, &["rev-parse", "HEAD"]), first);
 }
 
-/// Adds and listings at once on one repository all succeed: a listing
-/// meeting a registration another add is still writing is tried again, and
-/// adds in this process take turns.
+/// Adds, then removals, at once on one repository while another thread
+/// lists the worktrees: all succeed. A listing meeting a registration an add
+/// is still writing or a removal is deleting is tried again, and this
+/// process's adds and removals take turns.
 #[test]
-fn rf_esp_05_adds_and_lists_at_once_all_succeed() {
-    const ADDS: usize = 6;
+fn rf_esp_05_adds_removals_and_lists_at_once_all_succeed() {
+    const N: usize = 6;
     let Some(sb) = Sandbox::new() else { return };
     let root = sb.repo("burst");
-    let start = std::sync::Barrier::new(ADDS + 1);
-    let done = std::sync::atomic::AtomicBool::new(false);
-    std::thread::scope(|s| {
-        let lister = s.spawn(|| {
-            start.wait();
-            let mut lists = 0_u32;
-            while !done.load(Ordering::Acquire) {
-                git().worktrees(&root).unwrap();
-                lists += 1;
-            }
-            lists
-        });
-        let adds: Vec<_> = (0..ADDS)
-            .map(|i| {
-                let (root, start) = (&root, &start);
-                let path = sb.dir.join("burst-wt").join(format!("n{i}"));
-                s.spawn(move || {
-                    start.wait();
-                    git().add_worktree(root, &format!("feat/n{i}"), &path, None)
-                })
-            })
-            .collect();
-        // Joined before any assert, so a failed add cannot leave the lister spinning.
-        let added: Vec<_> = adds.into_iter().map(|a| a.join().unwrap()).collect();
-        done.store(true, Ordering::Release);
-        let lists = lister.join().unwrap();
-        for result in added {
-            result.unwrap();
-        }
-        assert!(lists > 0);
+    let path = |i: usize| sb.dir.join("burst-wt").join(format!("n{i}"));
+
+    let added = at_once_while_listing(&root, N, |i| {
+        git().add_worktree(&root, &format!("feat/n{i}"), &path(i), None)
     });
-    let list = git().worktrees(&root).unwrap();
-    assert_eq!(list.len(), ADDS + 1);
-    for i in 0..ADDS {
+    for result in added {
+        result.unwrap();
+    }
+    assert_eq!(git().worktrees(&root).unwrap().len(), N + 1);
+    for i in 0..N {
+        assert!(path(i).join("a.txt").is_file());
+    }
+
+    let removed =
+        at_once_while_listing(&root, N, |i| git().remove_worktree(&root, &path(i), false));
+    for result in removed {
+        result.unwrap();
+    }
+    assert_eq!(git().worktrees(&root).unwrap().len(), 1);
+    for i in 0..N {
+        assert!(!path(i).exists());
         assert!(has_branch(&sb, &root, &format!("feat/n{i}")));
-        assert!(
-            sb.dir
-                .join("burst-wt")
-                .join(format!("n{i}"))
-                .join("a.txt")
-                .is_file()
-        );
     }
 }
 
