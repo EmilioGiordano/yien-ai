@@ -408,15 +408,14 @@ fn resolves_to_batch(program: &str, dirs: &[PathBuf], pathext: &str) -> bool {
 }
 
 /// Whether arguments and a path can go to a batch file: nothing cmd.exe
-/// would expand or treat as syntax, inside quotes or not.
+/// would expand or treat as syntax. The path is always quoted, and inside
+/// quotes cmd.exe still expands `%` and `!` and ends the quote at `"`; the
+/// editor's arguments are quoted only when needed, so they get the full set.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn batch_safe(args: &[String], path: &Path) -> bool {
     const META: &[char] = &['%', '!', '"', '^', '&', '|', '<', '>', '(', ')'];
-    let path = path.to_string_lossy();
-    args.iter()
-        .map(String::as_str)
-        .chain(std::iter::once(path.as_ref()))
-        .all(|a| !a.contains(META))
+    const IN_QUOTES: &[char] = &['%', '!', '"'];
+    args.iter().all(|a| !a.contains(META)) && !path.to_string_lossy().contains(IN_QUOTES)
 }
 
 /// One argument for a Windows command line: quoted when it holds a space, a
@@ -592,6 +591,19 @@ mod tests {
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
         assert!(!batch_safe(&["a&calc".into()], file));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_batch_editor_takes_paths_with_characters_plain_inside_quotes() {
+        assert!(batch_safe(&[], Path::new(r"C:\web\app\(auth)\page.tsx")));
+        assert!(batch_safe(&[], Path::new(r"C:\Docs\Report (1).md")));
+        assert!(batch_safe(&[], Path::new(r"C:\a&b\x^y.md")));
+        assert!(!batch_safe(&[], Path::new(r"C:\a!b\x.md")));
+        assert!(!batch_safe(&[], Path::new(r"C:\100%\x.md")));
+        assert!(
+            !batch_safe(&["(x)".into()], Path::new(r"C:\x.md")),
+            "arguments keep the full set"
+        );
     }
 
     #[test]
