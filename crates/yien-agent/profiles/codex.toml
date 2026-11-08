@@ -6,6 +6,8 @@ detect = { command = "codex", version_args = ["--version"], version_regex = '(\d
 [launch]
 resume = ["resume", "{session_id}"]
 session_id = "from_list"
+# Read nothing yet: the reader is a stub until the format is verified (S7).
+sessions = "codex-sessions"
 
 # No version verified yet (S7). OSC 9 alone never lights the red mark.
 [[rules]]

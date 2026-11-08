@@ -7,6 +7,7 @@ detect = { command = "claude", version_args = ["--version"], version_regex = '(\
 args = ["--session-id", "{new_uuid}", "--settings", "{hooks_settings_file}"]
 resume = ["--resume", "{session_id}", "--settings", "{hooks_settings_file}"]
 session_id = "preassigned"
+sessions = "claude-projects"
 env = { YIEN_PANE = "{pane_id}", YIEN_HOOK_TOKEN = "{hook_token}", YIEN_HOOK_PIPE = "{hook_pipe}" }
 
 [[rules]]
