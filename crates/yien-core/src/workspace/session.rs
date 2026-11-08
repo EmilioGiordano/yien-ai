@@ -650,6 +650,84 @@ mod tests {
         assert_eq!(spawn_of(&fx, pane).2, None);
     }
 
+    /// The resume the next start of `ws` gives `pane`.
+    fn resumed_after_restart(ws: &Workspace, pane: PaneId) -> Option<String> {
+        let saved = ws.to_session();
+        let (_, fx, _) = restore(&saved, &all_exist(&saved));
+        spawn_of(&fx, pane).2.map(str::to_owned)
+    }
+
+    fn session(id: &str, launch: u64) -> PaneEvent {
+        PaneEvent::SessionId {
+            id: id.into(),
+            launch,
+        }
+    }
+
+    #[test]
+    fn rn_04_a_terminate_applied_before_a_fresh_launch_reports_its_session_still_ends_it() {
+        // The pane reports its new session before spawning; the terminate
+        // can reach the workspace first.
+        let (mut ws, pane) = workspace("claude");
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        ws.on_pane_event(pane, session("5e2d-fresh", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rn_04_a_terminate_applied_before_a_restored_launch_reports_its_session_still_ends_it() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        let saved = ws.to_session();
+        let (mut back, fx, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(spawn_of(&fx, pane).2, Some("4f1c"));
+        back.apply(Command::TerminatePane { pane }, &resolve)
+            .unwrap();
+        back.on_pane_event(pane, session("4f1c", 0));
+        assert_eq!(resumed_after_restart(&back, pane), None);
+    }
+
+    #[test]
+    fn rn_04_a_hook_session_after_a_terminate_does_not_bring_the_session_back() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        // `SessionStart` from the hook, still on its way when the user ended
+        // the launch.
+        ws.on_pane_event(pane, session("4f1c-hook", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rn_04_reports_of_a_launch_the_user_replaced_are_dropped() {
+        let (mut ws, pane) = workspace("claude");
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        ws.apply(Command::RelaunchPane { pane }, &resolve).unwrap();
+        // A quit before the new launch names its session starts fresh.
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+        ws.on_pane_event(pane, session("old", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+        ws.on_pane_event(pane, session("new", 1));
+        ws.on_pane_event(pane, PaneEvent::EndedByUser { launch: 0 });
+        assert_eq!(resumed_after_restart(&ws, pane).as_deref(), Some("new"));
+        ws.on_pane_event(pane, PaneEvent::EndedByUser { launch: 1 });
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rf_ses_04_the_new_session_of_a_restored_ended_pane_is_resumed_next_time() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        let saved = ws.to_session();
+        let (mut back, fx, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(spawn_of(&fx, pane).2, None);
+        // A quit before the fresh launch names its session starts fresh too.
+        assert_eq!(resumed_after_restart(&back, pane), None);
+        back.on_pane_event(pane, session("7a3b", 0));
+        assert_eq!(resumed_after_restart(&back, pane).as_deref(), Some("7a3b"));
+    }
+
     #[test]
     fn rf_ses_05_a_shell_pane_reopens_in_its_last_folder() {
         let (mut ws, _) = workspace("claude");
