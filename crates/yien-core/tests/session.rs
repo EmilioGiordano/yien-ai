@@ -445,8 +445,14 @@ fn rf_ses_03_a_restored_claude_pane_resumes_its_session() {
 #[test]
 fn rf_ses_04_a_terminated_claude_session_launches_fresh() {
     let (store, claude, session) = first_run();
-    let again = Run::start(&store);
+    let mut again = Run::start(&store);
     again.children(2);
+    // The resume reports its session id before it starts; a terminate handled
+    // before that report lets the report clear the end.
+    again.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == claude && p.running => Some(()),
+        _ => None,
+    });
     again.command(Command::TerminatePane { pane: claude });
     wait_until(|| {
         store.saved().is_some_and(|s| {
