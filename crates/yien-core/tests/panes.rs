@@ -638,7 +638,7 @@ fn rf_age_07_a_turn_done_unseen_goes_idle_once_the_window_is_focused() {
 }
 
 #[test]
-fn rf_age_04_profiles_from_the_user_folder_launch_and_are_listed() {
+fn rnf_22_a_profile_from_the_user_folder_launches_without_recompiling() {
     let dir = std::env::temp_dir().join(format!("yien-core-user-profiles-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let folder = dir.join(yien_agent::PROFILES_DIR);
@@ -664,10 +664,11 @@ fn rf_age_04_profiles_from_the_user_folder_launch_and_are_listed() {
     std::fs::write(folder.join("bad.toml"), "schema = = 1\n").unwrap();
     let user = yien_platform::user_profiles::load(&dir);
     assert_eq!(user.problems.len(), 1, "{:?}", user.problems);
-    let profiles =
-        yien_agent::resolve_profiles(yien_agent::builtin_profiles().unwrap(), user.profiles);
+    let (profiles, broken_profiles) = user.over(yien_agent::builtin_profiles().unwrap());
+    assert_eq!(broken_profiles.keys().collect::<Vec<_>>(), ["bad"]);
     let mut h = Harness::start_with(CoreConfig {
         profiles,
+        broken_profiles,
         ..config()
     });
     let snapshot = h.wait_for(|m| match m {
@@ -695,6 +696,44 @@ fn rf_age_04_profiles_from_the_user_folder_launch_and_are_listed() {
         child.spec().args.is_empty(),
         "args come from the profile only"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rf_age_04_a_broken_override_never_starts_the_builtin_in_its_place() {
+    let dir = std::env::temp_dir().join(format!("yien-core-broken-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let folder = dir.join(yien_agent::PROFILES_DIR);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("claude.toml"),
+        "schema = 1\nid = \"claude\"\nname = = 1\n",
+    )
+    .unwrap();
+    let user = yien_platform::user_profiles::load(&dir);
+    let (profiles, broken_profiles) = user.over(yien_agent::builtin_profiles().unwrap());
+    let mut h = Harness::start_with(CoreConfig {
+        profiles,
+        broken_profiles,
+        ..config()
+    });
+    let snapshot = h.wait_for(|m| match m {
+        CoreMsg::WorkspaceSnapshot(s) => Some(s.clone()),
+        _ => None,
+    });
+    assert!(snapshot.profiles.iter().all(|p| p.id.as_str() != "claude"));
+    let (_, first, _) = h.project();
+    h.command(Command::SplitPane {
+        pane: first,
+        orientation: Orientation::Horizontal,
+        profile: Some(ProfileId::new("claude")),
+    });
+    let message = h.wait_for(|m| match m {
+        CoreMsg::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert!(message.contains("profiles/claude.toml"), "{message}");
+    assert!(h.backend.take_spawned().is_empty(), "nothing started");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
