@@ -4,6 +4,7 @@
 
 use gpui_kit::*;
 use tokio::sync::{mpsc, oneshot};
+use yien_proto::ClientMsg;
 
 use super::Shell;
 use crate::actions::{self, OpenConfigFile, ToggleTheme};
@@ -93,6 +94,10 @@ impl Shell {
             config.ui_font.family.as_deref(),
             config.terminal_font.family.as_deref(),
         );
+        if theme.kind != self.theme.kind {
+            let palette = theme.kind.terminal_palette();
+            self.send(ClientMsg::SetTerminalPalette { palette }, cx);
+        }
         if theme != self.theme {
             self.theme = theme;
             sync_component_theme(&theme, cx);

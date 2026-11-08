@@ -2,6 +2,7 @@
 
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use gpui_kit::{App, Hsla, Pixels, Rgba, px, rgb, rgba};
+use yien_proto::TerminalPalette;
 
 use crate::git::FileMark;
 use crate::model::AgentState;
@@ -18,6 +19,14 @@ impl ThemeKind {
         match self {
             Self::Sumi => Self::Washi,
             Self::Washi => Self::Sumi,
+        }
+    }
+
+    /// The palette the core resolves terminal colours with under this theme.
+    pub(crate) fn terminal_palette(self) -> TerminalPalette {
+        match self {
+            Self::Sumi => TerminalPalette::Sumi,
+            Self::Washi => TerminalPalette::Washi,
         }
     }
 }
@@ -255,6 +264,26 @@ mod tests {
                 let ratio = contrast(fg, bg);
                 assert!(ratio >= 4.5, "{kind:?}: {name} is {ratio:.2}:1");
             }
+        }
+    }
+
+    #[test]
+    fn rf_cfg_02_each_theme_picks_its_terminal_palette() {
+        assert_eq!(ThemeKind::Sumi.terminal_palette(), TerminalPalette::Sumi);
+        assert_eq!(ThemeKind::Washi.terminal_palette(), TerminalPalette::Washi);
+        assert_eq!(
+            ThemeKind::default().terminal_palette(),
+            TerminalPalette::default(),
+            "the core starts with the palette of the window's first theme"
+        );
+    }
+
+    #[test]
+    fn rnf_18_selected_terminal_text_meets_aa_in_both_themes() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let ratio = contrast(t.term_text, t.term_strong);
+            assert!(ratio >= 4.5, "{kind:?}: selected text is {ratio:.2}:1");
         }
     }
 
