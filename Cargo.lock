@@ -8924,6 +8924,7 @@ version = "0.0.0"
 dependencies = [
  "portable-pty",
  "thiserror 2.0.21",
+ "yien-which",
 ]
 
 [[package]]
