@@ -7,8 +7,8 @@ use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV};
 use yien_proto::{PaneId, ProfileId};
 use yien_pty::SpawnSpec;
 
-use crate::CoreError;
 use crate::shell::ShellCommand;
+use crate::{CoreConfig, CoreError};
 
 pub(crate) use yien_proto::SHELL_PROFILE;
 
@@ -190,6 +190,24 @@ fn format_uuid(mut b: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// [`resolve`] against the core's profiles, refusing an id whose user file
+/// was skipped rather than starting anything else in its place.
+pub(crate) fn resolve_in(
+    profile: Option<&ProfileId>,
+    config: &CoreConfig,
+) -> Result<LaunchPlan, CoreError> {
+    if let Some(id) = profile
+        && let Some(file) = config.broken_profiles.get(id.as_str())
+        && !config.profiles.iter().any(|p| p.id == id.as_str())
+    {
+        return Err(CoreError::BrokenProfile {
+            id: id.as_str().to_owned(),
+            file: file.clone(),
+        });
+    }
+    resolve(profile, &config.profiles, &config.shell)
 }
 
 /// Resolves `profile` (the shell when `None`) against the known profiles.
