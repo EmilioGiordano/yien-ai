@@ -240,9 +240,19 @@ struct Message {
     content: serde_json::Value,
 }
 
-/// What the CLI itself wraps in tags and records as a user turn: slash
-/// commands, their output, background task notices. Not prompts.
-const MACHINE_PREFIXES: &[&str] = &["<command-", "<local-command-", "<task-notification"];
+/// What the CLI itself records as a user turn: slash commands and their
+/// output, `!` shell commands and their output, `#` memory notes, background
+/// task notices and the mark of an interrupted turn. Not prompts.
+const MACHINE_PREFIXES: &[&str] = &[
+    "<command-",
+    "<local-command-",
+    "<task-notification",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<user-memory-input>",
+    "[Request interrupted by user",
+];
 
 impl Record {
     /// The text of a prompt the user typed, if this record is one. Tool
@@ -269,11 +279,15 @@ impl Record {
 }
 
 /// `text` on one line: runs of whitespace and control characters become one
-/// space, and past [`TITLE_CHARS`] it is cut with an ellipsis.
+/// space, format characters (bidi overrides, zero-width) are dropped, and
+/// past [`TITLE_CHARS`] it is cut with an ellipsis.
 fn one_line(text: &str) -> Option<String> {
     let mut chars: Vec<char> = Vec::with_capacity(TITLE_CHARS + 1);
     let mut gap = false;
     for ch in text.chars() {
+        if is_format(ch) {
+            continue;
+        }
         if ch.is_whitespace() || ch.is_control() {
             gap = !chars.is_empty();
             continue;
@@ -293,6 +307,35 @@ fn one_line(text: &str) -> Option<String> {
         }
     }
     (!chars.is_empty()).then(|| chars.into_iter().collect())
+}
+
+/// Whether `ch` is a Unicode format character (general category Cf):
+/// invisible, and able to reorder or hide the text around it.
+fn is_format(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 #[cfg(test)]
@@ -393,6 +436,19 @@ mod tests {
         );
         let summary = read(&file(&lines));
         assert_eq!(summary.title.as_deref(), Some("what is this?"));
+
+        let mut noise: Vec<String> = [
+            "<bash-input>ls</bash-input>",
+            "<bash-stdout>a.txt</bash-stdout>",
+            "<user-memory-input>use tabs</user-memory-input>",
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ]
+        .iter()
+        .map(|t| user(t))
+        .collect();
+        noise.push(user("the prompt"));
+        assert_eq!(read(&file(&noise)).title.as_deref(), Some("the prompt"));
         assert_eq!(summary.cwd.as_deref(), Some(r"C:\Code\yien"));
     }
 
@@ -438,6 +494,12 @@ mod tests {
         let lines = read(&file(&[user("first line\r\n\tsecond\u{7}  line")])).title;
         assert_eq!(lines.as_deref(), Some("first line second line"));
         assert_eq!(read(&file(&[user(" \n\t ")])).title, None);
+
+        // Bidi overrides and zero-width characters are dropped.
+        let hidden = "fix\u{202e}txt.exe\u{202c} the\u{200b} build\u{feff}";
+        let title = read(&file(&[user(hidden)])).title;
+        assert_eq!(title.as_deref(), Some("fixtxt.exe the build"));
+        assert_eq!(read(&file(&[user("\u{200b}\u{2066}")])).title, None);
     }
 
     #[test]
