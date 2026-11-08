@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use yien_layout::{Rect, Tree};
 use yien_proto::{
     AgentState, Command, CoreMsg, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo,
-    ProjectId, ProjectInfo, TabId, TabInfo, WorkspaceSnapshot, same_folder,
+    ProjectId, ProjectInfo, SideBars, TabId, TabInfo, WorkspaceSnapshot, same_folder,
 };
 use yien_session::is_session_id;
 
@@ -227,6 +227,15 @@ impl Pane {
     }
 }
 
+/// The bars with every width that is not a positive number dropped, so the
+/// session never saves one (RF-NAV-10).
+fn finite_widths(mut bars: SideBars) -> SideBars {
+    for bar in [&mut bars.tab_bar, &mut bars.context_bar] {
+        bar.width = bar.width.filter(|w| w.is_finite() && *w > 0.0);
+    }
+    bars
+}
+
 /// Every project, tab and pane, and which tab is selected.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Workspace {
@@ -239,6 +248,8 @@ pub(crate) struct Workspace {
     profiles: Vec<ProfileInfo>,
     /// Every toast and taskbar flash is muted (RF-ATN-11).
     notifications_muted: bool,
+    /// The side bars as the UI last drew them (RF-NAV-10).
+    side_bars: SideBars,
 }
 
 impl Workspace {
@@ -270,6 +281,7 @@ impl Workspace {
             active_tab: self.active_tab,
             profiles: self.profiles.clone(),
             notifications_muted: self.notifications_muted,
+            side_bars: self.side_bars,
         }
     }
 
@@ -447,6 +459,7 @@ impl Workspace {
                     fx.push(Effect::Emit(CoreMsg::NotificationsMuted { muted }));
                 }
             }
+            Command::SetSideBars { bars } => self.side_bars = finite_widths(bars),
             Command::NewTab {
                 project,
                 name,
@@ -2210,6 +2223,30 @@ mod tests {
             muted: true,
         };
         assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
+    #[test]
+    fn rf_nav_10_side_bars_are_kept_without_widths_that_are_not_numbers() {
+        let mut ws = Workspace::new();
+        let bar = |width| yien_proto::SideBar {
+            hidden: false,
+            width,
+        };
+        let bars = SideBars {
+            tab_bar: bar(Some(f32::NAN)),
+            context_bar: bar(Some(-4.0)),
+            review: true,
+        };
+        assert!(run(&mut ws, Command::SetSideBars { bars }).is_empty());
+        let kept = ws.snapshot().side_bars;
+        assert_eq!((kept.tab_bar.width, kept.context_bar.width), (None, None));
+        assert!(kept.review);
+        let bars = SideBars {
+            tab_bar: bar(Some(300.0)),
+            ..bars
+        };
+        run(&mut ws, Command::SetSideBars { bars });
+        assert_eq!(ws.snapshot().side_bars.tab_bar.width, Some(300.0));
     }
 
     #[test]

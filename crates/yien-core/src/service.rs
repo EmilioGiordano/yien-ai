@@ -778,6 +778,7 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::RenameTab { .. }
         | Command::SetTabMuted { .. }
         | Command::SetNotificationsMuted { .. }
+        | Command::SetSideBars { .. }
         | Command::NewTab { .. }
         | Command::NewWorktreeTab { .. }
         | Command::CheckWorktree { .. }

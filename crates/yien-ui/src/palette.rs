@@ -581,6 +581,7 @@ mod tests {
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
             notifications_muted: false,
+            side_bars: Default::default(),
         })
     }
 
