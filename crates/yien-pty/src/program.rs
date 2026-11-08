@@ -8,7 +8,7 @@
 //! relative `PATH` entries and falls back to the bare name, which
 //! `CreateProcessW` resolves against YIEN's working folder.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use yien_which::WhichError;
@@ -52,20 +52,42 @@ impl From<ProgramError> for PtyError {
 }
 
 /// The spec with its program replaced by the absolute path to run. Reads the
-/// environment and the disk.
+/// environment and the disk. `PATH` and `PATHEXT` are the child's: the spec's
+/// own values over YIEN's, as portable-pty applies them.
 pub(crate) fn resolve(spec: SpawnSpec) -> Result<SpawnSpec, ProgramError> {
     let pathext = if cfg!(windows) {
-        std::env::var("PATHEXT").unwrap_or_else(|_| yien_which::DEFAULT_PATHEXT.into())
+        child_var(&spec, "PATHEXT", |k| std::env::var_os(k))
+            .and_then(|e| e.into_string().ok())
+            .unwrap_or_else(|| yien_which::DEFAULT_PATHEXT.into())
     } else {
         String::new()
     };
-    let found = yien_which::resolve(
-        &spec.program,
-        std::env::var_os("PATH").as_deref(),
-        &pathext,
-        runnable,
-    );
+    let path = child_var(&spec, "PATH", |k| std::env::var_os(k));
+    let found = yien_which::resolve(&spec.program, path.as_deref(), &pathext, runnable);
     with_program(spec, found)
+}
+
+/// The value `key` has in the child: the last `env` entry for it, nothing
+/// when `env_remove` drops it, else YIEN's own. Keys ignore case on Windows.
+fn child_var(
+    spec: &SpawnSpec,
+    key: &str,
+    inherited: impl Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
+    let same = |k: &OsStr| {
+        if cfg!(windows) {
+            k.eq_ignore_ascii_case(key)
+        } else {
+            k == key
+        }
+    };
+    if let Some((_, value)) = spec.env.iter().rev().find(|(k, _)| same(k)) {
+        return Some(value.clone());
+    }
+    if spec.env_remove.iter().any(|k| same(k)) {
+        return None;
+    }
+    inherited(key)
 }
 
 /// Whether `path` is a file the OS can start; on Unix, one with an execute
@@ -115,8 +137,6 @@ pub(crate) fn batch_unsafe(arg: &OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -214,6 +234,42 @@ mod tests {
         let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
         let spec = resolve(SpawnSpec::new(shell)).unwrap();
         assert!(Path::new(&spec.program).is_absolute(), "{:?}", spec.program);
+    }
+
+    #[test]
+    fn the_childs_own_path_overrides_or_removes_yiens() {
+        let yien = |_: &str| Some(OsString::from("yien"));
+        let spec = SpawnSpec::new("claude");
+        assert_eq!(child_var(&spec, "PATH", yien), Some("yien".into()));
+        let spec = SpawnSpec::new("claude").env_remove("PATH");
+        assert_eq!(child_var(&spec, "PATH", yien), None);
+        let spec = SpawnSpec::new("claude")
+            .env_remove("PATH")
+            .env("PATH", "first")
+            .env("OTHER", "x")
+            .env("PATH", "last");
+        assert_eq!(child_var(&spec, "PATH", yien), Some("last".into()));
+        let spec = SpawnSpec::new("claude").env("Path", "mixed");
+        let expected = if cfg!(windows) { "mixed" } else { "yien" };
+        assert_eq!(child_var(&spec, "PATH", yien), Some(expected.into()));
+    }
+
+    #[test]
+    fn a_program_is_found_on_the_path_the_spec_sets() {
+        let dir = temp_dir("spec-path");
+        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+        let tool = dir.join(name);
+        std::fs::write(&tool, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let spec = SpawnSpec::new("tool").env("PATH", dir.as_os_str());
+        assert_eq!(resolve(spec).unwrap().program, tool);
+        let spec = SpawnSpec::new("tool").env("PATH", ".");
+        assert!(matches!(resolve(spec), Err(ProgramError::NotFound { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
