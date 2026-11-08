@@ -356,7 +356,7 @@ impl Service {
     /// Lists the project's past agent sessions on a blocking thread with the
     /// reader each profile declares, and sends them to the UI from there, so
     /// the command loop never waits on the disk (RF-SES-07).
-    fn list_sessions(&self, project: ProjectId, root: String) {
+    fn list_sessions(&self, project: ProjectId, request: u64, root: String) {
         let config = Arc::clone(&self.ctx.config);
         let events = self.ctx.events.clone();
         tokio::task::spawn_blocking(move || {
@@ -373,7 +373,11 @@ impl Service {
                     message: format!("Some past sessions could not be read: {error}"),
                 });
             }
-            let _ = events.blocking_send(CoreMsg::AgentSessions { project, sessions });
+            let _ = events.blocking_send(CoreMsg::AgentSessions {
+                project,
+                request,
+                sessions,
+            });
         });
     }
 
@@ -570,7 +574,11 @@ impl Service {
                 Effect::Relaunch { pane } => self.relaunch(pane).await,
                 Effect::Terminate { pane } => self.to_pane(pane, PaneCmd::Terminate).await,
                 Effect::AddWorktree(job) => self.run_job(move || worktree::add(job)),
-                Effect::ListAgentSessions { project, root } => self.list_sessions(project, root),
+                Effect::ListAgentSessions {
+                    project,
+                    request,
+                    root,
+                } => self.list_sessions(project, request, root),
                 Effect::CheckWorktree { tab, worktree } => {
                     self.run_job(move || worktree::check(tab, worktree));
                 }

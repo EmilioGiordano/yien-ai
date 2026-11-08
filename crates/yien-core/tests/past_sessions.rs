@@ -119,10 +119,14 @@ impl Run {
 
     fn sessions(&mut self) -> Vec<AgentSession> {
         let project = self.project;
-        self.command(Command::ListAgentSessions { project });
+        self.command(Command::ListAgentSessions {
+            project,
+            request: 42,
+        });
         self.wait_for(|m| match m {
             CoreMsg::AgentSessions {
                 project: p,
+                request: 42,
                 sessions,
             } if *p == project => Some(sessions.clone()),
             _ => None,

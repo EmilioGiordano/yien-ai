@@ -80,6 +80,8 @@ pub(crate) struct Shell {
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
+    /// The last past-sessions request sent; each list waits for its own.
+    session_requests: u64,
     /// The question asked before closing a project that has work running.
     confirm: Option<ConfirmClose>,
     /// The tab whose name is being edited in place (RF-ESP-16).
@@ -206,6 +208,7 @@ impl Shell {
             split_menu: None,
             menu_closed: None,
             palette: None,
+            session_requests: 0,
             confirm: None,
             renaming: None,
             worktree_prompt: None,
@@ -281,12 +284,20 @@ impl Shell {
                 CoreMsg::NotificationsMuted { muted } => {
                     self.workspace.set_notifications_muted(muted);
                 }
-                CoreMsg::Error { message, .. } | CoreMsg::Notice { message } => {
+                CoreMsg::Error { message, .. } => {
                     self.notice = Some(message);
+                    if let Some(open) = self.palette.as_mut() {
+                        open.model.stop_waiting();
+                    }
                 }
+                CoreMsg::Notice { message } => self.notice = Some(message),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
-                CoreMsg::AgentSessions { project, sessions } => {
-                    self.sessions_listed(project, &sessions, cx);
+                CoreMsg::AgentSessions {
+                    project,
+                    request,
+                    sessions,
+                } => {
+                    self.sessions_listed(project, request, &sessions, cx);
                     continue;
                 }
             }
@@ -818,6 +829,7 @@ impl Shell {
     fn sessions_listed(
         &mut self,
         project: ProjectId,
+        request: u64,
         sessions: &[yien_proto::AgentSession],
         cx: &mut Context<Self>,
     ) {
@@ -828,7 +840,7 @@ impl Shell {
             return;
         }
         let entries = session_entries(project, sessions, &self.workspace, now_ms());
-        if open.model.set_sessions(project, entries) {
+        if open.model.set_sessions(project, request, entries) {
             open.scroll.scroll_to_item(0);
             cx.notify();
         }
@@ -881,8 +893,10 @@ impl Shell {
         window.focus(&input.focus_handle(cx), cx);
         let model = match sessions_of {
             Some(project) => {
-                self.command(Command::ListAgentSessions { project }, cx);
-                Palette::sessions(project)
+                self.session_requests += 1;
+                let request = self.session_requests;
+                self.command(Command::ListAgentSessions { project, request }, cx);
+                Palette::sessions(project, request)
             }
             None => Palette::new(mode, commands, places),
         };

@@ -75,10 +75,12 @@ pub(crate) struct Palette {
     query: String,
     rows: Vec<Row>,
     selected: usize,
-    /// In [`Mode::Sessions`]: the project listed, and whether its sessions
-    /// are still being read.
+    /// In [`Mode::Sessions`]: the project listed, the request its answer
+    /// carries, whether it is still being read, and whether that failed.
     sessions_of: Option<ProjectId>,
+    request: u64,
     loading: bool,
+    failed: bool,
 }
 
 /// In the switcher, a query that starts with this lists commands instead,
@@ -97,31 +99,56 @@ impl Palette {
             rows: Vec::new(),
             selected: 0,
             sessions_of: None,
+            request: 0,
             loading: false,
+            failed: false,
         };
         palette.refilter();
         palette
     }
 
     /// The past sessions list of `project`, empty while they are read; the
-    /// core's answer fills it ([`Palette::set_sessions`]).
-    pub(crate) fn sessions(project: ProjectId) -> Self {
+    /// core's answer to `request` fills it ([`Palette::set_sessions`]).
+    pub(crate) fn sessions(project: ProjectId, request: u64) -> Self {
         let mut palette = Self::new(Mode::Sessions, Vec::new(), Vec::new());
         palette.sessions_of = Some(project);
+        palette.request = request;
         palette.loading = true;
         palette
     }
 
-    /// Fills the sessions list with `entries` when it is waiting for
-    /// `project`'s; an answer for another project is ignored. The query is
+    /// Fills the sessions list with `entries` when they answer the request
+    /// it waits for; an answer for another project or an earlier request is
+    /// ignored, so it cannot reset the list or the selection. The query is
     /// kept and the best match selected.
-    pub(crate) fn set_sessions(&mut self, project: ProjectId, entries: Vec<Entry>) -> bool {
-        if self.mode != Mode::Sessions || self.sessions_of != Some(project) {
+    pub(crate) fn set_sessions(
+        &mut self,
+        project: ProjectId,
+        request: u64,
+        entries: Vec<Entry>,
+    ) -> bool {
+        if self.mode != Mode::Sessions
+            || self.sessions_of != Some(project)
+            || self.request != request
+            || !(self.loading || self.failed)
+        {
             return false;
         }
         self.places = entries;
         self.loading = false;
+        self.failed = false;
         self.refilter();
+        true
+    }
+
+    /// Stops waiting for sessions after the core reported an error, so the
+    /// list does not say it is reading forever; a late answer still fills it.
+    pub(crate) fn stop_waiting(&mut self) -> bool {
+        if !self.loading {
+            return false;
+        }
+        self.loading = false;
+        self.failed = true;
         true
     }
 
@@ -137,6 +164,9 @@ impl Palette {
             Mode::Commands => format!("No command matches \"{}\".", self.search()),
             Mode::Switcher => format!("Nothing matches \"{}\".", self.query),
             Mode::Sessions if self.loading => "Reading past sessions…".to_owned(),
+            Mode::Sessions if self.failed => {
+                "Past sessions could not be read; the status bar says why.".to_owned()
+            }
             Mode::Sessions if self.places.is_empty() => {
                 format!("No past sessions for {project}.")
             }
@@ -748,9 +778,9 @@ mod tests {
             ),
             past("cccccccc-0000-4000-8000-000000000003", None, 50 * HOUR),
         ];
-        let mut palette = Palette::sessions(ProjectId::new(1));
+        let mut palette = Palette::sessions(ProjectId::new(1), 1);
         let entries = session_entries(ProjectId::new(1), &sessions, ws, NOW);
-        assert!(palette.set_sessions(ProjectId::new(1), entries));
+        assert!(palette.set_sessions(ProjectId::new(1), 1, entries));
         palette
     }
 
@@ -801,23 +831,54 @@ mod tests {
 
     #[test]
     fn rf_ses_07_the_list_says_when_it_reads_and_when_there_is_none() {
-        let mut palette = Palette::sessions(ProjectId::new(1));
+        let mut palette = Palette::sessions(ProjectId::new(1), 5);
         assert!(palette.rows().is_empty());
         assert_eq!(palette.empty_text("yien"), "Reading past sessions…");
-        // An answer for another project leaves it waiting.
-        assert!(!palette.set_sessions(ProjectId::new(2), Vec::new()));
+        // An answer for another project or request leaves it waiting.
+        assert!(!palette.set_sessions(ProjectId::new(2), 5, Vec::new()));
+        assert!(!palette.set_sessions(ProjectId::new(1), 4, Vec::new()));
         assert_eq!(palette.empty_text("yien"), "Reading past sessions…");
-        assert!(palette.set_sessions(ProjectId::new(1), Vec::new()));
+        assert!(palette.set_sessions(ProjectId::new(1), 5, Vec::new()));
         assert_eq!(palette.empty_text("yien"), "No past sessions for yien.");
         assert_eq!(palette.sessions_of(), Some(ProjectId::new(1)));
         // Only a sessions list takes sessions.
         let mut commands = Palette::new(Mode::Commands, commands(), Vec::new());
-        assert!(!commands.set_sessions(ProjectId::new(1), Vec::new()));
+        assert!(!commands.set_sessions(ProjectId::new(1), 0, Vec::new()));
+        assert!(!commands.stop_waiting());
+    }
+
+    #[test]
+    fn rf_ses_07_an_error_stops_the_waiting_and_a_late_answer_still_fills() {
+        let mut palette = Palette::sessions(ProjectId::new(1), 2);
+        assert!(palette.stop_waiting());
+        assert_eq!(
+            palette.empty_text("yien"),
+            "Past sessions could not be read; the status bar says why."
+        );
+        assert!(!palette.stop_waiting());
+        let sessions = [past(
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Some("fix the build"),
+            HOUR,
+        )];
+        let entries = session_entries(ProjectId::new(1), &sessions, &workspace(), NOW);
+        assert!(palette.set_sessions(ProjectId::new(1), 2, entries));
+        assert_eq!(texts(&palette), ["fix the build"]);
+    }
+
+    #[test]
+    fn rf_ses_07_a_second_answer_does_not_reset_the_list() {
+        let mut palette = listed(&workspace());
+        palette.move_by(1);
+        let selected = palette.target();
+        assert!(!palette.set_sessions(ProjectId::new(1), 1, Vec::new()));
+        assert_eq!(palette.rows().len(), 3);
+        assert_eq!(palette.target(), selected);
     }
 
     #[test]
     fn rf_ses_07_a_query_typed_while_reading_applies_to_the_answer() {
-        let mut palette = Palette::sessions(ProjectId::new(1));
+        let mut palette = Palette::sessions(ProjectId::new(1), 1);
         palette.set_query("docs");
         let sessions = [
             past(
@@ -832,7 +893,7 @@ mod tests {
             ),
         ];
         let entries = session_entries(ProjectId::new(1), &sessions, &workspace(), NOW);
-        palette.set_sessions(ProjectId::new(1), entries);
+        palette.set_sessions(ProjectId::new(1), 1, entries);
         assert_eq!(texts(&palette), ["write the docs"]);
     }
 

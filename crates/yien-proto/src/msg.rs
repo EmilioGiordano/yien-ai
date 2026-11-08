@@ -393,10 +393,14 @@ pub enum Command {
         pane: PaneId,
     },
     /// Asks for the project's past agent sessions, read from each CLI's own
-    /// files; answered with [`CoreMsg::AgentSessions`] (RF-SES-07).
+    /// files; always answered with [`CoreMsg::AgentSessions`], empty when the
+    /// project is gone or nothing could be read (RF-SES-07).
     ListAgentSessions {
         /// The project.
         project: ProjectId,
+        /// Chosen by the UI and sent back with the answer, so an answer to
+        /// an earlier request can be told apart.
+        request: u64,
     },
     /// Resumes a past agent session in a new tab on the project's folder
     /// (RF-SES-07). A session a pane already runs is focused instead.
@@ -890,6 +894,8 @@ pub enum CoreMsg {
     AgentSessions {
         /// The project.
         project: ProjectId,
+        /// The request this answers.
+        request: u64,
         /// Its sessions; empty when it has none or they could not be read.
         sessions: Vec<AgentSession>,
     },
@@ -1016,6 +1022,7 @@ mod tests {
             },
             Command::ListAgentSessions {
                 project: ProjectId::new(1),
+                request: 7,
             },
             Command::ResumeAgentSession {
                 project: ProjectId::new(1),
@@ -1142,6 +1149,7 @@ mod tests {
             },
             CoreMsg::AgentSessions {
                 project: ProjectId::new(1),
+                request: 7,
                 sessions: vec![
                     AgentSession {
                         profile: ProfileId::new("claude"),
@@ -1159,6 +1167,7 @@ mod tests {
             },
             CoreMsg::AgentSessions {
                 project: ProjectId::new(2),
+                request: u64::MAX,
                 sessions: vec![],
             },
             CoreMsg::PaneState {
@@ -1277,6 +1286,7 @@ mod tests {
     fn rf_ses_07_a_listing_never_shows_a_title_in_debug() {
         let msg = CoreMsg::AgentSessions {
             project: ProjectId::new(1),
+            request: 1,
             sessions: vec![AgentSession {
                 profile: ProfileId::new("claude"),
                 id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),

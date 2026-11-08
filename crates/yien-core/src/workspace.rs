@@ -53,7 +53,11 @@ pub(crate) enum Effect {
     AddWorktree(worktree::AddJob),
     /// List the past agent sessions of the project at `root` off the
     /// command loop, and answer with [`CoreMsg::AgentSessions`] (RF-SES-07).
-    ListAgentSessions { project: ProjectId, root: String },
+    ListAgentSessions {
+        project: ProjectId,
+        request: u64,
+        root: String,
+    },
     /// Tell the UI what removing a tab's worktree would lose (RN-08).
     CheckWorktree { tab: TabId, worktree: String },
     /// Remove a worktree once the panes that ran in it have closed.
@@ -559,15 +563,21 @@ impl Workspace {
                 p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
-            Command::ListAgentSessions { project } => {
-                let root = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project)
-                    .ok_or(CoreError::UnknownProject(project))?
-                    .root
-                    .clone();
-                fx.push(Effect::ListAgentSessions { project, root });
+            Command::ListAgentSessions { project, request } => {
+                let root = self.projects.iter().find(|p| p.id == project);
+                fx.push(match root {
+                    Some(p) => Effect::ListAgentSessions {
+                        project,
+                        request,
+                        root: p.root.clone(),
+                    },
+                    // Answered all the same, so the list stops waiting.
+                    None => Effect::Emit(CoreMsg::AgentSessions {
+                        project,
+                        request,
+                        sessions: Vec::new(),
+                    }),
+                });
             }
             Command::ResumeAgentSession {
                 project,
@@ -1900,19 +1910,30 @@ mod tests {
         let mut ws = Workspace::new();
         project(&mut ws);
         let id = ws.snapshot().projects[0].id;
-        let fx = run(&mut ws, Command::ListAgentSessions { project: id });
+        let fx = run(
+            &mut ws,
+            Command::ListAgentSessions {
+                project: id,
+                request: 3,
+            },
+        );
         assert!(matches!(
             fx.as_slice(),
-            [Effect::ListAgentSessions { project, root }]
+            [Effect::ListAgentSessions { project, request: 3, root }]
                 if *project == id && root == "C:/Code/yien/"
         ));
-        let gone = ws.apply(
+        let gone = run(
+            &mut ws,
             Command::ListAgentSessions {
                 project: ProjectId::new(99),
+                request: 4,
             },
-            &resolve,
         );
-        assert!(matches!(gone, Err(CoreError::UnknownProject(_))));
+        assert!(matches!(
+            gone.as_slice(),
+            [Effect::Emit(CoreMsg::AgentSessions { request: 4, sessions, .. })]
+                if sessions.is_empty()
+        ));
     }
 
     #[test]
