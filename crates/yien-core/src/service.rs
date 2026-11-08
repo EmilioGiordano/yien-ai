@@ -29,6 +29,7 @@ use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
 use crate::persist::{self, Opened, Writer};
 use crate::report::Reports;
+use crate::screens::{ScreenSource, Screens};
 use crate::workspace::{Effect, Workspace};
 use crate::worktree::{self, Done};
 use crate::{CoreConfig, CoreError, PANE_INPUT_QUEUE};
@@ -98,6 +99,9 @@ struct PaneHandle {
     seen: bool,
     /// The workspace's number for the pane's current launch.
     launch: u64,
+    /// Where the screen writer reads the pane's screen; kept for a
+    /// restarted actor.
+    screen: Arc<ScreenSource>,
 }
 
 struct Service {
@@ -117,6 +121,10 @@ struct Service {
     jobs: mpsc::Sender<Done>,
     /// The palette every pane resolves colours with (RF-CFG-02).
     palette: Palette,
+    /// Writes the pane screens; `None` without a screen store.
+    screens: Option<Arc<Screens>>,
+    /// Saved screens of restored panes, until their actors start.
+    restored_screens: HashMap<PaneId, Vec<u8>>,
 }
 
 /// Worktree jobs waiting for the service; a job waits for room.
@@ -128,6 +136,7 @@ pub(crate) async fn run(
     mut commands: mpsc::Receiver<ClientMsg>,
     hooks_error: Option<String>,
     writer: Option<Arc<Writer>>,
+    screens: Option<Arc<Screens>>,
 ) {
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
@@ -155,6 +164,8 @@ pub(crate) async fn run(
         git_probed: HashSet::new(),
         jobs,
         palette: ctx_palette,
+        screens,
+        restored_screens: HashMap::new(),
     };
     let mut notices = opened.notices;
     let mut restored = Vec::new();
@@ -165,6 +176,12 @@ pub(crate) async fn run(
         let (fx, notes) = service.ws.restore(snapshot, &resolve, &opened.disk);
         restored = fx;
         notices.extend(notes);
+        service.restored_screens = service.read_screens(&restored).await;
+        if let Some(screens) = &service.screens {
+            // Panes of the saved session this run did not restore keep their screens.
+            let panes = snapshot.projects.iter().flat_map(|p| &p.tabs);
+            screens.keep(panes.flat_map(|t| &t.panes).map(|p| p.id.get()));
+        }
     }
     let saved_tabs = opened
         .snapshot
@@ -239,6 +256,29 @@ async fn next_git(reports: &mut Option<mpsc::Receiver<GitReport>>) -> Option<Git
 }
 
 impl Service {
+    /// The saved screens of the panes a restore starts, read off the
+    /// runtime's workers.
+    async fn read_screens(&self, restored: &[Effect]) -> HashMap<PaneId, Vec<u8>> {
+        let Some(screens) = self.screens.clone() else {
+            return HashMap::new();
+        };
+        let panes: Vec<PaneId> = restored
+            .iter()
+            .filter_map(|fx| match fx {
+                Effect::Spawn { pane, .. } => Some(*pane),
+                _ => None,
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            panes
+                .into_iter()
+                .filter_map(|pane| screens.read(pane).map(|dump| (pane, dump)))
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
     /// Keeps a saved session this run could not restore whole out of the way
     /// of the first save; when that fails, nothing is saved this run.
     async fn set_aside(&self) -> Option<String> {
@@ -427,10 +467,16 @@ impl Service {
         let (input_tx, input) = mpsc::channel(PANE_INPUT_QUEUE);
         let (hooks_tx, hooks) = mpsc::channel(PANE_HOOK_QUEUE);
         let hooks_lost = Arc::new(AtomicBool::new(false));
-        let (slot, visible, seen, launch) = self.panes.get(&pane).map_or_else(
-            || (Arc::default(), false, false, 0),
-            |h| (Arc::clone(&h.slot), h.visible, h.seen, h.launch),
+        let (slot, visible, seen, launch, screen) = self.panes.get(&pane).map_or_else(
+            || (Arc::default(), false, false, 0, Arc::default()),
+            |h| {
+                let screen = Arc::clone(&h.screen);
+                (Arc::clone(&h.slot), h.visible, h.seen, h.launch, screen)
+            },
         );
+        if let Some(screens) = &self.screens {
+            screens.track(pane, Arc::clone(&screen));
+        }
         let setup = PaneSetup {
             id: pane,
             plan: plan.clone(),
@@ -449,6 +495,8 @@ impl Service {
             wait_for_size,
             palette: self.palette,
             launch,
+            screen: Arc::clone(&screen),
+            restored: self.restored_screens.remove(&pane),
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -471,6 +519,7 @@ impl Service {
                 visible,
                 seen,
                 launch,
+                screen,
             },
         );
     }
@@ -479,6 +528,10 @@ impl Service {
         hooks::revoke(self.ctx.hooks.as_deref(), pane);
         self.panes.remove(&pane);
         links(&self.links).remove(&pane);
+        self.restored_screens.remove(&pane);
+        if let Some(screens) = &self.screens {
+            screens.forget(pane);
+        }
     }
 
     /// Relaunches the pane's program; an actor that crashed is started again

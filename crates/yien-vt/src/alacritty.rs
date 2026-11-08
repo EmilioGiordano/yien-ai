@@ -18,6 +18,7 @@ use alacritty_terminal::vte::ansi::{
 
 use crate::osc_scan::OscScanner;
 use crate::palette::{Palette, Rgb};
+use crate::screen_dump::{self, DumpLimits};
 use crate::{TitleChange, VtConfig, VtEngine, VtError, VtOutput};
 use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, GridPoint, Link, LinkKind, Match, Modes,
@@ -515,6 +516,10 @@ impl VtEngine for AlacrittyEngine {
             end: to_grid_point(end),
         })
     }
+
+    fn screen_dump(&self, limits: DumpLimits) -> Vec<u8> {
+        screen_dump::encode(self.term.grid(), limits)
+    }
 }
 
 /// Characters that end a sentence around a link rather than belong to it.
@@ -667,5 +672,80 @@ mod tests {
         assert_eq!(engine.color_at(260), p.ansi[1].dim());
         assert_eq!(engine.color_at(268), p.foreground.dim());
         assert_eq!(engine.color_at(10_000), p.foreground);
+    }
+
+    /// Named, bright, indexed (also 0-15) and truecolor text and
+    /// backgrounds, every attribute, underline colours, wide and combining
+    /// characters, a wide character pushed to the next row, a soft-wrapped
+    /// line, a coloured erase and blank rows, with scrollback and the cursor
+    /// left mid-screen.
+    const SAMPLE: &[u8] = b"\x1b[31mred\x1b[0m \x1b[92;44mbright on blue\x1b[0m\r\n\
+        \x1b[38;5;1mindexed one\x1b[0m \x1b[38;5;208;48;5;17mindexed\x1b[0m\r\n\
+        \x1b[38;2;1;2;3;48;2;250;128;0mtruecolor\x1b[0m\r\n\
+        \x1b[1mb\x1b[2md\x1b[22;3mi\x1b[4mu\x1b[4:2md\x1b[4:3mc\x1b[4:4mo\x1b[4:5ma\x1b[24m\
+        \x1b[7mr\x1b[27;8mh\x1b[28;9ms\x1b[0m\r\n\
+        \x1b[4;58;5;3mul5\x1b[58;2;9;8;7mul2\x1b[0m\r\n\
+        wide \xe5\xad\x97\xe5\xad\x97 e\xcc\x81\r\n\
+        1234567890123456789\xe5\xad\x97 next\r\n\
+        a soft wrapped line that is longer than the width\r\n\
+        \x1b[44m\x1b[K\x1b[0m\r\n\r\n\
+        one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n\
+        prompt> \x1b[33mtyped\x1b[0m\r\nbelow\x1b[1Aat\x1b[4G";
+
+    fn assert_same_cells(old: &AlacrittyEngine, new: &AlacrittyEngine) {
+        let (a, b) = (old.term.grid(), new.term.grid());
+        assert_eq!(a.history_size(), b.history_size());
+        assert_eq!(a.cursor.point, b.cursor.point);
+        let top = -i32::try_from(a.history_size()).unwrap();
+        for line in top..i32::try_from(a.screen_lines()).unwrap() {
+            for col in 0..a.columns() {
+                let point = Point::new(Line(line), Column(col));
+                let (x, y) = (&a[point], &b[point]);
+                assert_eq!(
+                    (x.c, x.fg, x.bg, x.flags, x.zerowidth(), x.underline_color()),
+                    (y.c, y.fg, y.bg, y.flags, y.zerowidth(), y.underline_color()),
+                    "cell at line {line}, column {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rf_ses_10_a_dump_gives_back_the_same_cells_and_cursor() {
+        let mut old = AlacrittyEngine::new(VtConfig::default(), 20, 8);
+        old.feed(SAMPLE);
+        assert!(old.term.grid().history_size() > 0);
+        let dump = old.screen_dump(DumpLimits::default());
+        assert!(crate::is_screen_dump(&dump));
+        let mut new = AlacrittyEngine::new(VtConfig::default(), 20, 8);
+        let out = new.feed(&dump);
+        assert_eq!(out, VtOutput::default());
+        assert_same_cells(&old, &new);
+        let red = Point::new(
+            Line(-i32::try_from(old.term.grid().history_size()).unwrap()),
+            Column(0),
+        );
+        assert_eq!(new.term.grid()[red].fg, Color::Named(ansi::NamedColor::Red));
+    }
+
+    #[test]
+    fn rf_ses_10_a_dump_of_a_dump_is_the_same() {
+        let mut old = AlacrittyEngine::new(VtConfig::default(), 20, 8);
+        old.feed(SAMPLE);
+        let dump = old.screen_dump(DumpLimits::default());
+        let mut new = AlacrittyEngine::new(VtConfig::default(), 20, 8);
+        new.feed(&dump);
+        assert_eq!(new.screen_dump(DumpLimits::default()), dump);
+    }
+
+    #[test]
+    fn rf_ses_10_the_alt_screen_dumps_only_that_screen() {
+        let mut old = AlacrittyEngine::new(VtConfig::default(), 20, 4);
+        old.feed(b"shell 1\r\nshell 2\r\nshell 3\r\nshell 4\r\nshell 5\x1b[?1049h\x1b[Htui");
+        let dump = old.screen_dump(DumpLimits::default());
+        let mut new = AlacrittyEngine::new(VtConfig::default(), 20, 4);
+        new.feed(&dump);
+        assert_eq!(new.frame().line_text(0), "tui");
+        assert_eq!(new.term.grid().history_size(), 0);
     }
 }
