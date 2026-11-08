@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod files;
 pub mod frame;
 mod git;
 pub mod hook_frame;

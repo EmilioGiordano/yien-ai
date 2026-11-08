@@ -36,6 +36,9 @@ pub(crate) const TAB_BAR_CONTEXT: &str = "YienTabBar";
 /// Key context of the context bar while it holds the keyboard (RF-NAV-08).
 pub(crate) const CONTEXT_BAR_CONTEXT: &str = "YienContextBar";
 
+/// Key context of the context bar's Files view (RF-CTX-01).
+pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
+
 actions!(
     yien,
     [
@@ -184,6 +187,27 @@ actions!(
         TabBarLeave,
         /// Gives the keyboard back to the pane from the context bar.
         ContextBarLeave,
+        /// Shows the selected tab's files in the context bar and gives the
+        /// keyboard to their filter (RF-CTX-01).
+        ShowFiles,
+        /// Shows the selected tab's changed files in the context bar
+        /// (RF-CTX-04).
+        ShowChanges,
+        /// Lists the file tree's folders again.
+        RefreshFiles,
+        /// Moves the file tree's cursor one row up.
+        FileTreeUp,
+        /// Moves the file tree's cursor one row down.
+        FileTreeDown,
+        /// Collapses the folder under the cursor, or goes to its parent.
+        FileTreeCollapse,
+        /// Expands the folder under the cursor, or goes into it.
+        FileTreeExpand,
+        /// Opens the file under the cursor in the editor (RF-CTX-03), or
+        /// expands or collapses the folder.
+        FileTreeOpen,
+        /// Clears the file filter, or leaves the context bar.
+        FileTreeEscape,
     ]
 );
 
@@ -231,6 +255,8 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let close = Some(WORKTREE_CLOSE_CONTEXT);
     let tab_bar = Some(TAB_BAR_CONTEXT);
     let context_bar = Some(CONTEXT_BAR_CONTEXT);
+    let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
+    let file_tree = Some(file_tree.as_str());
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -256,6 +282,12 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("enter", TabBarSelect, tab_bar),
         KeyBinding::new("escape", TabBarLeave, tab_bar),
         KeyBinding::new("escape", ContextBarLeave, context_bar),
+        KeyBinding::new("up", FileTreeUp, file_tree),
+        KeyBinding::new("down", FileTreeDown, file_tree),
+        KeyBinding::new("left", FileTreeCollapse, file_tree),
+        KeyBinding::new("right", FileTreeExpand, file_tree),
+        KeyBinding::new("enter", FileTreeOpen, file_tree),
+        KeyBinding::new("escape", FileTreeEscape, file_tree),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -314,6 +346,12 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TabBarSelect),
         Box::new(TabBarLeave),
         Box::new(ContextBarLeave),
+        Box::new(FileTreeUp),
+        Box::new(FileTreeDown),
+        Box::new(FileTreeCollapse),
+        Box::new(FileTreeExpand),
+        Box::new(FileTreeOpen),
+        Box::new(FileTreeEscape),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -333,7 +371,7 @@ mod tests {
             KeyBinding::new("tab", FocusNext, Some("Root")),
             KeyBinding::new("shift-tab", FocusNext, Some("Root")),
         ];
-        for keys in ["up", "down", "enter", "escape"] {
+        for keys in ["up", "down", "left", "right", "enter", "escape"] {
             all.push(KeyBinding::new(keys, InputKey, Some("Input")));
         }
         all.extend(bindings());
@@ -485,6 +523,33 @@ mod tests {
         let context_bar = ["Root", CONTEXT, CONTEXT_BAR_CONTEXT];
         assert!(first_is("escape", &context_bar, &ContextBarLeave));
         assert!(first_is("f6", &context_bar, &FocusNextRegion));
+    }
+
+    #[test]
+    fn rf_ctx_01_the_file_tree_keys_win_over_its_filter_and_stay_out_of_terminals() {
+        let files = [
+            "Root",
+            CONTEXT,
+            CONTEXT_BAR_CONTEXT,
+            FILE_TREE_CONTEXT,
+            "Input",
+        ];
+        for (keys, action) in [
+            ("up", &FileTreeUp as &dyn Action),
+            ("down", &FileTreeDown),
+            ("left", &FileTreeCollapse),
+            ("right", &FileTreeExpand),
+            ("enter", &FileTreeOpen),
+            ("escape", &FileTreeEscape),
+        ] {
+            assert!(first_is(keys, &files, action), "{keys}");
+        }
+        // Left and right fall through to the caret while the filter has text.
+        assert!(dispatched("left", &files).len() >= 2);
+        for keys in ["up", "down", "left", "right", "enter", "escape"] {
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
+        assert!(first_is("f6", &files, &FocusNextRegion));
     }
 
     #[test]
