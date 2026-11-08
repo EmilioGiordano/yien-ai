@@ -250,14 +250,20 @@ impl Workspace {
             notes.missing.insert(record.dir.clone());
         }
         for (pane, plan, cwd, resume, kept) in panes {
-            let agent = pane.agent.as_ref().filter(|_| kept.is_none());
+            // A session the user ended is not resumed: the pane starts a
+            // new one, which this launch has not ended.
+            let agent = pane
+                .agent
+                .as_ref()
+                .filter(|a| kept.is_none() && !a.ended_explicitly);
             self.panes.insert(
                 pane.id,
                 Pane {
                     tab: record.id,
                     profile: plan.profile.clone(),
                     launch_cwd: cwd.clone(),
-                    ended_explicitly: agent.is_some_and(|a| a.ended_explicitly),
+                    ended_explicitly: false,
+                    launch: 0,
                     kept,
                     custom_name: pane.name.clone().filter(|n| !n.trim().is_empty()),
                     default_name: plan.default_name.clone(),
@@ -580,7 +586,13 @@ mod tests {
     #[test]
     fn rf_ses_03_a_claude_pane_resumes_its_exact_session() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c-9a".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c-9a".into(),
+                launch: 0,
+            },
+        );
         let saved = ws.to_session();
         let (back, fx, notes) = restore(&saved, &all_exist(&saved));
         assert!(notes.is_empty(), "{notes:?}");
@@ -595,8 +607,14 @@ mod tests {
     #[test]
     fn rf_ses_04_a_session_the_user_ended_starts_fresh() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
-        ws.on_pane_event(pane, PaneEvent::EndedByUser);
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
+        ws.on_pane_event(pane, PaneEvent::EndedByUser { launch: 0 });
         let saved = ws.to_session();
         let record = &saved.projects[0].tabs[1].panes[0];
         assert!(record.agent.as_ref().unwrap().ended_explicitly);
@@ -604,7 +622,13 @@ mod tests {
         assert_eq!(spawn_of(&fx, pane).2, None);
 
         ws.apply(Command::RelaunchPane { pane }, &resolve).unwrap();
-        ws.on_pane_event(pane, PaneEvent::SessionId("new".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "new".into(),
+                launch: 1,
+            },
+        );
         let saved = ws.to_session();
         let (_, fx, _) = restore(&saved, &all_exist(&saved));
         assert_eq!(spawn_of(&fx, pane).2, Some("new"));
@@ -613,11 +637,95 @@ mod tests {
     #[test]
     fn rn_04_terminating_an_agent_pane_ends_its_session() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
         ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
         let saved = ws.to_session();
         let (_, fx, _) = restore(&saved, &all_exist(&saved));
         assert_eq!(spawn_of(&fx, pane).2, None);
+    }
+
+    /// The resume the next start of `ws` gives `pane`.
+    fn resumed_after_restart(ws: &Workspace, pane: PaneId) -> Option<String> {
+        let saved = ws.to_session();
+        let (_, fx, _) = restore(&saved, &all_exist(&saved));
+        spawn_of(&fx, pane).2.map(str::to_owned)
+    }
+
+    fn session(id: &str, launch: u64) -> PaneEvent {
+        PaneEvent::SessionId {
+            id: id.into(),
+            launch,
+        }
+    }
+
+    #[test]
+    fn rn_04_a_terminate_applied_before_a_fresh_launch_reports_its_session_still_ends_it() {
+        // The pane reports its new session before spawning; the terminate
+        // can reach the workspace first.
+        let (mut ws, pane) = workspace("claude");
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        ws.on_pane_event(pane, session("5e2d-fresh", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rn_04_a_terminate_applied_before_a_restored_launch_reports_its_session_still_ends_it() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        let saved = ws.to_session();
+        let (mut back, fx, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(spawn_of(&fx, pane).2, Some("4f1c"));
+        back.apply(Command::TerminatePane { pane }, &resolve)
+            .unwrap();
+        back.on_pane_event(pane, session("4f1c", 0));
+        assert_eq!(resumed_after_restart(&back, pane), None);
+    }
+
+    #[test]
+    fn rn_04_a_hook_session_after_a_terminate_does_not_bring_the_session_back() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        // `SessionStart` from the hook, still on its way when the user ended
+        // the launch.
+        ws.on_pane_event(pane, session("4f1c-hook", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rn_04_reports_of_a_launch_the_user_replaced_are_dropped() {
+        let (mut ws, pane) = workspace("claude");
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        ws.apply(Command::RelaunchPane { pane }, &resolve).unwrap();
+        // A quit before the new launch names its session starts fresh.
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+        ws.on_pane_event(pane, session("old", 0));
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+        ws.on_pane_event(pane, session("new", 1));
+        ws.on_pane_event(pane, PaneEvent::EndedByUser { launch: 0 });
+        assert_eq!(resumed_after_restart(&ws, pane).as_deref(), Some("new"));
+        ws.on_pane_event(pane, PaneEvent::EndedByUser { launch: 1 });
+        assert_eq!(resumed_after_restart(&ws, pane), None);
+    }
+
+    #[test]
+    fn rf_ses_04_the_new_session_of_a_restored_ended_pane_is_resumed_next_time() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(pane, session("4f1c", 0));
+        ws.apply(Command::TerminatePane { pane }, &resolve).unwrap();
+        let saved = ws.to_session();
+        let (mut back, fx, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(spawn_of(&fx, pane).2, None);
+        // A quit before the fresh launch names its session starts fresh too.
+        assert_eq!(resumed_after_restart(&back, pane), None);
+        back.on_pane_event(pane, session("7a3b", 0));
+        assert_eq!(resumed_after_restart(&back, pane).as_deref(), Some("7a3b"));
     }
 
     #[test]
@@ -700,7 +808,13 @@ mod tests {
     #[test]
     fn an_unknown_profile_opens_the_shell_with_a_notice() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
         let mut saved = ws.to_session();
         let record = &mut saved.projects[0].tabs[1].panes[0];
         record.profile = yien_session::ProfileId::new("aider");
@@ -713,7 +827,13 @@ mod tests {
     #[test]
     fn rf_ses_12_a_fallback_folder_is_never_saved_over_the_original() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
         let shell = ws.tabs[0].focused;
         ws.on_pane_event(shell, PaneEvent::Cwd("E:/offline".into()));
         let mut saved = ws.to_session();
@@ -725,7 +845,13 @@ mod tests {
         let (_, cwd, resume) = spawn_of(&fx, pane);
         assert_eq!((cwd, resume), (ROOT, None));
         assert!(notes.iter().any(|n| n.contains("new session")), "{notes:?}");
-        back.on_pane_event(pane, PaneEvent::SessionId("fresh".into()));
+        back.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "fresh".into(),
+                launch: 0,
+            },
+        );
         back.on_pane_event(shell, PaneEvent::Cwd(ROOT.into()));
         assert_eq!(back.to_session(), saved);
 
@@ -737,7 +863,13 @@ mod tests {
     #[test]
     fn an_unknown_profile_and_its_session_are_saved_as_they_were() {
         let (mut ws, pane) = workspace("claude");
-        ws.on_pane_event(pane, PaneEvent::SessionId("4f1c".into()));
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
         let mut saved = ws.to_session();
         let record = &mut saved.projects[0].tabs[1].panes[0];
         record.profile = yien_session::ProfileId::new("aider");

@@ -165,6 +165,9 @@ pub struct CoreConfig {
     /// Where the workspace is restored from at start and saved to after
     /// every change (RF-SES-01, RF-SES-02). `None` keeps nothing.
     pub session: Option<SessionStore>,
+    /// How long after the last change the workspace is written;
+    /// [`SAVE_DEBOUNCE`] by default.
+    pub save_debounce: Duration,
     /// The folder opened as a project when no session is restored.
     pub start_project: Option<String>,
     /// Git facts for tabs: the branch of every tab and the selected tab's
@@ -190,6 +193,7 @@ impl Default for CoreConfig {
             worker_threads: 2,
             hooks: None,
             session: None,
+            save_debounce: SAVE_DEBOUNCE,
             start_project: None,
             git: None,
             cli_dirs: CliDirs::default(),
@@ -286,7 +290,8 @@ impl Core {
     ///
     /// With [`CoreConfig::session`] set, the saved session is restored before
     /// the first snapshot, every agent pane resuming its session (RF-SES-03),
-    /// and the workspace is saved [`SAVE_DEBOUNCE`] after each change. When
+    /// and the workspace is saved [`CoreConfig::save_debounce`] after each
+    /// change. When
     /// nothing is restored, [`CoreConfig::start_project`] is opened.
     pub fn start(
         backend: Arc<dyn PtyBackend>,
@@ -325,7 +330,7 @@ impl Core {
         let writer = config
             .session
             .clone()
-            .and_then(|store| persist::Writer::start(store, SAVE_DEBOUNCE, events.clone()));
+            .and_then(|store| persist::Writer::start(store, config.save_debounce, events.clone()));
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),

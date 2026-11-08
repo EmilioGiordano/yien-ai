@@ -20,7 +20,7 @@ use crate::workspace::{Disk, folders};
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// The longest a change waits to be written while changes keep coming
-/// (RNF-09).
+/// (RNF-09), unless the debounce is longer.
 const SAVE_AT_MOST_AFTER: Duration = Duration::from_secs(2);
 
 /// Where the core keeps the saved session. Cheap to clone; clones share the
@@ -288,7 +288,8 @@ fn write_loop(
                 return;
             }
             let due = state.changed_at.map(|at| {
-                let latest = state.pending_since.map_or(at, |p| p + SAVE_AT_MOST_AFTER);
+                let most = SAVE_AT_MOST_AFTER.max(debounce);
+                let latest = state.pending_since.map_or(at, |p| p + most);
                 (at + debounce).min(latest)
             });
             match due {
