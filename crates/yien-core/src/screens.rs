@@ -174,7 +174,7 @@ impl ScreenSource {
 
     /// The dump of the engine and the change count it shows; `None` before
     /// the program first started.
-    fn dump(&self, limits: DumpLimits) -> Option<(u64, Vec<u8>)> {
+    pub(crate) fn dump(&self, limits: DumpLimits) -> Option<(u64, Vec<u8>)> {
         let engine = self
             .engine
             .lock()
