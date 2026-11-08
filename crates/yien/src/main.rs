@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod attention;
+mod files;
 mod panic_log;
 mod settings;
 
@@ -79,6 +80,7 @@ fn main() -> ExitCode {
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
     let (settings, settings_watcher) = settings::start();
+    let files = files::start();
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
@@ -87,6 +89,7 @@ fn main() -> ExitCode {
         events,
         attention,
         settings,
+        files,
         move || {
             tracing::info!("yien exiting");
             if let Some(watcher) = &settings_watcher {

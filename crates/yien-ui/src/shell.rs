@@ -16,7 +16,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
-    SHELL_PROFILE, TabId,
+    SHELL_PROFILE, TabGit, TabId,
 };
 
 use crate::actions::*;
@@ -24,8 +24,9 @@ use crate::assets::{self, state_icon};
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
+use crate::files::Files;
 use crate::fonts::Fonts;
-use crate::git::ContextGit;
+use crate::git::{ContextGit, FileMark};
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
@@ -41,8 +42,11 @@ use crate::settings::{Settings, SettingsHost, SettingsModel};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
 
+mod files;
 mod settings;
 mod worktrees;
+
+use files::{ContextView, FilesPanel};
 
 const TAB_BAR_WIDTH: f32 = 264.0;
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -82,6 +86,10 @@ pub(crate) struct Shell {
     rebinds: Rebinds,
     tab_bar_open: bool,
     context_bar_open: bool,
+    /// What the context bar shows under the branch head.
+    context_view: ContextView,
+    /// The Files view (RF-CTX-01).
+    files: FilesPanel,
     focus: FocusHandle,
     title: String,
     link: Rc<Link>,
@@ -146,11 +154,13 @@ struct OpenPalette {
 }
 
 impl Shell {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         link: Rc<Link>,
         mut events: mpsc::Receiver<CoreMsg>,
         os: Rc<dyn OsAttention>,
         settings: Settings,
+        files: Files,
         base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -212,6 +222,7 @@ impl Shell {
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
         });
+        let files = FilesPanel::new(files, window, cx);
         let mut shell = Self {
             workspace: WorkspaceView::default(),
             // `apply_config` below sets both from the settings.
@@ -226,6 +237,12 @@ impl Shell {
             rebinds: Rebinds::new(),
             tab_bar_open: true,
             context_bar_open: true,
+            context_view: if files.seeded() {
+                ContextView::Files
+            } else {
+                ContextView::Changes
+            },
+            files,
             focus,
             title: String::new(),
             link,
@@ -265,6 +282,7 @@ impl Shell {
     fn apply(&mut self, batch: Vec<CoreMsg>, window: &mut Window, cx: &mut Context<Self>) {
         let mut ready: BTreeSet<PaneId> = BTreeSet::new();
         let mut changed = false;
+        let mut git_changed = Vec::new();
         for msg in batch {
             match msg {
                 CoreMsg::PaneFrameReady { pane } => {
@@ -308,6 +326,7 @@ impl Shell {
                     if !self.workspace.tab_git(tab, git) {
                         continue;
                     }
+                    git_changed.push(tab);
                 }
                 CoreMsg::NotificationsMuted { muted } => {
                     self.workspace.set_notifications_muted(muted);
@@ -330,6 +349,8 @@ impl Shell {
         if changed {
             self.sync_focus(window, cx);
             self.update_alerts(window, cx);
+            self.sync_files(window, cx);
+            self.files_git_changed(&git_changed, cx);
             cx.notify();
         }
     }
@@ -481,6 +502,7 @@ impl Shell {
         if !self.context_bar_open && self.region(window, cx) == Region::ContextBar {
             self.give_back_keyboard(window, cx);
         }
+        self.sync_files(window, cx);
         cx.notify();
     }
 
@@ -509,6 +531,9 @@ impl Shell {
                 self.tab_cursor = region::cursor_on_entry(&rows, self.tab_cursor, selected);
                 window.focus(&self.tab_bar_focus, cx);
                 self.keyboard_in_bar = true;
+            }
+            Region::ContextBar if self.context_view == ContextView::Files => {
+                self.focus_files(window, cx);
             }
             Region::ContextBar => {
                 window.focus(&self.context_focus, cx);
@@ -2334,7 +2359,7 @@ impl Shell {
             })
     }
 
-    fn render_context_bar(&self) -> impl IntoElement {
+    fn render_context_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let Some(tab) = self.workspace.selected_tab() else {
             // With no tab selected there is no branch to speak of.
@@ -2360,45 +2385,63 @@ impl Shell {
         };
         let hidden = git.hidden();
         let repository = git.repository;
-        let rows = git.files.into_iter().enumerate().map(|(at, file)| {
-            h_flex()
-                .id(("git-file", at))
-                .role(Role::ListItem)
-                .aria_label(file.label)
-                .items_center()
-                .gap(px(8.0))
-                .px(px(6.0))
-                .py(px(4.0))
-                .rounded(px(5.0))
-                .text_size(t.text(12.5))
-                .when_some(mono.clone(), |d, family| d.font_family(family))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(16.0))
-                        .text_center()
-                        .text_size(t.text(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.mark_color(file.mark))
-                        .child(file.mark.letter()),
-                )
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .flex_shrink_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_color(t.muted)
-                                .child(file.folder),
-                        )
-                        .child(div().flex_none().child(file.name)),
-                )
-        });
+        let repo_root = match self.workspace.git_of(tab.id) {
+            Some(TabGit::Repository(facts)) => Some(facts.root.clone()),
+            _ => None,
+        };
+        let changes_view = self.context_view == ContextView::Changes;
+        let rows = git
+            .files
+            .into_iter()
+            .enumerate()
+            .map(|(at, file)| {
+                let path = format!("{}{}", file.folder, file.name);
+                let deleted = file.mark == FileMark::Deleted;
+                let root = repo_root.clone();
+                h_flex()
+                    .id(("git-file", at))
+                    .role(Role::ListItem)
+                    .aria_label(file.label)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.click_count() >= 2 {
+                            this.open_changed_file(root.as_deref(), &path, deleted, cx);
+                        }
+                    }))
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .rounded(px(5.0))
+                    .text_size(t.text(12.5))
+                    .when_some(mono.clone(), |d, family| d.font_family(family))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(16.0))
+                            .text_center()
+                            .text_size(t.text(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.mark_color(file.mark))
+                            .child(file.mark.letter()),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .child(
+                                div()
+                                    .flex_shrink_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_color(t.muted)
+                                    .child(file.folder),
+                            )
+                            .child(div().flex_none().child(file.name)),
+                    )
+            })
+            .collect::<Vec<_>>();
         self.context_bar_frame()
             .child(
                 h_flex()
@@ -2486,34 +2529,13 @@ impl Shell {
                         )
                     }),
             )
-            .when(repository, |bar| {
-                bar.child(
-                    h_flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(8.0))
-                        .px(px(12.0))
-                        .pt(px(10.0))
-                        .pb(px(6.0))
-                        .text_size(t.text(12.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.muted)
-                        .child("Changes")
-                        .child(
-                            div()
-                                .text_size(t.text(11.0))
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(t.faint)
-                                .when_some(mono.clone(), |d, family| d.font_family(family))
-                                .child(git.changed.to_string()),
-                        ),
-                )
-            })
-            .when_some(git.note, |bar, note| {
+            .child(self.render_context_tabs(repository.then_some(git.changed), cx))
+            .when(!changes_view, |bar| bar.child(self.render_files(cx)))
+            .when_some(git.note.filter(|_| changes_view), |bar, note| {
                 bar.child(
                     div()
                         .flex_none()
-                        .when(!repository, |d| d.pt(px(10.0)))
+                        .pt(px(10.0))
                         .px(px(12.0))
                         .pb(px(8.0))
                         .text_size(t.text(12.5))
@@ -2521,28 +2543,50 @@ impl Shell {
                         .child(note),
                 )
             })
-            .child(
-                v_flex()
-                    .id("git-changes")
-                    .role(Role::List)
-                    .aria_label("Changed files")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(6.0))
-                    .pb(px(8.0))
-                    .children(rows)
-                    .when(hidden > 0, |list| {
-                        list.child(
-                            div()
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .text_size(t.text(12.0))
-                                .text_color(t.faint)
-                                .child(format!("and {hidden} more")),
-                        )
-                    }),
-            )
+            .when(changes_view, |bar| {
+                bar.child(
+                    v_flex()
+                        .id("git-changes")
+                        .role(Role::List)
+                        .aria_label("Changed files")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px(px(6.0))
+                        .pb(px(8.0))
+                        .children(rows)
+                        .when(hidden > 0, |list| {
+                            list.child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(4.0))
+                                    .text_size(t.text(12.0))
+                                    .text_color(t.faint)
+                                    .child(format!("and {hidden} more")),
+                            )
+                        }),
+                )
+            })
+    }
+
+    /// Opens a file of the change list, whose path is relative to the
+    /// repository's root, not to the tab's folder (RF-CTX-03, RF-CTX-04).
+    fn open_changed_file(
+        &mut self,
+        root: Option<&str>,
+        path: &str,
+        deleted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if deleted {
+            self.notice = Some(format!("{path} was deleted; there is nothing to open."));
+            cx.notify();
+            return;
+        }
+        let Some(root) = root else { return };
+        let mut file = PathBuf::from(root);
+        file.extend(path.split('/').filter(|p| !p.is_empty()));
+        self.open_file(file, cx);
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
@@ -2697,6 +2741,15 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
             .on_action(cx.listener(Self::context_bar_leave))
+            .on_action(cx.listener(Self::show_files))
+            .on_action(cx.listener(Self::show_changes))
+            .on_action(cx.listener(Self::refresh_files))
+            .on_action(cx.listener(Self::file_tree_up))
+            .on_action(cx.listener(Self::file_tree_down))
+            .on_action(cx.listener(Self::file_tree_collapse))
+            .on_action(cx.listener(Self::file_tree_expand))
+            .on_action(cx.listener(Self::file_tree_open))
+            .on_action(cx.listener(Self::file_tree_escape))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
@@ -2720,7 +2773,7 @@ impl Render for Shell {
                     .when(self.tab_bar_open, |row| row.child(self.render_tab_bar(cx)))
                     .child(self.render_panes(cx))
                     .when(self.context_bar_open, |row| {
-                        row.child(self.render_context_bar())
+                        row.child(self.render_context_bar(cx))
                     }),
             )
             .child(self.render_status_bar())
@@ -2801,6 +2854,10 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("tab row double-click", "tab.rename"),
     ("worktree prompt buttons", "tab.new_worktree"),
     ("worktree question buttons", "pane.close"),
+    ("context bar's Changes tab", "changes.show"),
+    ("context bar's Files tab", "files.show"),
+    ("file tree rows", "files.show"),
+    ("changed file double-click", "changes.show"),
 ];
 
 #[cfg(test)]
