@@ -20,12 +20,14 @@
 mod alacritty;
 pub mod osc_scan;
 mod palette;
+mod screen_dump;
 
 use std::time::Duration;
 
 pub use alacritty::{AlacrittyEngine, MAX_MATCHES, MAX_SCROLLBACK};
 pub use osc_scan::{OscSignal, PromptMark};
 pub use palette::{Palette, Rgb};
+pub use screen_dump::{DUMP_END, DumpLimits, is_screen_dump};
 pub use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, GridPoint, Link, LinkKind, Match, Modes,
     MouseEncoding, MouseTracking, SelectionKind, Side, Size, ViewportPoint,
@@ -182,4 +184,25 @@ pub trait VtEngine: Send {
     /// The link under a viewport cell: an OSC 8 hyperlink, a URL or an
     /// absolute Windows path.
     fn link_at(&mut self, at: ViewportPoint) -> Option<Link>;
+
+    /// The screen and the newest scrollback rows as VT text, within
+    /// `limits` (RF-SES-10). Fed to a fresh engine of the same size it gives
+    /// back the same cells and cursor; [`DUMP_END`] then moves below the text.
+    /// With the alternate screen active, only that screen is dumped. Empty
+    /// when there is nothing to keep.
+    ///
+    /// ```
+    /// use yien_vt::{AlacrittyEngine, DUMP_END, DumpLimits, VtConfig, VtEngine};
+    ///
+    /// let mut old = AlacrittyEngine::new(VtConfig::default(), 20, 3);
+    /// old.feed(b"\x1b[31mred\x1b[0m\r\nplain");
+    /// let dump = old.screen_dump(DumpLimits::default());
+    /// let mut new = AlacrittyEngine::new(VtConfig::default(), 20, 3);
+    /// new.feed(&dump);
+    /// assert_eq!(new.frame(), old.frame());
+    /// new.feed(DUMP_END);
+    /// new.feed(b"\r\nnext");
+    /// assert_eq!(new.frame().line_text(2), "next");
+    /// ```
+    fn screen_dump(&self, limits: DumpLimits) -> Vec<u8>;
 }
