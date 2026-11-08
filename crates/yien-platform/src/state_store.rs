@@ -40,6 +40,75 @@ impl FileStore {
         &self.dir
     }
 
+    /// The file's bytes when it holds at most `limit` of them; `None` when it
+    /// does not exist or is bigger.
+    ///
+    /// ```no_run
+    /// let store = yien_platform::state_store::FileStore::new("screens");
+    /// assert!(store.read_at_most("1.vt", 1024)?.is_none_or(|b| b.len() <= 1024));
+    /// # Ok::<(), yien_session::StoreError>(())
+    /// ```
+    pub fn read_at_most(&self, name: &str, limit: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        let path = self.path("read", name)?;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(StoreError::new("read", name, err)),
+        };
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(
+            &mut io::Read::take(file, limit.saturating_add(1)),
+            &mut bytes,
+        )
+        .map_err(|err| StoreError::new("read", name, err))?;
+        Ok((bytes.len() as u64 <= limit).then_some(bytes))
+    }
+
+    /// Removes the file; one that does not exist is not an error.
+    ///
+    /// ```no_run
+    /// let mut store = yien_platform::state_store::FileStore::new("screens");
+    /// store.remove("1.vt")?;
+    /// # Ok::<(), yien_session::StoreError>(())
+    /// ```
+    pub fn remove(&mut self, name: &str) -> Result<(), StoreError> {
+        let path = self.path("remove", name)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(StoreError::new("remove", name, err)),
+        }
+    }
+
+    /// The names of the plain files in the directory; none when it does not
+    /// exist yet.
+    ///
+    /// ```no_run
+    /// let store = yien_platform::state_store::FileStore::new("screens");
+    /// for name in store.list()? {
+    ///     println!("{name}");
+    /// }
+    /// # Ok::<(), yien_session::StoreError>(())
+    /// ```
+    pub fn list(&self) -> Result<Vec<String>, StoreError> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StoreError::new("list", ".", err)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| StoreError::new("list", ".", err))?;
+            if entry.file_type().is_ok_and(|t| t.is_file())
+                && let Some(name) = entry.file_name().to_str()
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     /// Only plain file names: nothing outside the directory is ever touched (RNF-14).
     fn path(&self, op: &'static str, name: &str) -> Result<PathBuf, StoreError> {
         let plain =
@@ -70,7 +139,14 @@ impl Store for FileStore {
         let temp = self.path("write", &format!("{name}.tmp"))?;
         let write = || -> io::Result<()> {
             fs::create_dir_all(&self.dir)?;
-            let mut file = File::create(&temp)?;
+            // A leftover temp, or a link planted in its place, is removed, never
+            // followed: the write lands only in a file it creates.
+            if let Err(err) = fs::remove_file(&temp)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                return Err(err);
+            }
+            let mut file = File::options().write(true).create_new(true).open(&temp)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);

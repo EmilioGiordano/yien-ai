@@ -10,7 +10,7 @@ use yien_proto::frame::{
 };
 use yien_proto::{AgentState, ClientMsg, Command, CoreMsg, PaneId};
 use yien_pty::{FakeChild, FakePty};
-use yien_vt::{AlacrittyEngine, Palette, VtConfig, VtEngine, VtError, VtOutput};
+use yien_vt::{AlacrittyEngine, DumpLimits, Palette, VtConfig, VtEngine, VtError, VtOutput};
 
 use crate::{Core, CoreConfig, CoreHandle, ShellCommand};
 
@@ -84,6 +84,9 @@ impl VtEngine for Faulty {
     }
     fn link_at(&mut self, at: ViewportPoint) -> Option<Link> {
         self.0.link_at(at)
+    }
+    fn screen_dump(&self, limits: DumpLimits) -> Vec<u8> {
+        self.0.screen_dump(limits)
     }
 }
 
