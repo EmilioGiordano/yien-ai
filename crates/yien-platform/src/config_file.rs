@@ -253,6 +253,67 @@ fn open_now(path: &Path, command: Option<&[String]>) -> Result<(), OpenError> {
     Ok(())
 }
 
+/// The file as the last argument of a Windows command line, always quoted
+/// (a Windows path cannot hold `"`), its trailing backslashes doubled so
+/// the closing quote stays a quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn quote_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let trailing = text.len() - text.trim_end_matches('\\').len();
+    format!("\"{text}{}\"", "\\".repeat(trailing))
+}
+
+/// Whether `program` is, or resolves on `PATH` with `PATHEXT` to, a batch
+/// file, which Windows runs through cmd.exe.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_batch(program: &str) -> bool {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    resolves_to_batch(
+        program,
+        &std::env::split_paths(&path_var).collect::<Vec<_>>(),
+        &pathext,
+    )
+}
+
+fn resolves_to_batch(program: &str, dirs: &[PathBuf], pathext: &str) -> bool {
+    let batch = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    };
+    let program = Path::new(program);
+    if program.extension().is_some() {
+        return batch(program);
+    }
+    let candidates: Vec<PathBuf> = if program.components().count() > 1 {
+        vec![program.to_path_buf()]
+    } else {
+        dirs.iter().map(|d| d.join(program)).collect()
+    };
+    for base in candidates {
+        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
+            let file = base.with_extension(ext.trim_start_matches('.'));
+            if file.is_file() {
+                return batch(&file);
+            }
+        }
+    }
+    false
+}
+
+/// Whether arguments and a path can go to a batch file: nothing cmd.exe
+/// would expand or treat as syntax, inside quotes or not.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn batch_safe(args: &[String], path: &Path) -> bool {
+    const META: &[char] = &['%', '!', '"', '^', '&', '|', '<', '>', '(', ')'];
+    let path = path.to_string_lossy();
+    args.iter()
+        .map(String::as_str)
+        .chain(std::iter::once(path.as_ref()))
+        .all(|a| !a.contains(META))
+}
+
 /// One argument for a Windows command line: quoted when it holds a space, a
 /// tab or a quote, with backslashes doubled before a quote (the MSVC rules
 /// `CommandLineToArgvW` follows).
@@ -395,6 +456,35 @@ mod tests {
             let _ = tx.send(r);
         });
         assert!(matches!(rx.recv().unwrap(), Err(OpenError::BadEditor(_))));
+    }
+
+    #[test]
+    fn the_file_argument_is_always_quoted() {
+        assert_eq!(
+            quote_path(Path::new(r"C:\Data\config.toml")),
+            r#""C:\Data\config.toml""#
+        );
+        assert_eq!(quote_path(Path::new(r"C:\dir\")), r#""C:\dir\\""#);
+    }
+
+    #[test]
+    fn batch_editors_are_found_on_the_path_and_given_only_plain_arguments() {
+        let dir = scratch("batch");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ed.cmd"), "").unwrap();
+        fs::write(dir.join("tool.exe"), "").unwrap();
+        let dirs = [dir.clone()];
+        let ext = ".COM;.EXE;.BAT;.CMD";
+        assert!(resolves_to_batch("ed", &dirs, ext));
+        assert!(!resolves_to_batch("tool", &dirs, ext));
+        assert!(!resolves_to_batch("missing", &dirs, ext));
+        assert!(resolves_to_batch(r"C:\x\run.BAT", &dirs, ext));
+        assert!(!resolves_to_batch("notepad.exe", &dirs, ext));
+        let file = Path::new(r"C:\Data\config.toml");
+        assert!(batch_safe(&["--new-window".into()], file));
+        assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
+        assert!(!batch_safe(&["a&calc".into()], file));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
