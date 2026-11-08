@@ -28,6 +28,7 @@
 mod hooks;
 mod machine;
 mod profile;
+mod question;
 mod signal;
 mod user;
 mod version;
@@ -45,6 +46,7 @@ pub use profile::{
     Rule, RuleChoice, ScreenRule, SessionIdMode, SessionReader, builtin_profiles, evaluate_screen,
     resolve_profiles,
 };
+pub use question::{MAX_QUESTION_CHARS, claude_hook_question};
 pub use signal::{
     AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
     SessionEndReason, SessionStartSource, Signal, Source,

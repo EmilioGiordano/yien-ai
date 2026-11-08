@@ -105,6 +105,25 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-j"]
     ),
     command!(
+        "agent.next_done",
+        "agent: go to next ready to review",
+        JumpToDone,
+        ["ctrl-shift-u"]
+    ),
+    command!(
+        "agent.tray",
+        "agent: show attention tray",
+        ToggleAttentionTray,
+        ["ctrl-shift-m"]
+    ),
+    command!(
+        "view.group_tabs",
+        "view: group tabs by state / by project",
+        ToggleTabGrouping,
+        []
+    ),
+    command!("app.quit", "app: quit YIEN", Quit, []),
+    command!(
         "agent.resume_session",
         "agent: resume a past session…",
         ResumePastSession,
@@ -518,6 +537,8 @@ mod tests {
             ("pane.split_down", SPLIT_DOWN_KEYS),
             ("pane.close", CLOSE_PANE_KEYS),
             ("agent.next_needs_you", JUMP_KEYS),
+            ("agent.next_done", JUMP_DONE_KEYS),
+            ("agent.tray", TRAY_KEYS),
             ("tab.new", NEW_TAB_KEYS),
             ("tab.new_claude", NEW_CLAUDE_TAB_KEYS),
             ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),

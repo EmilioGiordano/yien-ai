@@ -103,6 +103,37 @@ impl fmt::Debug for SessionTitle {
     }
 }
 
+/// What an agent that needs the user asks, as its hook summarised it: one
+/// line of at most 160 characters (RF-ATN-13). Its `Debug` shows only the
+/// length, so the text never reaches a log (plan §5.4).
+///
+/// ```
+/// let q = yien_proto::PendingQuestion::new("Permission to use Bash");
+/// assert_eq!(format!("{q:?}"), "PendingQuestion(22 chars)");
+/// assert_eq!(q.as_str(), "Permission to use Bash");
+/// ```
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PendingQuestion(String);
+
+impl PendingQuestion {
+    /// Wraps a question.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    /// The question as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PendingQuestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PendingQuestion({} chars)", self.0.chars().count())
+    }
+}
+
 /// A past session of an agent CLI, as its own files describe it
 /// (RF-SES-07).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,6 +814,13 @@ pub struct PaneInfo {
     /// sequence number shared by all panes. Lower has waited longer
     /// (RF-ATN-05). Not a time.
     pub needs_you_since: Option<u64>,
+    /// While `state` is "needs you", error or done: when it entered that
+    /// kind of state, on the same sequence as `needs_you_since`. Lower got
+    /// there earlier (RF-ATN-13, RF-ATN-14). Not a time.
+    pub attention_since: Option<u64>,
+    /// While `state` is "needs you": what the agent asks, when its hooks
+    /// said (RF-ATN-13).
+    pub question: Option<PendingQuestion>,
     /// The agent's structured channel is unavailable or failed, so its state
     /// cannot be told and stays idle (RN-02): the "signal lost" mark.
     pub signal_lost: bool,
@@ -970,6 +1008,44 @@ mod tests {
         assert!(!whole.within(&WorktreeFiles::of(&many[1..])));
     }
 
+    #[test]
+    fn rf_atn_13_a_pane_carries_its_question_and_its_place_across_the_wire() {
+        let info = PaneInfo {
+            id: PaneId::new(3),
+            tab: TabId::new(2),
+            name: "claude".into(),
+            profile: "Claude Code".into(),
+            profile_id: ProfileId::new("claude"),
+            title: None,
+            cwd: None,
+            state: AgentState::NeedsYou(NeedsReason::Permission),
+            running: true,
+            exit_code: None,
+            session_id: None,
+            needs_you_since: Some(4),
+            attention_since: Some(4),
+            question: Some(PendingQuestion::new("Permission to use Bash")),
+            signal_lost: false,
+            runs_session: true,
+        };
+        let msg = CoreMsg::PaneUpdated(info);
+        assert_eq!(round_trip(&msg), msg);
+        let json = serde_json::to_string(&PendingQuestion::new("q")).unwrap();
+        assert_eq!(json, "\"q\"", "a plain string on the wire");
+        let done = PaneInfo {
+            state: AgentState::Done,
+            needs_you_since: None,
+            attention_since: Some(9),
+            question: None,
+            ..match msg {
+                CoreMsg::PaneUpdated(info) => info,
+                _ => unreachable!(),
+            }
+        };
+        let msg = CoreMsg::PaneUpdated(done);
+        assert_eq!(round_trip(&msg), msg);
+    }
+
     fn round_trip<T>(value: &T) -> T
     where
         T: Serialize + for<'de> Deserialize<'de>,
@@ -1144,6 +1220,8 @@ mod tests {
                 exit_code: None,
                 session_id: Some("4f1c".into()),
                 needs_you_since: None,
+                attention_since: None,
+                question: None,
                 signal_lost: false,
                 runs_session: true,
             }),

@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
-    AgentState, Command, CoreMsg, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
-    TabId, TabInfo, WorkspaceSnapshot, same_folder,
+    AgentState, Command, CoreMsg, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo,
+    ProjectId, ProjectInfo, TabId, TabInfo, WorkspaceSnapshot, same_folder,
 };
 use yien_session::is_session_id;
 
@@ -73,8 +73,11 @@ pub(crate) enum Effect {
 /// What a pane actor reports about its pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneEvent {
-    /// The agent state, and while it is "needs you" when it got there.
+    /// The agent state, and while it is "needs you", error or done when it
+    /// got to that kind of state.
     State(AgentState, Option<u64>),
+    /// What the agent asks while it needs the user (RF-ATN-13).
+    Question(Option<PendingQuestion>),
     /// The "signal lost" mark went on or off.
     SignalLost(bool),
     Title(Option<String>),
@@ -112,6 +115,7 @@ impl PaneEvent {
         matches!(
             self,
             PaneEvent::State(..)
+                | PaneEvent::Question(_)
                 | PaneEvent::SignalLost(_)
                 | PaneEvent::Title(_)
                 | PaneEvent::Cwd(_)
@@ -200,7 +204,10 @@ struct Pane {
     running: bool,
     exit_code: Option<u32>,
     session_id: Option<String>,
-    needs_you_since: Option<u64>,
+    /// While in "needs you", error or done: when it got to that kind of
+    /// state (RF-ATN-05, RF-ATN-13).
+    attention_since: Option<u64>,
+    question: Option<PendingQuestion>,
     signal_lost: bool,
     visible: bool,
     seen: bool,
@@ -655,7 +662,7 @@ impl Workspace {
             .into_iter()
             .filter_map(|id| {
                 let p = self.panes.get(&id)?;
-                p.state.is_red().then_some((p.needs_you_since, id))
+                p.state.is_red().then_some((p.attention_since, id))
             })
             .min()
             .map(|(_, id)| id)
@@ -814,7 +821,8 @@ impl Workspace {
                 running: false,
                 exit_code: None,
                 session_id: resume.clone(),
-                needs_you_since: None,
+                attention_since: None,
+                question: None,
                 signal_lost: false,
                 visible: false,
                 seen: false,
@@ -991,10 +999,16 @@ impl Workspace {
         match event {
             PaneEvent::State(state, since) => {
                 p.state = state;
-                let since_changed = p.needs_you_since != since;
-                p.needs_you_since = since;
+                let since_changed = p.attention_since != since;
+                p.attention_since = since;
                 fx.push(Effect::Emit(CoreMsg::PaneState { pane, state }));
                 if since_changed {
+                    self.emit_pane(pane, &mut fx);
+                }
+            }
+            PaneEvent::Question(question) => {
+                if p.question != question {
+                    p.question = question;
                     self.emit_pane(pane, &mut fx);
                 }
             }
@@ -1062,7 +1076,8 @@ impl Workspace {
                 p.standin = None;
                 // The restarted actor starts idle and reports no change, so a
                 // red mark would otherwise outlive the agent that raised it.
-                p.needs_you_since = None;
+                p.attention_since = None;
+                p.question = None;
                 if p.state != AgentState::Idle {
                     p.state = AgentState::Idle;
                     fx.push(Effect::Emit(CoreMsg::PaneState {
@@ -1182,7 +1197,9 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
         running: p.running,
         exit_code: p.exit_code,
         session_id: p.session_id.clone(),
-        needs_you_since: p.needs_you_since,
+        needs_you_since: p.attention_since.filter(|_| p.state.is_red()),
+        attention_since: p.attention_since,
+        question: p.question.clone().filter(|_| p.state.is_red()),
         signal_lost: p.signal_lost,
         runs_session: p.runs_session(),
     }
@@ -1667,6 +1684,37 @@ mod tests {
         assert!(fx.iter().any(|e| matches!(
             e,
             Effect::Emit(CoreMsg::PaneUpdated(p)) if p.signal_lost
+        )));
+    }
+
+    #[test]
+    fn rf_atn_13_a_question_republishes_the_pane_and_goes_with_the_red() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let needs = AgentState::NeedsYou(yien_proto::NeedsReason::Permission);
+        ws.on_pane_event(a, PaneEvent::State(needs, Some(2)));
+        let asked = Some(PendingQuestion::new("Permission to use Bash"));
+        let fx = ws.on_pane_event(a, PaneEvent::Question(asked.clone()));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.question == asked && p.attention_since == Some(2)
+        )));
+        let fx = ws.on_pane_event(a, PaneEvent::Question(asked.clone()));
+        assert!(fx.is_empty(), "the same question again changes nothing");
+        // A state report lands before the actor's own clearing question.
+        let fx = ws.on_pane_event(a, PaneEvent::State(AgentState::Done, Some(5)));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p))
+                if p.question.is_none() && p.needs_you_since.is_none() && p.attention_since == Some(5)
+        )));
+        ws.on_pane_event(a, PaneEvent::State(needs, Some(6)));
+        ws.on_pane_event(a, PaneEvent::Question(asked));
+        let fx = ws.on_pane_event(a, PaneEvent::Crashed);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneUpdated(p))
+                if p.question.is_none() && p.attention_since.is_none()
         )));
     }
 

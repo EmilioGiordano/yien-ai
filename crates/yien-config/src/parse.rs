@@ -9,7 +9,7 @@ use toml::de::{DeTable, DeValue};
 use crate::schema::{self, KEYS_TABLE, TABLES};
 use crate::{
     KeyOverride, Loaded, MAX_FILE_BYTES, MAX_FONT_SIZE, MAX_UI_FONT_SIZE, MIN_FONT_SIZE, Problem,
-    ThemeSetting,
+    TabGrouping, ThemeSetting,
 };
 
 /// Parses and checks the file. An `Err` is the first problem that makes the
@@ -105,6 +105,21 @@ impl Walk<'_> {
                 };
             }
             "editor" => self.loaded.config.editor = non_empty(self.string(path, value)?),
+            "ui.tabs.group" => {
+                let name = self.string(path, value)?;
+                self.loaded.config.tab_grouping = match name.to_ascii_lowercase().as_str() {
+                    "project" => TabGrouping::Project,
+                    "state" => TabGrouping::State,
+                    _ => {
+                        return Err(self.problem(
+                            value.span(),
+                            format!(
+                                "ui.tabs.group must be \"project\" or \"state\", not \"{name}\""
+                            ),
+                        ));
+                    }
+                };
+            }
             "ui.font.family" => {
                 self.loaded.config.ui_font.family = non_empty(self.string(path, value)?);
             }
@@ -293,6 +308,30 @@ font.size = 18
     fn rf_cfg_02_theme_names_ignore_case_and_system_is_accepted() {
         assert_eq!(ok("theme = \"Washi\"").config.theme, ThemeSetting::Washi);
         assert_eq!(ok("theme = \"system\"").config.theme, ThemeSetting::System);
+    }
+
+    #[test]
+    fn rf_atn_07_the_tab_grouping_is_project_or_state() {
+        assert_eq!(ok("").config.tab_grouping, TabGrouping::Project);
+        assert_eq!(
+            ok("ui.tabs.group = \"State\"").config.tab_grouping,
+            TabGrouping::State
+        );
+        assert_eq!(
+            ok("[ui.tabs]
+group = \"project\"")
+            .config
+            .tab_grouping,
+            TabGrouping::Project
+        );
+        let p = err("ui.tabs.group = \"status\"
+");
+        assert_eq!((p.line, p.column), (1, 17));
+        assert!(
+            p.message.contains("\"project\" or \"state\""),
+            "{}",
+            p.message
+        );
     }
 
     #[test]

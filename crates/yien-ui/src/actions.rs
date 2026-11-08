@@ -39,6 +39,9 @@ pub(crate) const CONTEXT_BAR_CONTEXT: &str = "YienContextBar";
 /// Key context of the context bar's Files view (RF-CTX-01).
 pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
 
+/// Key context of the attention tray (RF-ATN-13).
+pub(crate) const TRAY_CONTEXT: &str = "YienTray";
+
 actions!(
     yien,
     [
@@ -89,6 +92,25 @@ actions!(
         /// Focuses the next pane that needs the user, the one waiting
         /// longest first (RF-ATN-05).
         JumpToNeedsYou,
+        /// Focuses the next pane whose agent finished a turn, the one done
+        /// longest first (RF-ATN-14).
+        JumpToDone,
+        /// Opens or closes the attention tray: every pane that needs the
+        /// user, failed or finished (RF-ATN-13).
+        ToggleAttentionTray,
+        /// Moves the tray's cursor one row up.
+        TrayUp,
+        /// Moves the tray's cursor one row down.
+        TrayDown,
+        /// Goes to the pane under the tray's cursor.
+        TrayConfirm,
+        /// Closes the tray.
+        TrayClose,
+        /// Lists tabs in sections by agent state, or under their projects
+        /// again, for this session (RF-ATN-07).
+        ToggleTabGrouping,
+        /// Quits YIEN, asking first while agents are working (RF-SES-13).
+        Quit,
         /// Lists the selected project's past agent sessions to resume one
         /// (RF-SES-07).
         ResumePastSession,
@@ -221,6 +243,8 @@ pub(crate) const SPLIT_DOWN_KEYS: &str = "Alt+Shift+-";
 pub(crate) const CLOSE_PANE_KEYS: &str = "Ctrl+Shift+W";
 pub(crate) const FOCUS_KEYS: &str = "Alt+Arrows";
 pub(crate) const JUMP_KEYS: &str = "Ctrl+Shift+J";
+pub(crate) const JUMP_DONE_KEYS: &str = "Ctrl+Shift+U";
+pub(crate) const TRAY_KEYS: &str = "Ctrl+Shift+M";
 pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
 pub(crate) const NEW_CLAUDE_TAB_KEYS: &str = "Ctrl+Shift+A";
 pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
@@ -257,6 +281,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let context_bar = Some(CONTEXT_BAR_CONTEXT);
     let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
     let file_tree = Some(file_tree.as_str());
+    let tray = Some(TRAY_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -288,6 +313,10 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("right", FileTreeExpand, file_tree),
         KeyBinding::new("enter", FileTreeOpen, file_tree),
         KeyBinding::new("escape", FileTreeEscape, file_tree),
+        KeyBinding::new("up", TrayUp, tray),
+        KeyBinding::new("down", TrayDown, tray),
+        KeyBinding::new("enter", TrayConfirm, tray),
+        KeyBinding::new("escape", TrayClose, tray),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -352,6 +381,10 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(FileTreeExpand),
         Box::new(FileTreeOpen),
         Box::new(FileTreeEscape),
+        Box::new(TrayUp),
+        Box::new(TrayDown),
+        Box::new(TrayConfirm),
+        Box::new(TrayClose),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
