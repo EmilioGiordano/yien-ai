@@ -8858,6 +8858,7 @@ dependencies = [
  "yien-pty",
  "yien-session",
  "yien-vt",
+ "yien-which",
 ]
 
 [[package]]

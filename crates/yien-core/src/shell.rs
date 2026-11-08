@@ -69,9 +69,11 @@ fn pick_shell(
     }
 }
 
+/// Whether the pane spawn will find `program`: only absolute `PATH` folders
+/// count, as in `yien-pty`.
 fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+    let path = std::env::var_os("PATH");
+    yien_which::resolve(program.as_ref(), path.as_deref(), "", Path::is_file).is_ok()
 }
 
 #[cfg(test)]
