@@ -194,6 +194,8 @@ pub enum OpenError {
 /// argument). With no editor, a file of a view-only type ([`VIEW_ONLY`]) goes
 /// to the OS default app; any other file goes to Notepad on Windows and is
 /// refused elsewhere, so the default app never runs a program or script.
+/// On Windows a bare editor name is looked up on `PATH` alone, and Notepad
+/// is the system folder's, so the current folder is never searched.
 /// Runs on a thread of its own and returns at once; `done` gets the outcome.
 ///
 /// ```no_run
@@ -241,14 +243,29 @@ fn open_by_type(path: &Path) -> Result<(), OpenError> {
     };
     match route(path, &pathext, cfg!(windows), launches(path)) {
         Route::DefaultApp => open_now(path, None),
-        Route::Notepad => open_now(path, Some(&["notepad.exe".to_owned()])),
-        Route::Refuse => Err(OpenError::WouldRun {
-            name: path.file_name().map_or_else(
-                || path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
-        }),
+        Route::Notepad => open_in_notepad(path),
+        Route::Refuse => Err(would_run(path)),
     }
+}
+
+fn would_run(path: &Path) -> OpenError {
+    OpenError::WouldRun {
+        name: path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn open_in_notepad(path: &Path) -> Result<(), OpenError> {
+    windows::open_in_notepad(path).map_err(|reason| failed(path, reason))
+}
+
+/// Never reached: [`route`] sends nothing to Notepad off Windows.
+#[cfg(not(windows))]
+fn open_in_notepad(path: &Path) -> Result<(), OpenError> {
+    Err(would_run(path))
 }
 
 /// Where a file goes when no editor is set.
@@ -415,44 +432,47 @@ fn command_params(args: &[String], path: &Path) -> String {
     params.join(" ")
 }
 
-/// Whether `program` is, or resolves on `PATH` with `PATHEXT` to, a batch
-/// file, which Windows runs through cmd.exe.
+/// The file `program` names: an absolute path as given, or a bare name
+/// looked up in each absolute `dirs` folder in order, with each `pathext`
+/// extension when it has none. Relative folders, the current one among them,
+/// are never searched, and a relative path with folders in it is refused.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn is_batch(program: &str) -> bool {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    resolves_to_batch(
-        program,
-        &std::env::split_paths(&path_var).collect::<Vec<_>>(),
-        &pathext,
-    )
+fn resolve_program(program: &str, dirs: &[PathBuf], pathext: &str) -> Option<PathBuf> {
+    let program = Path::new(program);
+    let has_extension = program.extension().is_some();
+    let exts: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let find = |base: PathBuf| -> Option<PathBuf> {
+        if has_extension || exts.is_empty() {
+            return base.is_file().then_some(base);
+        }
+        exts.iter().find_map(|ext| {
+            let mut file = base.clone().into_os_string();
+            file.push(ext);
+            let file = PathBuf::from(file);
+            file.is_file().then_some(file)
+        })
+    };
+    if program.is_absolute() {
+        return find(program.to_path_buf()).or_else(|| Some(program.to_path_buf()));
+    }
+    let bare = matches!(
+        program.components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    );
+    if !bare {
+        return None;
+    }
+    dirs.iter()
+        .filter(|d| d.is_absolute())
+        .find_map(|d| find(d.join(program)))
 }
 
+/// Whether Windows runs `file` through cmd.exe.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn resolves_to_batch(program: &str, dirs: &[PathBuf], pathext: &str) -> bool {
-    let batch = |p: &Path| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-    };
-    let program = Path::new(program);
-    if program.extension().is_some() {
-        return batch(program);
-    }
-    let candidates: Vec<PathBuf> = if program.components().count() > 1 {
-        vec![program.to_path_buf()]
-    } else {
-        dirs.iter().map(|d| d.join(program)).collect()
-    };
-    for base in candidates {
-        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
-            let file = base.with_extension(ext.trim_start_matches('.'));
-            if file.is_file() {
-                return batch(&file);
-            }
-        }
-    }
-    false
+fn is_batch(file: &Path) -> bool {
+    file.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
 /// Whether arguments and a path can go to a batch file: nothing cmd.exe
@@ -619,26 +639,60 @@ mod tests {
         assert_eq!(quote_path(Path::new(r"C:\dir\")), r#""C:\dir\\""#);
     }
 
-    // PATHEXT lookup assumes Windows' case-insensitive file names.
-    #[cfg(windows)]
     #[test]
-    fn batch_editors_are_found_on_the_path_and_given_only_plain_arguments() {
-        let dir = scratch("batch");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("ed.cmd"), "").unwrap();
-        fs::write(dir.join("tool.exe"), "").unwrap();
-        let dirs = [dir.clone()];
-        let ext = ".COM;.EXE;.BAT;.CMD";
-        assert!(resolves_to_batch("ed", &dirs, ext));
-        assert!(!resolves_to_batch("tool", &dirs, ext));
-        assert!(!resolves_to_batch("missing", &dirs, ext));
-        assert!(resolves_to_batch(r"C:\x\run.BAT", &dirs, ext));
-        assert!(!resolves_to_batch("notepad.exe", &dirs, ext));
+    fn a_bare_program_is_found_only_in_absolute_path_folders() {
+        let dir = std::path::absolute(scratch("resolve")).unwrap();
+        let (first, second) = (dir.join("first"), dir.join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("ed.cmd"), "").unwrap();
+        fs::write(second.join("tool.exe"), "").unwrap();
+        fs::write(first.join("tool.cmd"), "").unwrap();
+        let dirs = [
+            PathBuf::from("."),
+            PathBuf::new(),
+            first.clone(),
+            second.clone(),
+        ];
+        let ext = ".exe;.cmd";
+        // PATH order first, then PATHEXT order inside a folder.
+        assert_eq!(
+            resolve_program("tool", &dirs, ext),
+            Some(first.join("tool.cmd"))
+        );
+        assert_eq!(
+            resolve_program("ed", &dirs, ext),
+            Some(second.join("ed.cmd"))
+        );
+        assert_eq!(
+            resolve_program("tool.exe", &dirs, ext),
+            Some(second.join("tool.exe"))
+        );
+        assert_eq!(resolve_program("missing", &dirs, ext), None);
+        // Relative folders, `.` among them, are skipped.
+        assert_eq!(resolve_program("ed", &[PathBuf::from(".")], ext), None);
+        let relative = Path::new("bin").join("ed");
+        assert_eq!(
+            resolve_program(&relative.to_string_lossy(), &dirs, ext),
+            None
+        );
+        let absolute = second.join("ed");
+        assert_eq!(
+            resolve_program(&absolute.to_string_lossy(), &[], ext),
+            Some(second.join("ed.cmd"))
+        );
+        assert!(is_batch(&second.join("ed.cmd")));
+        assert!(!is_batch(&second.join("tool.exe")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_editors_are_given_only_plain_arguments() {
+        assert!(is_batch(Path::new("run.BAT")));
         let file = Path::new(r"C:\Data\config.toml");
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
         assert!(!batch_safe(&["a&calc".into()], file));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
