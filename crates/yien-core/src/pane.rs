@@ -11,9 +11,11 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
-use yien_agent::{Effect as AgentEffect, Machine, SessionEndReason, Signal, evaluate_screen};
+use yien_agent::{
+    Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
+};
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
-use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId};
+use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
     AlacrittyEngine, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput,
@@ -132,6 +134,33 @@ type Engine = Arc<Mutex<Box<dyn VtEngine>>>;
 
 fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
     engine.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The kind of attention state a pane is in, if any: "needs you", error
+/// or done. A pane keeps its place in the attention order while its state
+/// stays of the same kind.
+fn attention_kind(state: AgentState) -> Option<u8> {
+    match state {
+        AgentState::NeedsYou(_) => Some(0),
+        AgentState::Error(_) => Some(1),
+        AgentState::Done => Some(2),
+        AgentState::Idle | AgentState::Working => None,
+    }
+}
+
+/// A hook after which an earlier question no longer stands: the user
+/// answered, the turn went on or ended, or the session changed.
+fn moves_on(event: &HookEvent) -> bool {
+    matches!(
+        event,
+        HookEvent::UserPromptSubmit
+            | HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::Stop
+            | HookEvent::StopFailure
+            | HookEvent::SessionStart { .. }
+            | HookEvent::SessionEnd(_)
+    )
 }
 
 /// The latest frame of a pane the UI has not taken yet: a newer one replaces
@@ -283,8 +312,13 @@ struct Actor {
     hooks_missing: bool,
     /// The "signal lost" mark last reported.
     signal_lost: bool,
-    /// When the pane entered "needs you", while it is there (RF-ATN-05).
-    needs_since: Option<u64>,
+    /// When the pane entered "needs you", error or done, while it is in
+    /// that kind of state (RF-ATN-05, RF-ATN-13).
+    attention_since: Option<u64>,
+    /// What the last hook that asked the user said, until the turn moves on.
+    asked: Option<PendingQuestion>,
+    /// The question last reported: `asked` while the pane needs the user.
+    question: Option<PendingQuestion>,
     /// The session the next launch resumes; only the first launch after a
     /// restore does, so a relaunch starts a new session.
     resume: Option<String>,
@@ -361,7 +395,9 @@ pub(crate) fn spawn(
         hook_serial: None,
         hooks_missing: false,
         signal_lost: false,
-        needs_since: None,
+        attention_since: None,
+        asked: None,
+        question: None,
         resume: setup.resume,
         palette: setup.palette,
         pending,
@@ -676,8 +712,30 @@ impl Actor {
         }
         self.launch_alive = true;
         match item.event {
-            Ok(event) => self.step(&Signal::Hook(event)),
+            Ok(event) => {
+                if item.question.is_some() {
+                    self.asked = item.question;
+                } else if moves_on(&event) {
+                    self.asked = None;
+                }
+                self.step(&Signal::Hook(event));
+            }
             Err(_) => self.step(&Signal::Ambiguous),
+        }
+        self.report_question();
+    }
+
+    /// Reports the question when it changes: what the last asking hook
+    /// said, only while the pane needs the user (RF-ATN-13).
+    fn report_question(&mut self) {
+        let question = if self.state.is_red() {
+            self.asked.clone()
+        } else {
+            None
+        };
+        if question != self.question {
+            self.question = question.clone();
+            self.report(PaneEvent::Question(question));
         }
     }
 
@@ -878,11 +936,13 @@ impl Actor {
             machine = machine.step(&Signal::Seen(true), self.now()).0;
         }
         self.machine = machine;
-        self.needs_since = None;
+        self.attention_since = None;
+        self.asked = None;
         if self.state != AgentState::Idle {
             self.state = AgentState::Idle;
             self.report(PaneEvent::State(AgentState::Idle, None));
         }
+        self.report_question();
     }
 
     /// The reader ended. After `Exited` that is the end of the session; before
@@ -963,15 +1023,18 @@ impl Actor {
                 AgentEffect::Transition { to, .. } => {
                     let state = convert::agent_state(to);
                     if state != self.state {
-                        self.needs_since = match (state.is_red(), self.needs_since) {
-                            (false, _) => None,
-                            (true, Some(since)) => Some(since),
-                            (true, None) => {
-                                Some(self.ctx.attention.fetch_add(1, Ordering::Relaxed) + 1)
-                            }
+                        let kind = attention_kind(state);
+                        self.attention_since = match self.attention_since {
+                            _ if kind.is_none() => None,
+                            Some(since) if kind == attention_kind(self.state) => Some(since),
+                            _ => Some(self.ctx.attention.fetch_add(1, Ordering::Relaxed) + 1),
                         };
+                        if self.state.is_red() && !state.is_red() {
+                            self.asked = None;
+                        }
                         self.state = state;
-                        self.report(PaneEvent::State(state, self.needs_since));
+                        self.report(PaneEvent::State(state, self.attention_since));
+                        self.report_question();
                     }
                 }
                 AgentEffect::CheckScreen => {
@@ -1357,7 +1420,30 @@ mod tests {
         HookItem {
             serial,
             event: Ok(event),
+            question: None,
         }
+    }
+
+    fn asking(serial: u64, event: yien_agent::HookEvent, question: &str) -> HookItem {
+        HookItem {
+            question: Some(PendingQuestion::new(question)),
+            ..hook(serial, event)
+        }
+    }
+
+    /// The last question reported, if any was.
+    fn last_question(events: &[PaneEvent]) -> Option<Option<String>> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::Question(q) => Some(q.as_ref().map(|q| q.as_str().to_owned())),
+            _ => None,
+        })
+    }
+
+    fn last_since(events: &[PaneEvent]) -> Option<Option<u64>> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::State(_, since) => Some(*since),
+            _ => None,
+        })
     }
 
     fn last_state(events: &[PaneEvent]) -> Option<AgentState> {
@@ -1413,6 +1499,75 @@ mod tests {
             matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
             "{events:?}"
         );
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_atn_13_a_red_shows_its_question_and_a_later_red_without_one_shows_none() {
+        use yien_agent::HookEvent::{
+            Notification, PermissionRequest, PostToolUse, UserPromptSubmit,
+        };
+        use yien_agent::NotificationKind::PermissionPrompt;
+        let pane = Solo::start(Vec::new(), false);
+        pane.hooks.try_send(hook(1, UserPromptSubmit)).unwrap();
+        pane.hooks
+            .try_send(asking(1, PermissionRequest, "Permission to use Bash"))
+            .unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+        assert_eq!(
+            last_question(&events),
+            Some(Some("Permission to use Bash".to_owned()))
+        );
+        // The notification that follows the request says it better.
+        let note = asking(
+            1,
+            Notification(PermissionPrompt),
+            "Claude needs your permission",
+        );
+        pane.hooks.try_send(note).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(
+            last_question(&events),
+            Some(Some("Claude needs your permission".to_owned()))
+        );
+        // Answered: the red and its question go.
+        pane.hooks.try_send(hook(1, PostToolUse)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        assert_eq!(last_question(&events), Some(None));
+        // A new red whose hooks said nothing shows no old text.
+        pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::Question(Some(_)))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_atn_14_a_finished_turn_gets_a_place_after_an_earlier_red() {
+        use yien_agent::HookEvent::{PermissionRequest, PostToolUse, Stop, UserPromptSubmit};
+        let pane = Solo::start(Vec::new(), false);
+        pane.hooks.try_send(hook(1, UserPromptSubmit)).unwrap();
+        pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
+        let red = last_since(&pane.collect(SETTLE)).flatten().unwrap();
+        pane.hooks.try_send(hook(1, PostToolUse)).unwrap();
+        pane.hooks.try_send(hook(1, Stop)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Done), "{events:?}");
+        let done = last_since(&events).flatten().unwrap();
+        assert!(done > red, "{red} then {done}");
         drop(pane.cmds);
     }
 

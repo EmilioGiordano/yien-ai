@@ -560,6 +560,8 @@ mod tests {
                     exit_code: None,
                     session_id: None,
                     needs_you_since: state.is_red().then_some(*id),
+                    attention_since: state.is_red().then_some(*id),
+                    question: None,
                     signal_lost: false,
                     runs_session: true,
                 })

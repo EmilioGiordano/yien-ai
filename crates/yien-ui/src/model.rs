@@ -58,6 +58,22 @@ impl AgentState {
         self == Self::NeedsYou
     }
 
+    /// Every state, the most urgent first: the order of the tab bar's
+    /// sections when it is grouped by state (RF-ATN-07).
+    pub const BY_URGENCY: [AgentState; 5] = [
+        Self::NeedsYou,
+        Self::Error,
+        Self::Done,
+        Self::Working,
+        Self::Idle,
+    ];
+
+    /// Whether the attention tray lists a pane in this state: it needs the
+    /// user, failed or finished (RF-ATN-13).
+    pub fn wants_attention(self) -> bool {
+        matches!(self, Self::NeedsYou | Self::Error | Self::Done)
+    }
+
     /// Lower is more urgent: a tab shows its most urgent pane.
     fn urgency(self) -> u8 {
         match self {
@@ -115,6 +131,12 @@ pub struct PaneView {
     /// While it needs the user: its place in the wait order, lower first
     /// (RF-ATN-05).
     pub needs_you_since: Option<u64>,
+    /// While it needs the user, failed or finished: its place in the
+    /// attention order, lower first (RF-ATN-13, RF-ATN-14).
+    pub attention_since: Option<u64>,
+    /// While it needs the user: what its agent asks, when its hooks said
+    /// (RF-ATN-13).
+    pub question: Option<String>,
     /// Its agent's state cannot be told, so it shows idle (RN-02).
     pub signal_lost: bool,
     /// The agent session it names, once known (RF-SES-07).
@@ -137,6 +159,8 @@ impl PaneView {
             exit_code: None,
             exited: false,
             needs_you_since: None,
+            attention_since: None,
+            question: None,
             signal_lost: false,
             session_id: None,
             runs_session: false,
@@ -155,6 +179,8 @@ impl PaneView {
             exit_code: info.exit_code,
             exited: !info.running && info.exit_code.is_some(),
             needs_you_since: info.needs_you_since,
+            attention_since: info.attention_since,
+            question: info.question.as_ref().map(|q| q.as_str().to_owned()),
             signal_lost: info.signal_lost,
             session_id: info.session_id.clone(),
             runs_session: info.runs_session,
@@ -181,6 +207,8 @@ impl PaneView {
     ///     exit_code: None,
     ///     exited: false,
     ///     needs_you_since: None,
+    ///     attention_since: None,
+    ///     question: None,
     ///     signal_lost: false,
     ///     session_id: None,
     ///     runs_session: true,
@@ -319,6 +347,8 @@ pub struct WorkspaceView {
     git: HashMap<TabId, TabGit>,
     /// Every toast and taskbar flash is muted (RF-ATN-11).
     notifications_muted: bool,
+    /// The tab bar lists tabs in sections by state (RF-ATN-07).
+    group_by_state: bool,
 }
 
 impl WorkspaceView {
@@ -501,10 +531,15 @@ impl WorkspaceView {
         self.panes
             .get_mut(&id)
             .map(|p| {
+                let was = p.state;
                 p.state = state.into();
                 p.needs_reason = needs_reason(state);
                 if !p.state.needs_you() {
                     p.needs_you_since = None;
+                    p.question = None;
+                }
+                if !p.state.wants_attention() || p.state != was {
+                    p.attention_since = None;
                 }
             })
             .is_some()
@@ -578,18 +613,87 @@ impl WorkspaceView {
         waiting.get(next).copied()
     }
 
+    /// Every pane in `state`, the one there longest first (RF-ATN-13,
+    /// RF-ATN-14). A pane whose place has not arrived yet goes last; ties
+    /// keep the tab bar's order.
+    pub fn panes_in(&self, state: AgentState) -> Vec<PaneId> {
+        let mut found: Vec<(Option<u64>, usize, PaneId)> = self
+            .all_panes()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(at, id)| {
+                let pane = self.panes.get(&id)?;
+                (pane.state == state).then_some((pane.attention_since, at, id))
+            })
+            .collect();
+        found.sort_by_key(|(since, at, _)| (since.is_none(), *since, *at));
+        found.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Where the jump to the next pane that finished a turn goes from
+    /// `current` (RF-ATN-14): the one done longest, or, from a pane that is
+    /// itself done, the next one, wrapping around. A pane leaves "done" once
+    /// seen, so from it the jump starts over at the oldest.
+    pub fn next_done(&self, current: Option<PaneId>) -> Option<PaneId> {
+        let done = self.panes_in(AgentState::Done);
+        let next = current
+            .and_then(|c| done.iter().position(|p| *p == c))
+            .map_or(0, |at| (at + 1) % done.len());
+        done.get(next).copied()
+    }
+
     /// The tabs of a project that the UI knows, in tab-bar order.
     pub fn tabs_of<'a>(&'a self, project: &'a ProjectView) -> impl Iterator<Item = &'a TabView> {
         project.tabs.iter().filter_map(|id| self.tabs.get(id))
     }
 
     /// The tab rows the tab bar draws, top to bottom: folded projects show
-    /// none (RF-NAV-08 moves the keyboard over these).
+    /// none, and grouped by state every tab shows in its section (RF-NAV-08
+    /// moves the keyboard over these).
     pub fn drawn_tabs(&self) -> Vec<TabId> {
+        if self.group_by_state {
+            return self
+                .state_sections()
+                .into_iter()
+                .flat_map(|(_, tabs)| tabs)
+                .collect();
+        }
         self.projects
             .iter()
             .filter(|p| !self.is_folded(p.id))
             .flat_map(|p| self.tabs_of(p).map(|t| t.id))
+            .collect()
+    }
+
+    /// Lists tabs in sections by state, or under their projects again
+    /// (RF-ATN-07). Only the drawing changes: the projects' own tab order,
+    /// which the session saves, is never touched.
+    pub fn set_group_by_state(&mut self, on: bool) {
+        self.group_by_state = on;
+    }
+
+    /// Whether the tab bar lists tabs in sections by state.
+    pub fn groups_by_state(&self) -> bool {
+        self.group_by_state
+    }
+
+    /// The tab bar's sections when grouped by state (RF-ATN-07): each
+    /// tab's most urgent state, in the order needs you, error, done,
+    /// working, idle, and empty sections left out. Within a section tabs
+    /// keep the user's order, projects first, so a tab moves only when its
+    /// state does. Folds do not apply.
+    pub fn state_sections(&self) -> Vec<(AgentState, Vec<TabId>)> {
+        AgentState::BY_URGENCY
+            .into_iter()
+            .map(|state| {
+                let tabs: Vec<TabId> = self
+                    .tabs_in_order()
+                    .filter(|t| self.tab_state(t) == state)
+                    .map(|t| t.id)
+                    .collect();
+                (state, tabs)
+            })
+            .filter(|(_, tabs)| !tabs.is_empty())
             .collect()
     }
 
@@ -960,6 +1064,8 @@ mod tests {
             exit_code: None,
             session_id: None,
             needs_you_since: state.is_red().then_some(id),
+            attention_since: AgentState::from(state).wants_attention().then_some(id),
+            question: None,
             signal_lost: false,
             runs_session: true,
         }
@@ -1459,6 +1565,115 @@ mod tests {
         let rows = view.drawn_tabs();
         let cursor = crate::region::move_cursor(&rows, Some(TabId::new(10)), None, 1);
         assert_eq!(cursor, Some(TabId::new(20)));
+    }
+
+    #[test]
+    fn rf_atn_07_grouped_by_state_tabs_come_most_urgent_first() {
+        let mut view = demo();
+        view.set_group_by_state(true);
+        let sections: Vec<(AgentState, Vec<u64>)> = view
+            .state_sections()
+            .into_iter()
+            .map(|(s, tabs)| (s, tabs.iter().map(|t| t.get()).collect()))
+            .collect();
+        assert_eq!(
+            sections,
+            vec![
+                (AgentState::NeedsYou, vec![10]),
+                (AgentState::Done, vec![20]),
+                (AgentState::Working, vec![11]),
+            ]
+        );
+        let ids: Vec<u64> = view.drawn_tabs().iter().map(|t| t.get()).collect();
+        assert_eq!(ids, vec![10, 20, 11], "the keyboard walks what is drawn");
+        // A fold does not hide tabs from the sections.
+        view.toggle_fold(ProjectId::new(1));
+        assert_eq!(view.drawn_tabs().len(), 3);
+    }
+
+    #[test]
+    fn rf_atn_07_a_section_keeps_the_user_order_and_off_restores_it() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[12, 10, 11]), project(2, &[20])],
+            tabs: vec![
+                tab(10, 1, &[100]),
+                tab(11, 1, &[110]),
+                tab(12, 1, &[120]),
+                tab(20, 2, &[200]),
+            ],
+            panes: vec![
+                pane(100, 10, P::Error(yien_proto::ErrorReason::TurnFailed)),
+                pane(110, 11, P::Idle),
+                pane(120, 12, P::Idle),
+                pane(200, 20, P::Error(yien_proto::ErrorReason::TurnFailed)),
+            ],
+            active_tab: Some(TabId::new(10)),
+            profiles: vec![],
+            notifications_muted: false,
+        });
+        let before = tab_names(&view);
+        view.set_group_by_state(true);
+        let sections: Vec<Vec<u64>> = view
+            .state_sections()
+            .into_iter()
+            .map(|(_, tabs)| tabs.iter().map(|t| t.get()).collect())
+            .collect();
+        assert_eq!(sections, vec![vec![10, 20], vec![12, 11]]);
+        // Another state change moves only the tab whose state changed.
+        assert!(view.pane_state(PaneId::new(110), P::Working));
+        let sections: Vec<Vec<u64>> = view
+            .state_sections()
+            .into_iter()
+            .map(|(_, tabs)| tabs.iter().map(|t| t.get()).collect())
+            .collect();
+        assert_eq!(sections, vec![vec![10, 20], vec![11], vec![12]]);
+        assert_eq!(tab_names(&view), before, "the saved order is untouched");
+        view.set_group_by_state(false);
+        let ids: Vec<u64> = view.drawn_tabs().iter().map(|t| t.get()).collect();
+        assert_eq!(ids, vec![12, 10, 11, 20]);
+    }
+
+    #[test]
+    fn rf_atn_14_the_jump_to_done_goes_oldest_first_and_cycles() {
+        let mut view = demo();
+        let done = |view: &mut WorkspaceView, id: u64, tab: u64, since: u64| {
+            let mut info = pane(id, tab, P::Done);
+            info.attention_since = Some(since);
+            view.pane_updated(&info);
+        };
+        done(&mut view, 200, 20, 50);
+        done(&mut view, 110, 11, 40);
+        done(&mut view, 101, 10, 60);
+        assert_eq!(view.next_done(None), Some(PaneId::new(110)));
+        assert_eq!(
+            view.next_done(Some(PaneId::new(110))),
+            Some(PaneId::new(200))
+        );
+        assert_eq!(
+            view.next_done(Some(PaneId::new(200))),
+            Some(PaneId::new(101))
+        );
+        assert_eq!(
+            view.next_done(Some(PaneId::new(101))),
+            Some(PaneId::new(110))
+        );
+        // Seen, 200 turns idle and leaves the cycle; from it the jump
+        // starts over at the oldest.
+        assert!(view.pane_state(PaneId::new(200), P::Idle));
+        assert_eq!(view.pane(PaneId::new(200)).attention_since, None);
+        assert_eq!(
+            view.next_done(Some(PaneId::new(200))),
+            Some(PaneId::new(110))
+        );
+        assert_eq!(
+            view.next_done(Some(PaneId::new(100))),
+            Some(PaneId::new(110)),
+            "from a pane that is not done"
+        );
+        for id in [110, 101] {
+            assert!(view.pane_state(PaneId::new(id), P::Working));
+        }
+        assert_eq!(view.next_done(None), None);
     }
 
     #[test]

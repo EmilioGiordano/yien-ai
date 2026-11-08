@@ -29,9 +29,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use yien_agent::{HookError, HookEvent, decode_claude_hook_or_event};
-use yien_proto::PaneId;
+use yien_agent::{
+    HookError, HookEvent, NotificationKind, claude_hook_question, decode_claude_hook_or_event,
+};
 use yien_proto::hook_frame::{self, FrameError, HEADER_LEN, MAX_EVENT_LEN, MAX_TOKEN_LEN};
+use yien_proto::{PaneId, PendingQuestion};
 
 pub use yien_proto::hook_frame::{HOOK_PIPE_ENV, HOOK_PIPE_PREFIX, HOOK_TOKEN_ENV};
 
@@ -239,6 +241,9 @@ pub struct HookDelivery {
     /// payload could not be read even with the argv fallback; it should reach
     /// the state machine as `Signal::Ambiguous`.
     pub event: Result<HookEvent, HookError>,
+    /// What the agent asks the user, for a permission request or a
+    /// notification that asks for the user (RF-ATN-13).
+    pub question: Option<PendingQuestion>,
     /// Size of the raw payload.
     pub payload_len: usize,
 }
@@ -346,10 +351,24 @@ fn serve_connection<R: Read>(
     let mut payload = vec![0u8; header.payload_len];
     read_exact(conn, &mut payload)?;
 
+    let event = decode_claude_hook_or_event(event_arg, &payload);
+    // Read a second time only for the hooks that can carry a question.
+    let question = match &event {
+        Ok(
+            HookEvent::PermissionRequest
+            | HookEvent::Notification(
+                NotificationKind::PermissionPrompt
+                | NotificationKind::Elicitation
+                | NotificationKind::AgentNeedsInput,
+            ),
+        ) => claude_hook_question(&payload).map(PendingQuestion::new),
+        _ => None,
+    };
     Ok(HookDelivery {
         pane,
         serial,
-        event: decode_claude_hook_or_event(event_arg, &payload),
+        event,
+        question,
         payload_len: payload.len(),
     })
 }
@@ -482,7 +501,6 @@ impl fmt::Debug for HookPipeServer {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use yien_agent::NotificationKind;
 
     fn frame(token: &str, event: &str, payload: &[u8]) -> Vec<u8> {
         hook_frame::encode(token.as_bytes(), event, payload).unwrap()
@@ -517,9 +535,35 @@ mod tests {
                 pane: PaneId::new(7),
                 serial: token.serial(),
                 event: Ok(HookEvent::Notification(NotificationKind::PermissionPrompt)),
+                question: None,
                 payload_len: payload.len(),
             }
         );
+    }
+
+    #[test]
+    fn rf_atn_13_a_delivery_carries_the_question_its_hook_asked() {
+        let (registry, token) = registry_with(7);
+        let payload = br#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}"#;
+        let bytes = frame(token.as_str(), "Notification", payload);
+        let delivery = serve_connection(&mut Cursor::new(bytes), &registry).unwrap();
+        assert_eq!(
+            delivery.question,
+            Some(PendingQuestion::new(
+                "Claude needs your permission to use Bash"
+            ))
+        );
+        let payload = br#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+        let bytes = frame(token.as_str(), "PermissionRequest", payload);
+        let delivery = serve_connection(&mut Cursor::new(bytes), &registry).unwrap();
+        assert_eq!(
+            delivery.question,
+            Some(PendingQuestion::new("Permission to use Bash"))
+        );
+        let payload = br#"{"hook_event_name":"Stop","message":"not a question"}"#;
+        let bytes = frame(token.as_str(), "Stop", payload);
+        let delivery = serve_connection(&mut Cursor::new(bytes), &registry).unwrap();
+        assert_eq!(delivery.question, None);
     }
 
     #[test]

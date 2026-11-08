@@ -278,7 +278,8 @@ impl Workspace {
                     session_id: agent
                         .and_then(|a| a.session_id.as_ref())
                         .map(|s| s.as_str().to_owned()),
-                    needs_you_since: None,
+                    attention_since: None,
+                    question: None,
                     signal_lost: false,
                     visible: false,
                     seen: false,
