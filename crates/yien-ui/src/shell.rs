@@ -315,9 +315,13 @@ impl Shell {
                 CoreMsg::NotificationsMuted { muted } => {
                     self.workspace.set_notifications_muted(muted);
                 }
-                CoreMsg::Error { message, .. } => {
+                CoreMsg::Error { pane, message } => {
                     self.notice = Some(message);
-                    if let Some(open) = self.palette.as_mut() {
+                    // Only an error about no pane can answer a palette
+                    // request; a pane's own error leaves the list waiting.
+                    if pane.is_none()
+                        && let Some(open) = self.palette.as_mut()
+                    {
                         open.model.stop_waiting();
                     }
                 }
