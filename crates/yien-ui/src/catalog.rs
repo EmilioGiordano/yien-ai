@@ -260,6 +260,19 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         OpenConfigFile,
         []
     ),
+    command!("files.show", "files: find file by name", ShowFiles, []),
+    command!(
+        "files.refresh",
+        "files: refresh file tree",
+        RefreshFiles,
+        []
+    ),
+    command!(
+        "changes.show",
+        "changes: show changed files",
+        ShowChanges,
+        []
+    ),
 ];
 
 /// A split that starts a given profile, as the split menu offers
