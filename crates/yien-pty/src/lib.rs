@@ -363,6 +363,16 @@ pub enum PtyError {
         /// The path as given, lossily converted.
         program: String,
     },
+    /// The program is an absolute path that names no file. Its extension
+    /// is never swapped for another that exists.
+    #[error("{program} does not exist")]
+    MissingProgram {
+        /// The path as given, lossily converted.
+        program: String,
+    },
+    /// The program is empty.
+    #[error("no program was given")]
+    EmptyProgram,
     /// The program is a batch file (`.cmd`, `.bat`) and an argument has a
     /// character `cmd.exe` would interpret, so it was not started. Without
     /// that argument it may start.
