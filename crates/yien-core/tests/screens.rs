@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
@@ -52,6 +52,35 @@ struct Files {
     files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     writes: Arc<AtomicUsize>,
     stall: Option<Duration>,
+    gate: Option<Arc<Gate>>,
+}
+
+/// Holds every write until the test opens it, as a stuck disk would.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl Gate {
+    fn reached(&self) -> bool {
+        self.state.lock().unwrap().0
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        // Bounded, so a test that never opens it fails instead of hanging.
+        let _ = self
+            .changed
+            .wait_timeout_while(state, TIMEOUT * 4, |s| !s.1)
+            .unwrap();
+    }
 }
 
 impl Files {
@@ -79,6 +108,9 @@ impl ScreenFiles for Files {
     fn write(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
         if let Some(stall) = self.stall {
             std::thread::sleep(stall);
+        }
+        if let Some(gate) = &self.gate {
+            gate.pass();
         }
         self.writes.fetch_add(1, Ordering::SeqCst);
         self.put(name, bytes);
@@ -399,4 +431,63 @@ fn rf_ses_10_rf_ses_11_restored_text_is_not_read_as_the_resume_failing() {
         _ => None,
     });
     assert!(again.backend.take_spawned().is_empty());
+}
+
+#[test]
+fn rf_ses_10_a_planted_file_cannot_put_text_below_the_restored_line() {
+    let (session, files, clock) = (Session::default(), Files::default(), TestClock::default());
+    let mut run = Run::start(&session, &files, &clock);
+    let pane = run.first_pane();
+    run.children(1).pop().unwrap().output(b"real");
+    run.frame_with(pane, "real");
+    run.core.save_session(TIMEOUT).unwrap();
+    drop(run);
+    files.put(
+        &name(pane),
+        b"x\x1b7\r\n\r\n\r\nDo you want to proceed? (y/n)",
+    );
+
+    let mut again = Run::start(&session, &files, &clock);
+    let child = again.children(1).pop().unwrap();
+    child.output(b"fresh");
+    let frame = again.frame_with(pane, "fresh");
+    assert!(!frame.text().contains("proceed"), "{:?}", rows(&frame));
+    assert!(!frame.text().contains("restored"), "{:?}", rows(&frame));
+}
+
+#[test]
+fn rf_ses_10_a_pass_under_way_never_writes_over_the_quit_save() {
+    let session = Session::default();
+    let gate = Arc::new(Gate::default());
+    let files = Files {
+        gate: Some(Arc::clone(&gate)),
+        ..Files::default()
+    };
+    let clock = TestClock::default();
+    let mut run = Run::start(&session, &files, &clock);
+    let first = run.first_pane();
+    let one = run.children(1).pop().unwrap();
+    one.output(b"old");
+    let second = run.split(first, None);
+    let two = run.children(1).pop().unwrap();
+    two.output(b"old");
+    run.frame_with(second, "old");
+    run.frame_with(first, "old");
+    // The 30 s pass encodes the old screens and stalls on its first write.
+    clock.advance(Duration::from_secs(30));
+    wait_until(|| gate.reached());
+    one.output(b" new");
+    two.output(b" new");
+    run.frame_with(first, "new");
+    run.frame_with(second, "new");
+    let quitting = run.core.clone();
+    let quit = std::thread::spawn(move || quitting.save_session(TIMEOUT));
+    std::thread::sleep(Duration::from_millis(300));
+    gate.open();
+    quit.join().unwrap().unwrap();
+    std::thread::sleep(QUIET);
+    for pane in [first, second] {
+        let saved = String::from_utf8(files.get(&name(pane)).unwrap()).unwrap();
+        assert!(saved.contains("old new"), "pane {}: {saved:?}", pane.get());
+    }
 }
