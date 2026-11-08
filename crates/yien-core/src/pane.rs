@@ -1067,6 +1067,11 @@ impl Actor {
             let clock_now = self.now();
             Instant::now() + at.saturating_sub(clock_now)
         });
+        // A request whose red never came (work went on inside the
+        // confirmation window) must not lend its text to a later red.
+        if !self.state.is_red() && !self.machine.needs_you_pending() {
+            self.asked = None;
+        }
         self.report_signal_lost();
     }
 
@@ -1540,6 +1545,33 @@ mod tests {
         assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
         assert_eq!(last_question(&events), Some(None));
         // A new red whose hooks said nothing shows no old text.
+        pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::Question(Some(_)))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_atn_13_a_request_cancelled_before_its_red_leaves_no_question() {
+        use yien_agent::HookEvent::{PermissionRequest, PreToolUse, UserPromptSubmit};
+        let pane = Solo::start(Vec::new(), false);
+        pane.hooks.try_send(hook(1, UserPromptSubmit)).unwrap();
+        pane.hooks
+            .try_send(asking(1, PermissionRequest, "Permission to use Bash"))
+            .unwrap();
+        // The tool runs at once: the request never turns red.
+        pane.hooks.try_send(hook(1, PreToolUse)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
         pane.hooks.try_send(hook(1, PermissionRequest)).unwrap();
         let events = pane.collect(SETTLE);
         assert!(
