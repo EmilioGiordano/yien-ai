@@ -69,6 +69,9 @@ pub struct SessionSnapshot {
     /// Every toast and taskbar flash is muted (RF-ATN-11).
     #[serde(default)]
     pub notifications_muted: bool,
+    /// The side bars' visibility and widths (RF-NAV-10).
+    #[serde(default)]
+    pub side_bars: SideBarsRecord,
 }
 
 impl SessionSnapshot {
@@ -85,8 +88,59 @@ impl SessionSnapshot {
             selected: Selection::default(),
             projects,
             notifications_muted: false,
+            side_bars: SideBarsRecord::default(),
         }
     }
+}
+
+/// The tab bar and the context bar as the user left them (RF-NAV-10).
+///
+/// ```
+/// let bars = yien_session::SideBarsRecord::default();
+/// assert!(!bars.tab_bar.hidden && bars.context_bar.width.is_none() && !bars.review);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SideBarsRecord {
+    /// The tab bar on the left.
+    #[serde(default)]
+    pub tab_bar: SideBarRecord,
+    /// The context bar on the right.
+    #[serde(default)]
+    pub context_bar: SideBarRecord,
+    /// The context bar is widened to review changes.
+    #[serde(default)]
+    pub review: bool,
+}
+
+/// One side bar.
+///
+/// ```
+/// let bar: yien_session::SideBarRecord =
+///     serde_json::from_str(r#"{ "hidden": true, "width": "wide" }"#).unwrap();
+/// assert!(bar.hidden && bar.width.is_none());
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SideBarRecord {
+    /// The user hid the bar.
+    #[serde(default)]
+    pub hidden: bool,
+    /// The width the user dragged it to, in logical pixels; `None` is the
+    /// default width. The UI clamps it to the window.
+    #[serde(default, deserialize_with = "lenient_width")]
+    pub width: Option<f32>,
+}
+
+/// A width that is not a finite number reads as the default, so one bad
+/// value never costs the user the whole session.
+fn lenient_width<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .and_then(|v| v.as_f64())
+        .map(|w| w as f32)
+        .filter(|w| w.is_finite()))
 }
 
 /// The project and tab selected when the snapshot was taken; each `None` when nothing was.

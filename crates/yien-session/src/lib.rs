@@ -74,7 +74,7 @@ pub use generations::{
 };
 pub use model::{
     AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, Selection,
-    SessionRef, SessionSnapshot, TabRecord,
+    SessionRef, SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord,
 };
 pub use past::{
     MAX_RECORD_BYTES, SESSION_READ_BUDGET, SessionSummary, TITLE_CHARS, claude_dir_matches,
