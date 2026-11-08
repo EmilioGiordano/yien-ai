@@ -83,6 +83,9 @@ actions!(
         /// Focuses the next pane that needs the user, the one waiting
         /// longest first (RF-ATN-05).
         JumpToNeedsYou,
+        /// Lists the selected project's past agent sessions to resume one
+        /// (RF-SES-07).
+        ResumePastSession,
         /// Turns every toast and taskbar flash off or back on (RF-ATN-11).
         ToggleNotificationsMuted,
         /// Turns the selected tab's toasts and taskbar flashes off or back
