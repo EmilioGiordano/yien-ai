@@ -8858,6 +8858,7 @@ dependencies = [
  "yien-pty",
  "yien-session",
  "yien-vt",
+ "yien-which",
 ]
 
 [[package]]
@@ -8906,6 +8907,7 @@ dependencies = [
  "yien-config",
  "yien-proto",
  "yien-session",
+ "yien-which",
 ]
 
 [[package]]
@@ -8923,6 +8925,7 @@ version = "0.0.0"
 dependencies = [
  "portable-pty",
  "thiserror 2.0.21",
+ "yien-which",
 ]
 
 [[package]]
@@ -8961,6 +8964,13 @@ dependencies = [
  "proptest",
  "thiserror 2.0.21",
  "yien-proto",
+]
+
+[[package]]
+name = "yien-which"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]

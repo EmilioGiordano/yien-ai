@@ -193,6 +193,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 | `yien-proto` | 0 | Messages, ids, workspace `Command`s, `PROTO_VERSION`. Only `serde`. |
 | `yien-layout` | 0 | Pane tree: split, close, move, swap, dock, sizes. From foothy. |
 | `yien-input` | 0 | Keys and text to bytes per terminal mode. From foothy. |
+| `yien-which` | 0 | Finds the file a program name means on `PATH` (absolute folders only, `PATHEXT`); the caller says which files exist. |
 | `yien-vt` | 1 | `VtEngine`, alacritty adapter, `osc_scan`, hot/cold scrollback, frame diffs. |
 | `yien-agent` | 1 | Profiles, signals, pure state machine, hook templates. |
 | `yien-session` | 1 | Model, invariants, persistence, migrations. |

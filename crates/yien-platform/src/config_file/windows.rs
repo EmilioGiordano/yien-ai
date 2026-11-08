@@ -19,7 +19,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::PCWSTR;
 
-use super::{batch_safe, command_params, is_batch, quote_path, resolve_program};
+use super::{batch_safe, command_params, is_batch, quote_path};
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
@@ -87,27 +87,34 @@ fn with_com(launch: impl FnOnce() -> Result<(), Failure>) -> Result<(), String> 
     })
 }
 
-/// The editor, found on `PATH` the way [`resolve_program`] does.
+/// The editor, found on `PATH` by [`yien_which::resolve`].
 fn editor(program: &str, args: &[String], path: &Path) -> Result<Launch, String> {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    editor_launch(program, args, path, &dirs, &pathext)
+    let path_var = std::env::var_os("PATH");
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| yien_which::DEFAULT_PATHEXT.into());
+    editor_launch(program, args, path, path_var.as_deref(), &pathext)
 }
 
 fn editor_launch(
     program: &str,
     args: &[String],
     path: &Path,
-    dirs: &[PathBuf],
+    path_var: Option<&OsStr>,
     pathext: &str,
 ) -> Result<Launch, String> {
-    let file = resolve_program(program, dirs, pathext).ok_or_else(|| {
-        format!(
-            "the editor {program} was not found on PATH (the current folder is not \
-             searched); set its full path in config.toml"
-        )
-    })?;
+    let file = yien_which::resolve(OsStr::new(program), path_var, pathext, |p| p.is_file())
+        .map_err(|e| match e {
+            yien_which::WhichError::Relative => format!(
+                "the editor {program} is a relative path, which would resolve against \
+                 YIEN's own folder; set its full path in config.toml"
+            ),
+            yien_which::WhichError::Missing => {
+                format!("the editor {program} does not exist; check its full path in config.toml")
+            }
+            _ => format!(
+                "the editor {program} was not found on PATH (the current folder is not \
+                 searched); set its full path in config.toml"
+            ),
+        })?;
     if is_batch(&file) && !batch_safe(args, path) {
         // cmd.exe parses a .cmd or .bat's arguments again, and no quoting
         // protects `%`, `!` or `"` from it.
@@ -209,16 +216,19 @@ mod tests {
         std::fs::write(bin.join("ed.exe"), "").unwrap();
         std::fs::write(bin.join("bat.cmd"), "").unwrap();
         let file = Path::new(r"C:\p\a%b.txt");
-        let dirs = [PathBuf::from("."), PathBuf::new(), bin.clone()];
-        let launch = editor_launch("ed", &["-w".into()], file, &dirs, ".com;.exe").unwrap();
+        let dirs = std::env::join_paths([PathBuf::from("."), PathBuf::new(), bin.clone()]).unwrap();
+        let dirs = Some(dirs.as_os_str());
+        let launch = editor_launch("ed", &["-w".into()], file, dirs, ".com;.exe").unwrap();
         assert_eq!(launch.file, bin.join("ed.exe"));
         assert!(launch.file.is_absolute());
         assert_eq!(launch.directory, None);
         assert_eq!(launch.params, r#"-w "C:\p\a%b.txt""#);
-        let missing = editor_launch("nothere", &[], file, &dirs, ".EXE");
+        let missing = editor_launch("nothere", &[], file, dirs, ".EXE");
         assert!(missing.is_err_and(|e| e.contains("not found on PATH")));
         // Found, but a batch file cannot take a path holding `%`.
-        assert!(editor_launch("bat", &[], file, &dirs, ".EXE;.CMD").is_err());
+        assert!(editor_launch("bat", &[], file, dirs, ".EXE;.CMD").is_err());
+        let relative = editor_launch(r"bin\ed.exe", &[], file, dirs, ".EXE");
+        assert!(relative.is_err_and(|e| e.contains("relative path")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

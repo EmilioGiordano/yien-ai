@@ -1,6 +1,7 @@
 //! The real backend: `portable-pty` over ConPTY on Windows and `openpty` on
 //! unix (plan ADR-05).
 
+use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -79,6 +80,18 @@ fn command(spec: &SpawnSpec) -> CommandBuilder {
     cmd
 }
 
+/// The builder for `spec` with its program resolved against the `PATH` the
+/// builder gives the child (on Windows the registry's, read at each spawn,
+/// so a program installed while YIEN runs is found).
+fn prepare(spec: SpawnSpec) -> Result<(SpawnSpec, CommandBuilder), PtyError> {
+    let mut cmd = command(&spec);
+    let spec = crate::program::resolve(spec, |key| cmd.get_env(key).map(OsStr::to_owned))?;
+    if let Some(program) = cmd.get_argv_mut().first_mut() {
+        program.clone_from(&spec.program);
+    }
+    Ok((spec, cmd))
+}
+
 type Master = Box<dyn MasterPty + Send>;
 
 struct PortableChild {
@@ -137,19 +150,14 @@ impl ChildControl for PortableChild {
 impl PtyBackend for PortablePty {
     fn spawn(&self, spec: SpawnSpec) -> Result<PtySession, PtyError> {
         check_size(spec.cols, spec.rows)?;
-        let spec = crate::program::resolve(spec).map_err(|e| PtyError::UnsafeBatchArgument {
-            program: e.program().to_owned(),
-        })?;
+        let (spec, cmd) = prepare(spec)?;
         let pair = native_pty_system()
             .openpty(pty_size(spec.cols, spec.rows))
             .map_err(|e| PtyError::Open(e.into()))?;
-        let mut child = pair
-            .slave
-            .spawn_command(command(&spec))
-            .map_err(|e| PtyError::Spawn {
-                program: spec.program.to_string_lossy().into_owned(),
-                source: e.into(),
-            })?;
+        let mut child = pair.slave.spawn_command(cmd).map_err(|e| PtyError::Spawn {
+            program: spec.program.to_string_lossy().into_owned(),
+            source: e.into(),
+        })?;
         // While the slave is open the master never sees end of stream on unix.
         drop(pair.slave);
 
@@ -237,7 +245,6 @@ impl PtyBackend for PortablePty {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
 
     use super::*;
 
@@ -250,5 +257,58 @@ mod tests {
         let cmd = command(&spec);
         assert_eq!(cmd.get_env("PATH"), None);
         assert_eq!(cmd.get_env("YIEN_TEST_VAR"), Some(OsStr::new("1")));
+    }
+
+    fn temp_tool(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("yien-pty-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::path::absolute(dir).unwrap();
+        let tool = dir.join(if cfg!(windows) { "tool.exe" } else { "tool" });
+        std::fs::write(&tool, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, tool)
+    }
+
+    #[test]
+    fn the_program_is_found_on_the_path_the_builder_gives_the_child() {
+        let (dir, tool) = temp_tool("builder-path");
+        let spec = SpawnSpec::new("tool")
+            .env("PATH", ".")
+            .env("PATH", dir.as_os_str());
+        let (spec, cmd) = prepare(spec).unwrap();
+        assert_eq!(spec.program, tool.as_os_str());
+        assert_eq!(cmd.get_argv()[0], tool.as_os_str());
+
+        let spec = SpawnSpec::new("tool").env("PATH", ".");
+        assert!(matches!(prepare(spec), Err(PtyError::NotFound { .. })));
+        let spec = SpawnSpec::new("tool").env_remove("PATH");
+        assert!(matches!(prepare(spec), Err(PtyError::NotFound { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_builder_runs_exactly_the_checked_file() {
+        let (dir, tool) = temp_tool("checked-file");
+        let (_, cmd) = prepare(SpawnSpec::new(tool.as_os_str()).arg("x")).unwrap();
+        assert_eq!(
+            cmd.get_argv(),
+            &vec![tool.clone().into_os_string(), "x".into()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_system_shell_resolves_to_an_absolute_path() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        let (spec, _) = prepare(SpawnSpec::new(shell)).unwrap();
+        assert!(
+            std::path::Path::new(&spec.program).is_absolute(),
+            "{:?}",
+            spec.program
+        );
     }
 }
