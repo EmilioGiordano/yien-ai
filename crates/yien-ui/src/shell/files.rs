@@ -162,7 +162,8 @@ impl Shell {
                     if let Some(tree) = shell.files.trees.get_mut(&tab)
                         && tree.root() == root
                     {
-                        tree.listed(&dir, listing);
+                        let again = tree.listed(&dir, listing);
+                        shell.list_folders(tab, again, cx);
                         cx.notify();
                     }
                 });
@@ -256,6 +257,7 @@ impl Shell {
     ) {
         let filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         if was_filtering && !filtering {
+            self.files.host.cancel_search();
             self.files
                 .input
                 .update(cx, |input, cx| input.set_value("", window, cx));

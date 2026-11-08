@@ -101,6 +101,9 @@ pub(crate) struct FileTree {
     /// Listings asked for and not answered yet, so a folder is not asked
     /// for twice at once.
     pending: HashSet<String>,
+    /// Pending listings a refresh asked for again: their answer may predate
+    /// the change, so they are listed once more when it arrives.
+    dirty: HashSet<String>,
     tree_cursor: Option<String>,
     hit_cursor: Option<String>,
     query: String,
@@ -118,6 +121,7 @@ impl FileTree {
             dirs,
             expanded: HashSet::new(),
             pending: HashSet::from([String::new()]),
+            dirty: HashSet::new(),
             tree_cursor: None,
             hit_cursor: None,
             query: String::new(),
@@ -144,12 +148,18 @@ impl FileTree {
         !self.query.is_empty()
     }
 
-    /// Takes a folder's listing, or why it failed. A folder no one asked
-    /// for is ignored.
-    pub(crate) fn listed(&mut self, dir: &str, listing: Result<DirListing, String>) {
+    /// Takes a folder's listing, or why it failed, and returns the listing
+    /// to ask for again when a refresh came while this one was on the way.
+    /// A folder no one asked for is ignored.
+    pub(crate) fn listed(&mut self, dir: &str, listing: Result<DirListing, String>) -> Vec<String> {
         self.pending.remove(dir);
+        let again = if self.dirty.remove(dir) && self.dirs.contains_key(dir) {
+            self.ask([dir.to_owned()], false)
+        } else {
+            Vec::new()
+        };
         let Some(slot) = self.dirs.get_mut(dir) else {
-            return;
+            return again;
         };
         *slot = match listing {
             Ok(DirListing {
@@ -165,13 +175,21 @@ impl FileTree {
                 Dir::Failed(reason)
             }
         };
+        again
     }
 
-    /// The listings of `dirs` not already asked for, marked as asked.
-    fn ask(&mut self, dirs: impl IntoIterator<Item = String>) -> Vec<String> {
-        dirs.into_iter()
-            .filter(|d| self.pending.insert(d.clone()))
-            .collect()
+    /// The listings of `dirs` not already asked for, marked as asked. With
+    /// `refresh`, one already on the way is marked to be asked for again.
+    fn ask(&mut self, dirs: impl IntoIterator<Item = String>, refresh: bool) -> Vec<String> {
+        let mut asked = Vec::new();
+        for dir in dirs {
+            if self.pending.insert(dir.clone()) {
+                asked.push(dir);
+            } else if refresh {
+                self.dirty.insert(dir);
+            }
+        }
+        asked
     }
 
     /// Expands a folder; its listing is asked for again unless it already
@@ -179,7 +197,7 @@ impl FileTree {
     pub(crate) fn expand(&mut self, dir: &str) -> Vec<String> {
         self.expanded.insert(dir.to_owned());
         self.dirs.entry(dir.to_owned()).or_insert(Dir::Loading);
-        self.ask([dir.to_owned()])
+        self.ask([dir.to_owned()], false)
     }
 
     /// Collapses a folder and every folder inside it; a cursor inside it
@@ -216,7 +234,7 @@ impl FileTree {
             .retain(|dir, _| dir.is_empty() || expanded.contains(dir));
         let mut dirs: Vec<String> = self.dirs.keys().cloned().collect();
         dirs.sort();
-        self.ask(dirs)
+        self.ask(dirs, true)
     }
 
     /// The rows to draw: the search's matches while filtering, else the
@@ -770,7 +788,10 @@ mod tests {
         tree.collapse("src");
         assert!(tree.expand("src").is_empty(), "its listing is on the way");
         assert_eq!(tree.refresh(), [""]);
-        tree.listed("src", listing(&[("main.rs", F)]));
+        // The refresh came while src was on the way: it is asked for again.
+        assert_eq!(tree.listed("src", listing(&[("main.rs", F)])), ["src"]);
+        assert!(tree.expand("src").is_empty());
+        assert!(tree.listed("src", listing(&[("main.rs", F)])).is_empty());
         assert_eq!(tree.expand("src"), ["src"]);
     }
 
