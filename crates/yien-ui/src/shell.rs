@@ -2955,7 +2955,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("context bar's Changes tab", "changes.show"),
     ("context bar's Files tab", "files.show"),
     ("file tree rows", "files.show"),
-    ("changed file double-click", "changes.show"),
+    ("changed file double-click", "files.show"),
 ];
 
 #[cfg(test)]
