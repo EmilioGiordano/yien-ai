@@ -29,11 +29,27 @@ const MAX_ENTRIES: usize = 1024;
 /// ```
 pub fn load(config_dir: &Path) -> UserProfiles {
     let mut problems = Vec::new();
-    let files = read_files(config_dir, MAX_USER_PROFILES, &mut problems);
+    let mut skipped = Vec::new();
+    let bounds = Bounds {
+        files: MAX_USER_PROFILES,
+        entries: MAX_ENTRIES,
+    };
+    let files = read_files(config_dir, bounds, &mut problems, &mut skipped);
     let mut user = load_user_profiles(files);
+    for file in &skipped {
+        user.skipped(file, None);
+    }
+    user.settle();
     problems.append(&mut user.problems);
     user.problems = problems;
     user
+}
+
+/// How much of the folder is looked at.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    files: usize,
+    entries: usize,
 }
 
 fn folder_problem(message: impl Into<String>) -> ProfileProblem {
@@ -55,12 +71,15 @@ fn file_problem(file: &str, kind: ProblemKind, message: impl Into<String>) -> Pr
 }
 
 /// The `(name, text)` of each readable profile file, in name order, at most
-/// `max_files` of them.
+/// `bounds.files` of them. The names of profile files left unread go to
+/// `skipped`.
 fn read_files(
     config_dir: &Path,
-    max_files: usize,
+    bounds: Bounds,
     problems: &mut Vec<ProfileProblem>,
+    skipped: &mut Vec<String>,
 ) -> Vec<(String, String)> {
+    let max_files = bounds.files;
     let folder = config_dir.join(PROFILES_DIR);
     match fs::symlink_metadata(&folder) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -71,7 +90,11 @@ fn read_files(
         Ok(_) => {}
     }
     let inside = match (fs::canonicalize(config_dir), fs::canonicalize(&folder)) {
-        (Ok(root), Ok(folder)) if folder.starts_with(&root) && folder.is_dir() => folder,
+        (Ok(root), Ok(folder))
+            if folder != root && folder.starts_with(&root) && folder.is_dir() =>
+        {
+            folder
+        }
         (Ok(_), Ok(_)) => {
             problems.push(folder_problem(
                 "is not a folder inside YIEN's config folder; no profile was read from it",
@@ -92,15 +115,27 @@ fn read_files(
     };
     let mut names = Vec::new();
     for (seen, entry) in entries.enumerate() {
-        if seen == MAX_ENTRIES {
+        if seen == bounds.entries {
             problems.push(folder_problem(format!(
-                "holds more than {MAX_ENTRIES} entries; only the first {MAX_ENTRIES} were looked at"
+                "holds more than {0} entries; only the first {0} were looked at",
+                bounds.entries
             )));
             break;
         }
         let Ok(entry) = entry else { continue };
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(raw) => {
+                let shown = raw.to_string_lossy().into_owned();
+                if is_profile_name(&shown) {
+                    problems.push(file_problem(
+                        &shown,
+                        ProblemKind::Skipped,
+                        "has a name that is not valid Unicode; it is skipped",
+                    ));
+                }
+                continue;
+            }
         };
         if !is_profile_name(&name) {
             continue;
@@ -112,25 +147,30 @@ fn read_files(
                 ProblemKind::Skipped,
                 "is not a plain file; it is skipped",
             ));
+            skipped.push(name);
             continue;
         }
         names.push(name);
     }
     names.sort();
     if names.len() > max_files {
-        let skipped = names.split_off(max_files);
+        let over = names.split_off(max_files);
         problems.push(folder_problem(format!(
             "holds {} profile files; only the first {max_files} by name are read, \
              {} and later are skipped",
-            max_files + skipped.len(),
-            skipped[0]
+            max_files + over.len(),
+            over[0]
         )));
+        skipped.extend(over);
     }
     let mut files = Vec::with_capacity(names.len());
     for name in names {
         match read_one(&inside, &name) {
             Ok(text) => files.push((name, text)),
-            Err(why) => problems.push(file_problem(&name, ProblemKind::Unreadable, why)),
+            Err(why) => {
+                problems.push(file_problem(&name, ProblemKind::Unreadable, why));
+                skipped.push(name);
+            }
         }
     }
     files
@@ -234,9 +274,15 @@ mod tests {
             fs::write(folder.join(format!("p{i}.toml")), profile(&format!("p{i}"))).unwrap();
         }
         let mut problems = Vec::new();
-        let files = read_files(&dir, 3, &mut problems);
+        let mut skipped = Vec::new();
+        let bounds = Bounds {
+            files: 3,
+            entries: MAX_ENTRIES,
+        };
+        let files = read_files(&dir, bounds, &mut problems, &mut skipped);
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["p0.toml", "p1.toml", "p2.toml"]);
+        assert_eq!(skipped, ["p3.toml", "p4.toml"]);
         let [problem] = problems.as_slice() else {
             panic!("{problems:?}")
         };
@@ -247,6 +293,100 @@ mod tests {
             "{problem}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_age_04_only_so_many_folder_entries_are_looked_at() {
+        let dir = scratch("entries");
+        let folder = dir.join(PROFILES_DIR);
+        fs::create_dir_all(&folder).unwrap();
+        for i in 0..6 {
+            fs::write(folder.join(format!("n{i}.txt")), "").unwrap();
+        }
+        let mut problems = Vec::new();
+        let bounds = Bounds {
+            files: MAX_USER_PROFILES,
+            entries: 4,
+        };
+        read_files(&dir, bounds, &mut problems, &mut Vec::new());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("more than 4 entries"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_age_04_a_skipped_file_blocks_the_builtin_it_was_named_for() {
+        let dir = scratch("blocked");
+        let folder = dir.join(PROFILES_DIR);
+        fs::create_dir_all(folder.join("codex.toml")).unwrap();
+        fs::write(
+            folder.join("claude.toml"),
+            "schema = = 1
+",
+        )
+        .unwrap();
+        fs::write(
+            folder.join("opencode.toml"),
+            vec![b'#'; MAX_PROFILE_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(
+            folder.join("shell.toml"),
+            "schema = = 1
+",
+        )
+        .unwrap();
+        let user = load(&dir);
+        let broken: Vec<&str> = user.broken.keys().map(String::as_str).collect();
+        assert_eq!(broken, ["claude", "codex", "opencode"], "never the shell");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Junctions need no privilege on Windows, unlike symbolic links.
+    #[cfg(windows)]
+    #[test]
+    fn rf_age_04_junctions_out_of_the_config_dir_are_never_followed() {
+        let junction = |link: &Path, target: &Path| {
+            let status = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J {link:?}");
+        };
+        let outside = scratch("junction-outside");
+        fs::write(outside.join("evil.toml"), profile("evil")).unwrap();
+
+        let dir = scratch("junction-folder");
+        junction(&dir.join(PROFILES_DIR), &outside);
+        let user = load(&dir);
+        assert!(user.profiles.is_empty(), "the folder leads outside");
+        assert_eq!(user.problems.len(), 1, "{:?}", user.problems);
+
+        let dir2 = scratch("junction-self");
+        fs::write(dir2.join("evil.toml"), profile("evil")).unwrap();
+        junction(&dir2.join(PROFILES_DIR), &dir2);
+        let user = load(&dir2);
+        assert!(
+            user.profiles.is_empty(),
+            "the folder must be below the root"
+        );
+
+        let dir3 = scratch("junction-entry");
+        let folder = dir3.join(PROFILES_DIR);
+        fs::create_dir_all(&folder).unwrap();
+        junction(&folder.join("claude.toml"), &outside);
+        fs::write(folder.join("good.toml"), profile("good")).unwrap();
+        let user = load(&dir3);
+        assert_eq!(ids(&user), ["good"]);
+        assert_eq!(user.problems[0].file, "claude.toml");
+        assert!(user.broken.contains_key("claude"));
+
+        for d in [dir, dir2, dir3, outside] {
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]
