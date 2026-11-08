@@ -89,3 +89,35 @@ fn rf_ses_10_files_are_listed_removed_and_read_within_a_limit() {
     assert!(store.read_at_most("a/b", 9).is_err());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rnf_14_a_leftover_temp_file_is_replaced_not_reused() {
+    let dir = scratch("leftover");
+    let mut store = FileStore::new(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("a.json.tmp"),
+        b"stale and much longer than the new bytes",
+    )
+    .unwrap();
+    store.write_atomic("a.json", b"new").unwrap();
+    assert_eq!(store.read("a.json").unwrap().as_deref(), Some(&b"new"[..]));
+    assert!(!dir.join("a.json.tmp").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn rnf_14_a_link_planted_as_the_temp_file_is_not_followed() {
+    let dir = scratch("link");
+    let outside = scratch("link-outside");
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("victim");
+    fs::write(&victim, b"keep").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join("a.json.tmp")).unwrap();
+    FileStore::new(&dir).write_atomic("a.json", b"new").unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&outside);
+}

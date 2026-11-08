@@ -139,7 +139,14 @@ impl Store for FileStore {
         let temp = self.path("write", &format!("{name}.tmp"))?;
         let write = || -> io::Result<()> {
             fs::create_dir_all(&self.dir)?;
-            let mut file = File::create(&temp)?;
+            // A leftover temp, or a link planted in its place, is removed, never
+            // followed: the write lands only in a file it creates.
+            if let Err(err) = fs::remove_file(&temp)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                return Err(err);
+            }
+            let mut file = File::options().write(true).create_new(true).open(&temp)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
