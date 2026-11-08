@@ -111,6 +111,26 @@ impl UserProfiles {
         self.broken
             .retain(|id, _| id != "shell" && !defined.contains(id));
     }
+
+    /// The user's profiles over `builtin`, without the built-in ones a
+    /// skipped file meant to replace, and those broken ids with the file as
+    /// the user reads it (`profiles/claude.toml`).
+    ///
+    /// ```
+    /// let user = yien_agent::load_user_profiles(vec![("claude.toml".into(), "schema = = 1".into())]);
+    /// let (all, broken) = user.over(yien_agent::builtin_profiles().unwrap());
+    /// assert!(all.iter().all(|p| p.id != "claude"));
+    /// assert_eq!(broken["claude"], "profiles/claude.toml");
+    /// ```
+    pub fn over(self, mut builtin: Vec<Profile>) -> (Vec<Profile>, BTreeMap<String, String>) {
+        builtin.retain(|p| !self.broken.contains_key(&p.id));
+        let broken = self
+            .broken
+            .into_iter()
+            .map(|(id, file)| (id, format!("{PROFILES_DIR}/{file}")))
+            .collect();
+        (crate::resolve_profiles(builtin, self.profiles), broken)
+    }
 }
 
 /// The profile id a file name gives: its name without `.toml`, when that is
