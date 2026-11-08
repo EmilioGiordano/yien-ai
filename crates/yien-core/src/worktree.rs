@@ -214,6 +214,13 @@ pub(crate) fn remove(job: RemoveJob, consoles: &Consoles) -> Done {
 
 /// Whether a folder can be removed whole.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        reason = "only the Windows probe finds a folder busy or stranded"
+    )
+)]
 enum Probe {
     Free,
     Busy,
