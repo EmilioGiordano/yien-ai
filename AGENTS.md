@@ -220,7 +220,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 - Libraries return `thiserror` errors and never `unwrap`, `expect` or `panic!` on external input: PTY bytes, hook payloads, IPC frames, state files, profiles, git output. `anyhow` only in binaries.
 - Logs (`tracing`) never contain terminal content, prompts or full hook payloads.
 - The red mark means "an agent needs you" and nothing else (RN-01). When unsure, no red (RN-02).
-- Never write outside YIEN's own directories; never touch `~/.claude`, `~/.codex` or a repo's agent config (RNF-14).
+- Never write outside YIEN's own directories; never touch `~/.claude`, `~/.codex` or a repo's agent config (RNF-14). Sole exception: creating or removing a git worktree on an explicit user action (Ctrl+Shift+N, Alt+R Remove); never delete branches (RN-06).
 - No GPL dependencies and no code copied from GPL projects (Zed's terminal included) until the licence is decided (TBD-04).
 - Accessibility: give controls names and roles when it costs nothing, so screen reader support (RNF-27, R3) is not a rebuild.
 
