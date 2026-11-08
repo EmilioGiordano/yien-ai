@@ -128,7 +128,9 @@ pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32) -> boo
 /// How wide each bar is drawn in a window `window` wide. A saved width is
 /// clamped between the bar's minimum and half the window; review mode takes
 /// its share of the window. When the bars would leave the panes less than
-/// [`PANES_MIN`], both shrink in proportion. The saved widths are never
+/// [`PANES_MIN`], each gives up width in proportion to what it has above its
+/// minimum, so a bar reaches its minimum only when both do; below that they
+/// shrink in proportion. The saved widths are never
 /// changed, so a window that grows again gets them back.
 pub(crate) fn drawn(bars: &SideBars, window: f32) -> Drawn {
     let window = if window.is_finite() {
@@ -150,19 +152,49 @@ pub(crate) fn drawn(bars: &SideBars, window: f32) -> Drawn {
             .unwrap_or(bar.default_width());
         clamp(bar, saved, window)
     };
-    let mut tab = wanted(Bar::Tab);
-    let mut context = wanted(Bar::Context);
-    let room = (window - PANES_MIN).max(0.0);
-    let total = tab + context;
-    if total > room && total > 0.0 {
-        let scale = room / total;
-        tab *= scale;
-        context *= scale;
-    }
+    let (tab, context) = fit(
+        (wanted(Bar::Tab), wanted(Bar::Context)),
+        (
+            min_if_shown(bars, Bar::Tab),
+            min_if_shown(bars, Bar::Context),
+        ),
+        (window - PANES_MIN).max(0.0),
+    );
     Drawn {
         tab_bar: shown(bars, Bar::Tab).then_some(tab),
         context_bar: shown(bars, Bar::Context).then_some(context),
     }
+}
+
+fn min_if_shown(bars: &SideBars, bar: Bar) -> f32 {
+    if shown(bars, bar) {
+        bar.min_width()
+    } else {
+        0.0
+    }
+}
+
+/// Shrinks two widths into `room`: first down to their minimums, each in
+/// proportion to its slack above its own, then both in proportion.
+fn fit((a, b): (f32, f32), (min_a, min_b): (f32, f32), room: f32) -> (f32, f32) {
+    let total = a + b;
+    if total <= room {
+        return (a, b);
+    }
+    let (slack_a, slack_b) = ((a - min_a).max(0.0), (b - min_b).max(0.0));
+    let slack = slack_a + slack_b;
+    let excess = total - room;
+    if slack > 0.0 && slack >= excess {
+        let k = excess / slack;
+        return (a - slack_a * k, b - slack_b * k);
+    }
+    let (a, b) = (a.min(min_a), b.min(min_b));
+    let total = a + b;
+    if total <= room || total <= 0.0 {
+        return (a, b);
+    }
+    let scale = room / total;
+    (a * scale, b * scale)
 }
 
 fn clamp(bar: Bar, width: f32, window: f32) -> f32 {
@@ -283,14 +315,22 @@ mod tests {
     }
 
     #[test]
-    fn rf_nav_10_a_narrow_window_shrinks_both_bars_in_proportion() {
+    fn rf_nav_10_a_narrow_window_shrinks_both_bars_toward_their_minimums() {
         let bars = sized(Some(400.0), Some(600.0));
         let window = 960.0;
         let d = drawn(&bars, window);
         let (tab, context) = (d.tab_bar.unwrap(), d.context_bar.unwrap());
         assert!((window - tab - context - PANES_MIN).abs() < 0.01);
-        // 400 and 480 (half the window) keep their ratio.
-        assert!((tab / context - 400.0 / 480.0).abs() < 1e-4);
+        // 400 and 480 (half the window) give up width in proportion to what
+        // they have above their minimums, so neither falls below it.
+        let given = (400.0 - tab, 480.0 - context);
+        let slack = (400.0 - TAB_BAR_MIN, 480.0 - CONTEXT_BAR_MIN);
+        assert!((given.0 / given.1 - slack.0 / slack.1).abs() < 1e-3);
+        assert!(tab > TAB_BAR_MIN && context > CONTEXT_BAR_MIN);
+        // A small tab bar is left alone while the wide context bar gives way.
+        let d = drawn(&sized(Some(TAB_BAR_MIN), Some(600.0)), window);
+        assert_eq!(d.tab_bar, Some(TAB_BAR_MIN));
+        assert!((d.context_bar.unwrap() - (window - PANES_MIN - TAB_BAR_MIN)).abs() < 0.01);
         // The saved widths come back once the window grows.
         assert_eq!(drawn(&bars, 1920.0).tab_bar, Some(400.0));
         assert_eq!(drawn(&bars, 1920.0).context_bar, Some(600.0));
