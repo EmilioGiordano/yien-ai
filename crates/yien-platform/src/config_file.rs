@@ -276,6 +276,7 @@ fn is_batch(program: &str) -> bool {
     )
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn resolves_to_batch(program: &str, dirs: &[PathBuf], pathext: &str) -> bool {
     let batch = |p: &Path| {
         p.extension()
@@ -467,6 +468,8 @@ mod tests {
         assert_eq!(quote_path(Path::new(r"C:\dir\")), r#""C:\dir\\""#);
     }
 
+    // PATHEXT lookup assumes Windows' case-insensitive file names.
+    #[cfg(windows)]
     #[test]
     fn batch_editors_are_found_on_the_path_and_given_only_plain_arguments() {
         let dir = scratch("batch");
