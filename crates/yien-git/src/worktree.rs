@@ -18,8 +18,8 @@ const LIST_ATTEMPTS: u32 = 6;
 const LIST_BACKOFF: Duration = Duration::from_millis(25);
 
 /// One lock per repository (its common git dir) for this process's worktree
-/// adds and removals: git dies listing a registration another add is still
-/// writing ("failed to read .git/worktrees/<name>/commondir") and has no lock.
+/// adds and removals: git dies listing a registration another one is writing
+/// or deleting ("failed to read .git/worktrees/<name>/commondir"), and has no lock.
 static WRITES: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 /// One entry of `git worktree list`.
@@ -511,8 +511,8 @@ impl Git {
     }
 }
 
-/// git failed reading a registration another add is still writing: an empty
-/// `commondir`, or a `locked` deleted between git's check and its read.
+/// git failed reading a registration another git process is writing or
+/// deleting: an empty `commondir`, or a file gone between git's check and its read.
 fn half_written_registration(err: &GitError) -> bool {
     matches!(err, GitError::Failed { message, .. }
         if message.contains("failed to read")
@@ -671,6 +671,10 @@ mod tests {
         )));
         assert!(half_written_registration(&failed(
             "fatal: failed to read '.git/worktrees/n5/locked': No such file or directory"
+        )));
+        // Windows, a file a removal is deleting.
+        assert!(half_written_registration(&failed(
+            "fatal: failed to read .git/worktrees/n2/commondir: Permission denied"
         )));
         assert!(!half_written_registration(&failed(
             "fatal: not a valid path: worktrees/commondir"
