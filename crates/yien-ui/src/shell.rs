@@ -23,7 +23,7 @@ use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
-use crate::catalog::{CATALOG, Scope, profile_splits, shortcut};
+use crate::catalog::{CATALOG, Scope, shortcut};
 use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
@@ -935,7 +935,7 @@ impl Shell {
                     let spec = CATALOG.get(at)?;
                     shortcut(&keymap, (spec.action)().as_ref())
                 },
-                profile_splits(self.workspace.profiles()),
+                self.workspace.profiles(),
             )
         };
         let places = switcher_entries(&self.workspace);
@@ -1053,6 +1053,7 @@ impl Shell {
                     self.split_pane(pane, orientation, Some(profile), cx);
                 }
             }
+            Target::NewTab(profile) => self.new_tab_with(Some(profile.as_str()), cx),
             Target::Resume {
                 project,
                 profile,

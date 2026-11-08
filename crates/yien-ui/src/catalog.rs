@@ -325,6 +325,32 @@ pub(crate) fn profile_splits(profiles: &[ProfileInfo]) -> Vec<ProfileSplit> {
     splits
 }
 
+/// A new tab that starts a given profile, made when the palette opens like
+/// [`ProfileSplit`], so a profile from the user's files is listed too
+/// (RF-AGE-04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileTab {
+    pub(crate) title: String,
+    pub(crate) profile: ProfileId,
+}
+
+/// Profiles a keyed catalog command already opens a tab with: the shell
+/// (`tab.new`) and Claude Code (`tab.new_claude`).
+const KEYED_TABS: &[&str] = &["shell", "claude"];
+
+/// "New tab with" for every profile, in the profiles' order, leaving out
+/// those a keyed command covers.
+pub(crate) fn profile_tabs(profiles: &[ProfileInfo]) -> Vec<ProfileTab> {
+    profiles
+        .iter()
+        .filter(|p| !KEYED_TABS.contains(&p.id.as_str()))
+        .map(|p| ProfileTab {
+            title: format!("tab: new tab with {}", p.name),
+            profile: p.id.clone(),
+        })
+        .collect()
+}
+
 /// The catalog entry with this id.
 #[cfg(test)]
 pub(crate) fn spec(id: &str) -> Option<&'static CommandSpec> {
@@ -542,6 +568,37 @@ mod tests {
             assert!(spec(id).is_some_and(|s| !s.keys.is_empty()), "{id}");
         }
         assert!(profile_splits(&[]).is_empty());
+    }
+
+    #[test]
+    fn rf_age_04_a_profile_from_the_user_files_gets_a_new_tab_command() {
+        let info = |id: &str, name: &str| ProfileInfo {
+            id: ProfileId::new(id),
+            name: name.into(),
+        };
+        let profiles = [
+            info("shell", "Shell"),
+            info("claude", "Fake Claude"),
+            info("codex", "Codex"),
+            info("mytool", "My tool"),
+        ];
+        let tabs = profile_tabs(&profiles);
+        let titles: Vec<&str> = tabs.iter().map(|t| t.title.as_str()).collect();
+        // The shell and Claude Code keep their keyed commands.
+        assert_eq!(
+            titles,
+            ["tab: new tab with Codex", "tab: new tab with My tool"]
+        );
+        assert_eq!(tabs[1].profile, ProfileId::new("mytool"));
+        for id in ["tab.new", "tab.new_claude"] {
+            assert!(spec(id).is_some_and(|s| !s.keys.is_empty()), "{id}");
+        }
+        let splits: Vec<String> = profile_splits(&profiles)
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert!(splits.contains(&"pane: split right with My tool".to_owned()));
+        assert!(splits.contains(&"pane: split down with My tool".to_owned()));
     }
 
     #[test]
