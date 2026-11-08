@@ -520,8 +520,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rf_ctx_03_a_file_opens_in_the_configured_editor_as_one_argument() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = scratch("fake-editor");
         fs::create_dir_all(dir.join("my code")).unwrap();
         let editor = dir.join("record.sh");
@@ -534,13 +532,12 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
         let file = dir.join("my code").join("main file.rs");
         fs::write(&file, "").unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         open(
             file.clone(),
-            Some(format!("\"{}\" --wait", editor.display())),
+            Some(format!("/bin/sh \"{}\" --wait", editor.display())),
             move |r| {
                 let _ = tx.send(r.map_err(|e| e.to_string()));
             },
