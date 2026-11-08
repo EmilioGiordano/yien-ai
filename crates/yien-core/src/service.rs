@@ -11,8 +11,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{mpsc, watch};
+use yien_agent::SessionReader;
 use yien_agent::{HookError, HookEvent};
-use yien_proto::{ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo, TabGit, TabId};
+use yien_platform::agent_sessions::{self, MAX_SESSIONS};
+use yien_proto::{
+    AgentSession, ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo, ProjectId,
+    SessionTitle, TabGit, TabId,
+};
 use yien_pty::PtyBackend;
 
 use crate::consoles::Consoles;
@@ -348,6 +353,30 @@ impl Service {
         self.emit(msg).await;
     }
 
+    /// Lists the project's past agent sessions on a blocking thread with the
+    /// reader each profile declares, and sends them to the UI from there, so
+    /// the command loop never waits on the disk (RF-SES-07).
+    fn list_sessions(&self, project: ProjectId, root: String) {
+        let config = Arc::clone(&self.ctx.config);
+        let events = self.ctx.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let (sessions, failed) = past_sessions(&config, &root);
+            tracing::debug!(
+                project = project.get(),
+                sessions = sessions.len(),
+                "listed past agent sessions"
+            );
+            if let Some(error) = failed {
+                tracing::warn!("past sessions could not be read: {error}");
+                let _ = events.blocking_send(CoreMsg::Error {
+                    pane: None,
+                    message: format!("Some past sessions could not be read: {error}"),
+                });
+            }
+            let _ = events.blocking_send(CoreMsg::AgentSessions { project, sessions });
+        });
+    }
+
     /// Hands the workspace to the writer; it writes only what changed.
     fn publish(&self) {
         if let Some(writer) = &self.writer {
@@ -541,6 +570,7 @@ impl Service {
                 Effect::Relaunch { pane } => self.relaunch(pane).await,
                 Effect::Terminate { pane } => self.to_pane(pane, PaneCmd::Terminate).await,
                 Effect::AddWorktree(job) => self.run_job(move || worktree::add(job)),
+                Effect::ListAgentSessions { project, root } => self.list_sessions(project, root),
                 Effect::CheckWorktree { tab, worktree } => {
                     self.run_job(move || worktree::check(tab, worktree));
                 }
@@ -591,6 +621,37 @@ fn opens_start_folder(saved_tabs: Option<usize>, restored_tabs: usize) -> bool {
         None => true,
         Some(saved) => saved > 0 && restored_tabs == 0,
     }
+}
+
+/// The past sessions of the project at `root` from every profile that
+/// declares a reader, newest first and at most [`MAX_SESSIONS`], and the
+/// last failure to read a CLI's folder, if any.
+fn past_sessions(config: &CoreConfig, root: &str) -> (Vec<AgentSession>, Option<String>) {
+    let mut readers: Vec<(&str, SessionReader)> = Vec::new();
+    for profile in &config.profiles {
+        if let Some(reader) = profile.launch.sessions
+            && !readers.iter().any(|(_, r)| *r == reader)
+        {
+            readers.push((&profile.id, reader));
+        }
+    }
+    let mut sessions = Vec::new();
+    let mut failed = None;
+    for (profile, reader) in readers {
+        match agent_sessions::list(reader, &config.cli_dirs, root, MAX_SESSIONS) {
+            Ok(found) => sessions.extend(found.into_iter().map(|s| AgentSession {
+                profile: ProfileId::new(profile),
+                id: s.id,
+                title: s.summary.title.map(SessionTitle::new),
+                modified_ms: s.modified_ms,
+                prompts: s.summary.prompts,
+            })),
+            Err(error) => failed = Some(error.to_string()),
+        }
+    }
+    sessions.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then(a.id.cmp(&b.id)));
+    sessions.truncate(MAX_SESSIONS);
+    (sessions, failed)
 }
 
 /// The profiles new panes can be started with: the shell first, then each

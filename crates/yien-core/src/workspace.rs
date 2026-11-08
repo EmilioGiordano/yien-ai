@@ -9,6 +9,7 @@ use yien_proto::{
     AgentState, Command, CoreMsg, PaneId, PaneInfo, ProfileId, ProfileInfo, ProjectId, ProjectInfo,
     TabId, TabInfo, WorkspaceSnapshot, same_folder,
 };
+use yien_session::is_session_id;
 
 use crate::CoreError;
 use crate::convert;
@@ -50,6 +51,9 @@ pub(crate) enum Effect {
     Terminate { pane: PaneId },
     /// Create a worktree for a new tab of `project` (RF-ESP-05).
     AddWorktree(worktree::AddJob),
+    /// List the past agent sessions of the project at `root` off the
+    /// command loop, and answer with [`CoreMsg::AgentSessions`] (RF-SES-07).
+    ListAgentSessions { project: ProjectId, root: String },
     /// Tell the UI what removing a tab's worktree would lose (RN-08).
     CheckWorktree { tab: TabId, worktree: String },
     /// Remove a worktree once the panes that ran in it have closed.
@@ -459,7 +463,7 @@ impl Workspace {
                 tab.leaves.insert(new_leaf, new);
                 tab.maximized = None;
                 let cwd = tab.dir.clone();
-                self.add_pane(new, tab_id, plan, cwd, &mut fx);
+                self.add_pane(new, tab_id, plan, cwd, None, &mut fx);
                 self.focus(new, &mut fx)?;
                 self.emit_pane(new, &mut fx);
             }
@@ -544,8 +548,21 @@ impl Workspace {
                 p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
-            // Answered by the core in the next change.
-            Command::ListAgentSessions { .. } | Command::ResumeAgentSession { .. } => {}
+            Command::ListAgentSessions { project } => {
+                let root = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .ok_or(CoreError::UnknownProject(project))?
+                    .root
+                    .clone();
+                fx.push(Effect::ListAgentSessions { project, root });
+            }
+            Command::ResumeAgentSession {
+                project,
+                profile,
+                session_id,
+            } => self.resume_session(project, &profile, session_id, resolve, &mut fx)?,
         }
         self.refresh_views(&mut fx);
         debug_assert_eq!(self.check(), Ok(()));
@@ -620,6 +637,53 @@ impl Workspace {
         worktree: Option<(String, String)>,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
+        self.open_tab(project, name, plan, worktree, None, fx)
+    }
+
+    /// Resumes a past agent session in a new tab on the project's folder,
+    /// the folder its CLI keeps the session under (RF-SES-07). A session a
+    /// pane already runs is focused instead: two programs resuming one
+    /// session would both write it.
+    fn resume_session(
+        &mut self,
+        project: ProjectId,
+        profile: &ProfileId,
+        session_id: String,
+        resolve: &dyn Fn(Option<&ProfileId>) -> Result<LaunchPlan, CoreError>,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        if !is_session_id(&session_id) {
+            return Err(CoreError::InvalidSessionId);
+        }
+        if !self.projects.iter().any(|p| p.id == project) {
+            return Err(CoreError::UnknownProject(project));
+        }
+        let open = self.panes.iter().find_map(|(id, p)| {
+            p.session_id
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(&session_id))
+                .then_some(*id)
+        });
+        if let Some(pane) = open {
+            return self.focus(pane, fx);
+        }
+        let plan = resolve(Some(profile))?;
+        if !plan.can_resume() {
+            return Err(CoreError::CannotResume(plan.profile_name));
+        }
+        self.open_tab(project, None, plan, None, Some(session_id), fx)
+    }
+
+    /// [`Workspace::new_tab`], its pane resuming `resume` when set.
+    fn open_tab(
+        &mut self,
+        project: ProjectId,
+        name: Option<String>,
+        plan: LaunchPlan,
+        worktree: Option<(String, String)>,
+        resume: Option<String>,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
         let tab_id = TabId::new(self.next()?);
         let pane = PaneId::new(self.next()?);
         let p = self
@@ -655,19 +719,23 @@ impl Workspace {
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
         }
-        self.add_pane(pane, tab_id, plan, dir, fx);
+        self.add_pane(pane, tab_id, plan, dir, resume, fx);
         self.emit_tab(tab_id, fx);
         self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
         Ok(())
     }
 
+    /// Adds a pane and starts its program, resuming the agent session
+    /// `resume` when set; the pane names that session until the program
+    /// reports one, as a restored pane does.
     fn add_pane(
         &mut self,
         pane: PaneId,
         tab: TabId,
         plan: LaunchPlan,
         cwd: String,
+        resume: Option<String>,
         fx: &mut Vec<Effect>,
     ) {
         self.panes.insert(
@@ -686,7 +754,7 @@ impl Workspace {
                 state: AgentState::Idle,
                 running: false,
                 exit_code: None,
-                session_id: None,
+                session_id: resume.clone(),
                 needs_you_since: None,
                 signal_lost: false,
                 visible: false,
@@ -698,7 +766,7 @@ impl Workspace {
             pane,
             plan: Box::new(plan),
             cwd,
-            resume: None,
+            resume,
         });
     }
 
@@ -1777,6 +1845,141 @@ mod tests {
             collapsed: true,
         };
         assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
+    const SESSION: &str = "4f1c2a3b-0000-4000-8000-0123456789ab";
+
+    fn with_agents(profile: Option<&ProfileId>) -> Result<LaunchPlan, CoreError> {
+        let profiles = yien_agent::builtin_profiles().unwrap();
+        launch::resolve(profile, &profiles, &ShellCommand::new("sh"))
+    }
+
+    fn resume(project: ProjectId, profile: &str, id: &str) -> Command {
+        Command::ResumeAgentSession {
+            project,
+            profile: ProfileId::new(profile),
+            session_id: id.into(),
+        }
+    }
+
+    #[test]
+    fn rf_ses_07_listing_asks_for_the_projects_folder() {
+        let mut ws = Workspace::new();
+        project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let fx = run(&mut ws, Command::ListAgentSessions { project: id });
+        assert!(matches!(
+            fx.as_slice(),
+            [Effect::ListAgentSessions { project, root }]
+                if *project == id && root == "C:/Code/yien/"
+        ));
+        let gone = ws.apply(
+            Command::ListAgentSessions {
+                project: ProjectId::new(99),
+            },
+            &resolve,
+        );
+        assert!(matches!(gone, Err(CoreError::UnknownProject(_))));
+    }
+
+    #[test]
+    fn rf_ses_07_a_past_session_resumes_in_a_new_tab_on_the_project_folder() {
+        let mut ws = Workspace::new();
+        let (first, _) = project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let fx = ws
+            .apply(resume(id, "claude", SESSION), &with_agents)
+            .unwrap();
+        let (pane, plan, cwd, resumed) = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Spawn {
+                    pane,
+                    plan,
+                    cwd,
+                    resume,
+                } => Some((*pane, plan, cwd.clone(), resume.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(plan.profile, "claude");
+        assert_eq!(cwd, "C:/Code/yien/");
+        assert_eq!(resumed.as_deref(), Some(SESSION));
+        let snap = ws.snapshot();
+        assert_eq!(snap.tabs.len(), 2);
+        let tab = ws.tab_of(pane).unwrap();
+        assert_ne!(tab, first);
+        assert_eq!(snap.active_tab, Some(tab));
+        let info = snap.panes.iter().find(|p| p.id == pane).unwrap();
+        assert_eq!(info.session_id.as_deref(), Some(SESSION));
+        // Saved at once, so a quit before the CLI reports the id keeps it.
+        let saved = ws.to_session();
+        let record = saved.projects[0]
+            .tabs
+            .iter()
+            .flat_map(|t| &t.panes)
+            .find(|p| p.id == pane)
+            .unwrap();
+        let agent = record.agent.as_ref().unwrap();
+        assert_eq!(agent.session_id.as_ref().map(|s| s.as_str()), Some(SESSION));
+    }
+
+    #[test]
+    fn rf_ses_07_a_session_already_open_is_focused_not_resumed_twice() {
+        let mut ws = Workspace::new();
+        project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let fx = ws
+            .apply(resume(id, "claude", SESSION), &with_agents)
+            .unwrap();
+        let pane = spawned(&fx)[0];
+        let (other, _) = {
+            let fx = run(
+                &mut ws,
+                Command::NewTab {
+                    project: id,
+                    name: None,
+                    profile: None,
+                },
+            );
+            let p = spawned(&fx)[0];
+            (ws.tab_of(p).unwrap(), p)
+        };
+        assert_eq!(ws.snapshot().active_tab, Some(other));
+        let upper = SESSION.to_uppercase();
+        let fx = ws
+            .apply(resume(id, "claude", &upper), &with_agents)
+            .unwrap();
+        assert!(spawned(&fx).is_empty());
+        let snap = ws.snapshot();
+        assert_eq!(snap.tabs.len(), 3);
+        assert_eq!(snap.active_tab, Some(ws.tab_of(pane).unwrap()));
+    }
+
+    #[test]
+    fn rf_ses_07_a_resume_that_cannot_work_changes_nothing() {
+        let mut ws = Workspace::new();
+        project(&mut ws);
+        let id = ws.snapshot().projects[0].id;
+        let before = ws.snapshot();
+        for (command, why) in [
+            (resume(id, "claude", "--settings"), "not an id"),
+            (resume(id, "claude", ""), "empty"),
+            (resume(id, "shell", SESSION), "the shell cannot resume"),
+            (resume(id, "aider", SESSION), "unknown profile"),
+            (resume(ProjectId::new(99), "claude", SESSION), "no project"),
+        ] {
+            assert!(ws.apply(command, &with_agents).is_err(), "{why}");
+        }
+        assert_eq!(ws.snapshot(), before);
+        assert!(matches!(
+            ws.apply(resume(id, "claude", "x"), &with_agents),
+            Err(CoreError::InvalidSessionId)
+        ));
+        assert!(matches!(
+            ws.apply(resume(id, "shell", SESSION), &with_agents),
+            Err(CoreError::CannotResume(_))
+        ));
     }
 
     #[test]

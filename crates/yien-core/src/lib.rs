@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use yien_agent::Profile;
+use yien_platform::agent_sessions::CliDirs;
 use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, TabId};
 use yien_pty::PtyBackend;
@@ -169,6 +170,9 @@ pub struct CoreConfig {
     /// Git facts for tabs: the branch of every tab and the selected tab's
     /// changes (RF-ESP-04, RF-CTX-04). `None`, the default, runs no git.
     pub git: Option<GitConfig>,
+    /// Where the agent CLIs keep their own data, read for past sessions
+    /// (RF-SES-07). The default names no folder, so nothing is listed.
+    pub cli_dirs: CliDirs,
 }
 
 impl Default for CoreConfig {
@@ -188,6 +192,7 @@ impl Default for CoreConfig {
             session: None,
             start_project: None,
             git: None,
+            cli_dirs: CliDirs::default(),
         }
     }
 }
@@ -225,6 +230,12 @@ pub enum CoreError {
     /// A project folder that is not a folder.
     #[error("{0} is not a folder; choose an existing folder for the project")]
     NotADirectory(String),
+    /// A resume named something that is not a session id.
+    #[error("that is not a session id; pick a session from the list of past sessions")]
+    InvalidSessionId,
+    /// A resume asked a profile that cannot resume a session by its id.
+    #[error("{0} cannot resume a past session")]
+    CannotResume(String),
     /// A worktree command named a tab that is not on a worktree of its own.
     #[error("tab {} is not on a worktree of its own", .0.get())]
     NoWorktree(TabId),
