@@ -36,6 +36,7 @@ mod pane;
 mod persist;
 mod report;
 mod resume;
+mod screens;
 mod service;
 mod shell;
 mod workspace;
@@ -66,6 +67,7 @@ use crate::service::{Links, links};
 pub use git::GitConfig;
 pub use hooks::HookConfig;
 pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
+pub use screens::{SCREEN_INTERVAL, SCREEN_LIMITS, SCREENS_TOTAL_BYTES, ScreenFiles, ScreenStore};
 pub use shell::{ShellCommand, default_shell};
 
 /// Commands waiting for the core; beyond this [`CoreHandle::try_send`]
@@ -168,6 +170,13 @@ pub struct CoreConfig {
     /// How long after the last change the workspace is written;
     /// [`SAVE_DEBOUNCE`] by default.
     pub save_debounce: Duration,
+    /// Where each pane's screen is kept, written while it changes and on
+    /// quit, and shown again when the pane is restored (RF-SES-10). `None`
+    /// keeps nothing.
+    pub screens: Option<ScreenStore>,
+    /// How often changed screens are written, on [`CoreConfig::clock`];
+    /// [`SCREEN_INTERVAL`] by default.
+    pub screen_interval: Duration,
     /// The folder opened as a project when no session is restored.
     pub start_project: Option<String>,
     /// Git facts for tabs: the branch of every tab and the selected tab's
@@ -194,6 +203,8 @@ impl Default for CoreConfig {
             hooks: None,
             session: None,
             save_debounce: SAVE_DEBOUNCE,
+            screens: None,
+            screen_interval: SCREEN_INTERVAL,
             start_project: None,
             git: None,
             cli_dirs: CliDirs::default(),
@@ -348,6 +359,9 @@ impl Core {
             .session
             .clone()
             .and_then(|store| persist::Writer::start(store, config.save_debounce, events.clone()));
+        let screens = config.screens.clone().and_then(|store| {
+            screens::Screens::start(store, config.screen_interval, Arc::clone(&config.clock))
+        });
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),
@@ -365,12 +379,14 @@ impl Core {
             command_rx,
             hooks_error,
             writer.clone(),
+            screens.clone(),
         ));
         let handle = CoreHandle {
             commands,
             panes,
             hooks,
             writer,
+            screens,
             consoles,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
@@ -404,6 +420,7 @@ pub struct CoreHandle {
     )]
     hooks: Option<Arc<hooks::Hooks>>,
     writer: Option<Arc<persist::Writer>>,
+    screens: Option<Arc<screens::Screens>>,
     consoles: Arc<Consoles>,
     _runtime: Arc<RuntimeGuard>,
 }
@@ -473,6 +490,10 @@ impl CoreHandle {
     /// the background. `Ok(false)` when nothing changed since the last save or
     /// no session store is set.
     ///
+    /// With [`CoreConfig::screens`] set, the changed pane screens are written
+    /// next, in what is left of `timeout`; those left when it runs out keep
+    /// their old files.
+    ///
     /// ```
     /// # use std::{sync::Arc, time::Duration};
     /// # use yien_core::{Core, CoreConfig};
@@ -481,10 +502,21 @@ impl CoreHandle {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn save_session(&self, timeout: Duration) -> Result<bool, SessionSaveError> {
-        match &self.writer {
+        let deadline = Instant::now() + timeout;
+        let saved = match &self.writer {
             Some(writer) => writer.save_now(timeout),
             None => Ok(false),
+        };
+        if let Some(screens) = &self.screens {
+            let started = Instant::now();
+            match screens.save_now(deadline.saturating_duration_since(started)) {
+                Ok(written) => {
+                    tracing::info!(written, elapsed = ?started.elapsed(), "pane screens saved on quit");
+                }
+                Err(e) => tracing::warn!("pane screens not all saved on quit: {e}"),
+            }
         }
+        saved
     }
 
     /// Terminates every pane's program and closes its pseudo terminal, for
@@ -510,6 +542,9 @@ impl CoreHandle {
         let deadline = Instant::now() + timeout;
         if let Some(writer) = &self.writer {
             writer.stop();
+        }
+        if let Some(screens) = &self.screens {
+            screens.stop();
         }
         let mut open = self.consoles.shut();
         for closer in &open {

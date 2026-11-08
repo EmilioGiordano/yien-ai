@@ -16,12 +16,14 @@ use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
-    AlacrittyEngine, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput,
+    AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine,
+    VtOutput,
 };
 
 use crate::convert;
 use crate::launch::{self, Fill, HookFill, LaunchPlan};
 use crate::resume::{self, ResumeFailure};
+use crate::screens::ScreenSource;
 use crate::service::{Ctx, HookItem};
 use crate::workspace::PaneEvent;
 
@@ -128,9 +130,9 @@ enum ReaderMsg {
     Exited(Option<u32>),
 }
 
-type Engine = Arc<Mutex<Box<dyn VtEngine>>>;
+pub(crate) type Engine = Arc<Mutex<Box<dyn VtEngine>>>;
 
-fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
+pub(crate) fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
     engine.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -245,6 +247,39 @@ pub(crate) struct PaneSetup {
     pub palette: Palette,
     /// The workspace's number for the launch this actor starts with.
     pub launch: u64,
+    /// Where the screen writer reads this pane's screen (RF-SES-10).
+    pub screen: Arc<ScreenSource>,
+    /// The screen the pane had when the app last quit, shown above the
+    /// program's first launch. Display only: never sent to the program.
+    pub restored: Option<Vec<u8>>,
+}
+
+/// Starts the line that follows a restored screen; screen rules and the
+/// resume check read only the rows after it.
+pub(crate) const RESTORED_MARK: &str = "\u{2500}\u{2500} restored ";
+
+/// The line below a restored screen: dim, in the identity blue (palette
+/// index 4, so it follows a palette switch), as wide as the pane.
+fn restored_line(cols: u16) -> Vec<u8> {
+    let rule = usize::from(cols).saturating_sub(RESTORED_MARK.chars().count() + 1);
+    let mut line = b"\r\n\x1b[0;2;34m".to_vec();
+    line.extend_from_slice(RESTORED_MARK.as_bytes());
+    line.extend_from_slice("\u{2500}".repeat(rule).as_bytes());
+    line.extend_from_slice(b"\x1b[0m\r\n");
+    line
+}
+
+/// The rows the running program drew: below the restored screen's mark,
+/// while this launch shows one.
+fn program_rows(frame: &Frame, restored: bool) -> Vec<String> {
+    let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+    if !restored {
+        return rows;
+    }
+    match rows.iter().rposition(|row| row.starts_with(RESTORED_MARK)) {
+        Some(mark) => rows[mark + 1..].to_vec(),
+        None => rows,
+    }
 }
 
 /// A pane that has not started its program yet because it waits for the
@@ -309,6 +344,12 @@ struct Actor {
     /// The workspace's number for the current launch, carried by the session
     /// reports so the workspace can drop those of a launch it replaced.
     launch: u64,
+    screen: Arc<ScreenSource>,
+    /// The saved screen, until a launch shows it; kept for the shell a failed
+    /// resume falls back to.
+    restored: Option<Vec<u8>>,
+    /// This launch's screen starts with the restored one.
+    shows_restored: bool,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -371,6 +412,9 @@ pub(crate) fn spawn(
         failed_resume: None,
         launch_alive: false,
         launch: setup.launch,
+        screen: setup.screen,
+        restored: setup.restored,
+        shows_restored: false,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -543,6 +587,21 @@ impl Actor {
             size.cols,
             size.rows,
         )));
+        // The shell a failed resume falls back to shows the screen again.
+        let restored = if self.fallback.is_some() {
+            self.restored.clone()
+        } else {
+            self.restored.take()
+        };
+        self.shows_restored = restored.is_some();
+        if let Some(dump) = restored {
+            let mut engine = lock(&self.engine);
+            // Its replies, title and signals are dropped: none of it is the program's.
+            engine.feed(&dump);
+            engine.feed(DUMP_END);
+            engine.feed(&restored_line(size.cols));
+        }
+        self.screen.attach(Arc::clone(&self.engine));
         self.dirty = true;
         let resume = self.resume.take().filter(|_| self.plan.can_resume());
         self.resumed_at = resume.is_some().then(|| self.now());
@@ -612,7 +671,9 @@ impl Actor {
         let (control, events) = session.into_parts();
         let (tx, reader) = mpsc::channel(READER_QUEUE);
         let engine = Arc::clone(&self.engine);
+        let screen = Arc::clone(&self.screen);
         let feed = move |bytes: &[u8]| {
+            screen.changed();
             let mut engine = lock(&engine);
             let out = engine.feed(bytes);
             let sync = engine.sync_pending().then(|| engine.sync_generation());
@@ -675,6 +736,7 @@ impl Actor {
             return;
         }
         self.launch_alive = true;
+        self.restored = None;
         match item.event {
             Ok(event) => self.step(&Signal::Hook(event)),
             Err(_) => self.step(&Signal::Ambiguous),
@@ -700,6 +762,7 @@ impl Actor {
                     engine.size()
                 };
                 self.outbox.resize = Some((size.cols, size.rows));
+                self.screen.changed();
                 self.dirty = true;
                 self.flush();
                 if self.pending.take().is_some() {
@@ -747,6 +810,7 @@ impl Actor {
             }
             PaneCmd::Relaunch { launch } => {
                 self.launch = launch;
+                self.restored = None;
                 if let Some(agent) = self.agent_plan.take() {
                     self.plan = agent;
                     self.reset_machine();
@@ -783,6 +847,9 @@ impl Actor {
     fn on_input(&mut self, input: PaneInput) {
         if input.user {
             self.launch_alive |= self.session.is_some();
+            if self.launch_alive {
+                self.restored = None;
+            }
             self.step(&Signal::Input);
         }
         if self.session.is_some() && !input.bytes.is_empty() {
@@ -836,7 +903,7 @@ impl Actor {
             self.absorb(out);
         }
         let frame = lock(&self.engine).frame();
-        let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+        let rows = program_rows(&frame, self.shows_restored);
         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
         let failure = resume::resume_failed(code, elapsed, &rows)?;
         Some((failure, resume::last_words(&rows)))
@@ -976,8 +1043,7 @@ impl Actor {
                 }
                 AgentEffect::CheckScreen => {
                     let frame = lock(&self.engine).frame();
-                    let rows: Vec<String> =
-                        (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+                    let rows = program_rows(&frame, self.shows_restored);
                     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                     let verdict = evaluate_screen(&self.plan.screen, &rows);
                     self.step(&Signal::Screen(verdict));
@@ -1342,6 +1408,8 @@ mod tests {
                 wait_for_size: false,
                 palette: Palette::default(),
                 launch: 0,
+                screen: Arc::default(),
+                restored: None,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {
