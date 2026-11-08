@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::PCWSTR;
 
-use super::{batch_safe, is_batch, quote_arg, quote_path};
+use super::{batch_safe, command_params, is_batch, quote_path};
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
@@ -47,9 +47,7 @@ pub(super) fn open(path: &Path, command: Option<&[String]>) -> Result<(), String
     let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
     let result = match command {
         Some([program, args @ ..]) => {
-            let mut params: Vec<String> = args.iter().map(|a| quote_arg(a)).collect();
-            params.push(quote_path(path));
-            execute(OsStr::new(program), Some(&params.join(" ")))
+            execute(OsStr::new(program), Some(&command_params(args, path)))
         }
         _ => match execute(path.as_os_str(), None) {
             // No app is set for .toml files: Notepad ships with Windows.

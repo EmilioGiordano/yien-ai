@@ -263,6 +263,15 @@ fn quote_path(path: &Path) -> String {
     format!("\"{text}{}\"", "\\".repeat(trailing))
 }
 
+/// The editor's arguments and then the file, as the Windows command line
+/// that follows the program.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn command_params(args: &[String], path: &Path) -> String {
+    let mut params: Vec<String> = args.iter().map(|a| quote_arg(a)).collect();
+    params.push(quote_path(path));
+    params.join(" ")
+}
+
 /// Whether `program` is, or resolves on `PATH` with `PATHEXT` to, a batch
 /// file, which Windows runs through cmd.exe.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -487,6 +496,60 @@ mod tests {
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
         assert!(!batch_safe(&["a&calc".into()], file));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_ctx_03_the_editor_gets_its_arguments_then_the_quoted_file() {
+        assert_eq!(
+            command_params(
+                &["--reuse-window".into(), "a b".into()],
+                Path::new(r"C:\My Code\src\main.rs")
+            ),
+            r#"--reuse-window "a b" "C:\My Code\src\main.rs""#
+        );
+        assert_eq!(
+            command_params(&[], Path::new(r"C:\x\notes.txt")),
+            r#""C:\x\notes.txt""#
+        );
+    }
+
+    /// A fake editor that records the arguments it was started with; no
+    /// window opens. Unix only: on Windows the launch goes through
+    /// `ShellExecuteExW`, covered by the command line test above.
+    #[cfg(unix)]
+    #[test]
+    fn rf_ctx_03_a_file_opens_in_the_configured_editor_as_one_argument() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("fake-editor");
+        fs::create_dir_all(dir.join("my code")).unwrap();
+        let editor = dir.join("record.sh");
+        let record = dir.join("args.txt");
+        fs::write(
+            &editor,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("my code").join("main file.rs");
+        fs::write(&file, "").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        open(
+            file.clone(),
+            Some(format!("\"{}\" --wait", editor.display())),
+            move |r| {
+                let _ = tx.send(r.map_err(|e| e.to_string()));
+            },
+        );
+        rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&record).unwrap(),
+            format!("--wait\n{}\n", file.display())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
