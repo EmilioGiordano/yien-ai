@@ -26,6 +26,22 @@ pub(crate) fn grid_size(width: f32, height: f32, cell_w: f32, cell_h: f32) -> (u
     (fit(width, cell_w), fit(height, cell_h))
 }
 
+/// The cell of a font at `size`: the advance of its "m" (`None` when the
+/// font has no metrics: 0.6 of the size) by its ascent plus descent (1.2 of
+/// the size when that is not a positive number), each snapped to device
+/// pixels at `scale`.
+pub(crate) fn cell_size(advance: Option<f32>, height: f32, size: f32, scale: f32) -> (f32, f32) {
+    let advance = advance
+        .filter(|a| a.is_finite() && *a > 0.0)
+        .unwrap_or(size * 0.6);
+    let height = if height.is_finite() && height > 0.0 {
+        height
+    } else {
+        size * 1.2
+    };
+    (snap(advance, scale), snap(height, scale))
+}
+
 /// A length rounded to whole device pixels at `scale`, never below one.
 pub(crate) fn snap(length: f32, scale: f32) -> f32 {
     if !(scale.is_finite() && scale > 0.0) {
@@ -478,6 +494,33 @@ mod tests {
 
     fn row(text: &str) -> Vec<Cell> {
         text.chars().map(cell).collect()
+    }
+
+    #[test]
+    fn rf_cfg_02_a_bigger_terminal_font_fits_fewer_columns_and_rows() {
+        // A mono face's advance and height grow in step with its size.
+        let cell = |size: f32| cell_size(Some(size * 0.55), size * 1.25, size, 1.0);
+        let (w13, h13) = cell(13.0);
+        let (w18, h18) = cell(18.0);
+        assert_eq!((w13, h13), (7.0, 16.0));
+        assert_eq!((w18, h18), (10.0, 23.0));
+        let (cols13, rows13) = grid_size(700.0, 480.0, w13, h13);
+        let (cols18, rows18) = grid_size(700.0, 480.0, w18, h18);
+        assert_eq!((cols13, rows13), (100, 30));
+        assert_eq!((cols18, rows18), (70, 20));
+        // Back at 13 the same grid comes back: nothing drifts.
+        assert_eq!(
+            grid_size(700.0, 480.0, cell(13.0).0, cell(13.0).1),
+            (100, 30)
+        );
+    }
+
+    #[test]
+    fn a_font_without_metrics_gets_a_cell_from_its_size() {
+        assert_eq!(cell_size(None, f32::NAN, 10.0, 1.0), (6.0, 12.0));
+        assert_eq!(cell_size(Some(0.0), -1.0, 20.0, 2.0), (12.0, 24.0));
+        // At 150 % a 7.4 px advance snaps to whole device pixels.
+        assert_eq!(cell_size(Some(7.4), 16.0, 13.0, 1.5), (11.0 / 1.5, 16.0));
     }
 
     #[test]

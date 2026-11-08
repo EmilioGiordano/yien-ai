@@ -7,6 +7,7 @@ use gpui_kit::{
 };
 
 use crate::catalog::{CATALOG, Scope};
+use crate::keys::Rebinds;
 
 /// Key context of the window's root, where these bindings apply.
 pub(crate) const CONTEXT: &str = "YienShell";
@@ -40,6 +41,8 @@ actions!(
     [
         /// Switches between the sumi and washi themes.
         ToggleTheme,
+        /// Opens the settings file in the configured editor (RF-CFG-01).
+        OpenConfigFile,
         /// Shows or hides the tab bar.
         ToggleTabBar,
         /// Shows or hides the context bar.
@@ -206,6 +209,12 @@ pub(crate) fn bind_keys(cx: &mut App) {
 }
 
 pub(crate) fn bindings() -> Vec<KeyBinding> {
+    bindings_with(&Rebinds::new())
+}
+
+/// The window's bindings with some commands' default keys replaced by the
+/// settings file's (RF-CFG-03).
+pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let terminal = Some(TERMINAL_CONTEXT);
     // The palette's keys sit beside the input's own ("Input" context) at the
     // same depth; being bound later, they win.
@@ -250,7 +259,11 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
             Scope::Window => CONTEXT,
             Scope::Terminal => TERMINAL_CONTEXT,
         };
-        for keys in spec.keys {
+        let keys: Vec<&str> = match rebinds.get(spec.id) {
+            Some(chords) => chords.iter().map(String::as_str).collect(),
+            None => spec.keys.to_vec(),
+        };
+        for keys in keys {
             match bind(keys, (spec.action)(), context) {
                 Some(binding) => all.push(binding),
                 None => tracing::error!("command {} has unreadable keys {keys}", spec.id),
@@ -474,6 +487,42 @@ mod tests {
     #[test]
     fn rf_esp_01_add_project_has_a_key_from_a_terminal() {
         assert!(first_is("ctrl-shift-k", &TERMINAL_STACK, &AddProject));
+    }
+
+    #[test]
+    fn rf_cfg_03_a_rebound_command_answers_its_new_chord_only() {
+        let (rebinds, notices) = crate::keys::plan(
+            &yien_config::parse(
+                "[keys]
+\"pane.split_right\" = \"ctrl-alt-r\"
+\"pane.close\" = []
+",
+            )
+            .unwrap()
+            .config
+            .keys,
+        );
+        assert!(notices.is_empty());
+        let keymap = Keymap::new(bindings_with(&rebinds));
+        let dispatched = |keys: &str| -> Vec<Box<dyn Action>> {
+            let stack: Vec<KeyContext> = TERMINAL_STACK
+                .iter()
+                .map(|c| KeyContext::parse(c).unwrap())
+                .collect();
+            keymap
+                .bindings_for_input(&[Keystroke::parse(keys).unwrap()], &stack)
+                .0
+                .iter()
+                .map(|b| b.action().boxed_clone())
+                .collect()
+        };
+        assert!(dispatched("ctrl-alt-r")[0].partial_eq(&SplitRight));
+        assert!(dispatched("alt-+").is_empty(), "the default chord is free");
+        assert!(
+            dispatched("ctrl-shift-w").is_empty(),
+            "pane.close is unbound"
+        );
+        assert!(dispatched("ctrl-shift-p")[0].partial_eq(&ToggleCommandPalette));
     }
 
     #[test]

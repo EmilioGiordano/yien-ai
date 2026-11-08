@@ -19,8 +19,8 @@ use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
 use crate::grid::{self, CursorPaint, PastePlan, PromptKey, Underline, WheelAction};
 use crate::theme::Theme;
 
-/// The terminal font size, before display scaling (RNF-19).
-const FONT_SIZE: f32 = 13.0;
+/// The terminal font size when the settings name none.
+pub(crate) const DEFAULT_FONT_SIZE: f32 = 13.0;
 /// Used when none of the preferred mono families is installed: the UI
 /// default is proportional, and a grid needs a fixed advance.
 const FALLBACK_MONO: &str = "Consolas";
@@ -39,6 +39,8 @@ pub(crate) struct TerminalPane {
     link: Rc<Link>,
     focus: FocusHandle,
     family: SharedString,
+    /// The font size in logical pixels, before display scaling (RNF-19).
+    font_size: f32,
     theme: Theme,
     frame: Option<Frame>,
     /// IME composition not yet committed (RF-PAN-15).
@@ -63,6 +65,7 @@ impl TerminalPane {
         id: PaneId,
         link: Rc<Link>,
         family: Option<SharedString>,
+        font_size: f32,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -77,6 +80,7 @@ impl TerminalPane {
             link,
             focus,
             family: family.unwrap_or_else(|| SharedString::new_static(FALLBACK_MONO)),
+            font_size,
             theme,
             frame: None,
             preedit: None,
@@ -106,6 +110,33 @@ impl TerminalPane {
 
     pub(crate) fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        cx.notify();
+    }
+
+    /// Measures the new cell now and sends the grid's new size in cells to
+    /// the core, which resizes the pseudo terminal, using the bounds of the
+    /// last paint: a pane on a hidden tab resizes too, not on its next show.
+    /// A pane never painted keeps its size until its first paint.
+    pub(crate) fn set_font(
+        &mut self,
+        family: Option<SharedString>,
+        size: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.family = family.unwrap_or_else(|| SharedString::new_static(FALLBACK_MONO));
+        self.font_size = size;
+        if let Some((bounds, _)) = self.grid {
+            let m = metrics(window, &self.family, size);
+            let (cols, rows) = grid::grid_size(
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32(),
+                m.cell_w,
+                m.cell_h,
+            );
+            self.grid = Some((bounds, m));
+            self.request_size(cols, rows, cx);
+        }
         cx.notify();
     }
 
@@ -464,7 +495,7 @@ impl TerminalPane {
             .border_b_1()
             .border_color(t.term_line)
             .bg(t.term_raised)
-            .text_size(px(12.0))
+            .text_size(t.text(12.0))
             .child(
                 div()
                     .flex_1()
@@ -536,7 +567,7 @@ impl Render for TerminalPane {
                 .border_t_1()
                 .border_color(t.term_line)
                 .bg(t.term_raised)
-                .text_size(px(12.0))
+                .text_size(t.text(12.0))
                 .text_color(t.ochre)
                 .occlude()
                 .child(text)
@@ -608,25 +639,17 @@ impl IntoElement for TerminalElement {
     }
 }
 
-fn metrics(window: &Window, family: &SharedString) -> Metrics {
+fn metrics(window: &Window, family: &SharedString, font_size: f32) -> Metrics {
     let text = window.text_system();
     let font_id = text.resolve_font(&font(family.clone()));
-    let size = px(FONT_SIZE);
+    let size = px(font_size);
     let advance = text
         .advance(font_id, size, 'm')
-        .map(|s| s.width.as_f32())
-        .unwrap_or(FONT_SIZE * 0.6);
+        .ok()
+        .map(|s| s.width.as_f32());
     let height = text.ascent(font_id, size).as_f32() + text.descent(font_id, size).as_f32().abs();
-    let height = if height.is_finite() && height > 0.0 {
-        height
-    } else {
-        FONT_SIZE * 1.2
-    };
-    let scale = window.scale_factor();
-    Metrics {
-        cell_w: grid::snap(advance, scale),
-        cell_h: grid::snap(height, scale),
-    }
+    let (cell_w, cell_h) = grid::cell_size(advance, height, font_size, window.scale_factor());
+    Metrics { cell_w, cell_h }
 }
 
 impl Element for TerminalElement {
@@ -663,8 +686,11 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let family = self.view.read(cx).family.clone();
-        let m = metrics(window, &family);
+        let (family, font_size) = {
+            let view = self.view.read(cx);
+            (view.family.clone(), view.font_size)
+        };
+        let m = metrics(window, &family, font_size);
         let (cols, rows) = grid::grid_size(
             bounds.size.width.as_f32(),
             bounds.size.height.as_f32(),
@@ -745,7 +771,7 @@ impl Element for TerminalElement {
                 let shaped =
                     window
                         .text_system()
-                        .shape_line(span.text.into(), px(FONT_SIZE), &[run], force);
+                        .shape_line(span.text.into(), px(font_size), &[run], force);
                 text.push((cell(span.col, row), shaped));
             }
         }
@@ -803,7 +829,7 @@ impl Element for TerminalElement {
             let shaped =
                 window
                     .text_system()
-                    .shape_line(preedit.into(), px(FONT_SIZE), &[run], None);
+                    .shape_line(preedit.into(), px(font_size), &[run], None);
             under_text.push(fill(
                 Bounds::new(origin, size(shaped.width, px(m.cell_h))),
                 hsla(frame.background),

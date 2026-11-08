@@ -70,6 +70,18 @@ pub fn state_dir() -> Result<PathBuf, PathError> {
     data_dir().map(|dir| dir.join("state"))
 }
 
+/// The settings file: `config.toml` under [`data_dir`], so `YIEN_DATA_DIR`
+/// redirects it with everything else.
+///
+/// ```no_run
+/// let file = yien_platform::paths::config_file()?;
+/// assert!(file.ends_with("config.toml"));
+/// # Ok::<(), yien_platform::paths::PathError>(())
+/// ```
+pub fn config_file() -> Result<PathBuf, PathError> {
+    data_dir().map(|dir| dir.join(yien_config::FILE_NAME))
+}
+
 /// The folder the first project opens on when there is no saved session, read
 /// from this process: see [`pick_start_dir`]. `None` when neither the current
 /// folder nor the home folder can be found.

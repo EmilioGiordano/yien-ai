@@ -8811,7 +8811,9 @@ dependencies = [
 name = "yien"
 version = "0.0.0"
 dependencies = [
+ "tokio",
  "tracing",
+ "yien-config",
  "yien-core",
  "yien-platform",
  "yien-proto",
@@ -8829,6 +8831,14 @@ dependencies = [
  "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
  "yien-testkit",
+]
+
+[[package]]
+name = "yien-config"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]
@@ -8892,6 +8902,7 @@ dependencies = [
  "windows 0.62.2",
  "windows-sys 0.61.2",
  "yien-agent",
+ "yien-config",
  "yien-proto",
  "yien-session",
 ]
@@ -8936,6 +8947,7 @@ dependencies = [
  "raw-window-handle",
  "tokio",
  "tracing",
+ "yien-config",
  "yien-input",
  "yien-proto",
 ]

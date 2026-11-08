@@ -196,6 +196,7 @@ Planned in the engineering plan §3.2; crates appear as milestones create them.
 | `yien-vt` | 1 | `VtEngine`, alacritty adapter, `osc_scan`, hot/cold scrollback, frame diffs. |
 | `yien-agent` | 1 | Profiles, signals, pure state machine, hook templates. |
 | `yien-session` | 1 | Model, invariants, persistence, migrations. |
+| `yien-config` | 1 | The settings file: schema, defaults, parsing with line numbers, the reload decision. |
 | `yien-pty` | 2 | `PtyBackend`: ConPTY (bundled or system), `openpty`. |
 | `yien-git` | 2 | git CLI and gix, worktrees; `gh` in R2. |
 | `yien-platform` | 2 | Notifications, tray, badge, single instance, shutdown, paths, IPC (the hook pipe today), DPAPI. |

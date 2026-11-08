@@ -1,0 +1,15 @@
+[package]
+name = "yien-config"
+description = "The YIEN settings file: schema, defaults, parsing with line numbers and the reload decision."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+toml = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
