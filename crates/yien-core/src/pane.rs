@@ -1128,14 +1128,19 @@ fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
         ),
         PtyError::NotFound { .. } => format!(
             "Could not start {}: it was not found on PATH (the current folder is not \
-             searched). Install it, or set its full path in the profile, then relaunch the pane.",
+             searched). Install it or give its full path, then relaunch the pane.",
             plan.program
         ),
         PtyError::RelativeProgram { .. } => format!(
             "Could not start {}: a relative path would resolve against YIEN's own folder. \
-             Set the program's full path in the profile, or a name found on PATH.",
+             Give its full path or a name found on PATH, then relaunch the pane.",
             plan.program
         ),
+        PtyError::MissingProgram { .. } => format!(
+            "Could not start {}: the file does not exist. Check its path, then relaunch the pane.",
+            plan.program
+        ),
+        PtyError::EmptyProgram => "Could not start the pane: no program was given.".to_owned(),
         PtyError::Spawn { .. } => format!(
             "Could not start {}. Check that it is installed and on PATH, then relaunch the pane.",
             plan.program
@@ -1514,5 +1519,9 @@ mod tests {
         let program = format!("bin/{}", plan.program);
         let relative = spawn_message(&plan, &PtyError::RelativeProgram { program });
         assert!(relative.contains("relative path"), "{relative}");
+        assert!(!relative.contains("profile"), "{relative}");
+        let program = format!("C:/missing/{}", plan.program);
+        let missing = spawn_message(&plan, &PtyError::MissingProgram { program });
+        assert!(missing.contains("does not exist"), "{missing}");
     }
 }
