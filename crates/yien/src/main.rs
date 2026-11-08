@@ -6,6 +6,7 @@
 
 mod attention;
 mod panic_log;
+mod settings;
 
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -77,31 +78,38 @@ fn main() -> ExitCode {
     };
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
+    let settings = settings::start();
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
-    yien_ui::run(Box::new(Client(core)), events, attention, move || {
-        tracing::info!("yien exiting");
-        if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
-            tracing::warn!("the session was not saved on quit: {error}");
-        }
-        let started = Instant::now();
-        match quitting.shutdown(QUIT_SHUTDOWN_TIMEOUT) {
-            Ok(closed) => tracing::info!(
-                closed,
-                elapsed = ?started.elapsed(),
-                "panes closed on quit"
-            ),
-            Err(error) => tracing::warn!(
-                elapsed = ?started.elapsed(),
-                "panes not all closed on quit: {error}"
-            ),
-        }
-        if let Some(file) = &settings_file {
-            let _ = std::fs::remove_file(file);
-        }
-        drop(log);
-    });
+    yien_ui::run(
+        Box::new(Client(core)),
+        events,
+        attention,
+        settings,
+        move || {
+            tracing::info!("yien exiting");
+            if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
+                tracing::warn!("the session was not saved on quit: {error}");
+            }
+            let started = Instant::now();
+            match quitting.shutdown(QUIT_SHUTDOWN_TIMEOUT) {
+                Ok(closed) => tracing::info!(
+                    closed,
+                    elapsed = ?started.elapsed(),
+                    "panes closed on quit"
+                ),
+                Err(error) => tracing::warn!(
+                    elapsed = ?started.elapsed(),
+                    "panes not all closed on quit: {error}"
+                ),
+            }
+            if let Some(file) = &settings_file {
+                let _ = std::fs::remove_file(file);
+            }
+            drop(log);
+        },
+    );
     ExitCode::SUCCESS
 }
 

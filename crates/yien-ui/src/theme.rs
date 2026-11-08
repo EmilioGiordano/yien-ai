@@ -60,6 +60,14 @@ impl Theme {
         }
     }
 
+    /// The same palette with the window's text at `size`.
+    pub(crate) fn with_ui_size(self, size: f32) -> Self {
+        Self {
+            ui_size: size,
+            ..self
+        }
+    }
+
     /// A text size of the prototype, `base` at 13 px, at the configured size.
     pub(crate) fn text(&self, base: f32) -> Pixels {
         px(base * self.ui_size / BASE_UI_SIZE)
@@ -301,7 +309,7 @@ mod tests {
     fn rf_cfg_02_text_sizes_follow_the_configured_ui_size() {
         let t = Theme::of(ThemeKind::Sumi);
         assert_eq!(t.text(12.5), px(12.5), "13 px draws the prototype's sizes");
-        let big = Theme { ui_size: 26.0, ..t };
+        let big = t.with_ui_size(26.0);
         assert_eq!(big.text(12.5), px(25.0));
         assert_eq!(big.kind, t.kind);
         assert_eq!(big.shu, t.shu);

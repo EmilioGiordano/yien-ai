@@ -14,6 +14,8 @@ pub(crate) struct Fonts {
     pub(crate) ui: Option<SharedString>,
     pub(crate) mono: Option<SharedString>,
     pub(crate) display: Option<SharedString>,
+    /// The terminals' family: [`Fonts::mono`] unless the settings name one.
+    pub(crate) terminal: Option<SharedString>,
 }
 
 impl Fonts {
@@ -23,7 +25,35 @@ impl Fonts {
             ui: pick(UI),
             mono: pick(MONO),
             display: pick(DISPLAY),
+            terminal: pick(MONO),
         }
+    }
+
+    /// [`Fonts::resolve`] with the families the settings name for the window
+    /// and the terminals first (RF-CFG-02); paths and branches in the bars
+    /// keep [`Fonts::mono`]. A family that is not installed falls back to the
+    /// role's list, with a notice saying so.
+    pub(crate) fn configured(
+        installed: &[String],
+        ui: Option<&str>,
+        terminal: Option<&str>,
+    ) -> (Self, Vec<String>) {
+        let mut fonts = Self::resolve(installed);
+        let mut notices = Vec::new();
+        for (wanted, slot, role) in [
+            (ui, &mut fonts.ui, "the window uses"),
+            (terminal, &mut fonts.terminal, "the terminals use"),
+        ] {
+            let Some(wanted) = wanted else { continue };
+            match installed.iter().find(|i| i.eq_ignore_ascii_case(wanted)) {
+                Some(found) => *slot = Some(SharedString::from(found.clone())),
+                None => notices.push(format!(
+                    "The font \"{wanted}\" is not installed; {role} {}.",
+                    slot.as_deref().unwrap_or("the default font")
+                )),
+            }
+        }
+        (fonts, notices)
     }
 }
 
@@ -61,6 +91,42 @@ mod tests {
         assert_eq!(fonts.mono.as_deref(), Some("Cascadia Mono"));
         assert_eq!(fonts.display.as_deref(), Some("Yu Mincho"));
         assert_eq!(fonts.ui, None);
+    }
+
+    #[test]
+    fn rf_cfg_02_a_configured_family_comes_first_in_its_installed_spelling() {
+        let all = installed(&["Consolas", "Fira Code", "Segoe UI", "Yu Gothic UI"]);
+        let (fonts, notices) = Fonts::configured(&all, Some("segoe ui"), Some("Fira Code"));
+        assert_eq!(fonts.ui.as_deref(), Some("Segoe UI"));
+        assert_eq!(fonts.terminal.as_deref(), Some("Fira Code"));
+        assert_eq!(
+            fonts.mono.as_deref(),
+            Some("Consolas"),
+            "the bars keep theirs"
+        );
+        assert!(notices.is_empty());
+        let (fonts, notices) = Fonts::configured(&all, None, None);
+        assert_eq!(fonts, Fonts::resolve(&all));
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn rf_cfg_02_a_missing_family_falls_back_with_a_notice() {
+        let all = installed(&["Consolas", "Yu Gothic UI"]);
+        let (fonts, notices) = Fonts::configured(&all, Some("Nope Sans"), Some("Nope Mono"));
+        assert_eq!(fonts, Fonts::resolve(&all));
+        assert_eq!(
+            notices,
+            [
+                "The font \"Nope Sans\" is not installed; the window uses Yu Gothic UI.",
+                "The font \"Nope Mono\" is not installed; the terminals use Consolas.",
+            ]
+        );
+        let (_, notices) = Fonts::configured(&[], Some("Nope Sans"), None);
+        assert_eq!(
+            notices,
+            ["The font \"Nope Sans\" is not installed; the window uses the default font."]
+        );
     }
 
     #[test]

@@ -113,6 +113,19 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// The next paint measures the new cell, and the grid's new size in
+    /// cells goes to the core, which resizes the pseudo terminal.
+    pub(crate) fn set_font(
+        &mut self,
+        family: Option<SharedString>,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.family = family.unwrap_or_else(|| SharedString::new_static(FALLBACK_MONO));
+        self.font_size = size;
+        cx.notify();
+    }
+
     fn modes(&self) -> Modes {
         self.frame.as_ref().map(|f| f.modes).unwrap_or_default()
     }

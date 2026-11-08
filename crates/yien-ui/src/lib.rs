@@ -21,6 +21,7 @@ mod matcher;
 mod model;
 mod palette;
 mod region;
+mod settings;
 mod shell;
 mod terminal;
 mod theme;
@@ -36,11 +37,21 @@ use yien_proto::CoreMsg;
 pub use attention::{OsAttention, ToastText};
 pub use bridge::{CoreClient, Refused};
 pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
+pub use settings::{ConfigUpdate, Settings, SettingsHost};
 
 use crate::bridge::Link;
-use crate::fonts::Fonts;
 use crate::shell::Shell;
 use crate::theme::{Theme, ThemeKind, sync_component_theme};
+
+/// The catalog's command ids and titles, which the settings file's `[keys]`
+/// table names (RF-CFG-03).
+///
+/// ```
+/// assert!(yien_ui::commands().iter().any(|(id, _)| *id == "settings.open_config"));
+/// ```
+pub fn commands() -> Vec<(&'static str, &'static str)> {
+    catalog::CATALOG.iter().map(|c| (c.id, c.title)).collect()
+}
 
 /// Opens the main window and runs until it closes. `client` carries messages
 /// to the core and `events` brings its events back; closing the window quits,
@@ -49,19 +60,24 @@ use crate::theme::{Theme, ThemeKind, sync_component_theme};
 /// `attention` shows toasts and the taskbar badge when an agent needs the
 /// user while the window is in the background (RF-ATN-09, -10).
 ///
+/// `settings` brings the settings file's readings, applied live
+/// (RF-CFG-01), and opens the file.
+///
 /// `on_quit` runs once when the app quits, including at Windows logoff or
 /// shutdown, where gpui ends the process without returning from `run`.
 ///
 /// ```no_run
 /// # fn connect() -> (Box<dyn yien_ui::CoreClient>, tokio::sync::mpsc::Receiver<yien_proto::CoreMsg>) { unimplemented!() }
 /// # fn os() -> std::rc::Rc<dyn yien_ui::OsAttention> { unimplemented!() }
+/// # fn settings() -> yien_ui::Settings { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, os(), || println!("bye"));
+/// yien_ui::run(client, events, os(), settings(), || println!("bye"));
 /// ```
 pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
     attention: Rc<dyn OsAttention>,
+    settings: Settings,
     on_quit: impl FnOnce() + 'static,
 ) {
     gpui_kit::application()
@@ -78,9 +94,9 @@ pub fn run(
             gpui_kit::init(cx);
             actions::bind_keys(cx);
             cx.on_window_closed(|cx, _| cx.quit()).detach();
-            let theme = Theme::of(ThemeKind::default());
-            sync_component_theme(&theme, cx);
-            let fonts = Fonts::resolve(&cx.text_system().all_font_names());
+            // The window opens in the default palette; the settings are
+            // applied before its first frame.
+            sync_component_theme(&Theme::of(ThemeKind::default()), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1440.0), px(900.0)), cx)),
                 window_min_size: Some(size(px(960.0), px(600.0))),
@@ -88,7 +104,7 @@ pub fn run(
             };
             let link = Rc::new(Link::new(client));
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| Shell::new(link, events, theme, fonts, attention, window, cx))
+                cx.new(|cx| Shell::new(link, events, attention, settings, window, cx))
             });
             match opened {
                 Ok(_) => cx.activate(true),

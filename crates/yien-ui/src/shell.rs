@@ -36,9 +36,11 @@ use crate::palette::{
     keyboard_after_close, keyboard_pane, switcher_entries,
 };
 use crate::region::{self, Region};
+use crate::settings::{Settings, SettingsHost, SettingsModel};
 use crate::terminal::TerminalPane;
-use crate::theme::{Theme, sync_component_theme};
+use crate::theme::{Theme, ThemeKind};
 
+mod settings;
 mod worktrees;
 
 const TAB_BAR_WIDTH: f32 = 264.0;
@@ -63,6 +65,14 @@ pub(crate) struct Shell {
     workspace: WorkspaceView,
     theme: Theme,
     fonts: Fonts,
+    /// The terminals' font size from the settings (RF-CFG-02).
+    terminal_size: f32,
+    /// The last valid settings and the session's theme toggle.
+    settings: SettingsModel,
+    settings_host: Box<dyn SettingsHost>,
+    /// The notice the last settings reading put up, so the next valid one
+    /// can take it down.
+    settings_notice: Option<String>,
     tab_bar_open: bool,
     context_bar_open: bool,
     focus: FocusHandle,
@@ -132,9 +142,8 @@ impl Shell {
     pub(crate) fn new(
         link: Rc<Link>,
         mut events: mpsc::Receiver<CoreMsg>,
-        theme: Theme,
-        fonts: Fonts,
         os: Rc<dyn OsAttention>,
+        settings: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -191,10 +200,19 @@ impl Shell {
             }
         })
         .detach();
-        Self {
+        Self::listen_to_settings(settings.updates, window, cx);
+        let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
+            shell.apply_look(window, cx);
+        });
+        let mut shell = Self {
             workspace: WorkspaceView::default(),
-            theme,
-            fonts,
+            // `apply_config` below sets both from the settings.
+            theme: Theme::of(ThemeKind::default()),
+            fonts: Fonts::default(),
+            terminal_size: crate::terminal::DEFAULT_FONT_SIZE,
+            settings: SettingsModel::default(),
+            settings_host: settings.host,
+            settings_notice: None,
             tab_bar_open: true,
             context_bar_open: true,
             focus,
@@ -216,8 +234,10 @@ impl Shell {
             tab_cursor: None,
             keyboard_region: Region::Panes,
             keyboard_in_bar: false,
-            _subscriptions: vec![activation],
-        }
+            _subscriptions: vec![activation, appearance],
+        };
+        shell.apply_config(settings.initial, window, cx);
+        shell
     }
 
     fn send(&self, msg: ClientMsg, cx: &mut Context<Self>) {
@@ -368,8 +388,8 @@ impl Shell {
                 continue;
             }
             let link = Rc::clone(&self.link);
-            let family = self.fonts.mono.clone();
-            let size = crate::terminal::DEFAULT_FONT_SIZE;
+            let family = self.fonts.terminal.clone();
+            let size = self.terminal_size;
             let theme = self.theme;
             let view = cx.new(|cx| TerminalPane::new(pane, link, family, size, theme, window, cx));
             self.terminals.insert(pane, view);
@@ -430,16 +450,6 @@ impl Shell {
 
     fn focused_pane(&self) -> Option<PaneId> {
         self.workspace.selected_tab().map(|t| t.focused)
-    }
-
-    fn toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
-        self.theme = Theme::of(self.theme.kind.toggled());
-        sync_component_theme(&self.theme, cx);
-        let theme = self.theme;
-        for terminal in self.terminals.values() {
-            terminal.update(cx, |t, cx| t.set_theme(theme, cx));
-        }
-        cx.notify();
     }
 
     fn toggle_tab_bar(&mut self, _: &ToggleTabBar, window: &mut Window, cx: &mut Context<Self>) {
@@ -2622,6 +2632,7 @@ impl Render for Shell {
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::next_tab))
