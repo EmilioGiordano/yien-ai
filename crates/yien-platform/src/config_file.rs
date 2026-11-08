@@ -432,12 +432,11 @@ fn command_params(args: &[String], path: &Path) -> String {
     params.join(" ")
 }
 
-/// Whether Windows runs `file` through cmd.exe.
+/// Whether Windows runs `file` through cmd.exe. Trailing dots and spaces,
+/// which Windows drops from a name, do not hide the extension.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_batch(file: &Path) -> bool {
-    file.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    last_extension(file).is_some_and(|e| e == "cmd" || e == "bat")
 }
 
 /// Whether arguments and a path can go to a batch file: nothing cmd.exe
@@ -609,6 +608,8 @@ mod tests {
         assert!(is_batch(Path::new("run.BAT")));
         assert!(is_batch(Path::new("ed.cmd")));
         assert!(!is_batch(Path::new("tool.exe")));
+        assert!(is_batch(Path::new("agent.cmd.")));
+        assert!(is_batch(Path::new("agent.CMD ")));
         let file = Path::new(r"C:\Data\config.toml");
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
