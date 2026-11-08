@@ -15,8 +15,8 @@ use yien_agent::SessionReader;
 use yien_agent::{HookError, HookEvent};
 use yien_platform::agent_sessions::{self, MAX_SESSIONS};
 use yien_proto::{
-    AgentSession, ClientMsg, Command, CoreMsg, PaneId, ProfileId, ProfileInfo, ProjectId,
-    SessionTitle, TabGit, TabId,
+    AgentSession, ClientMsg, Command, CoreMsg, PaneId, PendingQuestion, ProfileId, ProfileInfo,
+    ProjectId, SessionTitle, TabGit, TabId,
 };
 use yien_pty::PtyBackend;
 use yien_vt::Palette;
@@ -64,6 +64,8 @@ pub(crate) struct HookItem {
     /// The decoded event, or the error of an authentic frame that did not
     /// decode.
     pub event: Result<HookEvent, HookError>,
+    /// What the agent asks the user, when the hook said (RF-ATN-13).
+    pub question: Option<PendingQuestion>,
 }
 
 /// How the handle and the hook pipe reach a pane without going through the
