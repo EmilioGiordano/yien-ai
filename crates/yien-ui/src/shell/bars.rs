@@ -1,6 +1,6 @@
-//! Hiding and showing the side bars (RF-NAV-10). The model is
-//! `crate::sidebars`; this keeps the core told, so the session saves the
-//! bars.
+//! Hiding and resizing the side bars (RF-NAV-10). The model is
+//! `crate::sidebars`; this draws the edges and keeps the core told, so the
+//! session saves the bars.
 
 use gpui_kit::*;
 use yien_proto::{ClientMsg, Command, SideBars};
@@ -9,6 +9,21 @@ use super::Shell;
 use crate::actions::*;
 use crate::region::Region;
 use crate::sidebars::{self, Bar};
+
+/// The width of the strip over a bar's inner edge that drags it.
+const EDGE_WIDTH: f32 = 6.0;
+
+/// What a drag of a bar's edge carries.
+pub(super) struct BarDrag(Bar);
+
+/// A drag of a bar's edge draws nothing under the pointer.
+struct NoGhost;
+
+impl Render for NoGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 impl Shell {
     pub(super) fn bar_shown(&self, bar: Bar) -> bool {
@@ -54,12 +69,13 @@ impl Shell {
 
     /// Tells the core the bars once they differ from what it holds. Never
     /// before the core's snapshot brought the saved ones, which the
-    /// defaults drawn until then would overwrite.
+    /// defaults drawn until then would overwrite, and never mid-drag: the
+    /// drag's end sends the width once.
     pub(super) fn save_side_bars(&mut self, cx: &mut Context<Self>) {
         let Some(saved) = self.side_bars_saved else {
             return;
         };
-        if saved == self.side_bars {
+        if saved == self.side_bars || cx.has_active_drag() {
             return;
         }
         self.side_bars_saved = Some(self.side_bars);
@@ -83,5 +99,64 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.change_side_bars(|b| sidebars::toggle(b, Bar::Context), window, cx);
+    }
+
+    /// Follows a drag of a bar's edge; the root gets every move of it, so
+    /// the pointer may leave the thin edge.
+    pub(super) fn on_bar_drag(
+        &mut self,
+        event: &DragMoveEvent<BarDrag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let bar = event.drag(cx).0;
+        let x = event.event.position.x.as_f32();
+        let width = window.viewport_size().width.as_f32();
+        if sidebars::drag_to(&mut self.side_bars, bar, x, width) {
+            cx.notify();
+        }
+    }
+
+    /// The strip over a bar's inner edge: drag it to resize the bar, double
+    /// click it for the default width. `None` while the bar cannot be
+    /// dragged (review mode).
+    pub(super) fn render_bar_edge(
+        &self,
+        bar: Bar,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if !sidebars::draggable(&self.side_bars, bar) {
+            return None;
+        }
+        // The prototype's indigo wash; never red (RN-01).
+        let wash = Rgba {
+            a: 0.25,
+            ..self.theme.ai
+        };
+        let (id, label) = match bar {
+            Bar::Tab => ("tab-bar-edge", "Resize tab bar"),
+            Bar::Context => ("context-bar-edge", "Resize context bar"),
+        };
+        let edge = div()
+            .id(id)
+            .role(Role::Splitter)
+            .aria_label(label)
+            .occlude()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(EDGE_WIDTH))
+            .cursor_col_resize()
+            .hover(move |s| s.bg(wash))
+            .on_drag(BarDrag(bar), |_, _, _, cx| cx.new(|_| NoGhost))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    this.change_side_bars(|b| sidebars::reset(b, bar), window, cx);
+                }
+            }));
+        Some(match bar {
+            Bar::Tab => edge.right_0(),
+            Bar::Context => edge.left_0(),
+        })
     }
 }

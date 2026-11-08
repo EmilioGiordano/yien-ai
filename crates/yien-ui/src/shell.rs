@@ -1979,6 +1979,7 @@ impl Shell {
             .when(self.keyboard_region == Region::TabBar, |bar| {
                 bar.child(focus_ring(&t))
             })
+            .children(self.render_bar_edge(Bar::Tab, cx))
     }
 
     /// The tab bar grouped by state (RF-ATN-07): a head per state with its
@@ -2662,7 +2663,7 @@ impl Shell {
     }
 
     /// The context bar's box, without its contents.
-    fn context_bar_frame(&self) -> Stateful<Div> {
+    fn context_bar_frame(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
         v_flex()
             .id("context-bar")
@@ -2680,13 +2681,14 @@ impl Shell {
             .when(self.keyboard_region == Region::ContextBar, |bar| {
                 bar.child(focus_ring(&t))
             })
+            .children(self.render_bar_edge(Bar::Context, cx))
     }
 
     fn render_context_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let Some(tab) = self.workspace.selected_tab() else {
             // With no tab selected there is no branch to speak of.
-            return self.context_bar_frame().child(
+            return self.context_bar_frame(cx).child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
@@ -2765,7 +2767,7 @@ impl Shell {
                     )
             })
             .collect::<Vec<_>>();
-        self.context_bar_frame()
+        self.context_bar_frame(cx)
             .child(
                 h_flex()
                     .flex_none()
@@ -3009,6 +3011,8 @@ impl Render for Shell {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
+        // A drag that just ended sends its width here.
+        self.save_side_bars(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3018,6 +3022,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
             .on_action(cx.listener(Self::toggle_context_bar))
+            .on_drag_move(cx.listener(Self::on_bar_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))

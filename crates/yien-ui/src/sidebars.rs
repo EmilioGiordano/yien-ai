@@ -82,6 +82,41 @@ pub(crate) fn show(bars: &mut SideBars, bar: Bar) {
     bar.of_mut(bars).hidden = false;
 }
 
+/// Puts `bar` back at its default width; the context bar also leaves
+/// review mode.
+pub(crate) fn reset(bars: &mut SideBars, bar: Bar) {
+    bar.of_mut(bars).width = None;
+    if bar == Bar::Context {
+        bars.review = false;
+    }
+}
+
+/// Whether `bar`'s edge can be dragged: the context bar keeps its review
+/// width until review mode ends, as in the prototype.
+pub(crate) fn draggable(bars: &SideBars, bar: Bar) -> bool {
+    shown(bars, bar) && !(bar == Bar::Context && bars.review)
+}
+
+/// Sets `bar`'s width from the pointer at `x` dragging its inner edge, in
+/// a window `window` wide: the tab bar's edge is its right one, the context
+/// bar's its left one. Returns whether the width changed.
+pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32) -> bool {
+    if !draggable(bars, bar) || !x.is_finite() || !window.is_finite() {
+        return false;
+    }
+    let wanted = match bar {
+        Bar::Tab => x,
+        Bar::Context => window - x,
+    };
+    let width = clamp(bar, wanted, window).round();
+    let side = bar.of_mut(bars);
+    if side.width == Some(width) {
+        return false;
+    }
+    side.width = Some(width);
+    true
+}
+
 /// How wide each bar is drawn in a window `window` wide. A saved width is
 /// clamped between the bar's minimum and half the window; review mode takes
 /// its share of the window. When the bars would leave the panes less than
@@ -164,9 +199,39 @@ mod tests {
         assert_eq!((d.tab_bar, d.context_bar), (Some(TAB_BAR_DEFAULT), None));
         toggle(&mut bars, Bar::Tab);
         assert_eq!(drawn(&bars, WINDOW).tab_bar, None);
+        // A hidden bar cannot be dragged.
+        assert!(!drag_to(&mut bars, Bar::Tab, 400.0, WINDOW));
         toggle(&mut bars, Bar::Tab);
         show(&mut bars, Bar::Context);
         assert_eq!(drawn(&bars, WINDOW).context_bar, Some(CONTEXT_BAR_DEFAULT));
+    }
+
+    #[test]
+    fn rf_nav_10_dragging_the_inner_edge_sets_the_width() {
+        let mut bars = SideBars::default();
+        assert!(drag_to(&mut bars, Bar::Tab, 300.4, WINDOW));
+        assert_eq!(bars.tab_bar.width, Some(300.0));
+        // The context bar's inner edge is its left one.
+        assert!(drag_to(&mut bars, Bar::Context, WINDOW - 450.0, WINDOW));
+        assert_eq!(bars.context_bar.width, Some(450.0));
+        // The same width again is no change, so nothing is saved.
+        assert!(!drag_to(&mut bars, Bar::Context, WINDOW - 450.0, WINDOW));
+        let d = drawn(&bars, WINDOW);
+        assert_eq!((d.tab_bar, d.context_bar), (Some(300.0), Some(450.0)));
+    }
+
+    #[test]
+    fn rf_nav_10_a_drag_stops_at_the_minimum_and_at_half_the_window() {
+        let mut bars = SideBars::default();
+        drag_to(&mut bars, Bar::Tab, 20.0, WINDOW);
+        assert_eq!(bars.tab_bar.width, Some(TAB_BAR_MIN));
+        drag_to(&mut bars, Bar::Tab, 1300.0, WINDOW);
+        assert_eq!(bars.tab_bar.width, Some(WINDOW * MAX_SHARE));
+        drag_to(&mut bars, Bar::Context, WINDOW - 10.0, WINDOW);
+        assert_eq!(bars.context_bar.width, Some(CONTEXT_BAR_MIN));
+        drag_to(&mut bars, Bar::Context, -500.0, WINDOW);
+        assert_eq!(bars.context_bar.width, Some(WINDOW * MAX_SHARE));
+        assert!(!drag_to(&mut bars, Bar::Tab, f32::NAN, WINDOW));
     }
 
     #[test]
@@ -179,6 +244,19 @@ mod tests {
             assert_eq!(d.tab_bar, Some(TAB_BAR_DEFAULT), "{bad}");
             assert_eq!(d.context_bar, Some(CONTEXT_BAR_DEFAULT), "{bad}");
         }
+    }
+
+    #[test]
+    fn rf_nav_10_a_double_click_resets_to_the_default_width() {
+        let mut bars = sized(Some(400.0), Some(600.0));
+        bars.review = true;
+        reset(&mut bars, Bar::Tab);
+        assert_eq!(bars.tab_bar.width, None);
+        assert!(bars.review, "the tab bar leaves review mode alone");
+        reset(&mut bars, Bar::Context);
+        assert_eq!(bars.context_bar.width, None);
+        assert!(!bars.review);
+        assert_eq!(drawn(&bars, WINDOW), drawn(&SideBars::default(), WINDOW));
     }
 
     #[test]
