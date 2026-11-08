@@ -1006,7 +1006,13 @@ mod tests {
 
         // Another tab in the same folder keeps the worktree in use.
         let mut other = tab(31, 1, &[310]);
-        other.dir = r"c:\code\app-wt\feat-x\".into();
+        // Folders compare without case and with either slash on Windows only.
+        other.dir = if cfg!(windows) {
+            r"c:\code\app-wt\feat-x\"
+        } else {
+            "C:/Code/app-wt/feat-x/"
+        }
+        .into();
         view.tab_updated(&other);
         assert!(view.worktree_question(PaneId::new(300)).is_none());
     }
