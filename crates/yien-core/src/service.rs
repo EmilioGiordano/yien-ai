@@ -176,6 +176,11 @@ pub(crate) async fn run(
         restored = fx;
         notices.extend(notes);
         service.restored_screens = service.read_screens(&restored).await;
+        if let Some(screens) = &service.screens {
+            // Panes of the saved session this run did not restore keep their screens.
+            let panes = snapshot.projects.iter().flat_map(|p| &p.tabs);
+            screens.keep(panes.flat_map(|t| &t.panes).map(|p| p.id.get()));
+        }
     }
     let saved_tabs = opened
         .snapshot

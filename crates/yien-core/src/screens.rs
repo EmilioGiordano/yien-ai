@@ -162,7 +162,8 @@ impl ScreenSource {
         self.changed();
     }
 
-    /// The screen may have changed.
+    /// The screen may have changed. Called with the engine locked, after
+    /// the change, so a dump taken under the same lock never misses it.
     pub fn changed(&self) {
         self.changes.fetch_add(1, Ordering::Release);
     }
@@ -171,15 +172,16 @@ impl ScreenSource {
         self.changes.load(Ordering::Acquire)
     }
 
-    /// The dump of the engine; `None` before the program first started.
-    fn dump(&self, limits: DumpLimits) -> Option<Vec<u8>> {
+    /// The dump of the engine and the change count it shows; `None` before
+    /// the program first started.
+    fn dump(&self, limits: DumpLimits) -> Option<(u64, Vec<u8>)> {
         let engine = self
             .engine
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()?;
-        let dump = lock(&engine).screen_dump(limits);
-        Some(dump)
+        let engine = lock(&engine);
+        Some((self.changes(), engine.screen_dump(limits)))
     }
 }
 
@@ -199,6 +201,8 @@ struct State {
     panes: HashMap<PaneId, Entry>,
     /// Panes closed since the writer last looked; their files go.
     gone: Vec<PaneId>,
+    /// Panes of the saved session this run did not start; their files stay.
+    kept: HashSet<u64>,
     stopped: bool,
 }
 
@@ -206,6 +210,8 @@ struct Entry {
     source: Arc<ScreenSource>,
     /// The change count of the screen last written.
     written: u64,
+    /// The byte limit the file was written with; 0 before the first write.
+    limit: usize,
 }
 
 impl Shared {
@@ -220,7 +226,11 @@ struct Job {
     pane: PaneId,
     source: Arc<ScreenSource>,
     written: u64,
+    limit: usize,
 }
+
+/// A file written: the pane, the change count and the byte limit it holds.
+type Written = (PaneId, u64, usize);
 
 /// Why the quit save did not write every changed screen.
 #[derive(Debug, thiserror::Error)]
@@ -266,7 +276,19 @@ impl Screens {
     pub fn track(&self, pane: PaneId, source: Arc<ScreenSource>) {
         let mut state = self.shared.lock();
         state.gone.retain(|p| *p != pane);
-        state.panes.insert(pane, Entry { source, written: 0 });
+        state.panes.insert(
+            pane,
+            Entry {
+                source,
+                written: 0,
+                limit: 0,
+            },
+        );
+    }
+
+    /// Keeps the files of these panes of the saved session, started or not.
+    pub fn keep(&self, panes: impl IntoIterator<Item = u64>) {
+        self.shared.lock().kept.extend(panes);
     }
 
     /// The pane closed: its file goes.
@@ -305,10 +327,10 @@ impl Screens {
         std::thread::Builder::new()
             .name("yien-screens-quit".to_owned())
             .spawn(move || {
-                remove_gone(&store, &gone);
-                let (written, left) = write_jobs(&store, jobs, Some(deadline));
+                remove_gone(&store, &gone, None);
+                let (written, left) = write_jobs(&store, jobs, Some(deadline), None);
                 if left == 0 {
-                    prune(&store, &known);
+                    prune(&store, &known, None);
                 }
                 let _ = done.send((written.len(), left));
             })
@@ -334,12 +356,15 @@ fn jobs(state: &State) -> Vec<Job> {
             pane: *pane,
             source: Arc::clone(&entry.source),
             written: entry.written,
+            limit: entry.limit,
         })
         .collect()
 }
 
 fn known(state: &State) -> HashSet<u64> {
-    state.panes.keys().map(|p| p.get()).collect()
+    let mut known: HashSet<u64> = state.panes.keys().map(|p| p.get()).collect();
+    known.extend(&state.kept);
+    known
 }
 
 fn write_loop(shared: &Shared, store: &ScreenStore, interval: Duration, clock: &dyn Clock) {
@@ -369,26 +394,37 @@ fn write_loop(shared: &Shared, store: &ScreenStore, interval: Duration, clock: &
             (Vec::new(), HashSet::new())
         };
         drop(state);
-        remove_gone(store, &gone);
+        remove_gone(store, &gone, Some(shared));
         if !due {
             continue;
         }
-        let (written, _) = write_jobs(store, jobs, None);
-        prune(store, &known);
+        let (written, _) = write_jobs(store, jobs, None, Some(shared));
+        prune(store, &known, Some(shared));
         let mut state = shared.lock();
-        for (pane, changes) in written {
+        for (pane, changes, limit) in written {
             if let Some(entry) = state.panes.get_mut(&pane) {
                 entry.written = entry.written.max(changes);
+                entry.limit = limit;
             }
         }
     }
 }
 
-fn remove_gone(store: &ScreenStore, gone: &[PaneId]) {
+/// Whether the periodic writer has been stopped. Checked with the files
+/// locked, right before touching them, so once the quit save starts no
+/// older pass writes over it or after it.
+fn halted(stop: Option<&Shared>) -> bool {
+    stop.is_some_and(|shared| shared.lock().stopped)
+}
+
+fn remove_gone(store: &ScreenStore, gone: &[PaneId], stop: Option<&Shared>) {
     if gone.is_empty() {
         return;
     }
     let mut files = store.lock();
+    if halted(stop) {
+        return;
+    }
     for pane in gone {
         if let Err(e) = files.remove(&file_name(*pane)) {
             tracing::warn!(
@@ -399,18 +435,21 @@ fn remove_gone(store: &ScreenStore, gone: &[PaneId]) {
     }
 }
 
-/// Writes each changed screen until `deadline`; returns the panes written
-/// with the change count each was taken at, and how many were left.
+/// Writes each changed screen until `deadline`, and each one written with
+/// more than today's share, so the total stays bounded as panes are added.
+/// Returns the files written and how many were left. With `stop`, gives up
+/// as soon as the periodic writer is stopped.
 fn write_jobs(
     store: &ScreenStore,
     jobs: Vec<Job>,
     deadline: Option<Instant>,
-) -> (Vec<(PaneId, u64)>, usize) {
+    stop: Option<&Shared>,
+) -> (Vec<Written>, usize) {
     // Every tracked pane has a file, written now or before: each gets a share.
     let limits = share(jobs.len());
     let jobs: Vec<Job> = jobs
         .into_iter()
-        .filter(|job| job.source.changes() != job.written)
+        .filter(|job| job.source.changes() != job.written || job.limit > limits.max_bytes)
         .collect();
     let total = jobs.len();
     let mut written = Vec::new();
@@ -418,12 +457,14 @@ fn write_jobs(
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return (written, total - done);
         }
-        let changes = job.source.changes();
-        let Some(dump) = job.source.dump(limits) else {
+        let Some((changes, dump)) = job.source.dump(limits) else {
             continue;
         };
         let name = file_name(job.pane);
         let mut files = store.lock();
+        if halted(stop) {
+            return (written, total - done);
+        }
         let result = if dump.is_empty() {
             files.remove(&name)
         } else {
@@ -431,7 +472,7 @@ fn write_jobs(
         };
         drop(files);
         match result {
-            Ok(()) => written.push((job.pane, changes)),
+            Ok(()) => written.push((job.pane, changes, limits.max_bytes)),
             Err(e) => tracing::warn!(pane = job.pane.get(), "a pane's screen was not saved: {e}"),
         }
     }
@@ -449,8 +490,11 @@ fn share(panes: usize) -> DumpLimits {
 }
 
 /// Removes the screens of panes that no longer exist.
-fn prune(store: &ScreenStore, known: &HashSet<u64>) {
+fn prune(store: &ScreenStore, known: &HashSet<u64>, stop: Option<&Shared>) {
     let mut files = store.lock();
+    if halted(stop) {
+        return;
+    }
     let names = match files.list() {
         Ok(names) => names,
         Err(e) => {
@@ -499,10 +543,11 @@ mod tests {
                     pane: PaneId::new(id),
                     source,
                     written,
+                    limit: share(64).max_bytes,
                 }
             })
             .collect();
-        let (written, left) = write_jobs(&store, jobs, None);
+        let (written, left) = write_jobs(&store, jobs, None, None);
         assert_eq!((written.len(), left), (1, 0));
         let bytes = store.lock().read("1.vt", u64::MAX).unwrap().unwrap();
         assert!(
@@ -510,6 +555,55 @@ mod tests {
             "{}",
             bytes.len()
         );
+    }
+
+    /// Panes whose files were written at the share of fewer panes.
+    fn unchanged_jobs(count: u64, limit: usize) -> Vec<Job> {
+        (1..=count)
+            .map(|id| {
+                let source = Arc::new(ScreenSource::default());
+                let mut engine = yien_vt::AlacrittyEngine::new(yien_vt::VtConfig::default(), 20, 2);
+                yien_vt::VtEngine::feed(&mut engine, b"text");
+                let engine: Engine = Arc::new(Mutex::new(Box::new(engine)));
+                source.attach(engine);
+                let written = source.changes();
+                Job {
+                    pane: PaneId::new(id),
+                    source,
+                    written,
+                    limit,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rf_ses_10_files_written_at_a_bigger_share_are_written_again() {
+        let store = ScreenStore::new(MemFiles::default());
+        let (written, _) = write_jobs(&store, unchanged_jobs(64, share(32).max_bytes), None, None);
+        assert_eq!(written.len(), 64);
+        assert!(written.iter().all(|w| w.2 == share(64).max_bytes));
+        let (written, _) = write_jobs(&store, unchanged_jobs(64, share(64).max_bytes), None, None);
+        assert!(written.is_empty());
+        let (written, _) = write_jobs(&store, unchanged_jobs(16, share(64).max_bytes), None, None);
+        assert!(
+            written.is_empty(),
+            "a smaller file than the share is not grown"
+        );
+    }
+
+    #[test]
+    fn rf_ses_10_saved_panes_this_run_did_not_start_keep_their_files() {
+        let mut files = MemFiles::default();
+        for name in ["5.vt", "6.vt"] {
+            files.0.insert(name.to_owned(), b"x".to_vec());
+        }
+        let store = ScreenStore::new(files);
+        let clock: Arc<dyn Clock> = Arc::new(crate::MonotonicClock::new());
+        let screens = Screens::start(store.clone(), Duration::from_secs(3600), clock).unwrap();
+        screens.keep([5]);
+        screens.save_now(Duration::from_secs(5)).unwrap();
+        assert_eq!(store.lock().list().unwrap(), vec!["5.vt"]);
     }
 
     #[derive(Default)]
