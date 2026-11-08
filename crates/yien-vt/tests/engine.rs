@@ -722,7 +722,39 @@ fn rf_ses_10_only_dump_sequences_pass_the_check() {
         b"\x1bc",
         b"\xff\xfe",
         "\u{9b}6n".as_bytes(),
+        // Text that would land below where the dump ends.
+        b"x\x1b7\r\n\r\n\r\nDo you want to proceed? (y/n)",
+        b"x\x1b7\x1b[1G\r\nDo you want to proceed?\x1b7\x1b[1G",
+        b"x\x1b8\r\nDo you want to proceed?\x1b7\x1b[1G",
+        b"x\x1b7\x1b[1Gmore",
+        b"x\x1b7\x1b[2B\x1b[1G",
+        b"x\x1b[3D\x1b7\x1b[1G",
+        b"x",
     ] {
         assert!(!is_screen_dump(bad), "{bad:?}");
     }
+    for good in [
+        &b"x\x1b7\x1b[1G"[..],
+        b"a\r\nb\x1b7\x1b[1A\x1b[2G",
+        b" \x1b[Dx\x1b7\x1b[9G",
+    ] {
+        assert!(is_screen_dump(good), "{good:?}");
+    }
+}
+
+#[test]
+fn rf_ses_10_a_newest_row_longer_than_the_limit_is_cut() {
+    let mut old = engine(200, 3);
+    old.feed(b"\x1b[31m");
+    old.feed(&[b'r'; 150]);
+    let limits = DumpLimits {
+        max_bytes: 60,
+        ..DumpLimits::default()
+    };
+    let dump = old.screen_dump(limits);
+    assert!(is_screen_dump(&dump));
+    assert!(dump.len() <= 60 + 16, "{} bytes", dump.len());
+    let new = restored(&dump, 200, 3);
+    let text = new.frame().line_text(0);
+    assert!(text.starts_with("rrrr") && text.len() < 60, "{text}");
 }

@@ -36,7 +36,7 @@ proptest! {
         let mut old = AlacrittyEngine::new(config.clone(), cols, rows);
         old.feed(&bytes);
         let dump = old.screen_dump(DumpLimits::default());
-        prop_assert!(is_screen_dump(&dump));
+        prop_assert!(dump.is_empty() || is_screen_dump(&dump));
         let mut new = AlacrittyEngine::new(config, cols, rows);
         let out = new.feed(&dump);
         prop_assert!(out.replies.is_empty() && out.title.is_none() && out.signals.is_empty());

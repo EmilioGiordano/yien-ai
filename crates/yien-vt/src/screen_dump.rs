@@ -173,8 +173,15 @@ fn row_is_blank(row: &Row<Cell>, cols: usize) -> bool {
 /// One row: its cells, then a line break unless it wraps into `next` or is
 /// the last one. A wrapped row keeps every cell, so a terminal of another
 /// width reflows it instead of breaking it. A wrap into a blank row breaks
-/// the line instead, since nothing would make a terminal wrap there.
-fn encode_row(row: &Row<Cell>, next: Option<&Row<Cell>>, continues: bool, cols: usize) -> Vec<u8> {
+/// the line instead, since nothing would make a terminal wrap there. Cells
+/// past `limit` bytes are left out.
+fn encode_row(
+    row: &Row<Cell>,
+    next: Option<&Row<Cell>>,
+    continues: bool,
+    cols: usize,
+    limit: usize,
+) -> Vec<u8> {
     let wrapped = wraps(row, cols) && next.is_some_and(|next| !row_is_blank(next, cols));
     let next_wide = next.is_some_and(|next| {
         let first = &next[Column(0)];
@@ -190,6 +197,7 @@ fn encode_row(row: &Row<Cell>, next: Option<&Row<Cell>>, continues: bool, cols: 
     };
     let mut out = Vec::new();
     let mut pen = Pen::default();
+    let mut cell_bytes = Vec::new();
     // The cell a wide character just written also fills, whatever it holds.
     let mut covered = false;
     for col in 0..end {
@@ -206,14 +214,14 @@ fn encode_row(row: &Row<Cell>, next: Option<&Row<Cell>>, continues: bool, cols: 
         }
         let spacer = leading || cell.flags.contains(Flags::WIDE_CHAR_SPACER);
         let cell_pen = Pen::of(cell);
+        cell_bytes.clear();
         if col == 0 && continues && cell_pen.bg != Pen::default().bg {
             // The wrap scrolls in a row filled with the current background:
             // wrap with the default one, then step back onto the first cell.
-            out.extend_from_slice(b" \x1b[D");
+            cell_bytes.extend_from_slice(b" \x1b[D");
         }
         if cell_pen != pen {
-            cell_pen.write(&mut out);
-            pen = cell_pen;
+            cell_pen.write(&mut cell_bytes);
         }
         // A tab would move past the cells that follow it, which come next anyway.
         let c = if spacer || cell.c == '\t' || cell.c.is_control() {
@@ -221,14 +229,20 @@ fn encode_row(row: &Row<Cell>, next: Option<&Row<Cell>>, continues: bool, cols: 
         } else {
             cell.c
         };
-        covered = c != ' ' && cell.flags.contains(Flags::WIDE_CHAR);
         let mut buf = [0; 4];
-        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        cell_bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         for zw in cell.zerowidth().unwrap_or_default() {
             if !zw.is_control() {
-                out.extend_from_slice(zw.encode_utf8(&mut buf).as_bytes());
+                cell_bytes.extend_from_slice(zw.encode_utf8(&mut buf).as_bytes());
             }
         }
+        // Room for the closing reset and line break.
+        if out.len() + cell_bytes.len() + 6 > limit {
+            break;
+        }
+        out.extend_from_slice(&cell_bytes);
+        pen = cell_pen;
+        covered = c != ' ' && cell.flags.contains(Flags::WIDE_CHAR);
     }
     if pen != Pen::default() {
         out.extend_from_slice(b"\x1b[0m");
@@ -261,8 +275,14 @@ pub(crate) fn encode(grid: &Grid<Cell>, limits: DumpLimits) -> Vec<u8> {
         );
         let continues =
             line > top && wraps(&grid[Line(line - 1)], cols) && !row_is_blank(this, cols);
-        let row = encode_row(this, next, continues, cols);
+        let row = encode_row(this, next, continues, cols, usize::MAX);
         if bytes + row.len() > limits.max_bytes {
+            // The newest row alone is too long: keep its start.
+            if rows.is_empty() {
+                let row = encode_row(this, next, continues, cols, limits.max_bytes);
+                bytes += row.len();
+                rows.push(row);
+            }
             break;
         }
         bytes += row.len();
@@ -285,37 +305,63 @@ pub(crate) fn encode(grid: &Grid<Cell>, limits: DumpLimits) -> Vec<u8> {
     out
 }
 
-/// Whether `bytes` holds only what a dump writes: text, line breaks, SGR,
-/// cursor up, left and to a column, and `ESC 7` / `ESC 8`. A file that holds
-/// anything else (a query, a mode change, a title) is not fed to an engine.
+/// Whether `bytes` is a dump: text, line breaks, SGR and the bare cursor
+/// left a dump writes before a wrapped row, then once at the end `ESC 7`, an
+/// optional cursor up and a cursor to a column. A file that holds anything
+/// else (a query, a mode change, a title, a second `ESC 7`, `ESC 8`) is not
+/// fed to an engine, so nothing it holds can land below where its text ends.
 ///
 /// ```
 /// assert!(yien_vt::is_screen_dump(b"\x1b[0;31mred\x1b[0m\r\nok\x1b7\x1b[1A\x1b[3G"));
 /// assert!(!yien_vt::is_screen_dump(b"\x1b[6n"));
-/// assert!(!yien_vt::is_screen_dump(b"\x1b[?1049h"));
+/// assert!(!yien_vt::is_screen_dump(b"x\x1b7\r\n\r\nDo you want to proceed?\x1b7\x1b[1G"));
 /// ```
 pub fn is_screen_dump(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
-    let mut chars = text.chars();
+    let Some((body, tail)) = text.rsplit_once("\x1b7") else {
+        return false;
+    };
+    is_dump_body(body) && is_dump_tail(tail)
+}
+
+fn is_dump_body(body: &str) -> bool {
+    let mut chars = body.chars();
     while let Some(c) = chars.next() {
         match c {
             '\r' | '\n' => {}
-            '\x1b' => match chars.next() {
-                Some('7' | '8') => {}
-                Some('[') => loop {
+            '\x1b' => {
+                if chars.next() != Some('[') {
+                    return false;
+                }
+                let mut params = false;
+                loop {
                     match chars.next() {
-                        Some('0'..='9' | ';' | ':') => {}
-                        Some('m' | 'A' | 'D' | 'G') => break,
+                        Some('0'..='9' | ';' | ':') => params = true,
+                        Some('m') => break,
+                        Some('D') if !params => break,
                         _ => return false,
                     }
-                },
-                _ => return false,
-            },
+                }
+            }
             c if c.is_control() => return false,
             _ => {}
         }
     }
     true
+}
+
+/// `CSI n A` (optional) then `CSI n G`, and nothing after.
+fn is_dump_tail(tail: &str) -> bool {
+    let move_of = |rest: &str, end: char| -> Option<usize> {
+        let rest = rest.strip_prefix("\x1b[")?;
+        let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+        (digits > 0 && rest[digits..].starts_with(end)).then_some(2 + digits + 1)
+    };
+    let rest = match move_of(tail, 'A') {
+        Some(len) => &tail[len..],
+        None => tail,
+    };
+    move_of(rest, 'G').is_some_and(|len| len == rest.len())
 }
