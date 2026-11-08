@@ -171,6 +171,14 @@ enum Asked {
     Quit,
 }
 
+impl Asked {
+    /// Whether Enter answers yes. Quitting would stop agents mid-turn, so
+    /// there Enter cancels like Escape and only the button quits.
+    fn enter_accepts(&self) -> bool {
+        !matches!(self, Asked::Quit)
+    }
+}
+
 /// The palette's model and the widgets drawing it.
 struct OpenPalette {
     model: Palette,
@@ -789,7 +797,8 @@ impl Shell {
     /// Focuses the next pane that needs the user, oldest first (RF-ATN-05).
     /// The core selects its tab; the red stays until the agent moves on
     /// (RF-ATN-04).
-    fn jump(&mut self, cx: &mut Context<Self>) {
+    fn jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tray(window, cx);
         match self.workspace.next_waiting(self.focused_pane()) {
             Some(pane) => self.command(Command::FocusPane { pane }, cx),
             None => {
@@ -799,8 +808,13 @@ impl Shell {
         }
     }
 
-    fn jump_to_needs_you(&mut self, _: &JumpToNeedsYou, _: &mut Window, cx: &mut Context<Self>) {
-        self.jump(cx);
+    fn jump_to_needs_you(
+        &mut self,
+        _: &JumpToNeedsYou,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump(window, cx);
     }
 
     fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
@@ -1209,6 +1223,9 @@ impl Shell {
         self.split_menu = None;
         self.tray = None;
         self.palette = None;
+        // Both draw over the window and would hide the question.
+        self.worktree_prompt = None;
+        self.worktree_close = None;
         self.finish_rename(true, window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -1266,7 +1283,18 @@ impl Shell {
             })
     }
 
+    /// Enter on the question: yes, except for quitting, where Enter keeps
+    /// the window and only the button quits.
     fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.confirm {
+            Some(c) if !c.asked.enter_accepts() => self.confirm_cancel(&ConfirmCancel, window, cx),
+            Some(_) => self.accept_confirm(window, cx),
+            None => {}
+        }
+    }
+
+    /// The question's yes button.
+    fn accept_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(confirm) = self.confirm.take() else {
             return;
         };
@@ -1295,6 +1323,11 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
+        let (cancel_keys, accept_keys) = if confirm.asked.enter_accepts() {
+            ("Esc", "Enter")
+        } else {
+            ("Enter · Esc", "")
+        };
         let (title, detail, accept, id) = match &confirm.asked {
             Asked::CloseProject { project, name } => {
                 let detail = match self.workspace.busy_panes_of(*project) {
@@ -1327,7 +1360,11 @@ impl Shell {
             h_flex()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(format!("{label} ({keys})"))
+                .aria_label(if keys.is_empty() {
+                    label.to_owned()
+                } else {
+                    format!("{label} ({keys})")
+                })
                 .items_center()
                 .gap(px(8.0))
                 .px(px(12.0))
@@ -1338,13 +1375,15 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(label)
-                .child(
-                    div()
-                        .text_size(t.text(11.5))
-                        .text_color(t.faint)
-                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                        .child(keys),
-                )
+                .when(!keys.is_empty(), |b| {
+                    b.child(
+                        div()
+                            .text_size(t.text(11.5))
+                            .text_color(t.faint)
+                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                            .child(keys),
+                    )
+                })
         };
         Some(
             div()
@@ -1394,17 +1433,17 @@ impl Shell {
                                 .gap(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(t.text(13.0))
-                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
+                                .child(button("confirm-cancel", "Cancel", cancel_keys).on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.confirm_cancel(&ConfirmCancel, window, cx);
                                     }),
                                 ))
                                 .child(
-                                    button("confirm-accept", accept, "Enter")
+                                    button("confirm-accept", accept, accept_keys)
                                         .font_weight(FontWeight::MEDIUM)
                                         .border_color(t.muted)
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_accept(&ConfirmAccept, window, cx);
+                                            this.accept_confirm(window, cx);
                                         })),
                                 ),
                         ),
@@ -3075,9 +3114,9 @@ impl Render for Shell {
             .child(self.render_status_bar())
             .children(self.render_tray(cx))
             .children(self.render_palette(cx))
-            .children(self.render_confirm(cx))
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
+            .children(self.render_confirm(cx))
     }
 }
 
@@ -3170,7 +3209,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::{MOUSE_COMMANDS, no_tab_label};
+    use super::{Asked, MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
     use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
@@ -3189,6 +3228,16 @@ mod tests {
             ..WorkspaceSnapshot::default()
         });
         assert_eq!(no_tab_label(&tabs_closed), "No tab is open");
+    }
+
+    #[test]
+    fn rf_ses_13_enter_never_quits_but_closes_a_project() {
+        assert!(!Asked::Quit.enter_accepts());
+        let close = Asked::CloseProject {
+            project: ProjectId::new(1),
+            name: "yien".to_owned(),
+        };
+        assert!(close.enter_accepts());
     }
 
     #[test]
