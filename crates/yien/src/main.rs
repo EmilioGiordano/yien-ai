@@ -78,7 +78,7 @@ fn main() -> ExitCode {
     };
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
-    let settings = settings::start();
+    let (settings, settings_watcher) = settings::start();
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
     // so the guard is flushed in the quit callback, not after `run`.
@@ -89,6 +89,9 @@ fn main() -> ExitCode {
         settings,
         move || {
             tracing::info!("yien exiting");
+            if let Some(watcher) = &settings_watcher {
+                watcher.stop();
+            }
             if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
                 tracing::warn!("the session was not saved on quit: {error}");
             }

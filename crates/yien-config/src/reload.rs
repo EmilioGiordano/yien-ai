@@ -30,6 +30,8 @@ pub enum Reload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReloadGate<S> {
     applied: S,
+    /// What was applied before the last [`Reload::Apply`], for [`Self::retry`].
+    previous: Option<S>,
     seen: Option<(S, Duration)>,
     settle: Duration,
 }
@@ -39,6 +41,7 @@ impl<S: PartialEq + Clone> ReloadGate<S> {
     pub fn new(applied: S, settle: Duration) -> Self {
         Self {
             applied,
+            previous: None,
             seen: None,
             settle,
         }
@@ -53,7 +56,7 @@ impl<S: PartialEq + Clone> ReloadGate<S> {
         match &self.seen {
             Some((seen, since)) if *seen == stamp => {
                 if now.saturating_sub(*since) >= self.settle {
-                    self.applied = stamp;
+                    self.previous = Some(std::mem::replace(&mut self.applied, stamp));
                     self.seen = None;
                     Reload::Apply
                 } else {
@@ -64,6 +67,18 @@ impl<S: PartialEq + Clone> ReloadGate<S> {
                 self.seen = Some((stamp, now));
                 Reload::Wait
             }
+        }
+    }
+}
+
+impl<S> ReloadGate<S> {
+    /// Undoes the last [`Reload::Apply`]: the read it asked for failed for a
+    /// passing reason (the file held open by an editor saving it), so the
+    /// same stamp is applied again once it holds for the settle time.
+    pub fn retry(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.applied = previous;
+            self.seen = None;
         }
     }
 }
@@ -108,6 +123,20 @@ mod tests {
         assert_eq!(gate.observe(10, ms(100)), Reload::Wait);
         assert_eq!(gate.observe(11, ms(500)), Reload::Wait, "seen anew");
         assert_eq!(gate.observe(11, ms(800)), Reload::Apply);
+    }
+
+    #[test]
+    fn rf_cfg_01_a_failed_read_is_retried_on_later_polls() {
+        let mut gate = ReloadGate::new(10, ms(300));
+        assert_eq!(gate.observe(11, ms(0)), Reload::Wait);
+        assert_eq!(gate.observe(11, ms(500)), Reload::Apply);
+        gate.retry();
+        assert_eq!(gate.observe(11, ms(1000)), Reload::Wait, "settles again");
+        assert_eq!(gate.observe(11, ms(1500)), Reload::Apply);
+        // Nothing to undo twice.
+        gate.retry();
+        gate.retry();
+        assert_eq!(gate.observe(10, ms(2000)), Reload::Wait);
     }
 
     #[test]

@@ -4,6 +4,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -75,7 +77,9 @@ pub fn read(path: &Path) -> io::Result<Option<String>> {
 
 /// Watches `path` on a thread of its own, polling its stamp every [`POLL`].
 /// Each change that holds for a moment calls `on_change` with what
-/// [`read`] returns; the watch ends when `on_change` returns `false`.
+/// [`read`] returns; the watch ends when `on_change` returns `false` or the
+/// returned [`Watcher`] is stopped. A read that fails for a passing reason
+/// (the file held open by an editor saving it) is retried on later polls.
 /// `applied` is the stamp of the version the caller already has.
 ///
 /// ```no_run
@@ -83,31 +87,84 @@ pub fn read(path: &Path) -> io::Result<Option<String>> {
 ///
 /// let file = yien_platform::paths::config_file()?;
 /// let seen = config_file::stamp(&file);
-/// config_file::watch(file, seen, |text| {
+/// let watcher = config_file::watch(file, seen, |text| {
 ///     println!("changed: {:?}", text.map(|t| t.map(|t| t.len())));
 ///     true
 /// })?;
+/// watcher.stop();
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn watch(
     path: PathBuf,
     applied: FileStamp,
+    on_change: impl FnMut(io::Result<Option<String>>) -> bool + Send + 'static,
+) -> io::Result<Watcher> {
+    watch_every(path, applied, POLL, SETTLE, on_change)
+}
+
+/// The watcher thread of [`watch`].
+#[derive(Debug)]
+pub struct Watcher {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl Watcher {
+    /// Asks the thread to end at its next poll, without waiting for it.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    /// Whether the thread has ended.
+    pub fn is_finished(&self) -> bool {
+        self.thread.is_finished()
+    }
+}
+
+fn watch_every(
+    path: PathBuf,
+    applied: FileStamp,
+    poll: Duration,
+    settle: Duration,
     mut on_change: impl FnMut(io::Result<Option<String>>) -> bool + Send + 'static,
-) -> io::Result<JoinHandle<()>> {
-    std::thread::Builder::new()
+) -> io::Result<Watcher> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let thread = std::thread::Builder::new()
         .name("yien-config-watch".into())
         .spawn(move || {
             let start = Instant::now();
-            let mut gate = ReloadGate::new(applied, SETTLE);
-            loop {
-                std::thread::sleep(POLL);
-                if gate.observe(stamp(&path), start.elapsed()) == Reload::Apply
-                    && !on_change(read(&path))
+            let mut gate = ReloadGate::new(applied, settle);
+            while !stopped.load(Ordering::Acquire) {
+                std::thread::sleep(poll);
+                if stopped.load(Ordering::Acquire) {
+                    return;
+                }
+                if gate.observe(stamp(&path), start.elapsed()) != Reload::Apply {
+                    continue;
+                }
+                let text = read(&path);
+                if let Err(e) = &text
+                    && passing(e)
                 {
+                    gate.retry();
+                    continue;
+                }
+                if !on_change(text) {
                     return;
                 }
             }
-        })
+        })?;
+    Ok(Watcher { stop, thread })
+}
+
+/// A read error worth retrying rather than reporting: anything but a
+/// missing file or one too large or not UTF-8.
+fn passing(error: &io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+    )
 }
 
 /// Why the file could not be opened in an editor.
@@ -261,6 +318,74 @@ mod tests {
         fs::write(&latin1, b"theme = \"\xe9\"\n").unwrap();
         assert!(read(&latin1).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_cfg_01_the_watcher_reads_a_change_and_ends_when_told() {
+        let dir = scratch("watch");
+        let file = dir.join("config.toml");
+        create_if_absent(
+            &file,
+            "theme = \"washi\"
+",
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The file is new to the watcher: its stamp differs from `None`.
+        let watcher = watch_every(
+            file.clone(),
+            None,
+            Duration::from_millis(5),
+            Duration::ZERO,
+            move |text| {
+                let _ = tx.send(text.map_err(|e| e.kind()));
+                false
+            },
+        )
+        .unwrap();
+        let text = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            text,
+            Ok(Some(
+                "theme = \"washi\"
+"
+                .to_owned()
+            ))
+        );
+        // Returning false ended the thread: the sender went with it.
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_err());
+        assert!(watcher.thread.join().is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stopped_watcher_ends_without_reading() {
+        let dir = scratch("stop");
+        fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let watcher = watch_every(
+            dir.join("absent.toml"),
+            Some((None, 1)),
+            Duration::from_millis(5),
+            Duration::from_secs(3600),
+            move |_| tx.send(()).is_ok(),
+        )
+        .unwrap();
+        watcher.stop();
+        assert!(watcher.thread.join().is_ok());
+        assert!(rx.try_recv().is_err(), "nothing was applied");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_passing_read_errors_are_retried() {
+        assert!(
+            passing(&io::Error::from_raw_os_error(32)),
+            "sharing violation"
+        );
+        assert!(passing(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(!passing(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!passing(&io::Error::from(io::ErrorKind::InvalidData)));
     }
 
     #[test]
