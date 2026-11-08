@@ -320,6 +320,7 @@ pub struct ProjectView {
 ///     active_tab: Some(TabId::new(2)),
 ///     profiles: vec![],
 ///     notifications_muted: false,
+///     side_bars: Default::default(),
 /// };
 /// let view = WorkspaceView::from_snapshot(&snapshot);
 /// assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(2)));
@@ -1094,6 +1095,7 @@ mod tests {
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
             notifications_muted: false,
+            side_bars: Default::default(),
         })
     }
 
@@ -1406,6 +1408,7 @@ mod tests {
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
             notifications_muted: false,
+            side_bars: Default::default(),
         });
         view.tab_closed(TabId::new(10));
         assert!(view.selected_tab().is_none());
@@ -1612,6 +1615,7 @@ mod tests {
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
             notifications_muted: false,
+            side_bars: Default::default(),
         });
         let before = tab_names(&view);
         view.set_group_by_state(true);
@@ -1746,6 +1750,7 @@ mod tests {
             active_tab: Some(TabId::new(10)),
             profiles: vec![],
             notifications_muted: false,
+            side_bars: Default::default(),
         });
         assert!(!view.has_no_projects());
         assert_eq!(view.tab_closed(TabId::new(10)), vec![PaneId::new(100)]);

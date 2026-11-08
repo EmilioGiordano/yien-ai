@@ -5,8 +5,8 @@ mod common;
 use common::{basic, sample};
 use serde_json::{Map, Value, json};
 use yien_session::{
-    CodecError, MemStore, Migration, SCHEMA_VERSION, deserialize, deserialize_with, load,
-    migrate_with, serialize, validate,
+    CodecError, MemStore, Migration, SCHEMA_VERSION, SideBarRecord, SideBarsRecord, deserialize,
+    deserialize_with, load, migrate_with, serialize, validate,
 };
 
 const V0: &[u8] = include_bytes!("fixtures/workspace.v0.json");
@@ -98,6 +98,48 @@ fn rf_atn_11_mutes_are_saved_and_a_file_without_them_loads_unmuted() {
     muted.projects[0].tabs[1].muted = true;
     let bytes = serialize(&muted).unwrap();
     assert_eq!(deserialize(&bytes).unwrap(), muted);
+}
+
+#[test]
+fn rf_nav_10_a_schema_1_file_loads_with_and_without_side_bars() {
+    assert_eq!(SCHEMA_VERSION, 1, "side bars need no new schema");
+    let old = deserialize(V1).unwrap();
+    assert_eq!(old.side_bars, SideBarsRecord::default());
+    assert_eq!(old, sample(1_000));
+
+    let mut wide = sample(1_000);
+    wide.side_bars = SideBarsRecord {
+        tab_bar: SideBarRecord {
+            hidden: true,
+            width: Some(300.0),
+        },
+        context_bar: SideBarRecord {
+            hidden: false,
+            width: Some(512.5),
+        },
+        review: true,
+    };
+    let bytes = serialize(&wide).unwrap();
+    let doc: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["side_bars"]["context_bar"]["width"], 512.5);
+    assert_eq!(deserialize(&bytes).unwrap(), wide);
+}
+
+#[test]
+fn rf_nav_10_a_bad_width_reads_as_the_default_and_keeps_the_session() {
+    let mut doc: Value = serde_json::from_slice(V1).unwrap();
+    doc["side_bars"] = json!({
+        "tab_bar": { "hidden": true, "width": "wide" },
+        "context_bar": { "width": 1e39 },
+        "review": true
+    });
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let snapshot = deserialize(&bytes).unwrap();
+    let bars = snapshot.side_bars;
+    assert!(bars.tab_bar.hidden && bars.review);
+    assert_eq!((bars.tab_bar.width, bars.context_bar.width), (None, None));
+    assert_eq!(snapshot.projects, sample(1_000).projects);
 }
 
 #[test]

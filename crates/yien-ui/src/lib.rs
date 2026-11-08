@@ -26,6 +26,7 @@ mod palette;
 mod region;
 mod settings;
 mod shell;
+mod sidebars;
 mod terminal;
 mod theme;
 mod tray;

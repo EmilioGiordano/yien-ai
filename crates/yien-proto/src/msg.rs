@@ -304,6 +304,12 @@ pub enum Command {
         /// Whether toasts and flashes are off.
         muted: bool,
     },
+    /// Keeps the side bars' visibility and widths for the next start
+    /// (RF-NAV-10). The UI draws them; the core only saves them.
+    SetSideBars {
+        /// The bars as the UI now draws them.
+        bars: SideBars,
+    },
     /// Opens a tab on a new linked worktree with its own new branch
     /// (RF-ESP-05). The worktree goes beside the repository, in
     /// `<repo>-wt/<branch>`; a failure opens no tab and says why.
@@ -854,6 +860,39 @@ pub struct WorkspaceSnapshot {
     pub profiles: Vec<ProfileInfo>,
     /// Every toast and taskbar flash is muted (RF-ATN-11).
     pub notifications_muted: bool,
+    /// The side bars as the session saved them (RF-NAV-10).
+    pub side_bars: SideBars,
+}
+
+/// The tab bar and the context bar as the user left them (RF-NAV-10).
+///
+/// ```
+/// let bars = yien_proto::SideBars::default();
+/// assert!(!bars.tab_bar.hidden && bars.context_bar.width.is_none() && !bars.review);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct SideBars {
+    /// The tab bar on the left.
+    pub tab_bar: SideBar,
+    /// The context bar on the right.
+    pub context_bar: SideBar,
+    /// The context bar is widened to review changes.
+    pub review: bool,
+}
+
+/// One side bar.
+///
+/// ```
+/// let bar = yien_proto::SideBar { hidden: true, width: Some(320.0) };
+/// assert!(bar.hidden);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct SideBar {
+    /// The user hid the bar.
+    pub hidden: bool,
+    /// The width the user dragged it to, in logical pixels; `None` is the
+    /// default width. The UI clamps it to the window.
+    pub width: Option<f32>,
 }
 
 /// Everything the core tells the UI, in order.
@@ -1091,6 +1130,19 @@ mod tests {
                 muted: true,
             },
             Command::SetNotificationsMuted { muted: true },
+            Command::SetSideBars {
+                bars: SideBars {
+                    tab_bar: SideBar {
+                        hidden: true,
+                        width: None,
+                    },
+                    context_bar: SideBar {
+                        hidden: false,
+                        width: Some(512.5),
+                    },
+                    review: true,
+                },
+            },
             Command::NewWorktreeTab {
                 project: ProjectId::new(1),
                 branch: "feat/x".into(),

@@ -16,7 +16,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
-    SHELL_PROFILE, TabGit, TabId, TerminalPalette,
+    SHELL_PROFILE, SideBars, TabGit, TabId, TerminalPalette,
 };
 
 use crate::actions::*;
@@ -40,10 +40,12 @@ use crate::palette::{
 };
 use crate::region::{self, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
+use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
+mod bars;
 mod files;
 mod settings;
 mod tray;
@@ -52,7 +54,6 @@ mod worktrees;
 use files::{ContextView, FilesPanel};
 use tray::Tray;
 
-const TAB_BAR_WIDTH: f32 = 264.0;
 /// The palette's width and its gap below the window top, as the prototype's.
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
@@ -61,7 +62,6 @@ const CONFIRM_WIDTH: f32 = 440.0;
 /// Test-only: when set, the window opens with the attention tray open, so a
 /// window check can capture it without sending keys.
 const TRAY_SEED_VAR: &str = "YIEN_TEST_ATTENTION_TRAY";
-const CONTEXT_BAR_WIDTH: f32 = 380.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// Half the 6 px gutter between panes: every cell is inset by it.
@@ -95,8 +95,16 @@ pub(crate) struct Shell {
     /// on top of them (RF-CFG-03).
     base_keys: Vec<KeyBinding>,
     rebinds: Rebinds,
-    tab_bar_open: bool,
-    context_bar_open: bool,
+    /// The side bars as the user left them (RF-NAV-10).
+    side_bars: SideBars,
+    /// The side bars the core holds for the session; `None` until its
+    /// snapshot brings the saved ones.
+    side_bars_saved: Option<SideBars>,
+    /// How wide the bars were drawn at the last render.
+    bar_widths: Drawn,
+    /// How far right of a bar's edge the pointer grabbed it, so a drag
+    /// moves the edge without jumping to the pointer.
+    bar_grab: f32,
     /// What the context bar shows under the branch head.
     context_view: ContextView,
     /// The Files view (RF-CTX-01).
@@ -279,8 +287,10 @@ impl Shell {
             installed_fonts: Vec::new(),
             base_keys,
             rebinds: Rebinds::new(),
-            tab_bar_open: true,
-            context_bar_open: true,
+            side_bars: SideBars::default(),
+            side_bars_saved: None,
+            bar_widths: sidebars::drawn(&SideBars::default(), 0.0),
+            bar_grab: 0.0,
             context_view: if files.seeded() {
                 ContextView::Files
             } else {
@@ -345,6 +355,8 @@ impl Shell {
                 }
                 CoreMsg::WorkspaceSnapshot(snapshot) => {
                     self.workspace = WorkspaceView::from_snapshot(&snapshot);
+                    self.side_bars = snapshot.side_bars;
+                    self.side_bars_saved = Some(snapshot.side_bars);
                     self.workspace
                         .set_group_by_state(self.settings.groups_by_state());
                 }
@@ -558,28 +570,6 @@ impl Shell {
         self.workspace.selected_tab().map(|t| t.focused)
     }
 
-    fn toggle_tab_bar(&mut self, _: &ToggleTabBar, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab_bar_open = !self.tab_bar_open;
-        if !self.tab_bar_open && self.region(window, cx) == Region::TabBar {
-            self.give_back_keyboard(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn toggle_context_bar(
-        &mut self,
-        _: &ToggleContextBar,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_bar_open = !self.context_bar_open;
-        if !self.context_bar_open && self.region(window, cx) == Region::ContextBar {
-            self.give_back_keyboard(window, cx);
-        }
-        self.sync_files(window, cx);
-        cx.notify();
-    }
-
     /// The region that holds the keyboard; the pane area when no bar does.
     fn region(&self, window: &Window, cx: &App) -> Region {
         if self.tab_bar_focus.contains_focused(window, cx) {
@@ -597,7 +587,12 @@ impl Shell {
             return;
         }
         let from = self.region(window, cx);
-        let to = region::next_region(from, forward, self.tab_bar_open, self.context_bar_open);
+        let to = region::next_region(
+            from,
+            forward,
+            self.bar_shown(Bar::Tab),
+            self.bar_shown(Bar::Context),
+        );
         match to {
             Region::TabBar => {
                 let rows = self.workspace.drawn_tabs();
@@ -1479,7 +1474,7 @@ impl Shell {
         }
         self.finish_rename(true, window, cx);
         self.split_menu = None;
-        self.tab_bar_open = true;
+        self.change_side_bars(|b| sidebars::show(b, Bar::Tab), window, cx);
         if self.workspace.is_folded(project) {
             self.toggle_fold(project, cx);
         }
@@ -1676,8 +1671,8 @@ impl Shell {
                     .child(
                         icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
                             .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.tab_bar_open))
-                            .when(!self.tab_bar_open, |b| b.opacity(0.55))
+                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_tab_bar(&ToggleTabBar, window, cx)
                             })),
@@ -1685,8 +1680,8 @@ impl Shell {
                     .child(
                         icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
                             .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.context_bar_open))
-                            .when(!self.context_bar_open, |b| b.opacity(0.55))
+                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_context_bar(&ToggleContextBar, window, cx)
                             })),
@@ -1968,7 +1963,7 @@ impl Shell {
             .role(Role::Navigation)
             .aria_label("Projects and tabs")
             .relative()
-            .w(px(TAB_BAR_WIDTH))
+            .w(px(self.bar_widths.tab_bar.unwrap_or(0.0)))
             .flex_none()
             .h_full()
             .border_r_1()
@@ -1988,6 +1983,7 @@ impl Shell {
             .when(self.keyboard_region == Region::TabBar, |bar| {
                 bar.child(focus_ring(&t))
             })
+            .children(self.render_bar_edge(Bar::Tab, cx))
     }
 
     /// The tab bar grouped by state (RF-ATN-07): a head per state with its
@@ -2671,7 +2667,7 @@ impl Shell {
     }
 
     /// The context bar's box, without its contents.
-    fn context_bar_frame(&self) -> Stateful<Div> {
+    fn context_bar_frame(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
         v_flex()
             .id("context-bar")
@@ -2680,7 +2676,7 @@ impl Shell {
             .role(Role::Complementary)
             .aria_label("Context bar")
             .relative()
-            .w(px(CONTEXT_BAR_WIDTH))
+            .w(px(self.bar_widths.context_bar.unwrap_or(0.0)))
             .flex_none()
             .h_full()
             .border_l_1()
@@ -2689,13 +2685,14 @@ impl Shell {
             .when(self.keyboard_region == Region::ContextBar, |bar| {
                 bar.child(focus_ring(&t))
             })
+            .children(self.render_bar_edge(Bar::Context, cx))
     }
 
     fn render_context_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let Some(tab) = self.workspace.selected_tab() else {
             // With no tab selected there is no branch to speak of.
-            return self.context_bar_frame().child(
+            return self.context_bar_frame(cx).child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
@@ -2774,7 +2771,7 @@ impl Shell {
                     )
             })
             .collect::<Vec<_>>();
-        self.context_bar_frame()
+        self.context_bar_frame(cx)
             .child(
                 h_flex()
                     .flex_none()
@@ -3018,6 +3015,9 @@ impl Render for Shell {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
+        // A drag that just ended sends its width here.
+        self.save_side_bars(cx);
+        self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
             .key_context(CONTEXT)
@@ -3026,6 +3026,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
             .on_action(cx.listener(Self::toggle_context_bar))
+            .on_action(cx.listener(Self::toggle_review_mode))
+            .on_drag_move(cx.listener(Self::on_bar_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))
@@ -3111,9 +3113,11 @@ impl Render for Shell {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.tab_bar_open, |row| row.child(self.render_tab_bar(cx)))
+                    .when(self.bar_shown(Bar::Tab), |row| {
+                        row.child(self.render_tab_bar(cx))
+                    })
                     .child(self.render_panes(cx))
-                    .when(self.context_bar_open, |row| {
+                    .when(self.bar_shown(Bar::Context), |row| {
                         row.child(self.render_context_bar(cx))
                     }),
             )
