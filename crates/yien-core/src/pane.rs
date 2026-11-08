@@ -15,7 +15,9 @@ use yien_agent::{Effect as AgentEffect, Machine, SessionEndReason, Signal, evalu
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
-use yien_vt::{AlacrittyEngine, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput};
+use yien_vt::{
+    AlacrittyEngine, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine, VtOutput,
+};
 
 use crate::convert;
 use crate::launch::{self, Fill, HookFill, LaunchPlan};
@@ -72,6 +74,7 @@ pub(crate) enum PaneCmd {
     },
     ClearSelection,
     CopySelection,
+    Palette(Palette),
     View {
         visible: bool,
         seen: bool,
@@ -107,6 +110,14 @@ pub(crate) type EngineFactory = fn(&VtConfig, u16, u16) -> Box<dyn VtEngine>;
 /// The engine every pane runs outside tests.
 pub(crate) fn alacritty(config: &VtConfig, cols: u16, rows: u16) -> Box<dyn VtEngine> {
     Box::new(AlacrittyEngine::new(config.clone(), cols, rows))
+}
+
+fn new_engine(ctx: &Ctx, palette: Palette, cols: u16, rows: u16) -> Box<dyn VtEngine> {
+    let config = VtConfig {
+        palette,
+        ..ctx.config.vt.clone()
+    };
+    (ctx.engine)(&config, cols, rows)
 }
 
 enum ReaderMsg {
@@ -227,6 +238,8 @@ pub(crate) struct PaneSetup {
     /// Start the program only once the UI's size arrives (see
     /// [`CoreConfig::size_wait`](crate::CoreConfig::size_wait)).
     pub wait_for_size: bool,
+    /// The palette the UI asked for last; every engine of this pane uses it.
+    pub palette: Palette,
 }
 
 /// A pane that has not started its program yet because it waits for the
@@ -270,6 +283,7 @@ struct Actor {
     /// The session the next launch resumes; only the first launch after a
     /// restore does, so a relaunch starts a new session.
     resume: Option<String>,
+    palette: Palette,
     pending: Option<Pending>,
     /// The shell a failed resume falls back to, until it is used.
     fallback: Option<LaunchPlan>,
@@ -298,7 +312,7 @@ pub(crate) fn spawn(
     input: mpsc::Receiver<PaneInput>,
 ) {
     let (cols, rows) = setup.size;
-    let engine = Arc::new(Mutex::new((ctx.engine)(&ctx.config.vt, cols, rows)));
+    let engine = Arc::new(Mutex::new(new_engine(&ctx, setup.palette, cols, rows)));
     let mut machine = Machine::new(setup.plan.machine.clone());
     if setup.seen {
         machine = machine.step(&Signal::Seen(true), ctx.config.clock.now()).0;
@@ -341,6 +355,7 @@ pub(crate) fn spawn(
         signal_lost: false,
         needs_since: None,
         resume: setup.resume,
+        palette: setup.palette,
         pending,
         fallback: setup.fallback,
         agent_plan: None,
@@ -513,8 +528,9 @@ impl Actor {
         self.retry_at = None;
         self.sync = None;
         let size = lock(&self.engine).size();
-        self.engine = Arc::new(Mutex::new((self.ctx.engine)(
-            &self.ctx.config.vt,
+        self.engine = Arc::new(Mutex::new(new_engine(
+            &self.ctx,
+            self.palette,
             size.cols,
             size.rows,
         )));
@@ -696,6 +712,11 @@ impl Actor {
             }
             PaneCmd::ClearSelection => {
                 lock(&self.engine).clear_selection();
+                self.dirty = true;
+            }
+            PaneCmd::Palette(palette) => {
+                self.palette = palette;
+                lock(&self.engine).set_palette(palette);
                 self.dirty = true;
             }
             PaneCmd::CopySelection => {
@@ -1286,6 +1307,7 @@ mod tests {
                 resume: None,
                 fallback: None,
                 wait_for_size: false,
+                palette: Palette::default(),
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {

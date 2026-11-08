@@ -19,8 +19,10 @@ use yien_proto::{
     SessionTitle, TabGit, TabId,
 };
 use yien_pty::PtyBackend;
+use yien_vt::Palette;
 
 use crate::consoles::Consoles;
+use crate::convert;
 use crate::git::{GitReport, GitThread};
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
@@ -109,6 +111,8 @@ struct Service {
     git_probed: HashSet<TabId>,
     /// Where worktree jobs report back.
     jobs: mpsc::Sender<Done>,
+    /// The palette every pane resolves colours with (RF-CFG-02).
+    palette: Palette,
 }
 
 /// Worktree jobs waiting for the service; a job waits for room.
@@ -135,6 +139,7 @@ pub(crate) async fn run(
         None => (None, None),
     };
     let (jobs, mut done) = mpsc::channel(WORKTREE_JOBS);
+    let ctx_palette = ctx.config.vt.palette;
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
         ctx,
@@ -145,6 +150,7 @@ pub(crate) async fn run(
         git_sent: HashMap::new(),
         git_probed: HashSet::new(),
         jobs,
+        palette: ctx_palette,
     };
     let mut notices = opened.notices;
     let mut restored = Vec::new();
@@ -440,6 +446,7 @@ impl Service {
             }),
             resume,
             wait_for_size,
+            palette: self.palette,
         };
         pane::spawn(setup, self.ctx.clone(), cmds, input);
         links(&self.links).insert(
@@ -523,6 +530,16 @@ impl Service {
             ClientMsg::WindowFocus { focused } => {
                 let fx = self.ws.set_window_focus(focused);
                 self.execute(fx).await;
+            }
+            ClientMsg::SetTerminalPalette { palette } => {
+                let palette = convert::palette(palette);
+                if palette != self.palette {
+                    self.palette = palette;
+                    let txs: Vec<_> = self.panes.values().map(|h| h.tx.clone()).collect();
+                    for tx in txs {
+                        let _ = tx.send(PaneCmd::Palette(palette)).await;
+                    }
+                }
             }
         }
     }
