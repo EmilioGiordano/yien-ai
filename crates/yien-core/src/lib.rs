@@ -201,6 +201,23 @@ impl Default for CoreConfig {
     }
 }
 
+impl CoreConfig {
+    /// The same settings with panes starting on `palette`, so programs
+    /// restored before the window's first message already draw in it.
+    ///
+    /// ```
+    /// use yien_core::CoreConfig;
+    /// use yien_proto::TerminalPalette;
+    ///
+    /// let config = CoreConfig::default().with_terminal_palette(TerminalPalette::Washi);
+    /// assert_eq!(config.vt.palette, yien_vt::Palette::washi());
+    /// ```
+    pub fn with_terminal_palette(mut self, palette: yien_proto::TerminalPalette) -> Self {
+        self.vt.palette = convert::palette(palette);
+        self
+    }
+}
+
 /// Why a core operation failed. The text is meant for the user: it says what
 /// happened and what to do.
 ///
