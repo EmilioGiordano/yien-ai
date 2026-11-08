@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
-use yien_core::{Core, CoreConfig, CoreHandle, GitConfig, HookConfig, SendError, SessionStore};
+use yien_core::{
+    Core, CoreConfig, CoreHandle, GitConfig, HookConfig, ScreenStore, SendError, SessionStore,
+};
 use yien_platform::LogGuard;
 use yien_platform::agent_sessions::CliDirs;
 use yien_platform::single_instance::{self, Claim, Instance};
@@ -63,6 +65,7 @@ fn main() -> ExitCode {
     let config = CoreConfig {
         hooks,
         session: session_store(),
+        screens: screen_store(),
         start_project: yien_platform::paths::start_dir()
             .map(|dir| dir.to_string_lossy().into_owned()),
         size_wait: SIZE_WAIT,
@@ -167,7 +170,8 @@ const SIZE_WAIT: Duration = Duration::from_millis(400);
 /// How long restored panes wait for the window to show and report sizes.
 const UI_WAIT: Duration = Duration::from_secs(2);
 
-/// The longest the quit path waits to save the session.
+/// The longest the quit path waits to save the session, then the pane screens
+/// in what is left of it.
 const QUIT_SAVE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// The longest the quit path waits for every pane's program and pseudo
@@ -181,6 +185,16 @@ fn session_store() -> Option<SessionStore> {
         .inspect_err(|e| tracing::warn!("no data dir, the session is not saved: {e}"))
         .ok()?;
     Some(SessionStore::new(FileStore::new(dir)))
+}
+
+/// Pane screens under the state dir, one file per pane (RF-SES-10); `None`
+/// (no screen kept) when the data dir cannot be found.
+fn screen_store() -> Option<ScreenStore> {
+    let dir = yien_platform::paths::state_dir()
+        .inspect_err(|e| tracing::warn!("no data dir, pane screens are not kept: {e}"))
+        .ok()?
+        .join("screens");
+    Some(ScreenStore::new(FileStore::new(dir)))
 }
 
 /// `yien-hook` sits next to this executable; the hook settings go under
