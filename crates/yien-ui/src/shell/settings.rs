@@ -66,6 +66,11 @@ impl Shell {
         if loaded {
             notices.extend(self.apply_keys(cx));
         }
+        let grouped = self.settings.groups_by_state();
+        if grouped != self.workspace.groups_by_state() {
+            self.workspace.set_group_by_state(grouped);
+            self.tab_cursor = None;
+        }
         if notices.is_empty() {
             if self.notice.is_some() && self.notice == self.settings_notice {
                 self.notice = None;

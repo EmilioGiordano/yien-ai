@@ -28,6 +28,7 @@ mod settings;
 mod shell;
 mod terminal;
 mod theme;
+mod tray;
 mod worktree;
 
 use std::rc::Rc;

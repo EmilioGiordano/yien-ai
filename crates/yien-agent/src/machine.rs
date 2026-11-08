@@ -215,6 +215,25 @@ impl Machine {
         self.state.is_red()
     }
 
+    /// Whether a "needs you" waits out its confirmation window: the red
+    /// mark is not on yet, and input or work in the window can cancel it.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{HookEvent, Machine, MachineConfig, Signal, Source};
+    ///
+    /// let ms = Duration::from_millis;
+    /// let m = Machine::new(MachineConfig::new(&[Source::Hooks], None));
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::UserPromptSubmit), ms(0));
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::PermissionRequest), ms(10));
+    /// assert!(m.needs_you_pending() && !m.is_red());
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::PreToolUse), ms(20));
+    /// assert!(!m.needs_you_pending());
+    /// ```
+    pub fn needs_you_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Whether the pane is seen (RN-07, RF-AGE-07).
     pub fn seen(&self) -> bool {
         self.seen

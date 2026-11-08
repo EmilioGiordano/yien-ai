@@ -174,6 +174,7 @@ pub(crate) fn route(panes: &Links, delivery: HookDelivery) {
     let item = HookItem {
         serial: delivery.serial,
         event: delivery.event,
+        question: delivery.question,
     };
     if let Err(TrySendError::Full(_)) = link.hooks.try_send(item) {
         link.hooks_lost.store(true, Ordering::Release);
@@ -204,6 +205,7 @@ mod tests {
             pane: PaneId::new(pane),
             serial: 3,
             event: Ok(HookEvent::Stop),
+            question: None,
             payload_len: 0,
         }
     }
