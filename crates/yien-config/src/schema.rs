@@ -35,7 +35,9 @@ pub const SCHEMA: &[Setting] = &[
     Setting {
         key: "ui.tabs.group",
         default: "\"project\"",
-        doc: "How the tab bar lists tabs: \"project\" (under their projects) or \"state\"               (needs you, error, done, working, idle). The palette switches it until the               file is next saved.",
+        doc: "How the tab bar lists tabs: \"project\" (under their projects) or \
+              \"state\" (needs you, error, done, working, idle). The palette switches it \
+              until the file is next saved.",
     },
     Setting {
         key: "terminal.font.family",
