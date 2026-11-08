@@ -792,6 +792,16 @@ fn rf_cfg_02_a_palette_change_recolours_the_pane_and_keeps_its_scrollback() {
 }
 
 #[test]
+fn rf_cfg_02_panes_start_on_the_configured_palette() {
+    let washi = Palette::washi();
+    let mut h = Harness::start_with(config().with_terminal_palette(TerminalPalette::Washi));
+    let (_, pane, child) = h.project();
+    child.output(b"first");
+    let frame = h.frame_with(pane, "first");
+    assert_eq!(frame.background, washi.background, "no message needed");
+}
+
+#[test]
 fn rf_cfg_02_new_and_relaunched_panes_use_the_current_palette() {
     let washi = Palette::washi();
     let mut h = Harness::start();
