@@ -251,7 +251,13 @@ mod tests {
         let mut ws = Workspace::new();
         let project = project(&mut ws);
         let first = worktree_tab(&mut ws, project, "C:/Code/app-wt/feat-x");
-        let second = worktree_tab(&mut ws, project, "c:\\code\\app-wt\\feat-x\\");
+        // Folders compare without case and with either slash on Windows only.
+        let same = if cfg!(windows) {
+            "c:\\code\\app-wt\\feat-x\\"
+        } else {
+            "C:/Code/app-wt/feat-x/"
+        };
+        let second = worktree_tab(&mut ws, project, same);
         assert!(ws.folder_used_elsewhere(first, "C:/Code/app-wt/feat-x"));
         assert!(!ws.folder_used_elsewhere(first, "C:/Code/app-wt/other"));
 
