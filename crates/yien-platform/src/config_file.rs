@@ -432,47 +432,11 @@ fn command_params(args: &[String], path: &Path) -> String {
     params.join(" ")
 }
 
-/// The file `program` names: an absolute path as given, or a bare name
-/// looked up in each absolute `dirs` folder in order, with each `pathext`
-/// extension when it has none. Relative folders, the current one among them,
-/// are never searched, and a relative path with folders in it is refused.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn resolve_program(program: &str, dirs: &[PathBuf], pathext: &str) -> Option<PathBuf> {
-    let program = Path::new(program);
-    let has_extension = program.extension().is_some();
-    let exts: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
-    let find = |base: PathBuf| -> Option<PathBuf> {
-        if has_extension || exts.is_empty() {
-            return base.is_file().then_some(base);
-        }
-        exts.iter().find_map(|ext| {
-            let mut file = base.clone().into_os_string();
-            file.push(ext);
-            let file = PathBuf::from(file);
-            file.is_file().then_some(file)
-        })
-    };
-    if program.is_absolute() {
-        return find(program.to_path_buf()).or_else(|| Some(program.to_path_buf()));
-    }
-    let bare = matches!(
-        program.components().collect::<Vec<_>>()[..],
-        [std::path::Component::Normal(_)]
-    );
-    if !bare {
-        return None;
-    }
-    dirs.iter()
-        .filter(|d| d.is_absolute())
-        .find_map(|d| find(d.join(program)))
-}
-
-/// Whether Windows runs `file` through cmd.exe.
+/// Whether Windows runs `file` through cmd.exe. Trailing dots and spaces,
+/// which Windows drops from a name, do not hide the extension.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_batch(file: &Path) -> bool {
-    file.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    last_extension(file).is_some_and(|e| e == "cmd" || e == "bat")
 }
 
 /// Whether arguments and a path can go to a batch file: nothing cmd.exe
@@ -640,55 +604,12 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_program_is_found_only_in_absolute_path_folders() {
-        let dir = std::path::absolute(scratch("resolve")).unwrap();
-        let (first, second) = (dir.join("first"), dir.join("second"));
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-        fs::write(second.join("ed.cmd"), "").unwrap();
-        fs::write(second.join("tool.exe"), "").unwrap();
-        fs::write(first.join("tool.cmd"), "").unwrap();
-        let dirs = [
-            PathBuf::from("."),
-            PathBuf::new(),
-            first.clone(),
-            second.clone(),
-        ];
-        let ext = ".exe;.cmd";
-        // PATH order first, then PATHEXT order inside a folder.
-        assert_eq!(
-            resolve_program("tool", &dirs, ext),
-            Some(first.join("tool.cmd"))
-        );
-        assert_eq!(
-            resolve_program("ed", &dirs, ext),
-            Some(second.join("ed.cmd"))
-        );
-        assert_eq!(
-            resolve_program("tool.exe", &dirs, ext),
-            Some(second.join("tool.exe"))
-        );
-        assert_eq!(resolve_program("missing", &dirs, ext), None);
-        // Relative folders, `.` among them, are skipped.
-        assert_eq!(resolve_program("ed", &[PathBuf::from(".")], ext), None);
-        let relative = Path::new("bin").join("ed");
-        assert_eq!(
-            resolve_program(&relative.to_string_lossy(), &dirs, ext),
-            None
-        );
-        let absolute = second.join("ed");
-        assert_eq!(
-            resolve_program(&absolute.to_string_lossy(), &[], ext),
-            Some(second.join("ed.cmd"))
-        );
-        assert!(is_batch(&second.join("ed.cmd")));
-        assert!(!is_batch(&second.join("tool.exe")));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn batch_editors_are_given_only_plain_arguments() {
         assert!(is_batch(Path::new("run.BAT")));
+        assert!(is_batch(Path::new("ed.cmd")));
+        assert!(!is_batch(Path::new("tool.exe")));
+        assert!(is_batch(Path::new("agent.cmd.")));
+        assert!(is_batch(Path::new("agent.CMD ")));
         let file = Path::new(r"C:\Data\config.toml");
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));

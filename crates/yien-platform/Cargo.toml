@@ -21,6 +21,7 @@ dirs = { workspace = true }
 ignore = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+yien-which = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

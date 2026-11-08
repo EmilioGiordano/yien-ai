@@ -97,7 +97,8 @@ pub trait PtyBackend: Send + Sync {
 /// variables, since both can carry tokens (plan §5.4).
 #[derive(Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
-    /// The program, found through `PATH` when it is not a path.
+    /// The program: a full path, used as given, or a bare name looked up
+    /// in the absolute `PATH` folders (never the current folder).
     pub program: OsString,
     /// Arguments after the program.
     pub args: Vec<OsString>,
@@ -347,6 +348,31 @@ pub enum PtyError {
         #[source]
         source: BoxError,
     },
+    /// A bare program name found in no absolute `PATH` folder. Empty,
+    /// `.` and relative `PATH` entries are never searched, nor is the
+    /// current folder.
+    #[error("{program} was not found on PATH (the current folder is not searched)")]
+    NotFound {
+        /// The name as given.
+        program: String,
+    },
+    /// The program is a relative path with folders in it, which would
+    /// resolve against YIEN's own working folder.
+    #[error("{program} is a relative path; give a bare name found on PATH or a full path")]
+    RelativeProgram {
+        /// The path as given, lossily converted.
+        program: String,
+    },
+    /// The program is an absolute path that names no file. Its extension
+    /// is never swapped for another that exists.
+    #[error("{program} does not exist")]
+    MissingProgram {
+        /// The path as given, lossily converted.
+        program: String,
+    },
+    /// The program is empty.
+    #[error("no program was given")]
+    EmptyProgram,
     /// The program is a batch file (`.cmd`, `.bat`) and an argument has a
     /// character `cmd.exe` would interpret, so it was not started. Without
     /// that argument it may start.

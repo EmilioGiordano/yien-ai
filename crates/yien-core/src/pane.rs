@@ -1147,6 +1147,21 @@ fn spawn_message(plan: &LaunchPlan, error: &PtyError) -> String {
              profile's arguments, or install the program as an .exe.",
             plan.program
         ),
+        PtyError::NotFound { .. } => format!(
+            "Could not start {}: it was not found on PATH (the current folder is not \
+             searched). Install it or give its full path, then relaunch the pane.",
+            plan.program
+        ),
+        PtyError::RelativeProgram { .. } => format!(
+            "Could not start {}: a relative path would resolve against YIEN's own folder. \
+             Give its full path or a name found on PATH, then relaunch the pane.",
+            plan.program
+        ),
+        PtyError::MissingProgram { .. } => format!(
+            "Could not start {}: the file does not exist. Check its path, then relaunch the pane.",
+            plan.program
+        ),
+        PtyError::EmptyProgram => "Could not start the pane: no program was given.".to_owned(),
         PtyError::Spawn { .. } => format!(
             "Could not start {}. Check that it is installed and on PATH, then relaunch the pane.",
             plan.program
@@ -1509,5 +1524,26 @@ mod tests {
         assert!(!slot.retry(|| unreachable!("already told")));
         assert!(slot.take().is_some());
         assert!(!slot.retry(|| unreachable!("nothing to tell")));
+    }
+
+    #[test]
+    fn a_program_not_on_path_tells_the_current_folder_is_not_searched() {
+        let config = crate::CoreConfig::default();
+        let claude = yien_proto::ProfileId::new("claude");
+        let plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
+        let program = plan.program.clone();
+        let missing = spawn_message(&plan, &PtyError::NotFound { program });
+        assert!(missing.contains("not found on PATH"), "{missing}");
+        assert!(
+            missing.contains("current folder is not searched"),
+            "{missing}"
+        );
+        let program = format!("bin/{}", plan.program);
+        let relative = spawn_message(&plan, &PtyError::RelativeProgram { program });
+        assert!(relative.contains("relative path"), "{relative}");
+        assert!(!relative.contains("profile"), "{relative}");
+        let program = format!("C:/missing/{}", plan.program);
+        let missing = spawn_message(&plan, &PtyError::MissingProgram { program });
+        assert!(missing.contains("does not exist"), "{missing}");
     }
 }

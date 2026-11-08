@@ -20,6 +20,7 @@ const LAYERS: &[(&str, Layer)] = &[
     ("yien-proto", Layer::Level(0)),
     ("yien-layout", Layer::Level(0)),
     ("yien-input", Layer::Level(0)),
+    ("yien-which", Layer::Level(0)),
     ("yien-vt", Layer::Level(1)),
     ("yien-agent", Layer::Level(1)),
     ("yien-session", Layer::Level(1)),

@@ -199,12 +199,33 @@ fn spec_env_and_cwd_reach_the_child() {
 }
 
 #[test]
-fn a_missing_program_is_a_spawn_error() {
+fn a_missing_program_is_not_found_before_spawning() {
     match backend().spawn(SpawnSpec::new("yien-no-such-program-4417")) {
-        Err(PtyError::Spawn { program, .. }) => assert_eq!(program, "yien-no-such-program-4417"),
-        Err(other) => panic!("expected Spawn, got {other:?}"),
+        Err(PtyError::NotFound { program }) => assert_eq!(program, "yien-no-such-program-4417"),
+        Err(other) => panic!("expected NotFound, got {other:?}"),
         Ok(_) => panic!("a missing program spawned"),
     }
+}
+
+#[test]
+fn a_missing_absolute_program_is_refused_before_spawning() {
+    let missing = std::env::temp_dir()
+        .join("yien-no-such-dir-4417")
+        .join("prog");
+    match backend().spawn(SpawnSpec::new(missing.as_os_str())) {
+        Err(PtyError::MissingProgram { .. }) => {}
+        Err(other) => panic!("expected MissingProgram, got {other:?}"),
+        Ok(_) => panic!("a missing program spawned"),
+    }
+}
+
+#[test]
+fn a_relative_program_path_is_refused() {
+    let relative = std::path::Path::new("bin").join("yien-prog");
+    assert!(matches!(
+        backend().spawn(SpawnSpec::new(relative.as_os_str())),
+        Err(PtyError::RelativeProgram { .. })
+    ));
 }
 
 #[test]
