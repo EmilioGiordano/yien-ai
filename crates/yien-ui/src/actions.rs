@@ -529,6 +529,30 @@ mod tests {
     }
 
     #[test]
+    fn rf_ses_07_the_resume_command_takes_a_chord_from_the_settings_file() {
+        let (rebinds, notices) = crate::keys::plan(
+            &yien_config::parse(
+                "[keys]
+\"agent.resume_session\" = \"ctrl-alt-o\"
+",
+            )
+            .unwrap()
+            .config
+            .keys,
+        );
+        assert!(notices.is_empty());
+        let keymap = Keymap::new(bindings_with(&rebinds));
+        let stack: Vec<KeyContext> = TERMINAL_STACK
+            .iter()
+            .map(|c| KeyContext::parse(c).unwrap())
+            .collect();
+        let found = keymap
+            .bindings_for_input(&[Keystroke::parse("ctrl-alt-o").unwrap()], &stack)
+            .0;
+        assert!(found[0].action().partial_eq(&ResumePastSession));
+    }
+
+    #[test]
     fn every_catalog_key_is_bound() {
         let keys: usize = CATALOG.iter().map(|spec| spec.keys.len()).sum();
         let internal = bindings()
