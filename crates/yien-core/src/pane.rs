@@ -424,12 +424,18 @@ struct Actor {
     /// YIEN itself stops the program, so that exit is never taken for the
     /// resume failing.
     resumed_at: Option<Duration>,
+    /// The session this launch tried to resume. A hook may name another id
+    /// before the resume fails; the fallback names this one again, so the
+    /// saved session keeps the conversation it tried.
+    resumed_id: Option<String>,
     /// A resume found failed, for the run loop to fall back on.
     /// Also the CLI's last line on screen, for the notice.
     failed_resume: Option<(ResumeFailure, Option<String>)>,
     /// This launch showed it is alive: the user typed into it, or a hook
-    /// came with its token (Claude sends `SessionStart` once a resume
-    /// works). Its exit is then the session ending, never a failed resume.
+    /// that proves a working conversation came with its token
+    /// ([`resume::proves_conversation`]; `SessionStart` alone does not, as
+    /// Claude sends it before a resume fails). Its exit is then the session
+    /// ending, never a failed resume.
     launch_alive: bool,
     /// The workspace's number for the current launch, carried by the session
     /// reports so the workspace can drop those of a launch it replaced.
@@ -502,6 +508,7 @@ pub(crate) fn spawn(
         fallback: setup.fallback,
         agent_plan: None,
         resumed_at: None,
+        resumed_id: None,
         failed_resume: None,
         launch_alive: false,
         launch: setup.launch,
@@ -698,6 +705,7 @@ impl Actor {
         self.dirty = true;
         let resume = self.resume.take().filter(|_| self.plan.can_resume());
         self.resumed_at = resume.is_some().then(|| self.now());
+        self.resumed_id.clone_from(&resume);
         self.launch_alive = false;
         let session_id = if resume.is_some() {
             resume.clone()
@@ -828,8 +836,10 @@ impl Actor {
             tracing::debug!(pane = self.id.get(), "hook from an earlier launch dropped");
             return;
         }
-        self.launch_alive = true;
-        self.restored = None;
+        if item.event.as_ref().is_ok_and(resume::proves_conversation) {
+            self.launch_alive = true;
+            self.restored = None;
+        }
         match item.event {
             Ok(event) => {
                 if item.question.is_some() {
@@ -1028,8 +1038,10 @@ impl Actor {
     }
 
     /// Tells the user why the resume failed and opens the shell in the
-    /// pane's folder (RF-SES-11). The workspace keeps the agent and its
-    /// session for the saved session, so a restart tries the resume again.
+    /// pane's folder (RF-SES-11). The workspace keeps the agent, and the
+    /// session it tried is reported again (a hook of the failing launch may
+    /// have named another), so the saved session still names it and a
+    /// restart tries the resume again.
     async fn fall_back(&mut self, failure: ResumeFailure, said: Option<String>) {
         let Some(shell) = self.fallback.take() else {
             return;
@@ -1042,6 +1054,12 @@ impl Actor {
         self.report(PaneEvent::Notice(
             failure.notice(&self.plan.profile_name, said.as_deref()),
         ));
+        if let Some(id) = self.resumed_id.take() {
+            self.report(PaneEvent::SessionId {
+                id,
+                launch: self.launch,
+            });
+        }
         if let Some(hooks) = &self.ctx.hooks {
             hooks.registry.revoke(self.id);
         }
@@ -1481,6 +1499,8 @@ mod tests {
     /// serial 1, each relaunch's the next.
     struct Solo {
         runtime: tokio::runtime::Runtime,
+        backend: Arc<yien_pty::FakePty>,
+        screen: Arc<ScreenSource>,
         reports: Arc<crate::report::Reports>,
         cmds: mpsc::Sender<PaneCmd>,
         hooks: mpsc::Sender<HookItem>,
@@ -1492,6 +1512,20 @@ mod tests {
     impl Solo {
         /// Starts the actor with `queued` already waiting in its hook queue.
         fn start(queued: Vec<HookItem>, lost: bool) -> Self {
+            Self::launch(queued, lost, None, None)
+        }
+
+        /// As [`Solo::start`], resuming `resume` with the shell as the
+        /// fallback when it is given, on a screen wide enough for the CLI's
+        /// message. The actor takes hooks before reader messages, so
+        /// `queued` is handled before anything the child says. `restored` is
+        /// a saved screen the launch shows first.
+        fn launch(
+            queued: Vec<HookItem>,
+            lost: bool,
+            resume: Option<&str>,
+            restored: Option<Vec<u8>>,
+        ) -> Self {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_time()
@@ -1500,9 +1534,14 @@ mod tests {
             let config = crate::CoreConfig::default();
             let claude = yien_proto::ProfileId::new("claude");
             let plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
+            let fallback = resume
+                .is_some()
+                .then(|| launch::resolve(None, &config.profiles, &config.shell).unwrap());
+            let backend = Arc::new(yien_pty::FakePty::new());
+            let screen = Arc::new(ScreenSource::default());
             let (events, events_rx) = mpsc::channel(64);
             let ctx = Ctx {
-                backend: Arc::new(yien_pty::FakePty::new()),
+                backend: backend.clone(),
                 config: Arc::new(config),
                 events,
                 reports: Arc::default(),
@@ -1524,23 +1563,25 @@ mod tests {
                 id: PaneId::new(1),
                 plan,
                 cwd: ".".to_owned(),
-                size: (20, 4),
+                size: if resume.is_some() { (80, 6) } else { (20, 4) },
                 slot: Arc::default(),
                 visible: false,
                 seen: false,
                 hooks: hooks_rx,
                 hooks_lost: Arc::clone(&hooks_lost),
-                resume: None,
-                fallback: None,
+                resume: resume.map(str::to_owned),
+                fallback,
                 wait_for_size: false,
                 palette: Palette::default(),
                 launch: 0,
-                screen: Arc::default(),
-                restored: None,
+                screen: Arc::clone(&screen),
+                restored,
             };
             runtime.block_on(async { spawn(setup, ctx, cmds_rx, input_rx) });
             Self {
                 runtime,
+                backend,
+                screen,
                 reports,
                 cmds,
                 hooks,
@@ -1934,5 +1975,166 @@ mod tests {
         let program = format!("C:/missing/{}", plan.program);
         let missing = spawn_message(&plan, &PtyError::MissingProgram { program });
         assert!(missing.contains("does not exist"), "{missing}");
+    }
+
+    const RESUMED: &str = "4f1c9a00-0000-4000-8000-000000000001";
+
+    impl Solo {
+        /// The next program the actor spawns.
+        fn next_child(&self) -> yien_pty::FakeChild {
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(child) = self.backend.take_spawned().pop() {
+                    return child;
+                }
+                assert!(Instant::now() < end, "nothing spawned");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// Resumes [`RESUMED`] with `hooks` handled first, then lets the child
+    /// print `said` and exit with `code`. Returns what the actor reported and
+    /// whether it opened the shell.
+    fn resume_ends(
+        hooks: Vec<yien_agent::HookEvent>,
+        said: &str,
+        code: u32,
+    ) -> (Vec<PaneEvent>, bool) {
+        let (_pane, events, shell) = resume_run(hooks, None, said, code);
+        (events, shell)
+    }
+
+    /// As [`resume_ends`], over the saved screen `restored`, and keeps the
+    /// pane for a look at its screen.
+    fn resume_run(
+        hooks: Vec<yien_agent::HookEvent>,
+        restored: Option<Vec<u8>>,
+        said: &str,
+        code: u32,
+    ) -> (Solo, Vec<PaneEvent>, bool) {
+        let queued = hooks.into_iter().map(|e| hook(1, e)).collect();
+        let pane = Solo::launch(queued, false, Some(RESUMED), restored);
+        let child = pane.next_child();
+        assert_eq!(
+            child.spec().args.first().and_then(|a| a.to_str()),
+            Some("--resume")
+        );
+        child.output(said.as_bytes());
+        child.exit(code);
+        let events = pane.collect(SETTLE);
+        let shell = pane.backend.take_spawned().pop();
+        if let Some(shell) = &shell {
+            assert_ne!(shell.spec().program, child.spec().program);
+        }
+        (pane, events, shell.is_some())
+    }
+
+    /// The last session id reported.
+    fn last_session(events: &[PaneEvent]) -> Option<&str> {
+        events.iter().rev().find_map(|e| match e {
+            PaneEvent::SessionId { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
+    fn resume_start() -> yien_agent::HookEvent {
+        yien_agent::HookEvent::SessionStart {
+            session_id: Some(RESUMED.to_owned()),
+            source: yien_agent::SessionStartSource::Resume,
+        }
+    }
+
+    fn noticed(events: &[PaneEvent]) -> Option<&str> {
+        events.iter().find_map(|e| match e {
+            PaneEvent::Notice(n) => Some(n.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The order the real Claude Code 2.1.319 showed for a missing session:
+    /// `SessionStart` (source resume) under the pane's token, then the
+    /// message, then exit 1.
+    #[test]
+    fn rf_ses_11_a_session_start_before_the_not_found_message_still_opens_a_shell() {
+        let said = format!("No conversation found with session ID: {RESUMED}\r\n");
+        let (events, shell) = resume_ends(vec![resume_start()], &said, 1);
+        assert!(shell, "{events:?}");
+        assert_eq!(last_session(&events), Some(RESUMED), "{events:?}");
+        let notice = noticed(&events).unwrap_or_default();
+        assert!(notice.contains("not found"), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, PaneEvent::Exited(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn rf_ses_11_a_session_start_and_end_around_an_early_error_exit_open_a_shell() {
+        use yien_agent::{HookEvent::SessionEnd, SessionEndReason};
+        let hooks = vec![resume_start(), SessionEnd(SessionEndReason::Other)];
+        let (events, shell) = resume_ends(hooks, "Error\r\n", 1);
+        assert!(shell, "{events:?}");
+        assert!(noticed(&events).unwrap_or_default().contains("code 1"));
+    }
+
+    #[test]
+    fn rf_ses_11_a_resumed_conversation_that_took_a_prompt_ends_without_a_shell() {
+        use yien_agent::HookEvent::UserPromptSubmit;
+        let said = "No conversation found\r\n";
+        let (events, shell) = resume_ends(vec![resume_start(), UserPromptSubmit], said, 1);
+        assert!(!shell, "{events:?}");
+        assert!(events.contains(&PaneEvent::Exited(Some(1))), "{events:?}");
+    }
+
+    #[test]
+    fn rf_ses_11_a_resumed_conversation_left_with_exit_ends_without_a_shell() {
+        let (events, shell) = resume_ends(vec![resume_start()], "bye\r\n", 0);
+        assert!(!shell, "{events:?}");
+        assert!(events.contains(&PaneEvent::Exited(Some(0))), "{events:?}");
+    }
+
+    /// A failing launch whose `SessionStart` named another session must not
+    /// cost the saved session the conversation it tried: a passing failure
+    /// (a renamed folder, an expired sign-in) would lose it for good.
+    #[test]
+    fn rf_ses_11_a_failed_resume_keeps_the_session_it_tried_over_a_hook_s_id() {
+        let other = yien_agent::HookEvent::SessionStart {
+            session_id: Some("9e2b7c00-0000-4000-8000-000000000002".to_owned()),
+            source: yien_agent::SessionStartSource::Resume,
+        };
+        let said = format!("No conversation found with session ID: {RESUMED}\r\n");
+        let (events, shell) = resume_ends(vec![other], &said, 1);
+        assert!(shell, "{events:?}");
+        assert_eq!(last_session(&events), Some(RESUMED), "{events:?}");
+    }
+
+    /// The real order over a restored screen (PR #36): the message below the
+    /// restored line still counts, and the shell shows the restored screen
+    /// again.
+    #[test]
+    fn rf_ses_10_rf_ses_11_a_session_start_over_a_restored_screen_still_opens_a_shell() {
+        let said = format!("No conversation found with session ID: {RESUMED}\r\n");
+        let dump = dump_of(b"earlier work kept");
+        let (pane, events, shell) = resume_run(vec![resume_start()], Some(dump), &said, 1);
+        assert!(shell, "{events:?}");
+        assert!(
+            noticed(&events).unwrap_or_default().contains("not found"),
+            "{events:?}"
+        );
+        let (_, shown) = pane.screen.dump(yien_vt::DumpLimits::default()).unwrap();
+        let mut engine = alacritty(&VtConfig::default(), 80, 6);
+        engine.feed(&shown);
+        let frame = engine.frame();
+        let text: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+        assert!(
+            text.iter().any(|l| l.contains("earlier work kept")),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("No conversation found")),
+            "{text:?}"
+        );
+        drop(pane.cmds);
     }
 }
