@@ -545,6 +545,34 @@ fn rf_ses_01_the_quit_save_waits_no_longer_than_asked() {
 }
 
 #[test]
+fn rf_ses_01_the_quit_save_gives_up_on_its_own_slow_write_which_still_lands() {
+    let store = Slow::default();
+    // No debounced write runs, so the quit save's write is the only one.
+    let config = CoreConfig {
+        save_debounce: TIMEOUT * 10,
+        ..CoreConfig::default()
+    };
+    let mut run = Run::configured(store.clone(), config);
+    let first = run.first_pane();
+    // Handled by the command loop, so the workspace was handed to the writer.
+    run.split(first, None);
+    assert!(!store.stalled());
+    let asked = Duration::from_millis(200);
+    let started = Instant::now();
+    let result = run.core.save_session(asked);
+    let took = started.elapsed();
+    assert!(
+        matches!(result, Err(SessionSaveError::TimedOut)),
+        "{result:?}"
+    );
+    assert!(took >= asked && took < TIMEOUT, "{took:?}");
+    assert!(store.stalled());
+    assert!(store.0.saved().is_none());
+    store.open();
+    wait_until(|| store.0.saved().is_some());
+}
+
+#[test]
 fn rf_ses_01_nothing_after_the_quit_save_reaches_the_store() {
     let store = Shared::default();
     let mut run = Run::start(&store);
