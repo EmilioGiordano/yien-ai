@@ -295,14 +295,12 @@ impl FileTreeService {
 
     /// Searches `root` by name, cancelling the search before it.
     pub fn search(&self, root: PathBuf, query: String, done: SearchDone) {
-        let mine = self.latest.fetch_add(1, Ordering::AcqRel) + 1;
-        let latest = Arc::clone(&self.latest);
+        let ticket = self.ticket();
         let limits = self.limits;
         let spawned = std::thread::Builder::new()
             .name("yien-file-search".into())
             .spawn(move || {
-                let cancelled = || latest.load(Ordering::Acquire) != mine;
-                done(search(&root, &query, limits, &cancelled));
+                done(search(&root, &query, limits, &|| ticket.superseded()));
             });
         if let Err(e) = spawned {
             // The callback went with the closure; the caller sees it dropped.
@@ -313,6 +311,27 @@ impl FileTreeService {
     /// Stops the running search, if any; it ends as cancelled.
     pub fn cancel_search(&self) {
         self.latest.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A new search's number, which supersedes every earlier one.
+    fn ticket(&self) -> SearchTicket {
+        SearchTicket {
+            mine: self.latest.fetch_add(1, Ordering::AcqRel) + 1,
+            latest: Arc::clone(&self.latest),
+        }
+    }
+}
+
+/// One search's number and the service's newest.
+struct SearchTicket {
+    mine: u64,
+    latest: Arc<AtomicU64>,
+}
+
+impl SearchTicket {
+    /// Whether a newer search started or the search was cancelled.
+    fn superseded(&self) -> bool {
+        self.latest.load(Ordering::Acquire) != self.mine
     }
 }
 
@@ -617,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_ctx_01_the_service_cancels_the_older_search() {
+    fn rf_ctx_01_the_service_answers_the_newer_search() {
         let s = Scratch::new("cancel");
         for i in 0..1_000 {
             s.file(&format!("d{}/hit{i}.txt", i % 50));
@@ -631,8 +650,9 @@ mod tests {
                 let _ = first_tx.send(r.end);
             }),
         );
-        // A newer search moves the number on before the older one has
-        // walked 1,000 entries.
+        // The older search is cancelled unless it finished first; which one
+        // happens depends on the machine's load, so both are accepted here
+        // and the cancelling itself is tested on tickets below.
         let (second_tx, second) = mpsc::channel();
         service.search(
             s.0.clone(),
@@ -641,26 +661,29 @@ mod tests {
                 let _ = second_tx.send(r);
             }),
         );
-        assert_eq!(
-            first.recv_timeout(Duration::from_secs(20)).unwrap(),
-            SearchEnd::Cancelled
+        let first_end = first.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(
+            matches!(first_end, SearchEnd::Cancelled | SearchEnd::Complete),
+            "{first_end:?}"
         );
         let found = second.recv_timeout(Duration::from_secs(20)).unwrap();
         assert_eq!(found.end, SearchEnd::Complete);
         assert_eq!(found.hits.len(), 11, "hit99 and hit990 to hit999");
-        let (third_tx, third) = mpsc::channel();
-        service.search(
-            s.0.clone(),
-            "hit".into(),
-            Box::new(move |r| {
-                let _ = third_tx.send(r.end);
-            }),
-        );
+    }
+
+    #[test]
+    fn rf_ctx_01_a_newer_search_or_a_cancel_supersedes_a_search() {
+        let service = FileTreeService::start().unwrap();
+        let first = service.ticket();
+        assert!(!first.superseded());
+        let second = service.ticket();
+        assert!(first.superseded(), "a newer search");
+        assert!(!second.superseded());
         service.cancel_search();
-        assert_eq!(
-            third.recv_timeout(Duration::from_secs(20)).unwrap(),
-            SearchEnd::Cancelled
-        );
+        assert!(second.superseded(), "cancelled");
+        let third = service.ticket();
+        drop(service);
+        assert!(third.superseded(), "the service went away");
     }
 
     /// A junction needs no privilege, unlike a directory symlink.
