@@ -8,7 +8,7 @@
 )]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
@@ -55,9 +55,34 @@ impl Store for Shared {
     }
 }
 
-/// A store whose writes take two seconds, as a stalled disk would.
+/// A store whose writes stall, as a stalled disk would, until the test
+/// opens it.
 #[derive(Clone, Default)]
-struct Slow(Shared);
+struct Slow(Shared, Arc<Gate>);
+
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    reached: bool,
+    open: bool,
+}
+
+impl Slow {
+    /// Whether a write has reached the disk and is stalled there.
+    fn stalled(&self) -> bool {
+        self.1.state.lock().unwrap().reached
+    }
+
+    fn open(&self) {
+        self.1.state.lock().unwrap().open = true;
+        self.1.changed.notify_all();
+    }
+}
 
 impl Store for Slow {
     fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -65,7 +90,14 @@ impl Store for Slow {
     }
 
     fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        std::thread::sleep(Duration::from_secs(2));
+        let mut state = self.1.state.lock().unwrap();
+        state.reached = true;
+        // Bounded, so a test that never opens the gate fails instead of hanging.
+        let _ = self
+            .1
+            .changed
+            .wait_timeout_while(state, TIMEOUT * 4, |s| !s.open)
+            .unwrap();
         self.0.write_atomic(name, bytes)
     }
 
@@ -489,15 +521,20 @@ fn without_a_saved_session_the_start_folder_opens() {
 #[test]
 fn rf_ses_01_the_quit_save_waits_no_longer_than_asked() {
     let store = Slow::default();
-    let mut run = Run::start_on(store.clone());
-    run.first_pane();
+    let run = Run::start_on(store.clone());
+    // The writer holds the workspace once its debounced write reaches the disk.
+    wait_until(|| store.stalled());
+    let asked = Duration::from_millis(200);
     let started = Instant::now();
-    let result = run.core.save_session(Duration::from_millis(200));
+    let result = run.core.save_session(asked);
+    let took = started.elapsed();
+    // The disk stays stalled, so only giving up at the deadline returns.
     assert!(
         matches!(result, Err(SessionSaveError::TimedOut)),
         "{result:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(took >= asked && took < TIMEOUT, "{took:?}");
+    store.open();
     wait_until(|| store.0.saved().is_some());
 }
 
