@@ -19,6 +19,7 @@ pub const PROFILE_SCHEMA: u32 = 1;
 pub const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
 const MAX_REGEX_BYTES: usize = 1 << 20;
+const MAX_NAME_CHARS: usize = 64;
 const MAX_SCREEN_ROWS: u16 = 200;
 const PLACEHOLDERS: &[&str] = &[
     "new_uuid",
@@ -436,6 +437,15 @@ fn build_regex(field: &str, pattern: &str) -> Result<Regex, ProfileError> {
         .map_err(|e| invalid(field, format!("invalid regular expression: {e}")))
 }
 
+/// A NUL ends a string at the OS boundary, so what runs would differ from
+/// what the profile says.
+fn check_no_nul(field: &str, value: &str) -> Result<(), ProfileError> {
+    if value.contains('\0') {
+        return Err(invalid(field, "must not contain a NUL character"));
+    }
+    Ok(())
+}
+
 fn check_placeholders(field: &str, value: &str) -> Result<(), ProfileError> {
     let mut rest = value;
     while let Some(open) = rest.find('{') {
@@ -494,12 +504,22 @@ impl Profile {
         if raw.name.trim().is_empty() {
             return Err(invalid("name", "must not be empty"));
         }
+        if raw.name.chars().count() > MAX_NAME_CHARS || raw.name.chars().any(char::is_control) {
+            return Err(invalid(
+                "name",
+                format!("use at most {MAX_NAME_CHARS} characters and no control characters"),
+            ));
+        }
 
         let detect = match raw.detect {
             None => None,
             Some(d) => {
                 if d.command.trim().is_empty() {
                     return Err(invalid("detect.command", "must not be empty"));
+                }
+                check_no_nul("detect.command", &d.command)?;
+                for (i, arg) in d.version_args.iter().enumerate() {
+                    check_no_nul(&format!("detect.version_args[{i}]"), arg)?;
                 }
                 let pattern = d.version_regex.as_deref().unwrap_or(DEFAULT_VERSION_REGEX);
                 Some(Detect {
@@ -511,12 +531,22 @@ impl Profile {
         };
 
         for (i, arg) in raw.launch.args.iter().enumerate() {
+            check_no_nul(&format!("launch.args[{i}]"), arg)?;
             check_placeholders(&format!("launch.args[{i}]"), arg)?;
         }
         for (i, arg) in raw.launch.resume.iter().enumerate() {
+            check_no_nul(&format!("launch.resume[{i}]"), arg)?;
             check_placeholders(&format!("launch.resume[{i}]"), arg)?;
         }
         for (key, value) in &raw.launch.env {
+            // An environment block cannot hold these in a name.
+            if key.is_empty() || key.contains(['=', '\0']) {
+                return Err(invalid(
+                    format!("launch.env.{}", key.escape_debug()),
+                    "a variable name must not be empty or contain '=' or a NUL",
+                ));
+            }
+            check_no_nul(&format!("launch.env.{key}"), value)?;
             check_placeholders(&format!("launch.env.{key}"), value)?;
         }
         if !raw.launch.resume.is_empty()
@@ -911,6 +941,46 @@ sources = []
         );
         let big = format!("{MINIMAL}# {}", "x".repeat(MAX_PROFILE_BYTES));
         assert_eq!(err(&big).place(&big), None);
+    }
+
+    #[test]
+    fn rf_age_04_names_env_keys_and_nul_characters_are_checked() {
+        let field = |text: &str| match err(text) {
+            ProfileError::Invalid { field, .. } => field,
+            other => panic!("{other:?}"),
+        };
+        let with = |launch: &str| MINIMAL.replace("[[rules]]", &format!("{launch}\n[[rules]]"));
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"\" = \"x\" }")),
+            "launch.env."
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"A=B\" = \"x\" }")),
+            "launch.env.A=B"
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { \"A\\u0000\" = \"x\" }")),
+            "launch.env.A\\0"
+        );
+        assert_eq!(
+            field(&with("[launch]\nenv = { A = \"x\\u0000y\" }")),
+            "launch.env.A"
+        );
+        assert_eq!(
+            field(&with("[launch]\nargs = [\"ok\", \"a\\u0000\"]")),
+            "launch.args[1]"
+        );
+        assert_eq!(
+            field(&with("detect = { command = \"a\\u0000b\" }")),
+            "detect.command"
+        );
+        let long = MINIMAL.replace("\"X\"", &format!("\"{}\"", "n".repeat(65)));
+        assert_eq!(field(&long), "name");
+        assert!(
+            Profile::from_toml(&MINIMAL.replace("\"X\"", &format!("\"{}\"", "é".repeat(64))))
+                .is_ok()
+        );
+        assert_eq!(field(&MINIMAL.replace("\"X\"", "\"a\\tb\"")), "name");
     }
 
     #[test]
