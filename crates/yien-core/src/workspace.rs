@@ -45,8 +45,8 @@ pub(crate) enum Effect {
     },
     /// Stop a pane's actor; its program is terminated.
     Stop { pane: PaneId },
-    /// Start the pane's program again.
-    Relaunch { pane: PaneId },
+    /// Start the pane's program again, as launch number `launch`.
+    Relaunch { pane: PaneId, launch: u64 },
     /// Terminate the pane's program, keeping the pane.
     Terminate { pane: PaneId },
     /// Create a worktree for a new tab of `project` (RF-ESP-05).
@@ -79,10 +79,16 @@ pub(crate) enum PaneEvent {
     SignalLost(bool),
     Title(Option<String>),
     Cwd(String),
-    SessionId(String),
-    /// The user ended the agent session (`/exit`, `/logout`); it is not
-    /// resumed on restore (RN-04).
-    EndedByUser,
+    /// The agent session the pane's launch number `launch` runs.
+    SessionId {
+        id: String,
+        launch: u64,
+    },
+    /// The user ended the agent session of launch number `launch` (`/exit`,
+    /// `/logout`); it is not resumed on restore (RN-04).
+    EndedByUser {
+        launch: u64,
+    },
     Started,
     Exited(Option<u32>),
     /// The program could not start or can no longer be shown; the actor
@@ -109,7 +115,7 @@ impl PaneEvent {
                 | PaneEvent::SignalLost(_)
                 | PaneEvent::Title(_)
                 | PaneEvent::Cwd(_)
-                | PaneEvent::SessionId(_)
+                | PaneEvent::SessionId { .. }
                 | PaneEvent::Selection(_)
         )
     }
@@ -176,8 +182,12 @@ struct Pane {
     profile: String,
     /// The folder the pane's program started in.
     launch_cwd: String,
-    /// The user ended the pane's agent session (RN-04).
+    /// The user ended the agent session of the current launch (RN-04).
+    /// Only commands and reports of the current launch change it.
     ended_explicitly: bool,
+    /// The number of the pane's current launch, raised by each relaunch.
+    /// Reports carry it, so one from a launch the user replaced is dropped.
+    launch: u64,
     /// What the saved session said, when a restore had to launch the pane
     /// differently (missing folder, unknown profile); saved again instead.
     kept: Option<Kept>,
@@ -553,7 +563,18 @@ impl Workspace {
             }
             Command::RelaunchPane { pane } => {
                 self.tab_of(pane)?;
-                fx.push(Effect::Relaunch { pane });
+                let p = self
+                    .panes
+                    .get_mut(&pane)
+                    .ok_or(CoreError::UnknownPane(pane))?;
+                // A new session until the new launch names one, so a quit
+                // before that never resumes the one the user ended.
+                p.launch += 1;
+                p.ended_explicitly = false;
+                p.session_id = None;
+                let launch = p.launch;
+                fx.push(Effect::Relaunch { pane, launch });
+                self.emit_pane(pane, &mut fx);
             }
             Command::TerminatePane { pane } => {
                 let p = self
@@ -782,6 +803,7 @@ impl Workspace {
                 profile: plan.profile.clone(),
                 launch_cwd: cwd.clone(),
                 ended_explicitly: false,
+                launch: 0,
                 kept: None,
                 custom_name: None,
                 default_name: plan.default_name.clone(),
@@ -988,12 +1010,13 @@ impl Workspace {
                 p.cwd = Some(cwd);
                 self.emit_pane(pane, &mut fx);
             }
-            PaneEvent::SessionId(id) => {
+            PaneEvent::SessionId { launch, .. } | PaneEvent::EndedByUser { launch }
+                if launch != p.launch => {}
+            PaneEvent::SessionId { id, .. } => {
                 p.session_id = Some(id);
-                p.ended_explicitly = false;
                 self.emit_pane(pane, &mut fx);
             }
-            PaneEvent::EndedByUser => p.ended_explicitly = true,
+            PaneEvent::EndedByUser { .. } => p.ended_explicitly = true,
             PaneEvent::Started => {
                 p.running = true;
                 p.stopped = false;
@@ -1500,7 +1523,7 @@ mod tests {
         assert!(ws.panes[&a].visible && ws.panes[&a].seen);
         let fx = run(&mut ws, Command::RelaunchPane { pane: a });
         assert!(
-            matches!(fx[..], [Effect::Relaunch { pane }] if pane == a),
+            matches!(fx[0], Effect::Relaunch { pane, launch: 1 } if pane == a),
             "{fx:?}"
         );
     }

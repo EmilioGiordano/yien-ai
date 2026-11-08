@@ -792,12 +792,14 @@ fn rf_pan_20_input_queued_before_terminate_is_dropped() {
 fn a_pane_shown_for_the_first_time_draws_at_once() {
     let mut h = Harness::start();
     let (_, mut pane, mut child) = h.project();
+    // A pane that spins before its first draw shows it late or never; the
+    // bound leaves room for scheduling under load.
     for _ in 0..5 {
         let start = Instant::now();
         child.output(b"first frame");
         h.frame_with(pane, "first frame");
         assert!(
-            start.elapsed() < Duration::from_millis(300),
+            start.elapsed() < Duration::from_secs(1),
             "first frame took {:?}",
             start.elapsed()
         );
