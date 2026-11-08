@@ -1,9 +1,9 @@
 //! `AlacrittyEngine` behaviour through the public `VtEngine` API.
 
 use yien_vt::{
-    AlacrittyEngine, CellFlags, CursorShape, DEFAULT_SCROLLBACK, Frame, GridPoint, LinkKind,
-    MouseEncoding, MouseTracking, OscSignal, Palette, PromptMark, Rgb, SelectionKind, Side, Size,
-    TitleChange, ViewportPoint, VtConfig, VtEngine,
+    AlacrittyEngine, CellFlags, CursorShape, DEFAULT_SCROLLBACK, DUMP_END, DumpLimits, Frame,
+    GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, PromptMark, Rgb,
+    SelectionKind, Side, Size, TitleChange, ViewportPoint, VtConfig, VtEngine, is_screen_dump,
 };
 
 fn engine(cols: u16, rows: u16) -> AlacrittyEngine {
@@ -600,4 +600,129 @@ fn frame_matches_golden_after_a_small_replay() {
 |$ \u{2588}|
 ||";
     assert_eq!(render(&e.frame()), expected);
+}
+
+/// Every row of the buffer, history first, as text.
+fn all_text(e: &mut AlacrittyEngine) -> Vec<String> {
+    e.scroll(i32::MAX);
+    let history = e.frame().history_len;
+    let rows = usize::from(e.size().rows);
+    let mut text = Vec::new();
+    for _ in 0..history {
+        text.push(e.frame().line_text(0));
+        e.scroll(-1);
+    }
+    let frame = e.frame();
+    text.extend((0..rows).map(|r| frame.line_text(r)));
+    text
+}
+
+fn restored(dump: &[u8], cols: u16, rows: u16) -> AlacrittyEngine {
+    let mut e = engine(cols, rows);
+    e.feed(dump);
+    e
+}
+
+#[test]
+fn rf_ses_10_restored_colours_follow_a_palette_switch() {
+    let mut old = engine(30, 4);
+    old.feed(b"\x1b[31mred \x1b[38;5;4mblue \x1b[42mgreen\x1b[0m \x1b[38;2;9;9;9mrgb\x1b[0m");
+    let mut new = restored(&old.screen_dump(DumpLimits::default()), 30, 4);
+    old.set_palette(Palette::washi());
+    new.set_palette(Palette::washi());
+    assert_eq!(new.frame(), old.frame());
+    assert_eq!(new.frame().lines[0][0].fg, Palette::washi().ansi[1]);
+}
+
+#[test]
+fn rf_ses_10_a_dump_keeps_the_newest_rows_within_the_row_limit() {
+    let mut old = engine(20, 5);
+    numbered_lines(&mut old, 40);
+    let limits = DumpLimits {
+        max_rows: 10,
+        ..DumpLimits::default()
+    };
+    let mut new = restored(&old.screen_dump(limits), 20, 5);
+    let text = all_text(&mut new);
+    let kept: Vec<&str> = text
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.is_empty())
+        .collect();
+    // The cursor's empty row is one of the ten.
+    let expected: Vec<String> = (32..=40).map(|i| format!("line {i}")).collect();
+    assert_eq!(kept, expected);
+}
+
+#[test]
+fn rf_ses_10_a_dump_stays_within_the_byte_limit() {
+    let mut old = engine(20, 5);
+    numbered_lines(&mut old, 400);
+    let limits = DumpLimits {
+        max_bytes: 200,
+        ..DumpLimits::default()
+    };
+    let dump = old.screen_dump(limits);
+    // The cursor moves after the rows are not counted: a few bytes.
+    assert!(dump.len() <= 200 + 16, "{} bytes", dump.len());
+    let mut new = restored(&dump, 20, 5);
+    let text = all_text(&mut new);
+    let last = text.iter().rev().find(|t| !t.is_empty()).unwrap();
+    assert_eq!(last, "line 400");
+    assert!(!text.iter().any(|t| t == "line 1"));
+}
+
+#[test]
+fn rf_ses_10_a_soft_wrapped_line_reflows_at_another_width() {
+    let mut old = engine(10, 4);
+    old.feed(b"abcdefghijklmnopqrstuvwxy\r\nend");
+    let new = restored(&old.screen_dump(DumpLimits::default()), 40, 4);
+    assert_eq!(new.frame().line_text(0), "abcdefghijklmnopqrstuvwxy");
+    assert_eq!(new.frame().line_text(1), "end");
+}
+
+#[test]
+fn rf_ses_10_text_written_after_the_dump_end_goes_right_below_it() {
+    let mut old = engine(20, 6);
+    old.feed(b"one\r\ntwo\r\nthree\x1b[1;1H");
+    let mut new = restored(&old.screen_dump(DumpLimits::default()), 20, 6);
+    assert_eq!(new.frame().cursor.unwrap().point, vp(0, 0));
+    new.feed(DUMP_END);
+    new.feed(b"\r\nafter");
+    assert_eq!(new.frame().line_text(2), "three");
+    assert_eq!(new.frame().line_text(3), "after");
+}
+
+#[test]
+fn rf_ses_10_a_clear_after_the_restore_keeps_the_text_in_scrollback() {
+    let mut old = engine(20, 4);
+    old.feed(b"old output\r\n$ ");
+    let mut new = restored(&old.screen_dump(DumpLimits::default()), 20, 4);
+    new.feed(b"\x1b[H\x1b[2Jfresh");
+    assert_eq!(new.frame().line_text(0), "fresh");
+    assert_eq!(new.search("old output").unwrap().len(), 1);
+}
+
+#[test]
+fn rf_ses_10_an_empty_screen_dumps_nothing() {
+    assert!(engine(20, 4).screen_dump(DumpLimits::default()).is_empty());
+}
+
+#[test]
+fn rf_ses_10_only_dump_sequences_pass_the_check() {
+    let mut old = engine(20, 4);
+    old.feed("\x1b[1;4;38;2;1;2;3m\u{4e2d}x\x1b[0m\r\ny".as_bytes());
+    assert!(is_screen_dump(&old.screen_dump(DumpLimits::default())));
+    for bad in [
+        &b"\x1b[6n"[..],
+        b"\x1b]0;title\x07",
+        b"\x1b[?1000h",
+        b"\x1b[2J",
+        b"a\x07b",
+        b"\x1bc",
+        b"\xff\xfe",
+        "\u{9b}6n".as_bytes(),
+    ] {
+        assert!(!is_screen_dump(bad), "{bad:?}");
+    }
 }
