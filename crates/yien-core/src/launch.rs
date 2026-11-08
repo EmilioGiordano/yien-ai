@@ -150,6 +150,27 @@ fn fill_template(template: &str, fill: &Fill<'_>) -> Option<String> {
     Some(out)
 }
 
+/// A profile program as a pane name: its file name, without the extension
+/// only when it is one Windows runs a program by (`claude.cmd` is
+/// `claude`, `python3.12` stays as it is).
+fn program_name(command: &str) -> String {
+    let file = command
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|f| !f.is_empty())
+        .unwrap_or(command);
+    match file.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && ["exe", "cmd", "bat", "com", "ps1"]
+                    .contains(&ext.to_ascii_lowercase().as_str()) =>
+        {
+            stem.to_owned()
+        }
+        _ => file.to_owned(),
+    }
+}
+
 /// A random (version 4) UUID, or `None` when the OS random generator fails.
 pub(crate) fn new_uuid() -> Option<String> {
     let mut bytes = [0u8; 16];
@@ -212,7 +233,7 @@ pub(crate) fn resolve(
         Some(detect) => (
             detect.command.clone(),
             found.launch.args.clone(),
-            ShellCommand::new(&detect.command).display_name(),
+            program_name(&detect.command),
         ),
         None => (
             shell.program.clone(),
@@ -296,6 +317,15 @@ mod tests {
         assert_eq!(plan.program, "D:/tools/bin/my-tool.cmd");
         assert_eq!(plan.default_name, "my-tool");
         assert_eq!(claude().default_name, "claude");
+        for (command, name) in [
+            ("python3.12", "python3.12"),
+            (r"C:\Tools\Agent.EXE", "Agent"),
+            ("/usr/bin/run.sh", "run.sh"),
+            ("tool.ps1", "tool"),
+            (".cmd", ".cmd"),
+        ] {
+            assert_eq!(program_name(command), name, "{command}");
+        }
     }
 
     #[test]
