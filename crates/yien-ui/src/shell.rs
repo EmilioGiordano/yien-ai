@@ -74,6 +74,8 @@ pub(crate) struct Shell {
     /// The notice the last settings reading put up, so the next valid one
     /// can take it down.
     settings_notice: Option<String>,
+    /// The installed font families, listed again at each settings reading.
+    installed_fonts: Vec<String>,
     /// gpui-kit's bindings, and the settings' rebinds now in the keymap
     /// on top of them (RF-CFG-03).
     base_keys: Vec<KeyBinding>,
@@ -219,6 +221,7 @@ impl Shell {
             settings: SettingsModel::default(),
             settings_host: settings.host,
             settings_notice: None,
+            installed_fonts: Vec::new(),
             base_keys,
             rebinds: Rebinds::new(),
             tab_bar_open: true,

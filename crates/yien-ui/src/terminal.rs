@@ -113,16 +113,30 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// The next paint measures the new cell, and the grid's new size in
-    /// cells goes to the core, which resizes the pseudo terminal.
+    /// Measures the new cell now and sends the grid's new size in cells to
+    /// the core, which resizes the pseudo terminal, using the bounds of the
+    /// last paint: a pane on a hidden tab resizes too, not on its next show.
+    /// A pane never painted keeps its size until its first paint.
     pub(crate) fn set_font(
         &mut self,
         family: Option<SharedString>,
         size: f32,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.family = family.unwrap_or_else(|| SharedString::new_static(FALLBACK_MONO));
         self.font_size = size;
+        if let Some((bounds, _)) = self.grid {
+            let m = metrics(window, &self.family, size);
+            let (cols, rows) = grid::grid_size(
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32(),
+                m.cell_w,
+                m.cell_h,
+            );
+            self.grid = Some((bounds, m));
+            self.request_size(cols, rows, cx);
+        }
         cx.notify();
     }
 

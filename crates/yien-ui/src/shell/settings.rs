@@ -58,6 +58,8 @@ impl Shell {
         if let Notice::Show(text) = self.settings.apply(update) {
             notices.push(text);
         }
+        // A reading is when a newly installed font can be picked up.
+        self.installed_fonts = cx.text_system().all_font_names();
         notices.extend(self.apply_look(window, cx));
         if loaded {
             notices.extend(self.apply_keys(cx));
@@ -76,7 +78,8 @@ impl Shell {
     }
 
     /// Redraws with the current settings, the OS appearance and the theme
-    /// toggle. Returns notices for families that are not installed.
+    /// toggle, with the font list of the last reading. Returns notices for
+    /// families that are not installed.
     pub(super) fn apply_look(
         &mut self,
         window: &mut Window,
@@ -85,9 +88,8 @@ impl Shell {
         let config = self.settings.config().clone();
         let kind = self.settings.theme(system_dark(window));
         let theme = Theme::of(kind).with_ui_size(config.ui_font.size);
-        let installed = cx.text_system().all_font_names();
         let (fonts, notices) = Fonts::configured(
-            &installed,
+            &self.installed_fonts,
             config.ui_font.family.as_deref(),
             config.terminal_font.family.as_deref(),
         );
@@ -103,7 +105,7 @@ impl Shell {
             self.terminal_size = size;
             for terminal in self.terminals.values() {
                 let family = fonts.terminal.clone();
-                terminal.update(cx, |t, cx| t.set_font(family, size, cx));
+                terminal.update(cx, |t, cx| t.set_font(family, size, window, cx));
             }
         }
         self.fonts = fonts;
