@@ -17,9 +17,10 @@ use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand, ShutdownE
 use yien_proto::frame::Frame;
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
-    ProfileId, ProjectId, TabId,
+    ProfileId, ProjectId, TabId, TerminalPalette,
 };
 use yien_pty::{FakeChild, FakeInput, FakePty};
+use yien_vt::Palette;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -149,14 +150,19 @@ impl Harness {
 
     /// Takes frames of `pane` as they are announced until one shows `text`.
     fn frame_with(&mut self, pane: PaneId, text: &str) -> Frame {
+        self.frame_where(pane, |f| f.text().contains(text))
+    }
+
+    /// Takes frames of `pane` as they are announced until `pick` accepts one.
+    fn frame_where(&mut self, pane: PaneId, pick: impl Fn(&Frame) -> bool) -> Frame {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             if let Some(frame) = self.core.take_frame(pane)
-                && frame.text().contains(text)
+                && pick(&frame)
             {
                 return frame;
             }
-            assert!(Instant::now() < deadline, "no frame showed {text:?}");
+            assert!(Instant::now() < deadline, "no frame matched");
             self.frame_ready(pane);
         }
     }
@@ -749,6 +755,62 @@ fn panes_in_a_hidden_tab_send_frames_once_shown() {
 
     h.command(Command::SelectTab { tab: first_tab });
     h.frame_with(hidden, "hidden text");
+}
+
+fn set_palette(h: &Harness, palette: TerminalPalette) {
+    h.send(ClientMsg::SetTerminalPalette { palette });
+}
+
+#[test]
+fn rf_cfg_02_a_palette_change_recolours_the_pane_and_keeps_its_scrollback() {
+    let (sumi, washi) = (Palette::default(), Palette::washi());
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for i in 0..80 {
+        child.output(format!("line {i}\r\n").as_bytes());
+    }
+    child.output(b"\x1b[31mred\x1b[0m");
+    let before = h.frame_with(pane, "red");
+    assert_eq!(before.background, sumi.background);
+    assert!(before.history_len > 0);
+
+    set_palette(&h, TerminalPalette::Washi);
+    let after = h.frame_where(pane, |f| f.background == washi.background);
+    assert_eq!(after.text(), before.text());
+    assert_eq!(after.history_len, before.history_len, "scrollback kept");
+    let row = after.lines.iter().position(|l| l[0].ch == 'r').unwrap();
+    assert_eq!(after.lines[row][0].fg, washi.ansi[1]);
+    assert!(
+        !child.was_killed() && !child.was_closed(),
+        "the program keeps running"
+    );
+    assert!(h.backend.take_spawned().is_empty(), "nothing respawned");
+
+    set_palette(&h, TerminalPalette::Sumi);
+    let back = h.frame_where(pane, |f| f.background == sumi.background);
+    assert_eq!(back, before, "switching back gives the same frame");
+}
+
+#[test]
+fn rf_cfg_02_new_and_relaunched_panes_use_the_current_palette() {
+    let washi = Palette::washi();
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    set_palette(&h, TerminalPalette::Washi);
+    let (split, split_child) = h.split(pane, None);
+    split_child.output(b"split");
+    let frame = h.frame_with(split, "split");
+    assert_eq!(frame.background, washi.background);
+
+    child.exit(0);
+    h.wait_for(|m| match m {
+        CoreMsg::PaneExited { pane: p, .. } if *p == pane => Some(()),
+        _ => None,
+    });
+    h.command(Command::RelaunchPane { pane });
+    h.child().output(b"again");
+    let frame = h.frame_with(pane, "again");
+    assert_eq!(frame.background, washi.background);
 }
 
 #[test]
