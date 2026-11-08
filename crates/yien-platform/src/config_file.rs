@@ -181,11 +181,22 @@ pub enum OpenError {
         /// What the OS said.
         reason: String,
     },
+    /// No editor is set and the OS would run the file instead of showing
+    /// it: a program, a script or a shortcut.
+    #[error("{name} would run as a program; set `editor` in config.toml to open it")]
+    WouldRun {
+        /// The file's name.
+        name: String,
+    },
 }
 
 /// Opens `path` in `editor` (a command line, the file appended as its last
-/// argument), or in the OS default app for it when `editor` is `None`. Runs
-/// on a thread of its own and returns at once; `done` gets the outcome.
+/// argument). With no editor, a file of a view-only type ([`VIEW_ONLY`]) goes
+/// to the OS default app; any other file goes to Notepad on Windows and is
+/// refused elsewhere, so the default app never runs a program or script.
+/// On Windows a bare editor name is looked up on `PATH` alone, and Notepad
+/// is the system folder's, so the current folder is never searched.
+/// Runs on a thread of its own and returns at once; `done` gets the outcome.
 ///
 /// ```no_run
 /// let file = yien_platform::paths::config_file()?;
@@ -211,10 +222,159 @@ pub fn open(
     };
     let spawned = std::thread::Builder::new()
         .name("yien-open-file".into())
-        .spawn(move || done(open_now(&path, command.as_deref())));
+        .spawn(move || {
+            let outcome = match command {
+                Some(command) => open_now(&path, Some(&command)),
+                None => open_by_type(&path),
+            };
+            done(outcome);
+        });
     if let Err(e) = spawned {
         tracing::warn!("could not start the thread that opens the file: {e}");
     }
+}
+
+/// With no editor: the default app, Notepad or a refusal, by [`route`].
+fn open_by_type(path: &Path) -> Result<(), OpenError> {
+    let pathext = if cfg!(windows) {
+        std::env::var("PATHEXT").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    match route(path, &pathext, cfg!(windows), launches(path)) {
+        Route::DefaultApp => open_now(path, None),
+        Route::Notepad => open_in_notepad(path),
+        Route::Refuse => Err(would_run(path)),
+    }
+}
+
+fn would_run(path: &Path) -> OpenError {
+    OpenError::WouldRun {
+        name: path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn open_in_notepad(path: &Path) -> Result<(), OpenError> {
+    windows::open_in_notepad(path).map_err(|reason| failed(path, reason))
+}
+
+/// Never reached: [`route`] sends nothing to Notepad off Windows.
+#[cfg(not(windows))]
+fn open_in_notepad(path: &Path) -> Result<(), OpenError> {
+    Err(would_run(path))
+}
+
+/// Where a file goes when no editor is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    DefaultApp,
+    Notepad,
+    Refuse,
+}
+
+/// File types whose default app only shows them.
+const VIEW_ONLY: &[&str] = &[
+    "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonc", "toml", "yaml", "yml", "ini",
+    "cfg", "conf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "pdf", "docx", "xlsx",
+    "pptx", "odt", "ods", "odp",
+];
+
+/// Only a view-only type that no runnable list names and that is not a
+/// launcher goes to the default app; the rest go to Notepad on Windows and
+/// are refused elsewhere. `launches` is the file system's say (an execute
+/// bit, a folder).
+fn route(path: &Path, pathext: &str, windows: bool, launches: bool) -> Route {
+    let viewable = last_extension(path).is_some_and(|e| VIEW_ONLY.contains(&e.as_str()))
+        && !runnable_extension(path, pathext)
+        && !launches;
+    if viewable {
+        Route::DefaultApp
+    } else if windows {
+        Route::Notepad
+    } else {
+        Route::Refuse
+    }
+}
+
+/// The name's last extension, lowercased, after the trailing dots and
+/// spaces Windows drops.
+fn last_extension(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    let name = name.trim_end_matches(['.', ' ']);
+    let (stem, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty() && !ext.is_empty()).then(|| ext.to_owned())
+}
+
+/// Whether the file system marks `path` as something that runs: a folder
+/// (an app bundle) or a file with an execute bit.
+#[cfg(unix)]
+fn launches(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).is_ok_and(|m| m.is_dir() || m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn launches(path: &Path) -> bool {
+    path.is_dir()
+}
+
+/// Extensions the Windows shell runs, or hands to something that runs
+/// them, on its default verb; `PATHEXT` adds to them. A second guard
+/// behind [`VIEW_ONLY`].
+const RUNNABLE: &[&str] = &[
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "lnk",
+    "url",
+    "js",
+    "jse",
+    "vbs",
+    "vbe",
+    "wsf",
+    "wsh",
+    "hta",
+    "msi",
+    "msp",
+    "scr",
+    "cpl",
+    "reg",
+    "ps1",
+    "psm1",
+    "appref-ms",
+    "application",
+    "jar",
+    "pif",
+    "inf",
+    "msc",
+    "settingcontent-ms",
+];
+
+/// Whether `path`'s name ends in an extension the Windows shell runs:
+/// [`RUNNABLE`] or one of `pathext` (`;`-separated, with dots), ignoring
+/// case as Windows does, and ignoring the trailing dots and spaces Windows
+/// drops from a name.
+fn runnable_extension(path: &Path, pathext: &str) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let name = name.trim_end_matches(['.', ' ']);
+    let listed = pathext
+        .split(';')
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty());
+    RUNNABLE
+        .iter()
+        .map(|e| (*e).to_owned())
+        .chain(listed)
+        .any(|ext| name.ends_with(&format!(".{ext}")))
 }
 
 fn failed(path: &Path, reason: impl ToString) -> OpenError {
@@ -263,56 +423,67 @@ fn quote_path(path: &Path) -> String {
     format!("\"{text}{}\"", "\\".repeat(trailing))
 }
 
-/// Whether `program` is, or resolves on `PATH` with `PATHEXT` to, a batch
-/// file, which Windows runs through cmd.exe.
+/// The editor's arguments and then the file, as the Windows command line
+/// that follows the program.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn is_batch(program: &str) -> bool {
-    let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    resolves_to_batch(
-        program,
-        &std::env::split_paths(&path_var).collect::<Vec<_>>(),
-        &pathext,
-    )
+fn command_params(args: &[String], path: &Path) -> String {
+    let mut params: Vec<String> = args.iter().map(|a| quote_arg(a)).collect();
+    params.push(quote_path(path));
+    params.join(" ")
 }
 
+/// The file `program` names: an absolute path as given, or a bare name
+/// looked up in each absolute `dirs` folder in order, with each `pathext`
+/// extension when it has none. Relative folders, the current one among them,
+/// are never searched, and a relative path with folders in it is refused.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn resolves_to_batch(program: &str, dirs: &[PathBuf], pathext: &str) -> bool {
-    let batch = |p: &Path| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-    };
+fn resolve_program(program: &str, dirs: &[PathBuf], pathext: &str) -> Option<PathBuf> {
     let program = Path::new(program);
-    if program.extension().is_some() {
-        return batch(program);
-    }
-    let candidates: Vec<PathBuf> = if program.components().count() > 1 {
-        vec![program.to_path_buf()]
-    } else {
-        dirs.iter().map(|d| d.join(program)).collect()
-    };
-    for base in candidates {
-        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
-            let file = base.with_extension(ext.trim_start_matches('.'));
-            if file.is_file() {
-                return batch(&file);
-            }
+    let has_extension = program.extension().is_some();
+    let exts: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let find = |base: PathBuf| -> Option<PathBuf> {
+        if has_extension || exts.is_empty() {
+            return base.is_file().then_some(base);
         }
+        exts.iter().find_map(|ext| {
+            let mut file = base.clone().into_os_string();
+            file.push(ext);
+            let file = PathBuf::from(file);
+            file.is_file().then_some(file)
+        })
+    };
+    if program.is_absolute() {
+        return find(program.to_path_buf()).or_else(|| Some(program.to_path_buf()));
     }
-    false
+    let bare = matches!(
+        program.components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    );
+    if !bare {
+        return None;
+    }
+    dirs.iter()
+        .filter(|d| d.is_absolute())
+        .find_map(|d| find(d.join(program)))
+}
+
+/// Whether Windows runs `file` through cmd.exe.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_batch(file: &Path) -> bool {
+    file.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
 /// Whether arguments and a path can go to a batch file: nothing cmd.exe
-/// would expand or treat as syntax, inside quotes or not.
+/// would expand or treat as syntax. The path is always quoted, and inside
+/// quotes cmd.exe still expands `%` and `!` and ends the quote at `"`; the
+/// editor's arguments are quoted only when needed, so they get the full set.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn batch_safe(args: &[String], path: &Path) -> bool {
     const META: &[char] = &['%', '!', '"', '^', '&', '|', '<', '>', '(', ')'];
-    let path = path.to_string_lossy();
-    args.iter()
-        .map(String::as_str)
-        .chain(std::iter::once(path.as_ref()))
-        .all(|a| !a.contains(META))
+    const IN_QUOTES: &[char] = &['%', '!', '"'];
+    args.iter().all(|a| !a.contains(META)) && !path.to_string_lossy().contains(IN_QUOTES)
 }
 
 /// One argument for a Windows command line: quoted when it holds a space, a
@@ -468,25 +639,232 @@ mod tests {
         assert_eq!(quote_path(Path::new(r"C:\dir\")), r#""C:\dir\\""#);
     }
 
-    // PATHEXT lookup assumes Windows' case-insensitive file names.
-    #[cfg(windows)]
     #[test]
-    fn batch_editors_are_found_on_the_path_and_given_only_plain_arguments() {
-        let dir = scratch("batch");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("ed.cmd"), "").unwrap();
-        fs::write(dir.join("tool.exe"), "").unwrap();
-        let dirs = [dir.clone()];
-        let ext = ".COM;.EXE;.BAT;.CMD";
-        assert!(resolves_to_batch("ed", &dirs, ext));
-        assert!(!resolves_to_batch("tool", &dirs, ext));
-        assert!(!resolves_to_batch("missing", &dirs, ext));
-        assert!(resolves_to_batch(r"C:\x\run.BAT", &dirs, ext));
-        assert!(!resolves_to_batch("notepad.exe", &dirs, ext));
+    fn a_bare_program_is_found_only_in_absolute_path_folders() {
+        let dir = std::path::absolute(scratch("resolve")).unwrap();
+        let (first, second) = (dir.join("first"), dir.join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("ed.cmd"), "").unwrap();
+        fs::write(second.join("tool.exe"), "").unwrap();
+        fs::write(first.join("tool.cmd"), "").unwrap();
+        let dirs = [
+            PathBuf::from("."),
+            PathBuf::new(),
+            first.clone(),
+            second.clone(),
+        ];
+        let ext = ".exe;.cmd";
+        // PATH order first, then PATHEXT order inside a folder.
+        assert_eq!(
+            resolve_program("tool", &dirs, ext),
+            Some(first.join("tool.cmd"))
+        );
+        assert_eq!(
+            resolve_program("ed", &dirs, ext),
+            Some(second.join("ed.cmd"))
+        );
+        assert_eq!(
+            resolve_program("tool.exe", &dirs, ext),
+            Some(second.join("tool.exe"))
+        );
+        assert_eq!(resolve_program("missing", &dirs, ext), None);
+        // Relative folders, `.` among them, are skipped.
+        assert_eq!(resolve_program("ed", &[PathBuf::from(".")], ext), None);
+        let relative = Path::new("bin").join("ed");
+        assert_eq!(
+            resolve_program(&relative.to_string_lossy(), &dirs, ext),
+            None
+        );
+        let absolute = second.join("ed");
+        assert_eq!(
+            resolve_program(&absolute.to_string_lossy(), &[], ext),
+            Some(second.join("ed.cmd"))
+        );
+        assert!(is_batch(&second.join("ed.cmd")));
+        assert!(!is_batch(&second.join("tool.exe")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_editors_are_given_only_plain_arguments() {
+        assert!(is_batch(Path::new("run.BAT")));
         let file = Path::new(r"C:\Data\config.toml");
         assert!(batch_safe(&["--new-window".into()], file));
         assert!(!batch_safe(&[], Path::new(r"C:\100%\config.toml")));
         assert!(!batch_safe(&["a&calc".into()], file));
+    }
+
+    #[test]
+    fn a_batch_editor_takes_paths_with_characters_plain_inside_quotes() {
+        assert!(batch_safe(&[], Path::new(r"C:\web\app\(auth)\page.tsx")));
+        assert!(batch_safe(&[], Path::new(r"C:\Docs\Report (1).md")));
+        assert!(batch_safe(&[], Path::new(r"C:\a&b\x^y.md")));
+        assert!(!batch_safe(&[], Path::new(r"C:\a!b\x.md")));
+        assert!(!batch_safe(&[], Path::new(r"C:\100%\x.md")));
+        assert!(
+            !batch_safe(&["(x)".into()], Path::new(r"C:\x.md")),
+            "arguments keep the full set"
+        );
+    }
+
+    #[test]
+    fn rf_ctx_03_files_the_windows_shell_would_run_are_recognised() {
+        let ext = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.PY";
+        for runs in [
+            "setup.bat",
+            "SETUP.BAT",
+            ".bat",
+            "README.lnk",
+            "x.js",
+            "x.vbs",
+            "tool.exe",
+            "a.ps1",
+            "site.url",
+            "app.appref-ms",
+            "x.settingcontent-ms",
+            "keys.reg",
+            "run.py",
+            "trailing.bat. ",
+        ] {
+            assert!(runnable_extension(Path::new(runs), ext), "{runs:?}");
+        }
+        for shows in [
+            "config.toml",
+            "main.rs",
+            "notes.md",
+            "Makefile",
+            "batch.txt",
+            "exe",
+            "page.jsx",
+        ] {
+            assert!(!runnable_extension(Path::new(shows), ext), "{shows}");
+        }
+        assert!(
+            !runnable_extension(Path::new("run.py"), ""),
+            "only PATHEXT makes .py runnable"
+        );
+    }
+
+    #[test]
+    fn rf_ctx_03_with_no_editor_only_view_only_types_reach_the_default_app() {
+        let route_of = |name: &str, windows: bool| route(Path::new(name), "", windows, false);
+        for viewable in [
+            "README.md",
+            "config.toml",
+            "NOTES.TXT",
+            "data.json",
+            "photo.JPG",
+            "report.pdf",
+            "sheet.xlsx",
+            "trailing.md. ",
+        ] {
+            assert_eq!(route_of(viewable, true), Route::DefaultApp, "{viewable:?}");
+            assert_eq!(route_of(viewable, false), Route::DefaultApp, "{viewable:?}");
+        }
+        for other in [
+            "install.sh",
+            "run.py",
+            "main.rs",
+            "setup.bat",
+            "README.lnk",
+            "page.html",
+            "macro.docm",
+            "Makefile",
+            ".md",
+            "notes.md.exe",
+            "launch.desktop",
+            "Tool.app",
+            "data.xml",
+        ] {
+            assert_eq!(route_of(other, true), Route::Notepad, "{other}");
+            assert_eq!(route_of(other, false), Route::Refuse, "{other}");
+        }
+        // The second guard: a type PATHEXT names never reaches the default
+        // app, even one that is otherwise view-only.
+        assert_eq!(route(Path::new("x.md"), ".MD", true, false), Route::Notepad);
+        // An execute bit or a folder overrules the name.
+        assert_eq!(route(Path::new("x.md"), "", false, true), Route::Refuse);
+        assert_eq!(last_extension(Path::new("a.tar.GZ")).as_deref(), Some("gz"));
+        assert_eq!(last_extension(Path::new(".bashrc")), None);
+    }
+
+    /// Unix only: on Windows the same file would go to Notepad, which must
+    /// not open while Emilio is at the PC.
+    #[cfg(unix)]
+    #[test]
+    fn rf_ctx_03_with_no_editor_a_script_is_refused_through_the_callback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("refused");
+        fs::create_dir_all(&dir).unwrap();
+        let readme = dir.join("README.md");
+        fs::write(&readme, "").unwrap();
+        fs::set_permissions(&readme, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(launches(&readme), "an execute bit");
+        assert!(launches(&dir), "a folder");
+        for file in [dir.join("install.sh"), readme] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            open(file.clone(), None, move |r| {
+                let _ = tx.send(r);
+            });
+            let refused = rx.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert!(
+                matches!(&refused, Err(OpenError::WouldRun { .. })),
+                "{file:?}: {refused:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_ctx_03_the_editor_gets_its_arguments_then_the_quoted_file() {
+        assert_eq!(
+            command_params(
+                &["--reuse-window".into(), "a b".into()],
+                Path::new(r"C:\My Code\src\main.rs")
+            ),
+            r#"--reuse-window "a b" "C:\My Code\src\main.rs""#
+        );
+        assert_eq!(
+            command_params(&[], Path::new(r"C:\x\notes.txt")),
+            r#""C:\x\notes.txt""#
+        );
+    }
+
+    /// A fake editor that records the arguments it was started with; no
+    /// window opens. Unix only: on Windows the launch goes through
+    /// `ShellExecuteExW`, covered by the command line test above.
+    #[cfg(unix)]
+    #[test]
+    fn rf_ctx_03_a_file_opens_in_the_configured_editor_as_one_argument() {
+        let dir = scratch("fake-editor");
+        fs::create_dir_all(dir.join("my code")).unwrap();
+        let editor = dir.join("record.sh");
+        let record = dir.join("args.txt");
+        fs::write(
+            &editor,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        let file = dir.join("my code").join("main file.rs");
+        fs::write(&file, "").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        open(
+            file.clone(),
+            Some(format!("/bin/sh \"{}\" --wait", editor.display())),
+            move |r| {
+                let _ = tx.send(r.map_err(|e| e.to_string()));
+            },
+        );
+        rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&record).unwrap(),
+            format!("--wait\n{}\n", file.display())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

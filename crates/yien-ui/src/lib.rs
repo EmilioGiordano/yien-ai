@@ -13,6 +13,8 @@ mod assets;
 mod attention;
 mod bridge;
 mod catalog;
+mod file_tree;
+mod files;
 mod fonts;
 mod git;
 mod grid;
@@ -37,6 +39,7 @@ use yien_proto::CoreMsg;
 
 pub use attention::{OsAttention, ToastText};
 pub use bridge::{CoreClient, Refused};
+pub use files::{Files, FilesHost, ListDone, OpenDone, SearchDone};
 pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
 pub use settings::{ConfigUpdate, Settings, SettingsHost};
 
@@ -64,6 +67,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// `settings` brings the settings file's readings, applied live
 /// (RF-CFG-01), and opens the file.
 ///
+/// `files` lists, searches and opens the selected tab's files for the
+/// context bar (RF-CTX-01, RF-CTX-03).
+///
 /// `on_quit` runs once when the app quits, including at Windows logoff or
 /// shutdown, where gpui ends the process without returning from `run`.
 ///
@@ -71,14 +77,16 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// # fn connect() -> (Box<dyn yien_ui::CoreClient>, tokio::sync::mpsc::Receiver<yien_proto::CoreMsg>) { unimplemented!() }
 /// # fn os() -> std::rc::Rc<dyn yien_ui::OsAttention> { unimplemented!() }
 /// # fn settings() -> yien_ui::Settings { unimplemented!() }
+/// # fn files() -> yien_ui::Files { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, os(), settings(), || println!("bye"));
+/// yien_ui::run(client, events, os(), settings(), files(), || println!("bye"));
 /// ```
 pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
     attention: Rc<dyn OsAttention>,
     settings: Settings,
+    files: Files,
     on_quit: impl FnOnce() + 'static,
 ) {
     gpui_kit::application()
@@ -108,7 +116,11 @@ pub fn run(
             };
             let link = Rc::new(Link::new(client));
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| Shell::new(link, events, attention, settings, base_keys, window, cx))
+                cx.new(|cx| {
+                    Shell::new(
+                        link, events, attention, settings, files, base_keys, window, cx,
+                    )
+                })
             });
             match opened {
                 Ok(_) => cx.activate(true),
