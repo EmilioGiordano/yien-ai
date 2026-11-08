@@ -153,7 +153,12 @@ fn line_column(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..end];
     let line = before.matches('\n').count() + 1;
     let line_start = before.rfind('\n').map_or(0, |at| at + 1);
-    let column = before[line_start..].chars().count() + 1;
+    // A byte order mark is invisible in an editor: it is not a column.
+    let column = before[line_start..]
+        .chars()
+        .filter(|&c| c != '\u{feff}')
+        .count()
+        + 1;
     (line, column)
 }
 
@@ -171,6 +176,11 @@ mod tests {
         assert_eq!(line_column(text, 8), (2, 2), "inside a character");
         assert_eq!(line_column(text, 999), (3, 1), "past the end");
         assert_eq!(line_column("", 0), (1, 1));
+        assert_eq!(
+            line_column("\u{feff}a = x", 7),
+            (1, 5),
+            "the BOM is not counted"
+        );
     }
 
     #[test]
