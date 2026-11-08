@@ -20,6 +20,7 @@ yien-ui = { path = "crates/yien-ui" }
 yien-agent = { path = "crates/yien-agent" }
 yien-core = { path = "crates/yien-core" }
 yien-session = { path = "crates/yien-session" }
+yien-config = { path = "crates/yien-config" }
 yien-platform = { path = "crates/yien-platform" }
 yien-git = { path = "crates/yien-git" }
 

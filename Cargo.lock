@@ -8832,6 +8832,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yien-config"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
 name = "yien-core"
 version = "0.0.0"
 dependencies = [
