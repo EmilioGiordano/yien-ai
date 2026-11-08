@@ -141,6 +141,11 @@ pub trait VtEngine: Send {
     /// The current size.
     fn size(&self) -> Size;
 
+    /// Resolves colours with `palette` from the next frame on. The screen,
+    /// the scrollback and the colours a program set (OSC 4/10/11, truecolor)
+    /// are kept.
+    fn set_palette(&mut self, palette: Palette);
+
     /// The visible rows at the current scroll position.
     fn frame(&self) -> Frame;
 

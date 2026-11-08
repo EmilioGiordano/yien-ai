@@ -10,7 +10,7 @@ use yien_proto::frame::{
 };
 use yien_proto::{AgentState, ClientMsg, Command, CoreMsg, PaneId};
 use yien_pty::{FakeChild, FakePty};
-use yien_vt::{AlacrittyEngine, VtConfig, VtEngine, VtError, VtOutput};
+use yien_vt::{AlacrittyEngine, Palette, VtConfig, VtEngine, VtError, VtOutput};
 
 use crate::{Core, CoreConfig, CoreHandle, ShellCommand};
 
@@ -47,6 +47,9 @@ impl VtEngine for Faulty {
     }
     fn size(&self) -> Size {
         self.0.size()
+    }
+    fn set_palette(&mut self, palette: Palette) {
+        self.0.set_palette(palette);
     }
     fn frame(&self) -> Frame {
         self.0.frame()
