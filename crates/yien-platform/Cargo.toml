@@ -12,6 +12,7 @@ yien-proto = { workspace = true }
 yien-agent = { workspace = true }
 yien-session = { workspace = true }
 yien-config = { workspace = true }
+yien-which = { workspace = true }
 getrandom = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -8906,6 +8906,7 @@ dependencies = [
  "yien-config",
  "yien-proto",
  "yien-session",
+ "yien-which",
 ]
 
 [[package]]
