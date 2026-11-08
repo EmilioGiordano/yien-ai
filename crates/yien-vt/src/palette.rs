@@ -59,8 +59,9 @@ impl Default for Palette {
 
 impl Palette {
     /// The light terminal theme that goes with washi (paper): the prototype's
-    /// light `--term-*` tokens, with ANSI colours dark enough to read on its
-    /// background (normal ones at 4.5:1, bright ones at 3:1).
+    /// light `--term-*` tokens in the roles sumi gives the dark ones, with
+    /// ANSI colours dark enough to read on its background (normal ones at
+    /// 4.5:1, bright ones at 3:1).
     ///
     /// ```
     /// use yien_vt::{Palette, Rgb};
@@ -72,22 +73,22 @@ impl Palette {
     pub const fn washi() -> Self {
         Self {
             ansi: [
-                Rgb::from_hex(0x23211e), // black: --term-text
+                Rgb::from_hex(0xf1efe7), // black: --term-raised
                 Rgb::from_hex(0xd11f28), // red: --term-shu
                 Rgb::from_hex(0x3e6b24), // green
                 Rgb::from_hex(0x8a5a12), // yellow: --term-ochre
                 Rgb::from_hex(0x2f4f8f), // blue: --term-ai
                 Rgb::from_hex(0x8a3d7c), // magenta
                 Rgb::from_hex(0x1f6b66), // cyan
-                Rgb::from_hex(0x6f6c64), // white: --term-faint
-                Rgb::from_hex(0x5c5952), // bright black: --term-muted
+                Rgb::from_hex(0x5c5952), // white: --term-muted
+                Rgb::from_hex(0x6f6c64), // bright black: --term-faint
                 Rgb::from_hex(0xd9444a), // bright red
                 Rgb::from_hex(0x5a8a34), // bright green
                 Rgb::from_hex(0xa86f12), // bright yellow
                 Rgb::from_hex(0x4a6cb5), // bright blue
                 Rgb::from_hex(0xa8559a), // bright magenta
                 Rgb::from_hex(0x2f8781), // bright cyan
-                Rgb::from_hex(0x8a867c), // bright white
+                Rgb::from_hex(0x23211e), // bright white: --term-text
             ],
             foreground: Rgb::from_hex(0x23211e),
             background: Rgb::from_hex(0xfbfaf6),
@@ -180,6 +181,10 @@ mod tests {
         assert_eq!(p.ansi[1], Rgb::from_hex(0xd11f28), "--term-shu");
         assert_eq!(p.ansi[3], Rgb::from_hex(0x8a5a12), "--term-ochre");
         assert_eq!(p.ansi[4], Rgb::from_hex(0x2f4f8f), "--term-ai");
+        assert_eq!(p.ansi[0], Rgb::from_hex(0xf1efe7), "--term-raised");
+        assert_eq!(p.ansi[7], Rgb::from_hex(0x5c5952), "--term-muted");
+        assert_eq!(p.ansi[8], Rgb::from_hex(0x6f6c64), "--term-faint");
+        assert_eq!(p.ansi[15], p.foreground, "--term-text");
     }
 
     #[test]
@@ -194,19 +199,19 @@ mod tests {
 
     #[test]
     fn rnf_18_ansi_colours_read_on_their_background() {
-        // Sumi's black is its raised surface by design, so it is not text.
-        let checks = [
-            ("sumi", Palette::default(), 1),
-            ("washi", Palette::washi(), 0),
-        ];
-        for (name, p, first) in checks {
-            for (i, &colour) in p.ansi.iter().enumerate().skip(first) {
+        // Black is the raised surface in both, as in the prototype: the
+        // Windows console paints black as its background and draws inverse
+        // text as black on white, so black is not text.
+        for (name, p) in [("sumi", Palette::default()), ("washi", Palette::washi())] {
+            for (i, &colour) in p.ansi.iter().enumerate().skip(1) {
                 let ratio = contrast(colour, p.background);
                 assert!(ratio >= 3.0, "{name}: ANSI {i} is {ratio:.2}:1");
             }
+            let ratio = contrast(p.ansi[0], p.ansi[7]);
+            assert!(ratio >= 4.5, "{name}: black on white is {ratio:.2}:1");
         }
         let washi = Palette::washi();
-        for (i, &colour) in washi.ansi.iter().enumerate().take(8) {
+        for (i, &colour) in washi.ansi.iter().enumerate().take(8).skip(1) {
             let ratio = contrast(colour, washi.background);
             assert!(ratio >= 4.5, "washi: normal ANSI {i} is {ratio:.2}:1");
         }
