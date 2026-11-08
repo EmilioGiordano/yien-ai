@@ -1403,6 +1403,12 @@ mod tests {
         pane.cmds.try_send(PaneCmd::Relaunch { launch: 1 }).unwrap();
         let relaunched = pane.collect(Duration::from_millis(200));
         assert!(relaunched.contains(&PaneEvent::Started), "{relaunched:?}");
+        assert!(
+            relaunched
+                .iter()
+                .any(|e| matches!(e, PaneEvent::SessionId { launch: 1, .. })),
+            "{relaunched:?}"
+        );
         let stale = "11111111-1111-4111-8111-111111111111".to_owned();
         let session = SessionStart {
             session_id: Some(stale.clone()),
@@ -1427,6 +1433,27 @@ mod tests {
         let events = pane.collect(SETTLE);
         assert!(
             matches!(last_state(&events), Some(AgentState::NeedsYou(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn rn_04_a_hook_session_names_the_launch_it_came_from() {
+        use yien_agent::HookEvent::SessionStart;
+        use yien_agent::SessionStartSource;
+        let pane = Solo::start(Vec::new(), false);
+        pane.collect(Duration::from_millis(100));
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 4 }).unwrap();
+        pane.collect(Duration::from_millis(200));
+        let id = "22222222-2222-4222-8222-222222222222".to_owned();
+        let session = SessionStart {
+            session_id: Some(id.clone()),
+            source: SessionStartSource::Clear,
+        };
+        pane.hooks.try_send(hook(2, session)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            events.contains(&PaneEvent::SessionId { id, launch: 4 }),
             "{events:?}"
         );
     }
