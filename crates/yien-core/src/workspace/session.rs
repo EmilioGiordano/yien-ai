@@ -213,9 +213,17 @@ impl Workspace {
             let profile = yien_proto::ProfileId::new(pane.profile.as_str());
             let plan = match resolve(Some(&profile)) {
                 Ok(plan) => plan,
-                Err(_) => match resolve(None) {
+                Err(error) => match resolve(None) {
                     Ok(plan) => {
-                        notes.profiles.insert(pane.profile.as_str().to_owned());
+                        let id = pane.profile.as_str().to_owned();
+                        match error {
+                            CoreError::BrokenProfile { file, .. } => {
+                                notes.unloaded.insert((id, file));
+                            }
+                            _ => {
+                                notes.profiles.insert(id);
+                            }
+                        }
                         plan
                     }
                     Err(_) => return false,
@@ -335,6 +343,8 @@ impl Workspace {
 struct Notes {
     missing: BTreeSet<String>,
     profiles: BTreeSet<String>,
+    /// Profiles whose user file was skipped, with the file.
+    unloaded: BTreeSet<(String, String)>,
     broken: Vec<String>,
     /// An agent pane started a new session because its folder is missing.
     fresh_agents: bool,
@@ -361,6 +371,12 @@ impl Notes {
             out.push(format!(
                 "The profile(s) {} no longer exist; their panes opened the shell.",
                 list(&self.profiles)
+            ));
+        }
+        for (id, file) in &self.unloaded {
+            out.push(format!(
+                "The profile \"{id}\" did not load from {file}; its panes opened the shell \
+                 and come back as \"{id}\" once the file is fixed and YIEN restarts."
             ));
         }
         if !self.broken.is_empty() {
@@ -859,6 +875,39 @@ mod tests {
         back.on_pane_event(shell, PaneEvent::Cwd("C:/Code/other".into()));
         let resaved = back.to_session();
         assert_eq!(resaved.projects[0].tabs[0].panes[0].cwd, "C:/Code/other");
+    }
+
+    #[test]
+    fn rf_age_04_a_pane_of_a_profile_whose_file_failed_keeps_its_profile() {
+        let (mut ws, pane) = workspace("claude");
+        ws.on_pane_event(
+            pane,
+            PaneEvent::SessionId {
+                id: "4f1c".into(),
+                launch: 0,
+            },
+        );
+        let saved = ws.to_session();
+        let mut config = crate::CoreConfig {
+            shell: ShellCommand::new("sh"),
+            broken_profiles: [("claude".to_owned(), "profiles/claude.toml".to_owned())].into(),
+            ..crate::CoreConfig::default()
+        };
+        config.profiles.retain(|p| p.id != "claude");
+        let resolve_in = |p: Option<&yien_proto::ProfileId>| launch::resolve_in(p, &config);
+        let mut back = Workspace::new();
+        let (fx, notes) = back.restore(&saved, &resolve_in, &all_exist(&saved));
+        let (plan, _, resume) = spawn_of(&fx, pane);
+        assert_eq!((plan.profile.as_str(), resume), ("shell", None));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("profiles/claude.toml"), "{notes:?}");
+        // Saved as it was, so a fixed file brings the pane and its session back.
+        assert_eq!(back.to_session(), saved);
+        let (again, fx, notes) = restore(&back.to_session(), &all_exist(&saved));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(spawn_of(&fx, pane).0.profile, "claude");
+        assert_eq!(spawn_of(&fx, pane).2, Some("4f1c"));
+        drop(again);
     }
 
     #[test]
