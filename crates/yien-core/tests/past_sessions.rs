@@ -202,7 +202,13 @@ fn rf_ses_07_a_resumed_session_runs_its_cli_with_resume_in_the_project_folder() 
     });
     assert_eq!(pane.session_id.as_deref(), Some(C));
 
-    // Asking again focuses that pane instead of a second program.
+    // Back on the shell's tab, asking again goes to that pane instead of
+    // starting a second program.
+    run.command(Command::FocusPane { pane: shell });
+    run.wait_for(|m| match m {
+        CoreMsg::ActiveTab { tab: Some(t) } if *t != pane.tab => Some(()),
+        _ => None,
+    });
     run.resume(C);
     run.wait_for(|m| match m {
         CoreMsg::ActiveTab { tab: Some(t) } if *t == pane.tab => Some(()),
