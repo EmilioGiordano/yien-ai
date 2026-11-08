@@ -153,9 +153,7 @@ impl Git {
 
     /// The first entry of `git worktree list`, which is always the main worktree.
     fn main_worktree(&self, root: &Path) -> Option<PathBuf> {
-        let out = self
-            .run(root, &["worktree", "list", "--porcelain", "-z"])
-            .ok()?;
+        let out = self.list_worktrees(root).ok()?;
         main_worktree_from_list(&out)
     }
 }
