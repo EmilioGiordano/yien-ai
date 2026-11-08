@@ -3,10 +3,11 @@
 //! folders, on Windows with each `PATHEXT` extension, so `claude` finds
 //! `claude.exe` and `opencode` finds `opencode.cmd` (RF-AGE-02).
 //!
-//! portable-pty always gets an absolute path. Its own lookup picks npm's
-//! extensionless shell script first, which Windows cannot start; it walks
-//! relative `PATH` entries and falls back to the bare name, which
-//! `CreateProcessW` resolves against YIEN's working folder.
+//! portable-pty always gets the absolute path of a file that exists. Its own
+//! lookup picks npm's extensionless shell script first, which Windows cannot
+//! start; it walks relative `PATH` entries, falls back to the bare name, which
+//! `CreateProcessW` resolves against YIEN's working folder, and swaps the
+//! extension of a missing absolute path for one that exists.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,13 @@ pub(crate) enum ProgramError {
         /// The path as given.
         program: String,
     },
+    /// An absolute path that names no file.
+    Missing {
+        /// The path as given.
+        program: String,
+    },
+    /// No program at all.
+    Empty,
 }
 
 impl From<ProgramError> for PtyError {
@@ -47,47 +55,30 @@ impl From<ProgramError> for PtyError {
             }
             ProgramError::NotFound { program } => PtyError::NotFound { program },
             ProgramError::Relative { program } => PtyError::RelativeProgram { program },
+            ProgramError::Missing { program } => PtyError::MissingProgram { program },
+            ProgramError::Empty => PtyError::EmptyProgram,
         }
     }
 }
 
-/// The spec with its program replaced by the absolute path to run. Reads the
-/// environment and the disk. `PATH` and `PATHEXT` are the child's: the spec's
-/// own values over YIEN's, as portable-pty applies them.
-pub(crate) fn resolve(spec: SpawnSpec) -> Result<SpawnSpec, ProgramError> {
+/// The spec with its program replaced by the absolute path to run. `env`
+/// gives the child's variables: portable-pty's builder, which on Windows
+/// takes `PATH` from the registry rather than from YIEN's own environment.
+/// Reads the disk.
+pub(crate) fn resolve(
+    spec: SpawnSpec,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<SpawnSpec, ProgramError> {
     let pathext = if cfg!(windows) {
-        child_var(&spec, "PATHEXT", |k| std::env::var_os(k))
+        env("PATHEXT")
             .and_then(|e| e.into_string().ok())
             .unwrap_or_else(|| yien_which::DEFAULT_PATHEXT.into())
     } else {
         String::new()
     };
-    let path = child_var(&spec, "PATH", |k| std::env::var_os(k));
+    let path = env("PATH");
     let found = yien_which::resolve(&spec.program, path.as_deref(), &pathext, runnable);
     with_program(spec, found)
-}
-
-/// The value `key` has in the child: the last `env` entry for it, nothing
-/// when `env_remove` drops it, else YIEN's own. Keys ignore case on Windows.
-fn child_var(
-    spec: &SpawnSpec,
-    key: &str,
-    inherited: impl Fn(&str) -> Option<OsString>,
-) -> Option<OsString> {
-    let same = |k: &OsStr| {
-        if cfg!(windows) {
-            k.eq_ignore_ascii_case(key)
-        } else {
-            k == key
-        }
-    };
-    if let Some((_, value)) = spec.env.iter().rev().find(|(k, _)| same(k)) {
-        return Some(value.clone());
-    }
-    if spec.env_remove.iter().any(|k| same(k)) {
-        return None;
-    }
-    inherited(key)
 }
 
 /// Whether `path` is a file the OS can start; on Unix, one with an execute
@@ -112,9 +103,9 @@ fn with_program(
     let found = match found {
         Ok(found) => found,
         Err(WhichError::Relative) => return Err(ProgramError::Relative { program }),
-        Err(WhichError::NotFound | WhichError::Empty) => {
-            return Err(ProgramError::NotFound { program });
-        }
+        Err(WhichError::NotFound) => return Err(ProgramError::NotFound { program }),
+        Err(WhichError::Missing) => return Err(ProgramError::Missing { program }),
+        Err(WhichError::Empty) => return Err(ProgramError::Empty),
     };
     if cfg!(windows) && is_batch(&found) && spec.args.iter().any(|a| batch_unsafe(a)) {
         return Err(ProgramError::UnsafeBatchArgument {
@@ -125,10 +116,15 @@ fn with_program(
     Ok(spec)
 }
 
+/// Whether Windows runs `path` through cmd.exe. Windows drops trailing dots
+/// and spaces from a file name, so `agent.cmd.` is `agent.cmd`.
 fn is_batch(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let name = name.trim_end_matches(['.', ' ']);
+    name.ends_with(".cmd") || name.ends_with(".bat")
 }
 
 pub(crate) fn batch_unsafe(arg: &OsStr) -> bool {
@@ -161,6 +157,16 @@ mod tests {
         assert_eq!(exe.program, OsString::from("C:/bin/claude.exe"));
     }
 
+    #[test]
+    fn trailing_dots_and_spaces_do_not_hide_a_batch_file() {
+        for name in ["agent.cmd.", "agent.CMD ", "agent.bat. .", "AGENT.Bat"] {
+            assert!(is_batch(Path::new(name)), "{name:?}");
+        }
+        for name in ["agent.exe", "agent.cmdx", "agent", "agent.exe."] {
+            assert!(!is_batch(Path::new(name)), "{name:?}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn an_absolute_batch_file_from_a_profile_is_checked_too() {
@@ -172,6 +178,12 @@ mod tests {
         assert_eq!(found, Ok(cmd.clone()));
         let err = with_program(spec, found).unwrap_err();
         assert!(matches!(err, ProgramError::UnsafeBatchArgument { .. }));
+        // Such a name has no PATHEXT extension, so it is never found as is.
+        for given in [dir.join("agent.cmd."), dir.join("agent.CMD ")] {
+            let spec = SpawnSpec::new(given.as_os_str()).arg("a&calc");
+            let err = resolve(spec, |_| None).unwrap_err();
+            assert!(matches!(err, ProgramError::Missing { .. }), "{given:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -190,7 +202,8 @@ mod tests {
             "claude was not found on PATH (the current folder is not searched)"
         );
         let err = with_program(SpawnSpec::new(""), Err(WhichError::Empty)).unwrap_err();
-        assert!(matches!(err, ProgramError::NotFound { .. }));
+        assert_eq!(err, ProgramError::Empty);
+        assert_eq!(PtyError::from(err).to_string(), "no program was given");
     }
 
     #[test]
@@ -206,12 +219,17 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_program_is_used_as_given() {
+    fn a_missing_absolute_program_is_refused_not_swapped() {
         let dir = temp_dir("absolute");
-        let missing = dir.join("not-there");
+        let missing = dir.join("agent.exe");
+        std::fs::write(dir.join("agent.cmd"), "").unwrap();
         let spec = SpawnSpec::new(missing.as_os_str());
-        let found = yien_which::resolve(&spec.program, None, "", runnable);
-        assert_eq!(with_program(spec, found).unwrap().program, missing);
+        let err = resolve(spec, |_| None).unwrap_err();
+        assert!(matches!(err, ProgramError::Missing { .. }), "{err:?}");
+        assert!(matches!(
+            PtyError::from(err),
+            PtyError::MissingProgram { .. }
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -227,49 +245,6 @@ mod tests {
             let found = yien_which::resolve(OsStr::new("Cargo.toml"), Some(&path), "", is_file);
             assert_eq!(found, Err(WhichError::NotFound), "{dirs:?}");
         }
-    }
-
-    #[test]
-    fn the_system_shell_resolves_to_an_absolute_path() {
-        let shell = if cfg!(windows) { "cmd.exe" } else { "sh" };
-        let spec = resolve(SpawnSpec::new(shell)).unwrap();
-        assert!(Path::new(&spec.program).is_absolute(), "{:?}", spec.program);
-    }
-
-    #[test]
-    fn the_childs_own_path_overrides_or_removes_yiens() {
-        let yien = |_: &str| Some(OsString::from("yien"));
-        let spec = SpawnSpec::new("claude");
-        assert_eq!(child_var(&spec, "PATH", yien), Some("yien".into()));
-        let spec = SpawnSpec::new("claude").env_remove("PATH");
-        assert_eq!(child_var(&spec, "PATH", yien), None);
-        let spec = SpawnSpec::new("claude")
-            .env_remove("PATH")
-            .env("PATH", "first")
-            .env("OTHER", "x")
-            .env("PATH", "last");
-        assert_eq!(child_var(&spec, "PATH", yien), Some("last".into()));
-        let spec = SpawnSpec::new("claude").env("Path", "mixed");
-        let expected = if cfg!(windows) { "mixed" } else { "yien" };
-        assert_eq!(child_var(&spec, "PATH", yien), Some(expected.into()));
-    }
-
-    #[test]
-    fn a_program_is_found_on_the_path_the_spec_sets() {
-        let dir = temp_dir("spec-path");
-        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
-        let tool = dir.join(name);
-        std::fs::write(&tool, "").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let spec = SpawnSpec::new("tool").env("PATH", dir.as_os_str());
-        assert_eq!(resolve(spec).unwrap().program, tool);
-        let spec = SpawnSpec::new("tool").env("PATH", ".");
-        assert!(matches!(resolve(spec), Err(ProgramError::NotFound { .. })));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

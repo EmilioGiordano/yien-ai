@@ -53,6 +53,10 @@ pub enum WhichError {
     /// `C:tool`); it would resolve against the current folder.
     #[error("a relative path; give a bare name found on PATH or a full path")]
     Relative,
+    /// An absolute path that names no file, with any `pathext` extension
+    /// tried.
+    #[error("no such file")]
+    Missing,
 }
 
 /// The file `program` names.
@@ -61,8 +65,9 @@ pub enum WhichError {
 /// try, `PATHEXT` on Windows and empty elsewhere. `exists` says whether a
 /// candidate is a file that can be run (on Unix, one with an execute bit).
 ///
-/// - An absolute path is returned as given, or with the first `pathext`
-///   extension that exists when it has none of them.
+/// - An absolute path is returned as given when it exists, or with the
+///   first `pathext` extension that exists when it has none of them; never
+///   with its own extension swapped for another.
 /// - A bare name is looked up in each absolute `path` folder in order. With
 ///   one of the `pathext` extensions, or with `pathext` empty, it is tried as
 ///   is; otherwise only with each extension in order, so npm's extensionless
@@ -74,8 +79,10 @@ pub enum WhichError {
 ///
 /// let root = if cfg!(windows) { "C:/" } else { "/" };
 /// let tool = Path::new(root).join("opt").join("tool");
-/// let found = yien_which::resolve(tool.as_os_str(), None, "", |_| false);
-/// assert_eq!(found, Ok(tool));
+/// let found = yien_which::resolve(tool.as_os_str(), None, "", |_| true);
+/// assert_eq!(found, Ok(tool.clone()));
+/// let missing = yien_which::resolve(tool.as_os_str(), None, "", |_| false);
+/// assert_eq!(missing, Err(yien_which::WhichError::Missing));
 ///
 /// let relative = Path::new("bin").join("tool");
 /// let err = yien_which::resolve(relative.as_os_str(), None, "", |_| true);
@@ -109,7 +116,7 @@ pub fn resolve(
         })
     };
     if name.is_absolute() {
-        return Ok(find(name.to_path_buf()).unwrap_or_else(|| name.to_path_buf()));
+        return find(name.to_path_buf()).ok_or(WhichError::Missing);
     }
     if !matches!(
         name.components().collect::<Vec<_>>()[..],
@@ -289,10 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_path_is_used_as_given() {
+    fn an_absolute_path_is_used_as_given_or_missing() {
         let tool = abs("opt").join("tool.exe");
         let found = resolve(tool.as_os_str(), None, ".EXE", |_| false);
-        assert_eq!(found, Ok(tool.clone()));
+        assert_eq!(found, Err(WhichError::Missing));
+        let other = files(&[abs("opt").join("tool.cmd"), abs("opt").join("tool")]);
+        let found = resolve(tool.as_os_str(), None, ".EXE;.CMD", other);
+        assert_eq!(found, Err(WhichError::Missing));
         let found = resolve(
             tool.as_os_str(),
             None,
@@ -314,6 +324,6 @@ mod tests {
         );
         assert_eq!(found, Ok(cmd));
         let found = resolve(ed.as_os_str(), None, ".EXE;.CMD", |_| false);
-        assert_eq!(found, Ok(ed));
+        assert_eq!(found, Err(WhichError::Missing));
     }
 }

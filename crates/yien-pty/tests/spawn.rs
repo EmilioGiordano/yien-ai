@@ -208,13 +208,13 @@ fn a_missing_program_is_not_found_before_spawning() {
 }
 
 #[test]
-fn a_missing_absolute_program_is_a_spawn_error() {
+fn a_missing_absolute_program_is_refused_before_spawning() {
     let missing = std::env::temp_dir()
         .join("yien-no-such-dir-4417")
         .join("prog");
     match backend().spawn(SpawnSpec::new(missing.as_os_str())) {
-        Err(PtyError::Spawn { .. }) => {}
-        Err(other) => panic!("expected Spawn, got {other:?}"),
+        Err(PtyError::MissingProgram { .. }) => {}
+        Err(other) => panic!("expected MissingProgram, got {other:?}"),
         Ok(_) => panic!("a missing program spawned"),
     }
 }
