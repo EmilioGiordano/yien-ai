@@ -69,6 +69,7 @@ const BACKOFF: Duration = Duration::from_millis(50);
 
 pub(super) struct Guard {
     _mutex: OwnedHandle,
+    _installer_mutex: OwnedHandle,
     /// The pipe, until [`Guard::serve`] hands it to its thread.
     pipe: Option<OwnedHandle>,
 }
@@ -127,6 +128,15 @@ pub(super) fn claim(_dir: &std::path::Path, key: &str) -> Result<Claim, Instance
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: 0,
     };
+    let installer_name = wide(r"Local\YIENRunning");
+    // SAFETY: `installer_name` is NUL-terminated and remains alive for the call.
+    let installer_handle = unsafe { CreateMutexW(std::ptr::null(), 0, installer_name.as_ptr()) };
+    if installer_handle.is_null() {
+        return Err(last_error("CreateMutexW(installer guard)"));
+    }
+    // Keeping a handle open makes this stable, per-user-session guard visible
+    // to the installer even when YIEN uses a redirected data directory.
+    let installer_mutex = unsafe { OwnedHandle::from_raw_handle(installer_handle) };
     let name = wide(&mutex_name(key));
     // SAFETY: `name` is NUL-terminated and `attributes` points to a live
     // security descriptor for the duration of the call.
@@ -162,6 +172,7 @@ pub(super) fn claim(_dir: &std::path::Path, key: &str) -> Result<Claim, Instance
     Ok(Claim::First(Instance {
         guard: Guard {
             _mutex: mutex,
+            _installer_mutex: installer_mutex,
             pipe,
         },
     }))
@@ -506,6 +517,24 @@ mod tests {
     fn rf_ses_14_the_pipe_name_carries_the_session() {
         assert_ne!(pipe_name("ab", 1), pipe_name("ab", 2));
         assert!(pipe_name("ab", 1).ends_with("yien-instance-ab-1"));
+    }
+
+    #[test]
+    fn rnf_21_a_running_instance_holds_the_installer_mutex() {
+        let key = format!("installer-test-{}", std::process::id());
+        let instance = match claim(&std::env::temp_dir(), &key).unwrap() {
+            Claim::First(instance) => instance,
+            Claim::Running { .. } => panic!("test instance key unexpectedly exists"),
+        };
+        let name = wide(r"Local\YIENRunning");
+        // SAFETY: `name` is NUL-terminated and valid for this call.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        assert!(!handle.is_null());
+        // SAFETY: read immediately after CreateMutexW, before another OS call.
+        assert_eq!(unsafe { GetLastError() }, ERROR_ALREADY_EXISTS);
+        // SAFETY: `handle` is a successful CreateMutexW result owned here.
+        drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+        drop(instance);
     }
 
     #[test]
