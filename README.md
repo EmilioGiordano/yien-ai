@@ -27,6 +27,8 @@ yien-<version>-x86_64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /N
 
 To uninstall silently, run `%LOCALAPPDATA%\Programs\YIEN\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS`. Silent uninstall keeps `%LOCALAPPDATA%\YIEN`. Interactive uninstall asks whether to keep or delete that data folder and defaults to keeping it. Upgrades replace program files and preserve the data folder and saved sessions. YIEN holds a named mutex while it runs. If it is running, Setup asks you to close it and rerun; it never closes it. Silent install/upgrade fails with Inno Setup exit code `7`; silent uninstall fails with a non-zero exit code. Use `/NOCLOSEAPPLICATIONS` so Inno Setup also refuses to close any other application that has a packaged file open.
 
+The per-user uninstall registry entry is `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E5F3AD8A-224E-4A19-83A6-5D8D604B1B81}_is1`. Auto-update can read its `UninstallString` value to locate the installed uninstaller.
+
 ### Removing YIEN
 
 Delete the unzipped folder and `%LOCALAPPDATA%\YIEN`. The first time YIEN shows a notification it also registers its name for Windows under `HKEY_CURRENT_USER\Software\Classes\AppUserModelId\YIEN.App`; remove that key too, for example with `reg delete "HKCU\Software\Classes\AppUserModelId\YIEN.App" /f`.
