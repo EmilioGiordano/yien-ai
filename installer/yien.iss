@@ -47,11 +47,6 @@ Name: "{userdesktop}\YIEN"; Filename: "{app}\yien.exe"; Tasks: desktopicon
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\YIEN_is1"; ValueType: string; ValueName: "DisplayName"; ValueData: "YIEN"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\YIEN_is1"; ValueType: string; ValueName: "DisplayVersion"; ValueData: "{#AppVersion}"
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\YIEN_is1"; ValueType: string; ValueName: "InstallLocation"; ValueData: "{app}"
-
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
