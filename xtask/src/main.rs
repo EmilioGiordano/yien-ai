@@ -8,12 +8,13 @@
 
 mod check_deps;
 mod dist;
+mod installer;
 mod trace;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo xtask <check-deps | trace [--ers <path>] | dist>";
+const USAGE: &str = "usage: cargo xtask <check-deps | trace [--ers <path>] | dist | installer>";
 
 fn main() -> ExitCode {
     match run() {
@@ -31,6 +32,7 @@ fn run() -> anyhow::Result<ExitCode> {
     match args.first().map(String::as_str) {
         Some("check-deps") if args.len() == 1 => check_deps::run(&root),
         Some("dist") if args.len() == 1 => dist::run(&root),
+        Some("installer") if args.len() == 1 => installer::run(&root),
         Some("trace") => match &args[1..] {
             [] => trace::run(&root, None),
             [flag, path] if flag == "--ers" => trace::run(&root, Some(PathBuf::from(path))),
