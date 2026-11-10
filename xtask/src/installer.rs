@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(output_name("0.1.2"), "yien-0.1.2-x86_64-setup.exe");
     }
     #[test]
-    fn rf_cfg_07_checksum_is_sha256sum_compatible() {
+    fn checksum_sidecar_is_sha256sum_compatible() {
         assert_eq!(sha256_sidecar("setup.exe", "abc"), "abc  setup.exe\n");
     }
 }
