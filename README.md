@@ -15,7 +15,17 @@ Early, working towards the first usable version (MVP). Today YIEN opens a window
 
 YIEN opens a project on the folder it was started from; start it from a terminal in your repository (`path\to\yien.exe`) to open that one. `yien-hook.exe` must stay next to `yien.exe`: it is the small program Claude Code runs to report its state to YIEN. Without it, Claude panes still work but show "signal lost" instead of the red mark.
 
-Data and logs go to `%LOCALAPPDATA%\YIEN` (logs in `logs\`). Set `YIEN_DATA_DIR` to use another folder and `YIEN_LOG` (for example `debug`) to change the log level.
+Data, configuration, saved sessions and logs go to `%LOCALAPPDATA%\YIEN` (logs in `logs\`). Set `YIEN_DATA_DIR` to use another folder and `YIEN_LOG` (for example `debug`) to change the log level. The installer puts program files in `%LOCALAPPDATA%\Programs\YIEN`, separately from this data folder.
+
+## Install with the Windows installer
+
+The per-user installer needs no administrator privileges. It creates a YIEN entry in the current user's uninstall registry and a Start Menu shortcut. To install silently, run:
+
+```powershell
+yien-<version>-x86_64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCLOSEAPPLICATIONS
+```
+
+To uninstall silently, run `%LOCALAPPDATA%\Programs\YIEN\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS`. Silent uninstall keeps `%LOCALAPPDATA%\YIEN`. Interactive uninstall asks whether to keep or delete that data folder and defaults to keeping it. Upgrades replace program files and preserve the data folder and saved sessions. The interactive installer asks to close YIEN if its files are in use; silent commands use `/NOCLOSEAPPLICATIONS`, so close YIEN first. An in-use file makes the silent install/upgrade or uninstall fail with a non-zero exit code; it never forces YIEN closed.
 
 ### Removing YIEN
 
