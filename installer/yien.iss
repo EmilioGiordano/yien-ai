@@ -53,6 +53,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\YIEN_is
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\YIEN_is1"; ValueType: string; ValueName: "InstallLocation"; ValueData: "{app}"
 
 [Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if CheckForMutexes('Local\YIENRunning') then
+    Result := 'Close YIEN before installing or upgrading, then run Setup again. YIEN was not closed.';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := not CheckForMutexes('Local\YIENRunning');
+  if not Result then
+    SuppressibleMsgBox('Close YIEN before uninstalling, then run the uninstaller again. YIEN was not closed.', mbError, MB_OK, IDOK);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: string;
