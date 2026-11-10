@@ -25,7 +25,7 @@ The per-user installer needs no administrator privileges. It creates a YIEN entr
 yien-<version>-x86_64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCLOSEAPPLICATIONS
 ```
 
-To uninstall silently, run `%LOCALAPPDATA%\Programs\YIEN\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS`. Silent uninstall keeps `%LOCALAPPDATA%\YIEN`. Interactive uninstall asks whether to keep or delete that data folder and defaults to keeping it. Upgrades replace program files and preserve the data folder and saved sessions. The interactive installer asks to close YIEN if its files are in use; silent commands use `/NOCLOSEAPPLICATIONS`, so close YIEN first. An in-use file makes the silent install/upgrade or uninstall fail with a non-zero exit code; it never forces YIEN closed.
+To uninstall silently, run `%LOCALAPPDATA%\Programs\YIEN\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS`. Silent uninstall keeps `%LOCALAPPDATA%\YIEN`. Interactive uninstall asks whether to keep or delete that data folder and defaults to keeping it. Upgrades replace program files and preserve the data folder and saved sessions. YIEN holds a named mutex while it runs. If it is running, Setup asks you to close it and rerun; it never closes it. Silent install/upgrade fails with Inno Setup exit code `7`; silent uninstall fails with a non-zero exit code. Use `/NOCLOSEAPPLICATIONS` so Inno Setup also refuses to close any other application that has a packaged file open.
 
 ### Removing YIEN
 
