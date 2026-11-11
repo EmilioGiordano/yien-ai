@@ -34,6 +34,8 @@ LicenseFile={#SourceDir}\INSTALLER-LICENSE.txt
 [Files]
 Source: "{#SourceDir}\yien.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\yien-hook.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\THIRD-PARTY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\INSTALLER-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
