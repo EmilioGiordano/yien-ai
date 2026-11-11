@@ -43,6 +43,19 @@ cargo run -p yien
 
 `cargo xtask dist` builds the release binaries and writes the portable folder and zip to `target/dist/`.
 
+On Windows, `cargo xtask dist` also fetches the pinned Microsoft ConPTY package, verifies its SHA-256, and includes `conpty.dll` and `OpenConsole.exe` beside `yien.exe` in the portable folder. A local source run needs the same pair beside the executable. After `cargo xtask dist`, copy the release binaries and the two files into the slot's `run/` folder:
+
+```powershell
+$slot = (Get-Content .yien-slot -Raw).Trim()
+$package = Get-ChildItem "$slot/dist/yien-*-windows-x64" | Select-Object -First 1
+New-Item -ItemType Directory -Force "$slot/run" | Out-Null
+Copy-Item "$slot/release/yien.exe", "$slot/release/yien-hook.exe" "$slot/run/"
+Copy-Item "$package/conpty.dll", "$package/OpenConsole.exe" "$slot/run/"
+& "$slot/run/yien.exe"
+```
+
+`cargo build` does not copy these files. The source run uses the system ConPTY until the package pair has been copied beside `yien.exe`.
+
 ## Keyboard shortcuts
 
 | Keys | Action |
