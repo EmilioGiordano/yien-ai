@@ -925,6 +925,11 @@ impl Actor {
             }
             PaneCmd::CopySelection => {
                 let text = lock(&self.engine).selection_text();
+                tracing::debug!(
+                    pane = self.id.get(),
+                    selected = text.is_some(),
+                    "selection read"
+                );
                 self.report(PaneEvent::Selection(text));
             }
             PaneCmd::View { visible, seen } => {
