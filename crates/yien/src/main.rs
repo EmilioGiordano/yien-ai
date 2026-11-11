@@ -1,4 +1,4 @@
-//! The YIEN desktop app: starts the core on the system ConPTY, restores the
+//! The YIEN desktop app: starts the core on the bundled ConPTY or safe system fallback, restores the
 //! saved session (or opens a project on the start folder) and runs the window.
 
 #![forbid(unsafe_code)]
