@@ -10,6 +10,7 @@ mod check_deps;
 mod conpty;
 mod dist;
 mod installer;
+mod licences;
 mod trace;
 
 use std::path::{Path, PathBuf};

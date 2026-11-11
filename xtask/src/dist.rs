@@ -16,6 +16,8 @@ pub const TARGET_TRIPLE: &str = "x86_64-pc-windows-msvc";
 pub const BINARIES: [&str; 2] = ["yien", "yien-hook"];
 /// The generated notice, written straight into the package folder.
 pub const THIRD_PARTY: &str = "THIRD-PARTY.md";
+/// The licence texts of every third-party package, written into the package folder.
+pub const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
 /// The ConPTY package licence, kept out of the repository root while TBD-04 is open.
 pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
 /// Package name consumed by the portable archive and installer.
@@ -157,6 +159,10 @@ pub struct Package {
     pub version: String,
     pub license: String,
     pub repository: String,
+    /// The folder of the package's `Cargo.toml`; its licence files sit there.
+    pub manifest_dir: PathBuf,
+    /// The manifest's `license-file`, relative to `manifest_dir`.
+    pub license_file: Option<String>,
 }
 
 /// The registry packages reachable from `roots` through normal (not build or
@@ -222,6 +228,11 @@ pub fn third_party_packages(metadata: &Value, roots: &[&str]) -> anyhow::Result<
                 None => "see the package".to_owned(),
             },
             repository: text("repository"),
+            manifest_dir: Path::new(&text("manifest_path"))
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            license_file: package["license_file"].as_str().map(str::to_owned),
         });
     }
     out.sort();
@@ -303,7 +314,9 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
         bail!("cargo build --release failed ({status})");
     }
 
-    let notice = third_party_notice(&third_party_packages(&metadata, &BINARIES)?);
+    let packages = third_party_packages(&metadata, &BINARIES)?;
+    let notice = third_party_notice(&packages);
+    let licence_texts = crate::licences::build(&packages)?;
 
     let dist = target.join("dist");
     if dist.exists() {
@@ -337,6 +350,8 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     crate::conpty::fetch_and_extract(&target, &package)?;
     std::fs::write(package.join(THIRD_PARTY), notice)
         .with_context(|| format!("writing {THIRD_PARTY}"))?;
+    std::fs::write(package.join(THIRD_PARTY_LICENSES), licence_texts)
+        .with_context(|| format!("writing {THIRD_PARTY_LICENSES}"))?;
 
     let zip = dist.join(zip_name(&version));
     zip_folder(&dist, &package_name(&version), &zip)?;
