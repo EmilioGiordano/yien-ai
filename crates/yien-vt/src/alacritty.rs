@@ -293,13 +293,30 @@ impl AlacrittyEngine {
             end: to_grid_point(Point::new(point.line, Column(end))),
         })
     }
+
+    /// Runs `parse` and puts back a selection it dropped, unless the screen
+    /// switched between main and alternate. alacritty drops it on every erase
+    /// that touches its lines, which is each redraw of a TUI.
+    fn parse_keeping_selection(
+        &mut self,
+        parse: impl FnOnce(&mut Processor<SyncFlag>, &mut Term<Listener>),
+    ) {
+        let held = self.term.selection.clone();
+        let alt_screen = self.term.mode().contains(TermMode::ALT_SCREEN);
+        parse(&mut self.parser, &mut self.term);
+        if self.term.selection.is_none()
+            && self.term.mode().contains(TermMode::ALT_SCREEN) == alt_screen
+        {
+            self.term.selection = held;
+        }
+    }
 }
 
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8]) -> VtOutput {
         let mut out = VtOutput::default();
         self.osc.scan_into(bytes, &mut out.signals);
-        self.parser.advance(&mut self.term, bytes);
+        self.parse_keeping_selection(|parser, term| parser.advance(term, bytes));
         self.collect(&mut out);
         out
     }
@@ -315,7 +332,7 @@ impl VtEngine for AlacrittyEngine {
     fn flush_sync(&mut self) -> VtOutput {
         let mut out = VtOutput::default();
         if self.sync_pending() {
-            self.parser.stop_sync(&mut self.term);
+            self.parse_keeping_selection(|parser, term| parser.stop_sync(term));
         }
         self.collect(&mut out);
         out
