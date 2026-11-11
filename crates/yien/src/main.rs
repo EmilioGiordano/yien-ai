@@ -1,4 +1,4 @@
-//! The YIEN desktop app: starts the core on the system ConPTY, restores the
+//! The YIEN desktop app: starts the core on the bundled ConPTY or safe system fallback, restores the
 //! saved session (or opens a project on the start folder) and runs the window.
 
 #![forbid(unsafe_code)]
@@ -45,14 +45,27 @@ impl CoreClient for Client {
 }
 
 fn main() -> ExitCode {
-    // Before anything can load a DLL: portable-pty loads `conpty.dll` by bare
-    // name, which would otherwise pick one up from PATH or the current dir.
-    let dll_search = yien_platform::dll_search::restrict_dll_search();
+    // Before any thread starts, allow the app-local DLL only with its matching
+    // host; all other cases use System32 and keep PATH/current dir excluded.
+    let conpty = yien_platform::dll_search::configure_conpty();
     let log = start_logging();
     panic_log::install();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "yien starting");
-    if let Err(error) = dll_search {
-        tracing::error!("{error}");
+    match conpty {
+        Ok(yien_platform::dll_search::ConptyBackend::Bundled) => {
+            tracing::info!(conpty = "bundled", "ConPTY backend selected");
+        }
+        Ok(yien_platform::dll_search::ConptyBackend::System) => {
+            tracing::warn!(
+                conpty = "system",
+                "bundled ConPTY unavailable; using system ConPTY"
+            );
+        }
+        Err(error) => {
+            tracing::error!("{error}");
+            drop(log);
+            return ExitCode::FAILURE;
+        }
     }
     // Before the core loads or saves anything: a second start on the same
     // data dir only asks the running YIEN for its window (RF-SES-14).

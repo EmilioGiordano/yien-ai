@@ -133,6 +133,28 @@ fn rf_age_02_child_output_arrives_then_its_exit() {
     assert_eq!(status, ExitStatus::from_code(0));
 }
 
+#[cfg(windows)]
+#[test]
+fn rf_pan_06_bundled_conpty_spawns_cmd_echo() {
+    if std::env::var_os("YIEN_REQUIRE_BUNDLED_CONPTY").is_none() {
+        return;
+    }
+    let exe_dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(exe_dir.join("conpty.dll").is_file());
+    assert!(exe_dir.join("OpenConsole.exe").is_file());
+    let mut driver = Driver::new(backend().spawn(run("echo BUNDLED_CONPTY_OK")).unwrap());
+    assert!(driver.until_exit().success());
+    assert!(contains(&driver.output, b"BUNDLED_CONPTY_OK"));
+    println!(
+        "cmd /d /c echo BUNDLED_CONPTY_OK output: {}",
+        String::from_utf8_lossy(&driver.output).trim()
+    );
+}
+
 #[test]
 fn rf_age_02_input_reaches_an_interactive_child() {
     let mut driver = interactive();

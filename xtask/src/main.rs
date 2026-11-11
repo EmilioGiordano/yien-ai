@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod check_deps;
+mod conpty;
 mod dist;
 mod installer;
 mod trace;
