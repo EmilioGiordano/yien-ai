@@ -7,7 +7,7 @@
 //!
 //! ```no_run
 //! // First thing in `main`, before any thread starts.
-//! if let Err(error) = yien_platform::dll_search::restrict_dll_search() {
+//! if let Err(error) = yien_platform::dll_search::configure_conpty() {
 //!     eprintln!("{error}");
 //! }
 //! ```
@@ -19,6 +19,21 @@
 #[error("cannot restrict the DLL search path: {0}")]
 pub struct DllSearchError(#[source] std::io::Error);
 
+/// The ConPTY implementation made available to `portable-pty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConptyBackend {
+    /// The verified application-local DLL and console host are both present.
+    Bundled,
+    /// Only the system DLL search location is enabled.
+    System,
+}
+
+/// Selects the bundled backend only when both package files are present and
+/// the DLL loads; otherwise restricts ConPTY loading to System32.
+pub fn configure_conpty() -> Result<ConptyBackend, DllSearchError> {
+    imp::configure()
+}
+
 /// Limits run-time DLL loads to the executable's folder and System32, and
 /// drops the current directory from the legacy search order.
 ///
@@ -28,21 +43,95 @@ pub fn restrict_dll_search() -> Result<(), DllSearchError> {
     imp::restrict()
 }
 
+#[cfg(any(windows, test))]
+fn bundle_backend(dll: bool, host: bool) -> ConptyBackend {
+    if dll && host {
+        ConptyBackend::Bundled
+    } else {
+        ConptyBackend::System
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::{ConptyBackend, bundle_backend};
+
+    #[test]
+    fn rf_pan_06_conpty_requires_both_bundle_files() {
+        assert_eq!(bundle_backend(true, true), ConptyBackend::Bundled);
+        assert_eq!(bundle_backend(true, false), ConptyBackend::System);
+        assert_eq!(bundle_backend(false, true), ConptyBackend::System);
+        assert_eq!(bundle_backend(false, false), ConptyBackend::System);
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use super::DllSearchError;
     use windows_sys::Win32::System::LibraryLoader::{
-        LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
-        SetDefaultDllDirectories, SetDllDirectoryW,
+        GetProcAddress, LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        LoadLibraryW, SetDefaultDllDirectories, SetDllDirectoryW,
     };
 
     pub(super) fn restrict() -> Result<(), DllSearchError> {
+        set_search_dirs(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)
+    }
+
+    pub(super) fn configure() -> Result<super::ConptyBackend, DllSearchError> {
+        let app_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+        let dll = app_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("conpty.dll").is_file());
+        let host = app_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("OpenConsole.exe").is_file());
+
+        if super::bundle_backend(dll, host) == super::ConptyBackend::Bundled {
+            set_search_dirs(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)?;
+            let name: [u16; 11] = [
+                b'c' as u16,
+                b'o' as u16,
+                b'n' as u16,
+                b'p' as u16,
+                b't' as u16,
+                b'y' as u16,
+                b'.' as u16,
+                b'd' as u16,
+                b'l' as u16,
+                b'l' as u16,
+                0,
+            ];
+            // SAFETY: `name` is a NUL-terminated filename; DLL search is
+            // restricted to the application directory and System32 above.
+            let module = unsafe { LoadLibraryW(name.as_ptr()) };
+            if !module.is_null() {
+                let exports = [
+                    b"CreatePseudoConsole\0" as &[u8],
+                    b"ResizePseudoConsole\0",
+                    b"ClosePseudoConsole\0",
+                ];
+                let valid = exports.iter().all(|name| {
+                    // SAFETY: `module` is a loaded module and `name` is
+                    // NUL-terminated for GetProcAddress.
+                    unsafe { GetProcAddress(module, name.as_ptr()) }.is_some()
+                });
+                // SAFETY: `module` was returned by the LoadLibraryW above.
+                unsafe { windows_sys::Win32::Foundation::FreeLibrary(module) };
+                if valid {
+                    return Ok(super::ConptyBackend::Bundled);
+                }
+            }
+        }
+
+        set_search_dirs(LOAD_LIBRARY_SEARCH_SYSTEM32)?;
+        Ok(super::ConptyBackend::System)
+    }
+
+    fn set_search_dirs(flags: u32) -> Result<(), DllSearchError> {
         // SAFETY: takes plain flags and touches only the loader's own state.
-        let ok = unsafe {
-            SetDefaultDllDirectories(
-                LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
-            )
-        };
+        let ok = unsafe { SetDefaultDllDirectories(flags) };
         if ok == 0 {
             return Err(DllSearchError(std::io::Error::last_os_error()));
         }
@@ -64,6 +153,10 @@ mod imp {
 
     pub(super) fn restrict() -> Result<(), DllSearchError> {
         Ok(())
+    }
+
+    pub(super) fn configure() -> Result<super::ConptyBackend, DllSearchError> {
+        Ok(super::ConptyBackend::System)
     }
 }
 
