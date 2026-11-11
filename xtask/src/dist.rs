@@ -244,6 +244,10 @@ pub fn third_party_notice(packages: &[Package]) -> String {
             p.repository
         ));
     }
+    out.push_str(&format!(
+        "| Microsoft.Windows.Console.ConPTY | {} | MIT | https://github.com/microsoft/terminal |\n",
+        crate::conpty::VERSION
+    ));
     out
 }
 
@@ -321,6 +325,7 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
         std::fs::copy(&entry.source, &dest)
             .with_context(|| format!("copying {} to {}", entry.source.display(), dest.display()))?;
     }
+    crate::conpty::fetch_and_extract(&target, &package)?;
     std::fs::write(package.join(THIRD_PARTY), notice)
         .with_context(|| format!("writing {THIRD_PARTY}"))?;
 
@@ -537,6 +542,9 @@ mod tests {
         assert!(notice.contains(
             "| serde | 1.0.0 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |\n"
         ));
-        assert_eq!(notice.lines().filter(|l| l.starts_with("| ")).count(), 4);
+        assert!(notice.contains(
+            "| Microsoft.Windows.Console.ConPTY | 1.24.261001001 | MIT | https://github.com/microsoft/terminal |\n"
+        ));
+        assert_eq!(notice.lines().filter(|l| l.starts_with("| ")).count(), 5);
     }
 }
