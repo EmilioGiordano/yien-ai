@@ -12,6 +12,21 @@ pub(crate) enum Region {
     ContextBar,
 }
 
+/// How the user last acted: a key that moved the keyboard, or a mouse
+/// button. Only the focus rings depend on it, never where the keyboard is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Modality {
+    Keyboard,
+    Pointer,
+}
+
+/// Whether `bar` draws its keyboard ring (the bar border and its cursor
+/// row) while `holder` has the keyboard: only when the keyboard got there
+/// by keyboard, never after a click. The pane area has no bar ring.
+pub(crate) fn ring_on(bar: Region, holder: Region, modality: Modality) -> bool {
+    bar != Region::Panes && bar == holder && modality == Modality::Keyboard
+}
+
 /// Where F6 (`forward`) or Shift+F6 moves the keyboard from `from`: the
 /// next region left to right, wrapping, past the bars that are hidden. The
 /// pane area is always there; a hidden region counts as the pane area.
@@ -80,6 +95,47 @@ mod tests {
 
     fn tabs(ids: &[u64]) -> Vec<TabId> {
         ids.iter().map(|id| TabId::new(*id)).collect()
+    }
+
+    #[test]
+    fn rf_nav_08_the_ring_shows_after_a_keyboard_move_into_a_bar() {
+        use Region::*;
+        let tab_bar = next_region(Panes, false, true, true);
+        assert!(ring_on(TabBar, tab_bar, Modality::Keyboard));
+        assert!(!ring_on(ContextBar, tab_bar, Modality::Keyboard));
+        let context_bar = next_region(Panes, true, true, true);
+        assert!(ring_on(ContextBar, context_bar, Modality::Keyboard));
+        assert!(!ring_on(TabBar, context_bar, Modality::Keyboard));
+    }
+
+    #[test]
+    fn rf_nav_08_a_click_in_a_bar_shows_no_ring() {
+        use Region::*;
+        assert!(!ring_on(TabBar, TabBar, Modality::Pointer));
+        assert!(!ring_on(ContextBar, ContextBar, Modality::Pointer));
+    }
+
+    #[test]
+    fn rf_nav_08_a_click_after_f6_hides_the_ring_and_f6_shows_it_again() {
+        use Region::*;
+        // F6 from the panes into the context bar.
+        let at = next_region(Panes, true, true, true);
+        assert!(ring_on(ContextBar, at, Modality::Keyboard));
+        // A click on a file row keeps the keyboard in the bar: no ring.
+        assert!(!ring_on(ContextBar, at, Modality::Pointer));
+        // Shift+F6 to the panes, F6 back: the ring returns.
+        let at = next_region(next_region(at, false, true, true), true, true, true);
+        assert!(ring_on(ContextBar, at, Modality::Keyboard));
+    }
+
+    #[test]
+    fn rf_nav_08_the_pane_area_never_shows_a_bar_ring() {
+        use Region::*;
+        for modality in [Modality::Keyboard, Modality::Pointer] {
+            assert!(!ring_on(Panes, Panes, modality));
+            assert!(!ring_on(TabBar, Panes, modality));
+            assert!(!ring_on(ContextBar, Panes, modality));
+        }
     }
 
     #[test]
