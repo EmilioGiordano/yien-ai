@@ -15,7 +15,19 @@ Early, working towards the first usable version (MVP). Today YIEN opens a window
 
 YIEN opens a project on the folder it was started from; start it from a terminal in your repository (`path\to\yien.exe`) to open that one. `yien-hook.exe` must stay next to `yien.exe`: it is the small program Claude Code runs to report its state to YIEN. Without it, Claude panes still work but show "signal lost" instead of the red mark.
 
-Data and logs go to `%LOCALAPPDATA%\YIEN` (logs in `logs\`). Set `YIEN_DATA_DIR` to use another folder and `YIEN_LOG` (for example `debug`) to change the log level.
+Data, configuration, saved sessions and logs go to `%LOCALAPPDATA%\YIEN` (logs in `logs\`). Set `YIEN_DATA_DIR` to use another folder and `YIEN_LOG` (for example `debug`) to change the log level. The installer puts program files in `%LOCALAPPDATA%\Programs\YIEN`, separately from this data folder.
+
+## Install with the Windows installer
+
+The per-user installer needs no administrator privileges. It creates a YIEN entry in the current user's uninstall registry and a Start Menu shortcut. To install silently, run:
+
+```powershell
+yien-<version>-x86_64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCLOSEAPPLICATIONS
+```
+
+To uninstall silently, run `%LOCALAPPDATA%\Programs\YIEN\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS`. Silent uninstall keeps `%LOCALAPPDATA%\YIEN`. Interactive uninstall asks whether to keep or delete that data folder and defaults to keeping it. Upgrades replace program files and preserve the data folder and saved sessions. YIEN holds a named mutex while it runs. If it is running, Setup asks you to close it and rerun; it never closes it. Silent install/upgrade fails with Inno Setup exit code `7`; silent uninstall fails with a non-zero exit code. Use `/NOCLOSEAPPLICATIONS` so Inno Setup also refuses to close any other application that has a packaged file open.
+
+The per-user uninstall registry entry is `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E5F3AD8A-224E-4A19-83A6-5D8D604B1B81}_is1`. Auto-update can read its `UninstallString` value to locate the installed uninstaller.
 
 ### Removing YIEN
 
