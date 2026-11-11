@@ -16,6 +16,10 @@ pub const TARGET_TRIPLE: &str = "x86_64-pc-windows-msvc";
 pub const BINARIES: [&str; 2] = ["yien", "yien-hook"];
 /// The generated notice, written straight into the package folder.
 pub const THIRD_PARTY: &str = "THIRD-PARTY.md";
+/// The ConPTY package licence, kept out of the repository root while TBD-04 is open.
+pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
+/// Package name consumed by the portable archive and installer.
+pub const CONPTY_LICENSE_DEST: &str = "LICENSE-MIT-ConPTY.txt";
 
 /// PE optional-header subsystem of a GUI program.
 pub const SUBSYSTEM_GUI: u16 = 2;
@@ -325,6 +329,11 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
         std::fs::copy(&entry.source, &dest)
             .with_context(|| format!("copying {} to {}", entry.source.display(), dest.display()))?;
     }
+    std::fs::copy(
+        root.join(CONPTY_LICENSE_SOURCE),
+        package.join(CONPTY_LICENSE_DEST),
+    )
+    .with_context(|| format!("copying {CONPTY_LICENSE_SOURCE} into the distribution package"))?;
     crate::conpty::fetch_and_extract(&target, &package)?;
     std::fs::write(package.join(THIRD_PARTY), notice)
         .with_context(|| format!("writing {THIRD_PARTY}"))?;

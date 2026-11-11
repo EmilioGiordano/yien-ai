@@ -36,10 +36,11 @@ Source: "{#SourceDir}\yien.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\yien-hook.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\LICENSE-MIT-ConPTY.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\THIRD-PARTY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\INSTALLER-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceDir}\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Excludes: "LICENSE-MIT-ConPTY.txt"
 Source: "{#SourceDir}\LICENCE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
