@@ -50,6 +50,9 @@ pub fn fetch_and_extract(target: &Path, package_dir: &Path) -> anyhow::Result<()
             "-File",
         ])
         .arg(&script_path)
+        // Started from pwsh 7 (GitHub's default shell), Windows PowerShell 5.1
+        // inherits pwsh's PSModulePath and cannot load Get-FileHash.
+        .env_remove("PSModulePath")
         .env("YIEN_CONPTY_ARCHIVE", &archive)
         .env("YIEN_CONPTY_SHA256", SHA256)
         .env("YIEN_CONPTY_URL", PACKAGE_URL)
