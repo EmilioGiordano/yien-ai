@@ -280,6 +280,138 @@ fn rf_pan_09_block_selection_yields_a_rectangle() {
     assert_eq!(e.selection_text().as_deref(), Some("bcd\nhij\nnop"));
 }
 
+/// What a TUI sends on every redraw: erase each line it owns, write it again.
+const REDRAW_ROW_TWO: &[u8] = b"\x1b[2;1H\x1b[2Ktwo words";
+
+fn select_two(e: &mut AlacrittyEngine) {
+    e.feed(b"one\r\ntwo words\r\nthree");
+    e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(1, 2), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+}
+
+#[test]
+fn rf_pan_09_a_redraw_of_the_selected_line_keeps_the_selection() {
+    let mut e = engine(20, 5);
+    select_two(&mut e);
+    e.feed(REDRAW_ROW_TWO);
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+    let frame = e.frame();
+    assert!(frame.lines[1][0].flags.contains(CellFlags::SELECTED));
+    assert!(frame.lines[1][2].flags.contains(CellFlags::SELECTED));
+    assert!(!frame.lines[1][3].flags.contains(CellFlags::SELECTED));
+}
+
+#[test]
+fn rf_pan_09_erasing_the_screen_and_drawing_it_again_keeps_the_selection() {
+    for erase in [
+        &b"\x1b[1;1H\x1b[J"[..],
+        b"\x1b[5;20H\x1b[1J",
+        b"\x1b[2J",
+        b"\x1b[2J\x1b[3J",
+    ] {
+        let mut e = engine(20, 5);
+        select_two(&mut e);
+        e.feed(erase);
+        e.feed(b"\x1b[1;1Hone\r\ntwo words\r\nthree");
+        assert_eq!(
+            e.selection_text().as_deref(),
+            Some("two"),
+            "{}",
+            erase.escape_ascii()
+        );
+    }
+}
+
+#[test]
+fn rf_pan_09_a_redraw_inside_a_synchronized_update_keeps_the_selection() {
+    let mut e = engine(20, 5);
+    select_two(&mut e);
+    e.feed(b"\x1b[?2026h");
+    e.feed(REDRAW_ROW_TWO);
+    e.feed(b"\x1b[?2026l");
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+
+    e.feed(b"\x1b[?2026h");
+    e.feed(REDRAW_ROW_TWO);
+    assert!(e.sync_pending());
+    e.flush_sync();
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+}
+
+#[test]
+fn rf_pan_09_a_drag_goes_on_after_a_redraw() {
+    let mut e = engine(20, 5);
+    e.feed(b"one\r\ntwo words\r\nthree");
+    e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+    e.feed(REDRAW_ROW_TWO);
+    e.update_selection(vp(1, 2), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+}
+
+#[test]
+fn rf_pan_09_the_selection_follows_its_text_as_output_scrolls() {
+    let mut e = engine(20, 3);
+    e.feed(b"one\r\ntwo words\r\nthree");
+    e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(1, 2), Side::Right);
+    e.feed(b"\r\nfour\r\nfive");
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+    assert!(!e.frame().lines[1][0].flags.contains(CellFlags::SELECTED));
+}
+
+#[test]
+fn rf_pan_09_switching_screens_ends_the_selection() {
+    let mut e = engine(20, 5);
+    select_two(&mut e);
+    e.feed(b"\x1b[?1049h");
+    assert_eq!(e.selection_text(), None);
+
+    e.feed(b"\x1b[Hfull screen");
+    e.start_selection(vp(0, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(0, 3), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("full"));
+    e.feed(b"\x1b[?1049l");
+    assert_eq!(e.selection_text(), None);
+}
+
+#[test]
+fn rf_pan_09_copied_text_joins_wrapped_lines_and_drops_trailing_spaces() {
+    let mut e = engine(10, 4);
+    e.feed(b"abcdefghijklmno\r\nxy   \r\nz");
+    e.start_selection(vp(0, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(3, 0), Side::Right);
+    assert_eq!(
+        e.selection_text().as_deref(),
+        Some("abcdefghijklmno\nxy\nz")
+    );
+}
+
+/// Windows PowerShell 5.1 on the bundled ConPTY 1.24.261001001, 100 by 30:
+/// its start, then `echo hello-world` typed and run. Recorded from a real
+/// pseudo console, less the redraws of the line between its first and last
+/// typed character.
+const CONPTY_1_24_POWERSHELL: &[u8] = b"\x1b[1t\x1b[6n\x1b[c\x1b[?1004h\x1b[?9001h\x1b[1;1HPS C:\\> \
+    \x1b[?25l\x1b[1;9H\x1b[93me\x1b[37m\x1b[40m\x1b[0m\x1b[1;10H\x1b[?25h\
+    \x1b[?25l\x1b[1;9H\x1b[93mecho\x1b[37m\x1b[40m \x1b[37mhello-world\x1b[37m\x1b[40m\x1b[0m\x1b[1;25H\x1b[?25h\
+    \x1b[2;1Hhello-world\r\nPS C:\\> ";
+
+#[test]
+fn rf_pan_09_powershell_on_the_bundled_conpty_leaves_the_mouse_to_the_terminal() {
+    let mut e = engine(100, 30);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    let modes = e.modes();
+    assert_eq!(modes.mouse, MouseTracking::Off);
+    assert!(modes.focus_reporting);
+    assert_eq!(e.frame().line_text(1), "hello-world");
+
+    e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(1, 4), Side::Right);
+    // What PSReadLine sends for a key typed at the prompt below.
+    e.feed(b"\x1b[?25l\x1b[3;9H\x1b[93mx\x1b[37m\x1b[40m\x1b[0m\x1b[3;10H\x1b[?25h");
+    assert_eq!(e.selection_text().as_deref(), Some("hello"));
+}
+
 #[test]
 fn rf_pan_09_bracketed_paste_mode_is_reported() {
     let mut e = engine(10, 3);
