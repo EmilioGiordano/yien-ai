@@ -384,8 +384,15 @@ impl Shell {
                 CoreMsg::PaneExited { pane, code } => {
                     self.workspace.pane_exited(pane, code);
                 }
-                CoreMsg::SelectionText { text, .. } => {
-                    if let Some(text) = text.filter(|t| !t.is_empty()) {
+                CoreMsg::SelectionText { pane, text } => {
+                    let text = text.filter(|t| !t.is_empty());
+                    tracing::debug!(
+                        pane = pane.get(),
+                        copied = text.is_some(),
+                        "selection answered"
+                    );
+                    if let Some(text) = text {
+                        let text = crate::grid::clipboard_text(&text, cfg!(windows));
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                     continue;
