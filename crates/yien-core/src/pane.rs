@@ -980,6 +980,8 @@ impl Actor {
                 self.restored = None;
             }
             self.step(&Signal::Input);
+            lock(&self.engine).clear_selection();
+            self.dirty = true;
         }
         if self.session.is_some() && !input.bytes.is_empty() {
             self.outbox.input.push_back(input.bytes);
