@@ -9,6 +9,7 @@ mod files;
 mod panic_log;
 mod profiles;
 mod settings;
+mod shell_switch;
 
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -77,7 +78,7 @@ fn main() -> ExitCode {
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let user_profiles = profiles::load();
-    let (settings, settings_watcher) = settings::start(user_profiles.notices);
+    let (settings, settings_watcher, shell_switch) = settings::start(user_profiles.notices);
     let config = CoreConfig {
         shell_integration: settings::shell_integration(&settings.initial),
         profiles: user_profiles.profiles,
@@ -105,6 +106,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let to_core = core.clone();
+    shell_switch.attach(Box::new(move |on| deliver_shell_integration(&to_core, on)));
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
     let files = files::start();
@@ -177,6 +180,27 @@ fn claim_data_dir(window: &Arc<AtomicIsize>) -> Option<Option<Instance>> {
         Err(error) => {
             tracing::warn!("the single instance check failed, starting anyway: {error}");
             Some(None)
+        }
+    }
+}
+
+/// Tells the core whether shells started from now on report their folder,
+/// waiting up to a second while its queue is full. Runs on the settings
+/// watcher's thread.
+fn deliver_shell_integration(core: &CoreHandle, on: bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut msg = ClientMsg::SetShellIntegration { on };
+    loop {
+        match core.try_send(msg) {
+            Ok(()) => return true,
+            Err(SendError::Busy(back)) if Instant::now() < deadline => {
+                msg = back;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                tracing::warn!(on, "the shell integration change did not reach the core");
+                return false;
+            }
         }
     }
 }
