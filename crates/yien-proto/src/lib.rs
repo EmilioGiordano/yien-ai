@@ -42,6 +42,15 @@ pub use path::{folder_key, same_folder};
 /// ```
 pub const PROTO_VERSION: u32 = 14;
 
+/// The least part of a pair of neighbouring panes either one keeps when
+/// [`Command::SetDivider`] moves the divider between them: a share closer to
+/// 0 or 1 is clamped to this, so no pane shrinks to nothing.
+///
+/// ```
+/// assert!(yien_proto::MIN_DIVIDER_SHARE > 0.0 && yien_proto::MIN_DIVIDER_SHARE < 0.5);
+/// ```
+pub const MIN_DIVIDER_SHARE: f32 = 0.02;
+
 /// The id of the built-in profile that runs the user's shell; every other
 /// profile runs an agent.
 ///

@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
-    AgentState, Command, CoreMsg, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo,
-    ProjectId, ProjectInfo, SideBars, TabId, TabInfo, WorkspaceSnapshot, same_folder,
+    AgentState, Command, CoreMsg, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PendingQuestion, ProfileId,
+    ProfileInfo, ProjectId, ProjectInfo, SideBars, TabId, TabInfo, WorkspaceSnapshot, same_folder,
 };
 use yien_session::is_session_id;
 
@@ -550,6 +550,12 @@ impl Workspace {
                 let tab = self.tab_mut(tab_id)?;
                 let (Some(lb), Some(la)) = (tab.leaf_of(before), tab.leaf_of(after)) else {
                     return Err(CoreError::UnknownPane(before));
+                };
+                // Out of (0, 1) stays out, for the tree to refuse.
+                let share = if share > 0.0 && share < 1.0 {
+                    share.clamp(MIN_DIVIDER_SHARE, 1.0 - MIN_DIVIDER_SHARE)
+                } else {
+                    share
                 };
                 if tab.tree.set_divider(lb, la, share) {
                     self.emit_tab(tab_id, &mut fx);
@@ -1547,6 +1553,62 @@ mod tests {
             assert!(fx.is_empty());
         }
         assert_eq!(flex(&ws), after);
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_never_leaves_a_pane_with_nothing() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let split = Command::SplitPane {
+            pane: a,
+            orientation: Orientation::Vertical,
+            profile: None,
+        };
+        let b = spawned(&run(&mut ws, split))[0];
+        let first = |ws: &Workspace| {
+            let LayoutNode::Split { children, .. } = ws.tab_info(ws.tab(tab).unwrap()).layout
+            else {
+                panic!("expected a split");
+            };
+            children[0].flex / (children[0].flex + children[1].flex)
+        };
+        let drag = |share| Command::SetDivider {
+            before: a,
+            after: b,
+            share,
+        };
+        run(&mut ws, drag(0.0001));
+        assert!((first(&ws) - MIN_DIVIDER_SHARE).abs() < 1e-5);
+        run(&mut ws, drag(0.9999));
+        assert!((first(&ws) - (1.0 - MIN_DIVIDER_SHARE)).abs() < 1e-5);
+        // Clamped to where it already is: nothing to tell.
+        assert!(run(&mut ws, drag(0.999)).is_empty());
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_across_tabs_or_with_an_unknown_pane_fails() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        let project_id = ws.snapshot().projects[0].id;
+        let other = spawned(&run(
+            &mut ws,
+            Command::NewTab {
+                project: project_id,
+                name: None,
+                profile: None,
+            },
+        ))[0];
+        let before = ws.snapshot();
+        let unknown = PaneId::new(999);
+        for (x, y) in [(a, other), (a, unknown), (unknown, a)] {
+            let command = Command::SetDivider {
+                before: x,
+                after: y,
+                share: 0.5,
+            };
+            assert!(ws.apply(command, &resolve).is_err(), "{x:?} {y:?}");
+            assert_eq!(ws.snapshot(), before);
+        }
     }
 
     #[test]

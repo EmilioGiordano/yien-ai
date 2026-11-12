@@ -392,7 +392,8 @@ pub enum Command {
     /// the first takes `share` of the space the two hold together; the rest
     /// of the split stays put (RF-PAN-02). Ignored when the panes are not on
     /// the two sides of one divider, or `share` is not strictly between 0
-    /// and 1.
+    /// and 1; a share closer than [`crate::MIN_DIVIDER_SHARE`] to either end
+    /// is clamped there.
     SetDivider {
         /// Any pane in the child before the divider.
         before: PaneId,
