@@ -2440,6 +2440,7 @@ mod tests {
         CloseProject(usize),
         Collapse(usize, bool),
         RenameTab(usize, usize),
+        MoveTab(usize, usize),
         NewTab(usize),
         CloseTab(usize),
         SelectTab(usize),
@@ -2462,6 +2463,7 @@ mod tests {
             i.clone().prop_map(Op::CloseProject),
             (i.clone(), any::<bool>()).prop_map(|(a, b)| Op::Collapse(a, b)),
             (i.clone(), i.clone()).prop_map(|(a, b)| Op::RenameTab(a, b)),
+            (i.clone(), i.clone()).prop_map(|(a, b)| Op::MoveTab(a, b)),
             i.clone().prop_map(Op::NewTab),
             i.clone().prop_map(Op::CloseTab),
             i.clone().prop_map(Op::SelectTab),
@@ -2515,6 +2517,14 @@ mod tests {
                 tab: pick(&tabs, *i)?,
                 name: ["", " ", "review", "Ñandú 2"][n % 4].into(),
             },
+            Op::MoveTab(i, to) => {
+                let tab = pick(&tabs, *i)?;
+                Command::MoveTab {
+                    tab,
+                    project: ws.tab(tab).ok()?.project,
+                    to_index: u32::try_from(*to).ok()?,
+                }
+            }
             Op::NewTab(i) => Command::NewTab {
                 project: pick(&projects, *i)?,
                 name: None,
