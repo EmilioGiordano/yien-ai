@@ -2288,7 +2288,7 @@ impl Shell {
         let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
         let drop_target = !with_project;
         let mark = self.row_mark(id);
-        let close_shown = tab_controls::close_always_shown(active, self.ringed_tab() == Some(id));
+        let close_shown = active || self.ringed_tab() == Some(id);
         div()
             .id(("tab", id.get()))
             .group(tab_controls::row_group(id))

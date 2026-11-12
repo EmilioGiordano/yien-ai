@@ -21,12 +21,6 @@ pub(crate) fn close_tab_label(tab: &str) -> String {
     format!("Close tab {tab}")
 }
 
-/// Whether a row's × shows without the pointer over the row: on the
-/// selected row and on the row under the tab bar's keyboard cursor.
-pub(crate) fn close_always_shown(active: bool, under_cursor: bool) -> bool {
-    active || under_cursor
-}
-
 /// The group a tab row's hover is tracked under, so its × shows with it.
 pub(super) fn row_group(tab: TabId) -> SharedString {
     format!("tab-row-{}", tab.get()).into()
@@ -122,7 +116,7 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_always_shown, close_tab_label, new_tab_label};
+    use super::{close_tab_label, new_tab_label};
     use crate::catalog::default_keys;
 
     #[test]
@@ -136,12 +130,5 @@ mod tests {
     #[test]
     fn rf_esp_03_the_close_button_names_its_tab() {
         assert_eq!(close_tab_label("Tab 2"), "Close tab Tab 2");
-    }
-
-    #[test]
-    fn rf_esp_02_a_row_close_button_shows_on_the_selected_or_cursor_row() {
-        assert!(close_always_shown(true, false));
-        assert!(close_always_shown(false, true));
-        assert!(!close_always_shown(false, false), "only on hover");
     }
 }
