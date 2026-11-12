@@ -150,6 +150,10 @@ actions!(
         ToggleTabMuted,
         /// Opens a tab with the shell in the selected tab's project.
         NewTab,
+        /// Opens a tab with the shell in the folder `ui.tabs.default_dir`
+        /// names, the home folder by default, adding it as a project when it
+        /// is not one (RF-ESP-01, RF-ESP-03).
+        NewDefaultTab,
         /// Opens a tab with Claude Code in the selected tab's project
         /// (RF-PAN-18).
         NewClaudeTab,
@@ -316,6 +320,7 @@ pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
 pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
+pub(crate) const DEFAULT_TAB_KEYS: &str = "Ctrl+Shift+H";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
@@ -753,6 +758,12 @@ mod tests {
     #[test]
     fn rf_esp_01_add_project_has_a_key_from_a_terminal() {
         assert!(first_is("ctrl-shift-k", &TERMINAL_STACK, &AddProject));
+    }
+
+    #[test]
+    fn rf_esp_03_a_tab_in_the_default_folder_has_a_key_from_a_terminal() {
+        assert!(first_is("ctrl-shift-h", &TERMINAL_STACK, &NewDefaultTab));
+        assert!(first_is("ctrl-shift-t", &TERMINAL_STACK, &NewTab));
     }
 
     #[test]

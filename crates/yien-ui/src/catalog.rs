@@ -154,6 +154,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-t"]
     ),
     command!(
+        "tab.new_default",
+        "tab: new tab in the default folder",
+        NewDefaultTab,
+        ["ctrl-shift-h"]
+    ),
+    command!(
         "tab.new_claude",
         "tab: new tab with Claude Code",
         NewClaudeTab,
@@ -576,6 +582,7 @@ mod tests {
             ("palette.open", PALETTE_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
             ("tab.new", NEW_TAB_KEYS),
+            ("tab.new_default", DEFAULT_TAB_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }
