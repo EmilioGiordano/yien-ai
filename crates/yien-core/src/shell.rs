@@ -219,13 +219,17 @@ mod tests {
 
     #[test]
     fn rf_ses_01_powershell_starts_with_the_prompt_hook() {
-        for program in [
+        let mut programs = vec![
             "pwsh.exe",
             "powershell.exe",
             "PowerShell.EXE",
-            r"C:\Program Files\PowerShell\7\pwsh.exe",
             "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-        ] {
+        ];
+        // A backslash separates path parts only on Windows.
+        if cfg!(windows) {
+            programs.push(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        }
+        for program in programs {
             let shell = ShellCommand::new(program).reporting_cwd(Some("$G"));
             assert_eq!(shell.program, program);
             assert_eq!(
