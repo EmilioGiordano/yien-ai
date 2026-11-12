@@ -1,21 +1,24 @@
-//! The pane menu and the terminal menu (RF-PAN-20): a small popup drawn at a
-//! window position, over a pure model of items, separators and a cursor.
+//! A small popup menu any part of the window can open: a pure model of
+//! items, separators and a cursor, and its drawing at a window position.
+//! What the items do belongs to the caller, which gets a [`MenuEvent`] for
+//! every key and click and runs the action [`Menu::respond`] hands back.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_proto::{Command, Orientation, PaneId, TabId};
 
-use super::Shell;
-use crate::actions::*;
-use crate::catalog::{shortcut, spec};
-use crate::model::PaneView;
+use crate::actions::{MENU_CONTEXT, MenuClose, MenuConfirm, MenuDown, MenuUp};
+use crate::theme::Theme;
 
-const MENU_WIDTH: f32 = 240.0;
+pub(crate) const MENU_WIDTH: f32 = 240.0;
 /// How close to the window's edges a menu may come.
-const EDGE_MARGIN: f32 = 8.0;
+pub(crate) const EDGE_MARGIN: f32 = 8.0;
+/// How long after a mouse-down outside closed a menu the click on its own
+/// button counts as the same click.
+const SAME_CLICK: Duration = Duration::from_millis(500);
 
 /// One thing a menu can run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +34,32 @@ pub(crate) struct MenuItem<A> {
 pub(crate) enum MenuEntry<A> {
     Item(MenuItem<A>),
     Separator,
+}
+
+/// What happened in an open menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuEvent {
+    Up,
+    Down,
+    /// Enter: run the item under the cursor.
+    Confirm,
+    /// A click on the item at this index.
+    Pick(usize),
+    /// Escape.
+    Close,
+    /// A mouse-down outside the menu.
+    ClickedOutside,
+}
+
+/// What the menu's owner does after an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MenuOutcome<A> {
+    /// The menu stays open, maybe with its cursor moved.
+    Stay,
+    /// Close the menu, then run this.
+    Run(A),
+    /// Close the menu.
+    Close,
 }
 
 /// A menu's items and the one the arrows are on. The cursor rests only on
@@ -101,397 +130,98 @@ impl<A> Menu<A> {
     }
 }
 
-/// What the pane and terminal menus run, on the pane they were opened for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PaneAction {
-    Copy,
-    Paste,
-    SplitRight,
-    SplitDown,
-    ToggleMaximize,
-    Relaunch,
-    Terminate,
-    CopySessionId,
-    NewTab,
-    CloseTab,
-    ClosePane,
-}
-
-impl PaneAction {
-    /// The catalog command that does the same from the palette (RF-NAV-02).
-    pub(super) fn command(self) -> &'static str {
-        match self {
-            PaneAction::Copy => "terminal.copy",
-            PaneAction::Paste => "terminal.paste",
-            PaneAction::SplitRight => "pane.split_right",
-            PaneAction::SplitDown => "pane.split_down",
-            PaneAction::ToggleMaximize => "pane.maximize",
-            PaneAction::Relaunch => "pane.relaunch",
-            PaneAction::Terminate => "pane.terminate",
-            PaneAction::CopySessionId => "pane.copy_session_id",
-            PaneAction::NewTab => "tab.new",
-            PaneAction::CloseTab => "tab.close",
-            PaneAction::ClosePane => "pane.close",
+impl<A: Clone> Menu<A> {
+    /// Applies a key or a click. Enter or a click on something that cannot
+    /// run leaves the menu open.
+    pub(crate) fn respond(&mut self, event: MenuEvent) -> MenuOutcome<A> {
+        let run = |action: Option<&A>| match action {
+            Some(action) => MenuOutcome::Run(action.clone()),
+            None => MenuOutcome::Stay,
+        };
+        match event {
+            MenuEvent::Up => {
+                self.move_by(-1);
+                MenuOutcome::Stay
+            }
+            MenuEvent::Down => {
+                self.move_by(1);
+                MenuOutcome::Stay
+            }
+            MenuEvent::Confirm => run(self.chosen()),
+            MenuEvent::Pick(at) => run(self.pick(at)),
+            MenuEvent::Close | MenuEvent::ClickedOutside => MenuOutcome::Close,
         }
     }
 }
 
-fn item(
-    label: &str,
-    action: PaneAction,
-    enabled: bool,
-    keys: &dyn Fn(&str) -> Option<String>,
-) -> MenuEntry<PaneAction> {
-    MenuEntry::Item(MenuItem {
-        label: label.to_owned(),
-        keys: keys(action.command()),
-        enabled,
-        action,
-    })
+/// Whether a click on the button of menu `key` is the same click whose
+/// mouse-down just closed that menu from outside, so it must not open it
+/// again. `closed` is the menu that closed that way last, and when.
+pub(crate) fn closed_by_this_click<K: PartialEq>(
+    closed: Option<&(K, Instant)>,
+    key: &K,
+    now: Instant,
+) -> bool {
+    closed.is_some_and(|(k, at)| k == key && now.saturating_duration_since(*at) < SAME_CLICK)
 }
 
-/// The pane head's menu (RF-PAN-20). `maximized` says the pane fills its tab
-/// now, `alone` that it is its tab's only pane; `keys` answers with a
-/// command's current keys.
-pub(super) fn pane_menu(
-    pane: &PaneView,
-    maximized: bool,
-    alone: bool,
-    keys: &dyn Fn(&str) -> Option<String>,
-) -> Menu<PaneAction> {
-    use PaneAction::*;
-    let maximize = if maximized {
-        "Restore layout"
-    } else {
-        "Maximize"
-    };
-    Menu::new(vec![
-        item("Split right", SplitRight, true, keys),
-        item("Split down", SplitDown, true, keys),
-        MenuEntry::Separator,
-        item(maximize, ToggleMaximize, maximized || !alone, keys),
-        item("Relaunch", Relaunch, pane.exited, keys),
-        item("Terminate", Terminate, !pane.exited, keys),
-        item(
-            "Copy session id",
-            CopySessionId,
-            pane.session_id.is_some(),
-            keys,
-        ),
-        MenuEntry::Separator,
-        item("Close pane", ClosePane, true, keys),
-    ])
-}
-
-/// The menu of a right click in the terminal.
-pub(super) fn terminal_menu(
-    has_selection: bool,
-    keys: &dyn Fn(&str) -> Option<String>,
-) -> Menu<PaneAction> {
-    use PaneAction::*;
-    Menu::new(vec![
-        item("Copy", Copy, has_selection, keys),
-        item("Paste", Paste, true, keys),
-        MenuEntry::Separator,
-        item("Split right", SplitRight, true, keys),
-        item("Split down", SplitDown, true, keys),
-        MenuEntry::Separator,
-        item("New tab", NewTab, true, keys),
-        item("Close tab", CloseTab, true, keys),
-        item("Close pane", ClosePane, true, keys),
-    ])
-}
-
-/// Which menu is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MenuKind {
-    Pane,
-    Terminal,
-}
-
-/// The menu while open, for one pane.
-pub(super) struct OpenMenu {
-    model: Menu<PaneAction>,
-    pane: PaneId,
-    kind: MenuKind,
+/// A menu on screen: its model, its accessible name, where it opens and the
+/// keyboard it holds.
+pub(crate) struct OpenMenu<A> {
+    model: Menu<A>,
+    name: SharedString,
     at: Point<Pixels>,
     focus: FocusHandle,
     _blur: Subscription,
 }
 
-impl Shell {
-    /// Opens a menu for `pane` with its top left at `at`, moving the
-    /// keyboard to it; the pane gets the focus, so the keyboard goes back
-    /// there when the menu closes.
-    pub(super) fn open_menu(
-        &mut self,
-        pane: PaneId,
-        kind: MenuKind,
+impl<A> OpenMenu<A> {
+    /// Shows `model` with its top left at `at` (window coordinates) and moves
+    /// the keyboard to it. `on_blur` runs when something else takes the
+    /// keyboard; the owner drops the menu then, leaving the keyboard where
+    /// it went.
+    pub(crate) fn open<V: 'static>(
+        model: Menu<A>,
+        name: impl Into<SharedString>,
         at: Point<Pixels>,
-        has_selection: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.workspace.tab_of(pane) else {
-            return;
-        };
-        // Dropped first, so its blur cannot close the menu opened now.
-        self.menu = None;
-        let maximized = tab.maximized == Some(pane);
-        let alone = tab.layout.panes().len() == 1;
-        let focused = tab.focused == pane;
-        self.split_menu = None;
-        self.close_tray(window, cx);
-        self.close_palette(window, cx);
-        self.finish_rename(true, window, cx);
-        if !focused {
-            self.command(Command::FocusPane { pane }, cx);
-        }
-        let model = {
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            let keys = |id: &str| shortcut(&keymap, (spec(id)?.action)().as_ref());
-            match kind {
-                MenuKind::Pane => pane_menu(&self.workspace.pane(pane), maximized, alone, &keys),
-                MenuKind::Terminal => terminal_menu(has_selection, &keys),
-            }
-        };
+        cx: &mut Context<V>,
+        on_blur: impl Fn(&mut V, &mut Context<V>) + 'static,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        // A window key (the palette, F6, the tray) takes the keyboard without
-        // closing the menu; left open, it would keep `sync_focus` from moving
-        // the keyboard. Whatever took the focus keeps it.
-        let blurred = focus.clone();
-        let blur = cx.on_blur(&focus, window, move |this, _, cx| {
-            if this.menu.as_ref().is_some_and(|m| m.focus == blurred) {
-                this.menu = None;
-                cx.notify();
-            }
-        });
-        self.menu = Some(OpenMenu {
+        let blur = cx.on_blur(&focus, window, move |this, _, cx| on_blur(this, cx));
+        Self {
             model,
-            pane,
-            kind,
+            name: name.into(),
             at,
             focus,
             _blur: blur,
-        });
-        cx.notify();
-    }
-
-    /// Where the pane menu opens when it is not opened at the pointer: under
-    /// the right end of the pane's head.
-    fn pane_menu_anchor(&self, pane: PaneId) -> Option<Point<Pixels>> {
-        let head = *self.pane_heads.borrow().get(&pane)?;
-        Some(point(
-            head.right() - px(MENU_WIDTH + 4.0),
-            head.bottom() + px(2.0),
-        ))
-    }
-
-    /// Whether the pane menu of `pane` is open.
-    pub(super) fn menu_open_for(&self, pane: PaneId) -> bool {
-        self.menu
-            .as_ref()
-            .is_some_and(|m| m.pane == pane && m.kind == MenuKind::Pane)
-    }
-
-    /// The "Pane actions" button toggles the pane menu, unless the
-    /// mouse-down of that same click just closed it from outside.
-    pub(super) fn pane_menu_clicked(
-        &mut self,
-        pane: PaneId,
-        clicked_at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let just_closed = self
-            .menu_closed_at
-            .take()
-            .is_some_and(|(p, at)| p == pane && at.elapsed() < Duration::from_millis(500));
-        if self.menu_open_for(pane) {
-            self.close_menu(window, cx);
-        } else if !just_closed {
-            let at = self.pane_menu_anchor(pane).unwrap_or(clicked_at);
-            self.open_menu(pane, MenuKind::Pane, at, false, window, cx);
         }
     }
 
-    /// The `pane.actions` command: the focused pane's menu (RNF-16).
-    pub(super) fn open_pane_menu(
-        &mut self,
-        _: &OpenPaneMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pane) = self.focused_pane() else {
-            self.say("There is no pane.", cx);
-            return;
+    pub(crate) fn model_mut(&mut self) -> &mut Menu<A> {
+        &mut self.model
+    }
+
+    /// The menu, drawn over everything at its position and kept inside the
+    /// window. Every key and click goes to `on_event`.
+    pub(crate) fn render<V: 'static>(
+        &self,
+        t: &Theme,
+        cx: &mut Context<V>,
+        on_event: impl Fn(&mut V, MenuEvent, &mut Window, &mut Context<V>) + 'static,
+    ) -> AnyElement {
+        let on_event = Rc::new(on_event);
+        let send = |event: MenuEvent| {
+            let on_event = Rc::clone(&on_event);
+            move |this: &mut V, window: &mut Window, cx: &mut Context<V>| {
+                on_event(this, event, window, cx)
+            }
         };
-        let at = self
-            .pane_menu_anchor(pane)
-            .unwrap_or_else(|| point(px(EDGE_MARGIN), px(EDGE_MARGIN)));
-        self.open_menu(pane, MenuKind::Pane, at, false, window, cx);
-    }
-
-    pub(super) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
-            self.give_back_keyboard(window, cx);
-        }
-    }
-
-    /// A menu for a pane that left, or whose tab is no longer shown, goes.
-    pub(super) fn drop_stale_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stale = self.menu.as_ref().is_some_and(|m| {
-            self.workspace.tab_of(m.pane).map(|t| t.id)
-                != self.workspace.selected_tab().map(|t| t.id)
-        });
-        if stale {
-            self.close_menu(window, cx);
-        }
-    }
-
-    fn menu_up(&mut self, _: &MenuUp, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.menu.as_mut() {
-            menu.model.move_by(-1);
-            cx.notify();
-        }
-    }
-
-    fn menu_down(&mut self, _: &MenuDown, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = self.menu.as_mut() {
-            menu.model.move_by(1);
-            cx.notify();
-        }
-    }
-
-    fn menu_confirm(&mut self, _: &MenuConfirm, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_menu(None, window, cx);
-    }
-
-    fn menu_close(&mut self, _: &MenuClose, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_menu(window, cx);
-    }
-
-    /// Runs item `at`, or the one under the cursor when `None`. The menu
-    /// closes first, so the keyboard is back on the pane when it runs.
-    fn run_menu(&mut self, at: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(menu) = &self.menu else {
-            return;
-        };
-        let action = match at {
-            Some(at) => menu.model.pick(at),
-            None => menu.model.chosen(),
-        };
-        let Some(action) = action.copied() else {
-            return;
-        };
-        let pane = menu.pane;
-        self.close_menu(window, cx);
-        self.run_pane_action(pane, action, window, cx);
-    }
-
-    fn run_pane_action(
-        &mut self,
-        pane: PaneId,
-        action: PaneAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match action {
-            PaneAction::Copy => {
-                if let Some(terminal) = self.terminals.get(&pane) {
-                    terminal.update(cx, |t, cx| t.copy_selection(cx));
-                }
-            }
-            PaneAction::Paste => {
-                if let Some(terminal) = self.terminals.get(&pane) {
-                    terminal.update(cx, |t, cx| t.paste_clipboard(cx));
-                }
-            }
-            PaneAction::SplitRight => self.split_pane(pane, Orientation::Horizontal, None, cx),
-            PaneAction::SplitDown => self.split_pane(pane, Orientation::Vertical, None, cx),
-            PaneAction::ToggleMaximize => self.command(Command::ToggleMaximize { pane }, cx),
-            PaneAction::Relaunch => self.command(Command::RelaunchPane { pane }, cx),
-            PaneAction::Terminate => self.terminate(pane, cx),
-            PaneAction::CopySessionId => self.copy_session_id_of(pane, cx),
-            PaneAction::NewTab => self.new_tab_with(None, cx),
-            PaneAction::CloseTab => {
-                if let Some(tab) = self.workspace.tab_of(pane).map(|t| t.id) {
-                    self.close_tab_id(tab, window, cx);
-                }
-            }
-            PaneAction::ClosePane => self.close_pane_id(pane, window, cx),
-        }
-    }
-
-    /// Ends the pane's program and keeps the pane (RF-PAN-20).
-    fn terminate(&mut self, id: PaneId, cx: &mut Context<Self>) {
-        let pane = self.workspace.pane(id);
-        if pane.exited {
-            self.say(format!("{} is not running.", pane.name), cx);
-        } else {
-            self.command(Command::TerminatePane { pane: id }, cx);
-        }
-    }
-
-    pub(super) fn terminate_pane(
-        &mut self,
-        _: &TerminatePane,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pane) = self.focused_pane() {
-            self.terminate(pane, cx);
-        }
-    }
-
-    fn copy_session_id_of(&mut self, id: PaneId, cx: &mut Context<Self>) {
-        let pane = self.workspace.pane(id);
-        match pane.session_id {
-            Some(session) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(session));
-                self.say(format!("Copied the session id of {}.", pane.name), cx);
-            }
-            None => self.say(format!("{} has no agent session.", pane.name), cx),
-        }
-    }
-
-    pub(super) fn copy_session_id(
-        &mut self,
-        _: &CopySessionId,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pane) = self.focused_pane() {
-            self.copy_session_id_of(pane, cx);
-        }
-    }
-
-    /// Closes a whole tab; the last tab on a worktree asks first whether to
-    /// keep the worktree (RF-ESP-07).
-    fn close_tab_id(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ask_before_closing_tab(tab, window, cx) {
-            self.command(Command::CloseTab { tab }, cx);
-        }
-    }
-
-    pub(super) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        match self.workspace.selected_tab().map(|t| t.id) {
-            Some(tab) => self.close_tab_id(tab, window, cx),
-            None => {
-                self.say("There is no tab to close.", cx);
-            }
-        }
-    }
-
-    /// The open menu, drawn over everything at its window position and kept
-    /// inside the window.
-    pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let open = self.menu.as_ref()?;
-        let t = self.theme;
-        let cursor = open.model.cursor();
-        let rows: Vec<AnyElement> = open
+        let cursor = self.model.cursor();
+        let hover = t.term_raised;
+        let rows: Vec<AnyElement> = self
             .model
             .entries()
             .iter()
@@ -503,19 +233,54 @@ impl Shell {
                     .h(px(1.0))
                     .bg(t.term_line)
                     .into_any_element(),
-                MenuEntry::Item(item) => self.render_menu_item(at, item, cursor == Some(at), cx),
+                MenuEntry::Item(item) => {
+                    let enabled = item.enabled;
+                    let selected = cursor == Some(at);
+                    let pick = send(MenuEvent::Pick(at));
+                    h_flex()
+                        .id(("menu-item", at))
+                        .role(Role::MenuItem)
+                        .aria_label(item.label.clone())
+                        .aria_selected(selected)
+                        .when_some(item.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
+                        .when(!enabled, |d| d.aria_description("Unavailable"))
+                        .items_center()
+                        .gap(px(12.0))
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .rounded(px(5.0))
+                        .when(selected, |d| d.bg(t.term_raised))
+                        .when(enabled, |d| {
+                            d.cursor_pointer()
+                                .hover(move |s| s.bg(hover))
+                                .on_click(cx.listener(move |this, _, w, cx| pick(this, w, cx)))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(if enabled { t.term_text } else { t.term_faint })
+                                .child(item.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(t.term_faint)
+                                .child(item.keys.clone().unwrap_or_default()),
+                        )
+                        .into_any_element()
+                }
             })
             .collect();
-        let name = match open.kind {
-            MenuKind::Pane => format!("{} actions", self.workspace.pane(open.pane).name),
-            MenuKind::Terminal => "Terminal actions".to_owned(),
-        };
-        let pane = open.pane;
+        let up = send(MenuEvent::Up);
+        let down = send(MenuEvent::Down);
+        let confirm = send(MenuEvent::Confirm);
+        let close = send(MenuEvent::Close);
+        let outside = send(MenuEvent::ClickedOutside);
         let menu = v_flex()
-            .id("pane-menu")
+            .id("menu")
             .role(Role::Menu)
-            .aria_label(name)
-            .track_focus(&open.focus)
+            .aria_label(self.name.clone())
+            .track_focus(&self.focus)
             .key_context(MENU_CONTEXT)
             .occlude()
             .w(px(MENU_WIDTH))
@@ -526,75 +291,29 @@ impl Shell {
             .bg(t.term_bg)
             .text_size(t.text(12.5))
             .shadow_lg()
-            .on_action(cx.listener(Self::menu_up))
-            .on_action(cx.listener(Self::menu_down))
-            .on_action(cx.listener(Self::menu_confirm))
-            .on_action(cx.listener(Self::menu_close))
-            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
-                this.menu_closed_at = Some((pane, Instant::now()));
-                this.close_menu(window, cx);
-            }))
+            .on_action(cx.listener(move |this, _: &MenuUp, w, cx| up(this, w, cx)))
+            .on_action(cx.listener(move |this, _: &MenuDown, w, cx| down(this, w, cx)))
+            .on_action(cx.listener(move |this, _: &MenuConfirm, w, cx| confirm(this, w, cx)))
+            .on_action(cx.listener(move |this, _: &MenuClose, w, cx| close(this, w, cx)))
+            .on_mouse_down_out(cx.listener(move |this, _, w, cx| outside(this, w, cx)))
             .children(rows);
-        Some(deferred(
+        deferred(
             anchored()
-                .position(open.at)
+                .position(self.at)
                 .snap_to_window_with_margin(px(EDGE_MARGIN))
                 .child(menu),
-        ))
-    }
-
-    fn render_menu_item(
-        &self,
-        at: usize,
-        item: &MenuItem<PaneAction>,
-        selected: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = self.theme;
-        let hover = t.term_raised;
-        let enabled = item.enabled;
-        h_flex()
-            .id(("menu-item", at))
-            .role(Role::MenuItem)
-            .aria_label(item.label.clone())
-            .when_some(item.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
-            .when(!enabled, |d| d.aria_description("Unavailable"))
-            .items_center()
-            .gap(px(12.0))
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .when(selected, |d| d.bg(t.term_raised))
-            .when(enabled, |d| {
-                d.cursor_pointer()
-                    .hover(move |s| s.bg(hover))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_menu(Some(at), window, cx);
-                    }))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(if enabled { t.term_text } else { t.term_faint })
-                    .child(item.label.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(t.term_faint)
-                    .child(item.keys.clone().unwrap_or_default()),
-            )
-            .into_any_element()
+        )
+        .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::{Menu, MenuEntry, MenuItem, PaneAction, pane_menu, terminal_menu};
-    use crate::catalog::spec;
-    use crate::model::{AgentState, PaneView};
-    use yien_proto::{PaneId, ProfileId};
+    use super::{
+        Menu, MenuEntry, MenuEvent, MenuItem, MenuOutcome, SAME_CLICK, closed_by_this_click,
+    };
+    use std::time::{Duration, Instant};
 
     fn entry(label: &'static str, enabled: bool) -> MenuEntry<&'static str> {
         MenuEntry::Item(MenuItem {
@@ -614,49 +333,6 @@ mod tests {
             entry("c", false),
             MenuEntry::Separator,
         ])
-    }
-
-    fn no_keys(_: &str) -> Option<String> {
-        None
-    }
-
-    fn pane() -> PaneView {
-        PaneView {
-            id: PaneId::new(1),
-            name: "claude".into(),
-            profile: "Claude Code".into(),
-            cwd: None,
-            profile_id: ProfileId::new("claude"),
-            state: AgentState::Idle,
-            needs_reason: None,
-            running: true,
-            exit_code: None,
-            exited: false,
-            needs_you_since: None,
-            attention_since: None,
-            question: None,
-            signal_lost: false,
-            session_id: None,
-            runs_session: true,
-        }
-    }
-
-    fn items(menu: &Menu<PaneAction>) -> Vec<(String, bool)> {
-        menu.entries()
-            .iter()
-            .filter_map(|e| match e {
-                MenuEntry::Item(i) => Some((i.label.clone(), i.enabled)),
-                MenuEntry::Separator => None,
-            })
-            .collect()
-    }
-
-    fn enabled(menu: &Menu<PaneAction>, label: &str) -> bool {
-        items(menu)
-            .into_iter()
-            .find(|(l, _)| l == label)
-            .unwrap_or_else(|| panic!("no {label}"))
-            .1
     }
 
     #[test]
@@ -697,130 +373,41 @@ mod tests {
         empty.move_by(1);
         empty.move_by(-3);
         assert_eq!(empty.cursor(), None);
-        assert_eq!(empty.chosen(), None);
+        assert_eq!(empty.respond(MenuEvent::Confirm), MenuOutcome::Stay);
         let mut off = Menu::new(vec![entry("x", false), MenuEntry::Separator]);
         off.move_by(1);
         assert_eq!(off.cursor(), None);
-        assert_eq!(off.chosen(), None);
+        assert_eq!(off.respond(MenuEvent::Pick(0)), MenuOutcome::Stay);
     }
 
     #[test]
-    fn rf_pan_20_the_pane_menu_offers_relaunch_terminate_and_close() {
-        let menu = pane_menu(&pane(), false, false, &no_keys);
-        let labels: Vec<String> = items(&menu).into_iter().map(|(l, _)| l).collect();
-        assert_eq!(
-            labels,
-            [
-                "Split right",
-                "Split down",
-                "Maximize",
-                "Relaunch",
-                "Terminate",
-                "Copy session id",
-                "Close pane",
-            ]
-        );
-        assert!(enabled(&menu, "Terminate"));
-        assert!(enabled(&menu, "Close pane"));
-        // A running program is relaunched only after it stopped, as
-        // `pane.relaunch` does.
-        assert!(!enabled(&menu, "Relaunch"));
-        let separators = menu
-            .entries()
-            .iter()
-            .filter(|e| matches!(e, MenuEntry::Separator))
-            .count();
-        assert_eq!(separators, 2);
+    fn keys_and_clicks_move_run_or_close() {
+        let mut menu = sample();
+        assert_eq!(menu.respond(MenuEvent::Down), MenuOutcome::Stay);
+        assert_eq!(menu.respond(MenuEvent::Confirm), MenuOutcome::Run("b"));
+        assert_eq!(menu.respond(MenuEvent::Up), MenuOutcome::Stay);
+        assert_eq!(menu.respond(MenuEvent::Confirm), MenuOutcome::Run("a"));
+        assert_eq!(menu.respond(MenuEvent::Pick(3)), MenuOutcome::Run("b"));
+        assert_eq!(menu.respond(MenuEvent::Pick(4)), MenuOutcome::Stay);
+        assert_eq!(menu.respond(MenuEvent::Close), MenuOutcome::Close);
+        assert_eq!(menu.respond(MenuEvent::ClickedOutside), MenuOutcome::Close);
     }
 
     #[test]
-    fn rf_pan_20_terminate_is_disabled_for_an_exited_pane() {
-        let exited = PaneView {
-            running: false,
-            exit_code: Some(1),
-            exited: true,
-            ..pane()
-        };
-        let menu = pane_menu(&exited, false, false, &no_keys);
-        assert!(!enabled(&menu, "Terminate"));
-        assert!(enabled(&menu, "Relaunch"));
-    }
-
-    #[test]
-    fn rf_pan_20_the_session_id_is_copied_only_once_known() {
-        assert!(!enabled(
-            &pane_menu(&pane(), false, false, &no_keys),
-            "Copy session id"
+    fn only_the_menu_a_click_just_closed_stays_closed() {
+        let now = Instant::now();
+        let closed = ((7, "pane"), now);
+        assert!(closed_by_this_click(Some(&closed), &(7, "pane"), now));
+        // Another menu of the same pane, or another pane's, opens.
+        assert!(!closed_by_this_click(Some(&closed), &(7, "terminal"), now));
+        assert!(!closed_by_this_click(Some(&closed), &(8, "pane"), now));
+        // A later click is a new click.
+        let later = now + SAME_CLICK + Duration::from_millis(1);
+        assert!(!closed_by_this_click(Some(&closed), &(7, "pane"), later));
+        assert!(!closed_by_this_click::<(i32, &str)>(
+            None,
+            &(7, "pane"),
+            now
         ));
-        let known = PaneView {
-            session_id: Some("aaaaaaaa-0000-4000-8000-000000000001".into()),
-            ..pane()
-        };
-        assert!(enabled(
-            &pane_menu(&known, false, false, &no_keys),
-            "Copy session id"
-        ));
-    }
-
-    #[test]
-    fn rf_pan_04_the_menu_says_restore_layout_while_maximized() {
-        let menu = pane_menu(&pane(), true, false, &no_keys);
-        assert!(enabled(&menu, "Restore layout"));
-        assert!(items(&menu).iter().all(|(l, _)| l != "Maximize"));
-        // A pane alone in its tab has nothing to maximize over.
-        assert!(!enabled(
-            &pane_menu(&pane(), false, true, &no_keys),
-            "Maximize"
-        ));
-    }
-
-    #[test]
-    fn rf_pan_09_copy_is_disabled_without_a_selection() {
-        assert!(!enabled(&terminal_menu(false, &no_keys), "Copy"));
-        assert!(enabled(&terminal_menu(true, &no_keys), "Copy"));
-        assert!(enabled(&terminal_menu(false, &no_keys), "Paste"));
-    }
-
-    #[test]
-    fn rf_pan_01_the_terminal_menu_splits_and_closes() {
-        let labels: Vec<String> = items(&terminal_menu(false, &no_keys))
-            .into_iter()
-            .map(|(l, _)| l)
-            .collect();
-        assert_eq!(
-            labels,
-            [
-                "Copy",
-                "Paste",
-                "Split right",
-                "Split down",
-                "New tab",
-                "Close tab",
-                "Close pane",
-            ]
-        );
-    }
-
-    #[test]
-    fn rf_nav_02_every_menu_item_is_a_palette_command_and_shows_its_keys() {
-        let keys = |id: &str| crate::catalog::default_keys(id);
-        let menus = [
-            pane_menu(&pane(), false, false, &keys),
-            terminal_menu(true, &keys),
-        ];
-        for menu in &menus {
-            for entry in menu.entries() {
-                if let MenuEntry::Item(item) = entry {
-                    let id = item.action.command();
-                    assert!(spec(id).is_some(), "{} has no command {id}", item.label);
-                    assert_eq!(item.keys, crate::catalog::default_keys(id), "{id}");
-                }
-            }
-        }
-        let close = menus[0].entries().iter().find_map(|e| match e {
-            MenuEntry::Item(i) if i.action == PaneAction::ClosePane => i.keys.clone(),
-            _ => None,
-        });
-        assert_eq!(close.as_deref(), Some("Ctrl+Shift+W"));
     }
 }

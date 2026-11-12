@@ -49,13 +49,14 @@ use crate::tray::{CloseRequest, close_request, quit_detail};
 mod bars;
 mod files;
 mod menu;
+mod pane_menu;
 mod settings;
 mod status;
 mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
-use menu::{MenuKind, OpenMenu};
+use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use status::{Line, Notice};
 use tray::Tray;
 
@@ -134,9 +135,9 @@ pub(crate) struct Shell {
     /// that follows on its own button must not open it again.
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
     /// The pane or terminal menu, while open (RF-PAN-20).
-    menu: Option<OpenMenu>,
-    /// The pane whose menu a mouse-down outside it just closed, and when.
-    menu_closed_at: Option<(PaneId, Instant)>,
+    menu: Option<PaneMenu>,
+    /// The menu a mouse-down outside it just closed, and when.
+    menu_closed_at: Option<(PaneMenuKey, Instant)>,
     /// Where each pane head was painted, for the menu opened by keyboard.
     pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
     /// The user's home folder, which pane heads show as `~`.
