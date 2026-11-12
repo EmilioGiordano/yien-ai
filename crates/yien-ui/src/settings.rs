@@ -180,20 +180,22 @@ impl SettingsModel {
 
 /// What a program's clipboard write (OSC 52) does: the text for the system
 /// clipboard and the notice to show, or `None` when the setting is off or
-/// there is nothing to copy (RF-PAN-09).
+/// there is nothing to copy (RF-PAN-09). `take` always runs, so the core's
+/// slot is emptied whatever the setting says.
 pub(crate) fn osc52_copy(
+    take: impl FnOnce() -> Option<String>,
     enabled: bool,
     pane_name: &str,
-    text: &str,
     crlf: bool,
 ) -> Option<(String, String)> {
+    let text = take()?;
     if !enabled || text.is_empty() {
         return None;
     }
     let name = pane_name.trim();
     let name = if name.is_empty() { "pane" } else { name };
     Some((
-        crate::grid::clipboard_text(text, crlf),
+        crate::grid::clipboard_text(&text, crlf),
         format!("Copied from {name}"),
     ))
 }
@@ -223,14 +225,24 @@ mod tests {
 
     #[test]
     fn rf_pan_09_a_program_copy_follows_the_setting() {
-        let on = osc52_copy(true, "claude", "a\nb", true).unwrap();
+        let said = |text: &'static str| move || Some(text.to_owned());
+        let on = osc52_copy(said("a\nb"), true, "claude", true).unwrap();
         assert_eq!(on, ("a\r\nb".to_owned(), "Copied from claude".to_owned()));
         assert_eq!(
-            osc52_copy(true, "  ", "x", false),
+            osc52_copy(said("x"), true, "  ", false),
             Some(("x".into(), "Copied from pane".into()))
         );
-        assert_eq!(osc52_copy(false, "claude", "secret", true), None);
-        assert_eq!(osc52_copy(true, "claude", "", true), None);
+        assert_eq!(osc52_copy(said("secret"), false, "claude", true), None);
+        assert_eq!(osc52_copy(said(""), true, "claude", true), None);
+        assert_eq!(osc52_copy(|| None, true, "claude", true), None);
+    }
+
+    #[test]
+    fn rf_pan_09_a_write_is_taken_even_with_the_setting_off() {
+        let mut slot = Some("left in the slot".to_owned());
+        let out = osc52_copy(|| slot.take(), false, "claude", true);
+        assert_eq!(out, None);
+        assert_eq!(slot, None, "the core's slot is emptied");
     }
 
     #[test]
