@@ -147,19 +147,20 @@ mod tests {
     use super::{Picked, default_tab_label, pick_dir};
     use crate::catalog::default_keys;
 
+    fn rooted(dir: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{dir}")
+        } else {
+            dir.to_owned()
+        }
+    }
+
     fn vars(name: &str) -> Option<String> {
-        (name == "CODE").then(|| "/mnt/code".to_owned())
+        (name == "CODE").then(|| rooted("/mnt/code"))
     }
 
     fn pick(configured: Option<&str>, home: Option<&str>) -> Picked {
         let folders = ["/home/me", "/home/me/work", "/mnt/code/yien"];
-        let rooted = |dir: &str| {
-            if cfg!(windows) {
-                format!("C:{dir}")
-            } else {
-                dir.to_owned()
-            }
-        };
         let home = home.map(rooted);
         let configured = configured.map(|c| {
             if c.starts_with('/') {
@@ -198,12 +199,10 @@ mod tests {
             pick(Some("~/work"), home),
             Picked::Dir("/home/me/work".into())
         );
-        if !cfg!(windows) {
-            assert_eq!(
-                pick(Some("%CODE%/yien"), home),
-                Picked::Dir("/mnt/code/yien".into())
-            );
-        }
+        assert_eq!(
+            pick(Some("%CODE%/yien"), home),
+            Picked::Dir("/mnt/code/yien".into())
+        );
     }
 
     #[test]
