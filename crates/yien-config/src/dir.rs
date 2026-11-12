@@ -1,26 +1,33 @@
 //! A folder setting as written, turned into a path: `ui.tabs.default_dir`.
 
 /// Expands a leading `~` (alone, or before `/` or `\`) to `home` and each
-/// `%NAME%` to what `var` gives for `NAME`. What cannot be expanded (no
+/// `%NAME%` to what `var` gives for `NAME`. After a `~`, a home written
+/// with `\` turns the `/` of the rest into `\`. What cannot be expanded (no
 /// home, an unknown variable, a lone `%`) stays as written, so the folder
 /// is then not found and the caller says so.
 ///
 /// ```
 /// let var = |name: &str| (name == "CODE").then(|| "D:\\Code".to_owned());
 /// let home = Some("C:\\Users\\me");
-/// assert_eq!(yien_config::expand_dir("~\\work", home, &var), "C:\\Users\\me\\work");
+/// assert_eq!(yien_config::expand_dir("~/work", home, &var), "C:\\Users\\me\\work");
 /// assert_eq!(yien_config::expand_dir("%CODE%\\yien", home, &var), "D:\\Code\\yien");
 /// assert_eq!(yien_config::expand_dir("%NOPE%", home, &var), "%NOPE%");
 /// ```
 pub fn expand_dir(raw: &str, home: Option<&str>, var: &dyn Fn(&str) -> Option<String>) -> String {
     let (start, rest) = match (raw.strip_prefix('~'), home) {
         (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            // `\` is an ordinary character in a Unix name: only `/` changes.
+            let rest = if home.contains('\\') {
+                rest.replace('/', "\\")
+            } else {
+                rest.to_owned()
+            };
             (home.to_owned(), rest)
         }
-        _ => (String::new(), raw),
+        _ => (String::new(), raw.to_owned()),
     };
     let mut out = start;
-    let mut rest = rest;
+    let mut rest = rest.as_str();
     while let Some(open) = rest.find('%') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -64,7 +71,16 @@ mod tests {
     fn rf_esp_03_a_leading_tilde_is_the_home_folder() {
         assert_eq!(expand("~"), "/home/me");
         assert_eq!(expand("~/code"), "/home/me/code");
-        assert_eq!(expand("~\\code"), "/home/me\\code");
+        assert_eq!(
+            expand("~\\code"),
+            "/home/me\\code",
+            "a Unix home keeps `\\`"
+        );
+        let windows = |raw: &str| expand_dir(raw, Some("C:\\Users\\me"), &vars);
+        assert_eq!(windows("~/work/yien"), "C:\\Users\\me\\work\\yien");
+        assert_eq!(windows("~\\work"), "C:\\Users\\me\\work");
+        assert_eq!(windows("~"), "C:\\Users\\me");
+        assert_eq!(windows("D:/Code"), "D:/Code", "only after a `~`");
         assert_eq!(expand("~user/code"), "~user/code", "not another user's");
         assert_eq!(expand("C:/a~/b"), "C:/a~/b", "only at the start");
         assert_eq!(expand_dir("~/code", None, &vars), "~/code", "no home");
