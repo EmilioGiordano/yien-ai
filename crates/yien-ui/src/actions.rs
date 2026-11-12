@@ -157,6 +157,10 @@ actions!(
         CloseProject,
         /// Edits the selected tab's name in place (RF-ESP-16).
         RenameTab,
+        /// Closes the whole tab: the one under the tab bar's cursor while
+        /// the bar has the keyboard, else the selected one. A tab on a
+        /// worktree asks first (RF-ESP-03, RF-ESP-07).
+        CloseTab,
         /// Moves the tab one place up in its project: the tab under the tab
         /// bar's cursor while the bar has the keyboard, else the selected
         /// one (RF-ESP-16, RNF-16).

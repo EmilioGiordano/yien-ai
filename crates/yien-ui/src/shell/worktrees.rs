@@ -135,6 +135,33 @@ impl Shell {
         let Some(question) = self.workspace.worktree_question(pane) else {
             return false;
         };
+        self.ask_worktree_question(question, window, cx);
+        true
+    }
+
+    /// Closes the whole of `tab`, asking first when it is the last tab on
+    /// its worktree (RF-ESP-03, RF-ESP-07).
+    pub(super) fn close_tab_now(
+        &mut self,
+        tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming.as_ref().is_some_and(|r| r.tab == tab) {
+            self.finish_rename(false, window, cx);
+        }
+        match self.workspace.close_tab_question(tab) {
+            Some(question) => self.ask_worktree_question(question, window, cx),
+            None => self.command(Command::CloseTab { tab }, cx),
+        }
+    }
+
+    fn ask_worktree_question(
+        &mut self,
+        question: Question,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = question.tab;
         self.split_menu = None;
         self.finish_rename(true, window, cx);
@@ -143,7 +170,6 @@ impl Shell {
         self.worktree_close = Some(Closing { question, focus });
         self.command(Command::CheckWorktree { tab }, cx);
         cx.notify();
-        true
     }
 
     /// The core's answer to the check, for the open question. An answer

@@ -166,6 +166,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-n"]
     ),
     command!("tab.rename", "tab: rename tab", RenameTab, []),
+    command!("tab.close", "tab: close tab", CloseTab, []),
     command!(
         "tab.move_up",
         "tab: move tab up",

@@ -49,6 +49,7 @@ mod bars;
 mod files;
 mod settings;
 mod status;
+mod tab_controls;
 mod tab_drag;
 mod tray;
 mod worktrees;
@@ -2294,8 +2295,10 @@ impl Shell {
         let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
         let drop_target = !with_project;
         let mark = self.row_mark(id);
+        let close_shown = tab_controls::close_always_shown(active, self.ringed_tab() == Some(id));
         div()
             .id(("tab", id.get()))
+            .group(tab_controls::row_group(id))
             .role(Role::Tab)
             .aria_label(match tab.worktree {
                 Some(_) => format!("{name}, worktree, {}", state.label()),
@@ -2365,7 +2368,8 @@ impl Shell {
                                 .size(px(12.0))
                                 .text_color(t.ai),
                         )
-                    }),
+                    })
+                    .child(self.close_tab_button(id, &name, close_shown, cx)),
             )
             .when(second_line, |row| {
                 row.child(
@@ -3195,6 +3199,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::confirm_accept))
             .on_action(cx.listener(Self::confirm_cancel))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::move_tab_up))
             .on_action(cx.listener(Self::move_tab_down))
             .on_action(cx.listener(Self::rename_confirm))
@@ -3356,6 +3361,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("tab row double-click", "tab.rename"),
     ("tab row drag", "tab.move_up"),
     ("tab row drag", "tab.move_down"),
+    ("tab row close button", "tab.close"),
     ("worktree prompt buttons", "tab.new_worktree"),
     ("worktree question buttons", "pane.close"),
     ("context bar's Changes tab", "changes.show"),
