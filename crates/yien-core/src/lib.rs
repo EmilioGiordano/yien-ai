@@ -145,7 +145,8 @@ pub struct CoreConfig {
     pub shell: ShellCommand,
     /// PowerShell and cmd panes report their folder at each prompt
     /// ([`ShellCommand::reporting_cwd`], RF-SES-01), so a restored pane opens
-    /// where the user left it. [`ClientMsg::SetShellIntegration`] changes it
+    /// where the user left it; PowerShell panes also mark their commands, so
+    /// they work while one runs. [`ClientMsg::SetShellIntegration`] changes it
     /// for panes started afterwards. On by default.
     pub shell_integration: bool,
     /// The agent profiles panes can be split with (RF-PAN-18).
