@@ -2791,8 +2791,10 @@ impl Shell {
             words(pane.profile.clone())
         } else if separate && shows.name {
             words(tag.to_owned())
-        } else {
+        } else if separate {
             primary(tag.to_owned())
+        } else {
+            primary(pane.name.clone())
         }
         .when(!text.agent, |mut d| {
             // A shell's name counts only a few letters in the layout, so it
