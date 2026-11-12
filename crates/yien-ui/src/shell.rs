@@ -43,7 +43,9 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
-use crate::title_bar::{CENTRE_SHIFT, PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
+use crate::title_bar::{
+    PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
@@ -1708,12 +1710,11 @@ impl Shell {
                     .h_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pr(px(10.0))
+                    .pr(px(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
                             .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
+                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
                             .items_center()
                             .gap(px(12.0))
                             .child(
@@ -1725,7 +1726,7 @@ impl Shell {
                                     .child(img(assets::MARK).size(px(20.0)))
                                     .child("YIEN"),
                             )
-                            .child(div().flex_1().min_w_0().children(crumbs)),
+                            .child(div().flex_1().w_0().min_w_0().children(crumbs)),
                     )
                     .child(self.render_palette_pill(&layout, cx))
                     .child(
@@ -1734,7 +1735,7 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .gap(px(12.0))
-                            .when(layout.centred, |side| side.ml(px(CENTRE_SHIFT)))
+                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
                             .child(self.render_need_count(cx))
                             .when(layout.theme_button, |bar| {
                                 bar.child(
