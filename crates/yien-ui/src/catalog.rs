@@ -531,6 +531,26 @@ mod tests {
     }
 
     #[test]
+    fn the_key_labels_drawn_in_the_interface_match_the_catalog() {
+        for (id, label) in [
+            ("tab_bar.toggle", TAB_BAR_KEYS),
+            ("context_bar.toggle", CONTEXT_BAR_KEYS),
+            ("context_bar.review", REVIEW_KEYS),
+            ("theme.toggle", THEME_KEYS),
+            ("pane.split_right", SPLIT_RIGHT_KEYS),
+            ("pane.split_down", SPLIT_DOWN_KEYS),
+            ("agent.next_needs_you", JUMP_KEYS),
+            ("agent.next_done", JUMP_DONE_KEYS),
+            ("agent.tray", TRAY_KEYS),
+            ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),
+            ("palette.open", PALETTE_KEYS),
+            ("project.add", ADD_PROJECT_KEYS),
+        ] {
+            assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
+        }
+    }
+
+    #[test]
     fn rf_pan_18_every_profile_splits_both_ways() {
         let profiles = [
             ProfileInfo {
