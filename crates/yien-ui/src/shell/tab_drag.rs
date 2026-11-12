@@ -265,12 +265,17 @@ impl Shell {
         }
     }
 
-    /// One place up or down: the tab under the cursor while the tab bar
-    /// has the keyboard, else the selected tab. Nothing at either end.
-    fn move_tab_by(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// The tab a tab command acts on: the one under the cursor while the
+    /// tab bar has the keyboard, else the selected one.
+    pub(super) fn keyboard_tab(&self, window: &Window, cx: &App) -> Option<TabId> {
         let in_bar = self.region(window, cx) == Region::TabBar;
         let selected = self.workspace.selected_tab().map(|t| t.id);
-        let Some(tab) = self.tab_cursor.filter(|_| in_bar).or(selected) else {
+        self.tab_cursor.filter(|_| in_bar).or(selected)
+    }
+
+    /// One place up or down: [`Shell::keyboard_tab`]. Nothing at either end.
+    fn move_tab_by(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.keyboard_tab(window, cx) else {
             return;
         };
         let Some((project, from, len)) = self.workspace.place_of(tab) else {
