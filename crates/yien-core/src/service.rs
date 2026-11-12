@@ -21,6 +21,7 @@ use yien_proto::{
 use yien_pty::PtyBackend;
 use yien_vt::Palette;
 
+use crate::clipboards::Clipboards;
 use crate::consoles::Consoles;
 use crate::convert;
 use crate::git::{GitReport, GitThread};
@@ -52,6 +53,8 @@ pub(crate) struct Ctx {
     pub ui_size: Arc<watch::Sender<Option<(u16, u16)>>>,
     /// Every session's closer, for the quit path.
     pub consoles: Arc<Consoles>,
+    /// What programs asked to put on the clipboard, until the UI takes it.
+    pub clipboards: Arc<Clipboards>,
 }
 
 /// Hook events waiting for one pane's actor. Beyond this the pane's channel
@@ -533,6 +536,7 @@ impl Service {
         hooks::revoke(self.ctx.hooks.as_deref(), pane);
         self.panes.remove(&pane);
         links(&self.links).remove(&pane);
+        self.ctx.clipboards.forget(pane);
         self.restored_screens.remove(&pane);
         if let Some(screens) = &self.screens {
             screens.forget(pane);

@@ -1391,19 +1391,21 @@ fn osc52_write(text: &[u8]) -> Vec<u8> {
     format!("\x1b]52;c;{}\x07", base64(text)).into_bytes()
 }
 
-fn clipboard_writes(h: &mut Harness, pane: PaneId, until: &str) -> Vec<String> {
-    let mut seen = Vec::new();
+/// Reads events until the pane shows `until`, taking nothing from the
+/// clipboard slot. Returns how many clipboard notices came.
+fn clipboard_notices(h: &mut Harness, pane: PaneId, until: &str) -> usize {
+    let mut notices = 0;
     let deadline = Instant::now() + TIMEOUT;
     loop {
         match h.events.try_recv() {
-            Ok(CoreMsg::ClipboardWrite { pane: p, text }) if p == pane => seen.push(text),
+            Ok(CoreMsg::ClipboardReady { pane: p }) if p == pane => notices += 1,
             Ok(_) => {}
             Err(TryRecvError::Empty) => {
                 if h.core
                     .take_frame(pane)
                     .is_some_and(|f| f.text().contains(until))
                 {
-                    return seen;
+                    return notices;
                 }
                 assert!(Instant::now() < deadline, "the pane never showed {until}");
                 std::thread::sleep(Duration::from_millis(1));
@@ -1413,16 +1415,39 @@ fn clipboard_writes(h: &mut Harness, pane: PaneId, until: &str) -> Vec<String> {
     }
 }
 
+fn clipboard_ready(h: &mut Harness, pane: PaneId) -> Option<String> {
+    h.wait_for(|m| match m {
+        CoreMsg::ClipboardReady { pane: p } if *p == pane => Some(()),
+        _ => None,
+    });
+    h.core.take_clipboard(pane)
+}
+
 #[test]
 fn rf_pan_09_an_osc52_write_reaches_the_ui_decoded() {
     let mut h = Harness::start();
     let (_, pane, child) = h.project();
     child.output(&osc52_write("héllo\nworld".as_bytes()));
-    let text = h.wait_for(|m| match m {
-        CoreMsg::ClipboardWrite { pane: p, text } if *p == pane => Some(text.clone()),
-        _ => None,
-    });
-    assert_eq!(text, "héllo\nworld");
+    assert_eq!(
+        clipboard_ready(&mut h, pane).as_deref(),
+        Some("héllo\nworld")
+    );
+    assert_eq!(h.core.take_clipboard(pane), None, "taken once");
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_split_across_two_reads_arrives_whole() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    let whole = osc52_write(b"split in the middle");
+    let (first, second) = whole.split_at(whole.len() / 2);
+    child.output(first);
+    std::thread::sleep(Duration::from_millis(30));
+    child.output(second);
+    assert_eq!(
+        clipboard_ready(&mut h, pane).as_deref(),
+        Some("split in the middle")
+    );
 }
 
 #[test]
@@ -1438,7 +1463,8 @@ fn rf_pan_09_an_osc52_read_gets_no_reply_and_no_message() {
         "only the cursor report answers: {reply:?}"
     );
     child.output(b"after the read");
-    assert!(clipboard_writes(&mut h, pane, "after the read").is_empty());
+    assert_eq!(clipboard_notices(&mut h, pane, "after the read"), 0);
+    assert_eq!(h.core.take_clipboard(pane), None);
 }
 
 #[test]
@@ -1447,5 +1473,37 @@ fn rf_pan_09_an_osc52_write_over_one_mebibyte_is_dropped() {
     let (_, pane, child) = h.project();
     child.output(&osc52_write(&vec![b'a'; (1 << 20) + 1]));
     child.output(b"after the big one");
-    assert!(clipboard_writes(&mut h, pane, "after the big one").is_empty());
+    assert_eq!(clipboard_notices(&mut h, pane, "after the big one"), 0);
+    assert_eq!(h.core.take_clipboard(pane), None);
+}
+
+#[test]
+fn rf_pan_09_primary_selection_writes_do_not_reach_the_ui_but_the_default_does() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for target in ["p", "s"] {
+        child.output(format!("\x1b]52;{target};{}\x07", base64(b"primary")).as_bytes());
+    }
+    child.output(b"after the primary writes");
+    assert_eq!(
+        clipboard_notices(&mut h, pane, "after the primary writes"),
+        0
+    );
+    assert_eq!(h.core.take_clipboard(pane), None);
+
+    child.output(format!("\x1b]52;;{}\x07", base64(b"default")).as_bytes());
+    assert_eq!(clipboard_ready(&mut h, pane).as_deref(), Some("default"));
+}
+
+#[test]
+fn rf_pan_09_a_burst_while_the_ui_does_not_take_leaves_one_notice_and_the_last_text() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for i in 0..50 {
+        child.output(&osc52_write(format!("write {i}").as_bytes()));
+    }
+    child.output(b"burst done");
+    assert_eq!(clipboard_notices(&mut h, pane, "burst done"), 1);
+    assert_eq!(h.core.take_clipboard(pane).as_deref(), Some("write 49"));
+    assert_eq!(h.core.take_clipboard(pane), None);
 }

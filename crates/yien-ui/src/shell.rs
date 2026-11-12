@@ -426,7 +426,10 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
-                CoreMsg::ClipboardWrite { pane, text } => {
+                CoreMsg::ClipboardReady { pane } => {
+                    let Some(text) = self.link.take_clipboard(pane) else {
+                        continue;
+                    };
                     let name = self.workspace.pane(pane).name;
                     let config = self.settings.config();
                     tracing::debug!(
@@ -439,7 +442,10 @@ impl Shell {
                         crate::settings::osc52_copy(config.osc52_copy, &name, &text, cfg!(windows))
                     {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        self.say(notice, cx);
+                        let showing = self.notice.as_ref().map(|n| n.kind);
+                        if status::copy_notice_replaces(showing) {
+                            self.say(notice, cx);
+                        }
                     }
                     continue;
                 }
