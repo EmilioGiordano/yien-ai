@@ -13,6 +13,7 @@ use yien_proto::TerminalPalette;
 use yien_ui::{ConfigUpdate, Settings, SettingsHost};
 
 use crate::shell_switch::ShellSwitch;
+use crate::update::Update;
 
 /// Opens the file through the platform layer.
 struct Host {
@@ -39,17 +40,21 @@ impl SettingsHost for Host {
 /// with the watcher to stop on quit, and the switch that hands every later
 /// `terminal.shell_integration` to the core. Without a data dir the window
 /// runs on the defaults. `profile_problems` go to the status bar with the
-/// first reading.
+/// first reading. Every valid reading also reaches `update`, for
+/// `update.check`.
 pub(crate) fn start(
     profile_problems: Vec<String>,
+    update: Arc<Update>,
 ) -> (Settings, Option<Watcher>, Arc<ShellSwitch>) {
     let (send, updates) = mpsc::unbounded_channel();
     let path = yien_platform::paths::config_file()
         .inspect_err(|e| tracing::warn!("no data dir, the settings file is off: {e}"))
         .ok();
     let Some(file) = path.clone() else {
+        let initial = ConfigUpdate::Loaded(Loaded::default());
+        update.reading(&initial);
         let settings = Settings {
-            initial: ConfigUpdate::Loaded(Loaded::default()),
+            initial,
             updates,
             host: Box::new(Host { path }),
             profile_problems,
@@ -65,12 +70,14 @@ pub(crate) fn start(
     // The stamp before the text: a save in between is seen as a change.
     let stamp = config_file::stamp(&file);
     let initial = reading(config_file::read(&file));
+    update.reading(&initial);
     let switch = Arc::new(ShellSwitch::new(shell_integration(&initial)));
     let to_core = Arc::clone(&switch);
     let watcher = config_file::watch(file, stamp, move |text| {
-        let update = reading(text);
-        to_core.reading(&update);
-        send.send(update).is_ok()
+        let reading = reading(text);
+        to_core.reading(&reading);
+        update.reading(&reading);
+        send.send(reading).is_ok()
     })
     .inspect_err(|error| {
         tracing::warn!("the settings file is not watched, changes need a restart: {error}");

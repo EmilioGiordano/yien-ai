@@ -1,6 +1,7 @@
 //! The main window: title bar, tab bar, pane area, context bar and status bar,
 //! laid out as in the prototype, kept in step with the core's events.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
@@ -31,35 +32,50 @@ use crate::git::{ContextGit, FileMark};
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
-    typed_tab_name,
+    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, folder_label,
+    frames_to_take, typed_tab_name,
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
+    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::region::{self, Modality, Region};
+use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
-use crate::terminal::TerminalPane;
+use crate::terminal::{TerminalEvent, TerminalPane};
 use crate::theme::{Theme, ThemeKind};
+use crate::title_bar::{
+    PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+};
 use crate::tray::{CloseRequest, close_request, quit_detail};
+use crate::update::Updates;
 
 mod bars;
+mod dividers;
 mod files;
+mod menu;
+mod pane_menu;
 mod settings;
 mod status;
+mod tab_controls;
+mod tab_drag;
 mod tray;
+mod update;
 mod worktrees;
 
+use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
+use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use status::{Line, Notice};
+use tab_drag::{RowMark, TabDragState};
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+/// The left padding of a pane row under its tab in the switcher's tree.
+const PALETTE_INDENT: f32 = 20.0;
 const CONFIRM_WIDTH: f32 = 440.0;
 /// Test-only: when set, the window opens with the attention tray open, so a
 /// window check can capture it without sending keys.
@@ -74,6 +90,8 @@ const RESIZE_STEP: f32 = 0.05;
 const MAX_BATCH: usize = 1024;
 /// The profile the Claude shortcuts start.
 const CLAUDE_PROFILE: &str = "claude";
+/// The longest folder a pane head shows before cutting its first names.
+const PANE_FOLDER_CHARS: usize = 48;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -115,10 +133,14 @@ pub(crate) struct Shell {
     title: String,
     link: Rc<Link>,
     terminals: HashMap<PaneId, Entity<TerminalPane>>,
+    /// The window's subscription to each terminal's right clicks.
+    terminal_events: HashMap<PaneId, Subscription>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
     /// What the status bar shows in place of the key hints, if anything.
     notice: Option<Notice>,
+    /// A standing notice a passing one covers, shown again when it goes.
+    behind: Option<Notice>,
     /// Counts the notices shown, so a stale timer cannot clear a newer one.
     notice_generation: u64,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
@@ -126,6 +148,14 @@ pub(crate) struct Shell {
     /// The chooser a mouse-down outside it just closed, and when. The click
     /// that follows on its own button must not open it again.
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
+    /// The pane or terminal menu, while open (RF-PAN-20).
+    menu: Option<PaneMenu>,
+    /// The menu a mouse-down outside it just closed, and when.
+    menu_closed_at: Option<(PaneMenuKey, Instant)>,
+    /// Where each pane head was painted, for the menu opened by keyboard.
+    pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
+    /// The user's home folder, which pane heads show as `~`.
+    home: Option<String>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
     /// The last past-sessions request sent; each list waits for its own.
@@ -148,12 +178,16 @@ pub(crate) struct Shell {
     worktree_close: Option<worktrees::Closing>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
+    /// A newer YIEN: its notice, notes and install.
+    updates: update::UpdatePanel,
     /// The tab bar and the context bar as places the keyboard can be
     /// (RF-NAV-08); the pane area is the terminals' own focus.
     tab_bar_focus: FocusHandle,
     context_focus: FocusHandle,
     /// The tab row the arrows are on while the tab bar has the keyboard.
     tab_cursor: Option<TabId>,
+    /// A tab row being dragged to another place in its project (RF-ESP-16).
+    tab_drag: TabDragState,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
     /// Whether the last move came from the keyboard or a mouse button; the
@@ -164,6 +198,12 @@ pub(crate) struct Shell {
     /// focus; a click in a bar focuses it too, and the pane must still get
     /// the keyboard after it.
     keyboard_in_bar: bool,
+    /// The divider the pointer took (RF-PAN-02).
+    divider_grab: Option<DividerGrab>,
+    /// The dividers as a place the keyboard can be, and the one it is on.
+    divider_focus: FocusHandle,
+    divider_cursor: Option<DividerKey>,
+    pane_area: PaneArea,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -184,16 +224,12 @@ struct Confirm {
 enum Asked {
     /// Closing a project that has work running.
     CloseProject { project: ProjectId, name: String },
+    /// Closing a tab whose panes run work (RF-ESP-03).
+    CloseTab { tab: TabId, name: String },
+    /// Closing a pane that runs work.
+    ClosePane { pane: PaneId, name: String },
     /// Quitting while agents work (RF-SES-13).
     Quit,
-}
-
-impl Asked {
-    /// Whether Enter answers yes. Quitting would stop agents mid-turn, so
-    /// there Enter cancels like Escape and only the button quits.
-    fn enter_accepts(&self) -> bool {
-        !matches!(self, Asked::Quit)
-    }
 }
 
 /// The palette's model and the widgets drawing it.
@@ -212,6 +248,7 @@ impl Shell {
         os: Rc<dyn OsAttention>,
         settings: Settings,
         files: Files,
+        updates: Updates,
         base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -245,6 +282,9 @@ impl Shell {
         let activation = cx.observe_window_activation(window, |shell, window, cx| {
             let focused = window.is_window_active();
             shell.send(ClientMsg::WindowFocus { focused }, cx);
+            if !focused {
+                shell.cancel_tab_drag(window, cx);
+            }
             shell.alerts.refresh_badge();
             shell.update_alerts(window, cx);
         });
@@ -269,8 +309,21 @@ impl Shell {
         })
         .detach();
         Self::listen_to_settings(settings.updates, window, cx);
+        let updates = Self::update_panel(updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
+        });
+        // Before any binding: Escape must end a tab drag without reaching
+        // the pane, where it would interrupt the agent.
+        let shell = cx.weak_entity();
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key == "escape" {
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.cancel_tab_drag(window, cx) {
+                        cx.stop_propagation();
+                    }
+                });
+            }
         });
         let files = FilesPanel::new(files, window, cx);
         let this = cx.weak_entity();
@@ -307,11 +360,17 @@ impl Shell {
             title: String::new(),
             link,
             terminals: HashMap::new(),
+            terminal_events: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            behind: None,
             notice_generation: 0,
             split_menu: None,
             menu_closed: None,
+            menu: None,
+            menu_closed_at: None,
+            pane_heads: Rc::default(),
+            home: home_folder(),
             palette: None,
             session_requests: 0,
             confirm: None,
@@ -322,13 +381,19 @@ impl Shell {
             worktree_prompt: None,
             worktree_close: None,
             alerts: Alerts::new(os),
+            updates,
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
             tab_cursor: None,
+            tab_drag: TabDragState::default(),
             keyboard_region: Region::Panes,
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
-            _subscriptions: vec![activation, appearance],
+            divider_grab: None,
+            divider_focus: cx.focus_handle(),
+            divider_cursor: None,
+            pane_area: PaneArea::default(),
+            _subscriptions: vec![activation, appearance, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
@@ -376,7 +441,10 @@ impl Shell {
                         ready.remove(&pane);
                     }
                 }
-                CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
+                CoreMsg::TabUpdated(info) => {
+                    self.workspace.tab_updated(&info);
+                    self.divider_settled(info.id);
+                }
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
                         ready.remove(&pane);
@@ -418,6 +486,9 @@ impl Shell {
                 }
                 CoreMsg::Error { pane, message } => {
                     self.fail(message, cx);
+                    if pane.is_none() {
+                        self.workspace.command_refused();
+                    }
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
                     if pane.is_none()
@@ -425,6 +496,23 @@ impl Shell {
                     {
                         open.model.stop_waiting();
                     }
+                }
+                CoreMsg::ClipboardReady { pane } => {
+                    let name = self.workspace.pane(pane).name;
+                    let enabled = self.settings.config().osc52_copy;
+                    if let Some((text, notice)) = crate::settings::osc52_copy(
+                        || self.link.take_clipboard(pane),
+                        enabled,
+                        &name,
+                        cfg!(windows),
+                    ) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        let showing = self.notice.as_ref().map(|n| n.kind);
+                        if status::copy_notice_replaces(showing) {
+                            self.say(notice, cx);
+                        }
+                    }
+                    continue;
                 }
                 CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
@@ -517,6 +605,10 @@ impl Shell {
     fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panes = self.workspace.all_panes();
         self.terminals.retain(|id, _| panes.contains(id));
+        self.terminal_events.retain(|id, _| panes.contains(id));
+        self.pane_heads
+            .borrow_mut()
+            .retain(|id, _| panes.contains(id));
         for pane in panes {
             if self.terminals.contains_key(&pane) {
                 continue;
@@ -526,6 +618,11 @@ impl Shell {
             let size = self.terminal_size;
             let theme = self.theme;
             let view = cx.new(|cx| TerminalPane::new(pane, link, family, size, theme, window, cx));
+            let events = cx.subscribe_in(&view, window, move |this, _, event, window, cx| {
+                let TerminalEvent::ContextMenu { at, has_selection } = *event;
+                this.open_menu(pane, MenuKind::Terminal, at, has_selection, window, cx);
+            });
+            self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
         }
     }
@@ -534,6 +631,8 @@ impl Shell {
     fn drop_stale_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gone = self.confirm.as_ref().is_some_and(|c| match &c.asked {
             Asked::CloseProject { project, .. } => self.workspace.project(*project).is_none(),
+            Asked::CloseTab { tab, .. } => self.workspace.tab(*tab).is_none(),
+            Asked::ClosePane { pane, .. } => self.workspace.tab_of(*pane).is_none(),
             Asked::Quit => false,
         });
         if gone {
@@ -549,21 +648,25 @@ impl Shell {
             self.give_back_keyboard(window, cx);
         }
         self.drop_stale_worktree_question(window, cx);
+        self.drop_stale_menu(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
         self.palette.is_some()
+            || self.menu.is_some()
             || self.tray.is_some()
             || self.confirm.is_some()
             || self.renaming.is_some()
             || self.worktree_prompt.is_some()
             || self.worktree_close.is_some()
+            || self.updates.notes_open()
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that
     /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_divider_cursor(window, cx);
         self.keyboard_in_bar =
             region::bar_claim_holds(self.keyboard_in_bar, self.region(window, cx));
         if self.overlay_has_keyboard() || self.keyboard_in_bar {
@@ -593,6 +696,8 @@ impl Shell {
             Region::TabBar
         } else if self.context_focus.contains_focused(window, cx) {
             Region::ContextBar
+        } else if self.divider_focus.is_focused(window) {
+            Region::Dividers
         } else {
             Region::Panes
         }
@@ -615,9 +720,16 @@ impl Shell {
         canvas(
             |_, _, _| (),
             move |_, (), window, _| {
+                let down = shell.clone();
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.on_pointer_down(cx));
+                        let _ = down.update(cx, |this, cx| this.on_pointer_down(cx));
+                    }
+                });
+                // Wherever the button comes up, a tab drag ends there.
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
                     }
                 });
             },
@@ -643,6 +755,7 @@ impl Shell {
             forward,
             self.bar_shown(Bar::Tab),
             self.bar_shown(Bar::Context),
+            !self.divider_keys(cx).is_empty(),
         );
         match to {
             Region::TabBar => {
@@ -659,6 +772,7 @@ impl Shell {
                 window.focus(&self.context_focus, cx);
                 self.keyboard_in_bar = true;
             }
+            Region::Dividers => self.focus_dividers(forward, window, cx),
             Region::Panes => self.give_back_keyboard(window, cx),
         }
         cx.notify();
@@ -722,14 +836,14 @@ impl Shell {
     pub(super) fn show(&mut self, notice: Notice, cx: &mut Context<Self>) {
         self.notice_generation += 1;
         let shown = self.notice_generation;
-        let lifetime = status::lifetime(notice.kind);
+        let lifetime = notice.lifetime();
+        self.behind = status::behind(self.notice.take(), self.behind.take(), &notice);
         self.notice = Some(notice);
         if let Some(lifetime) = lifetime {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(lifetime).await;
                 let _ = this.update(cx, |shell, cx| {
-                    let kind = shell.notice.as_ref().map(|n| n.kind);
-                    if status::timer_clears(kind, shown, shell.notice_generation) {
+                    if status::timer_clears(shell.notice.as_ref(), shown, shell.notice_generation) {
                         shell.clear_notice(cx);
                     }
                 });
@@ -745,12 +859,19 @@ impl Shell {
         }
     }
 
-    /// Takes the notice down; whether there was one.
+    /// Takes the notice down; whether there was one. A standing notice it
+    /// covered, or else the update notice, comes back.
     pub(super) fn clear_notice(&mut self, cx: &mut Context<Self>) -> bool {
-        let was_up = self.notice.take().is_some();
+        let taken = self.notice.take();
         self.notice_generation += 1;
+        if let Some(taken) = &taken {
+            self.update_notice_cleared(taken);
+        }
+        if let Some(next) = self.behind.take().or_else(|| self.update_standing_notice()) {
+            self.show(next, cx);
+        }
         cx.notify();
-        was_up
+        taken.is_some()
     }
 
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
@@ -811,18 +932,19 @@ impl Shell {
         }
     }
 
-    fn split(&mut self, orientation: Orientation, cx: &mut Context<Self>) {
+    fn split(&mut self, orientation: Orientation, before: bool, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
-            self.split_pane(pane, orientation, None, cx);
+            self.split_pane(pane, orientation, before, None, cx);
         }
     }
 
-    /// Splits `pane` and starts `profile` in the new one, the shell when
-    /// `None` (RF-PAN-18).
+    /// Starts `profile` in the new pane, the shell when `None` (RF-PAN-18);
+    /// `before` puts it left of or above `pane`.
     fn split_pane(
         &mut self,
         pane: PaneId,
         orientation: Orientation,
+        before: bool,
         profile: Option<ProfileId>,
         cx: &mut Context<Self>,
     ) {
@@ -832,6 +954,7 @@ impl Shell {
                 pane,
                 orientation,
                 profile,
+                before,
             },
             cx,
         );
@@ -841,7 +964,7 @@ impl Shell {
     fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
             let claude = Some(ProfileId::new(CLAUDE_PROFILE));
-            self.split_pane(pane, Orientation::Horizontal, claude, cx);
+            self.split_pane(pane, Orientation::Horizontal, false, claude, cx);
         }
     }
 
@@ -867,14 +990,7 @@ impl Shell {
     /// With every tab closed it falls back to the project selected last.
     fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
         match self.workspace.project_for_new_tab() {
-            Some(project) => self.command(
-                Command::NewTab {
-                    project,
-                    name: None,
-                    profile: profile.map(ProfileId::new),
-                },
-                cx,
-            ),
+            Some(project) => self.new_tab_in(project, profile, cx),
             None => {
                 self.say("There is no project to open a tab in.".to_owned(), cx);
             }
@@ -912,21 +1028,33 @@ impl Shell {
     }
 
     fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Horizontal, cx);
+        self.split(Orientation::Horizontal, false, cx);
     }
 
     fn split_down(&mut self, _: &SplitDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Vertical, cx);
+        self.split(Orientation::Vertical, false, cx);
+    }
+
+    fn split_left(&mut self, _: &SplitLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Horizontal, true, cx);
+    }
+
+    fn split_up(&mut self, _: &SplitUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Vertical, true, cx);
     }
 
     /// Closes the focused pane; closing the last tab on a worktree asks
     /// first whether to keep the worktree (RF-ESP-07).
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.focused_pane()
-            && !self.ask_before_closing(pane, window, cx)
-        {
-            self.command(Command::ClosePane { pane }, cx);
+        if let Some(pane) = self.focused_pane() {
+            self.close_pane_id(pane, window, cx);
         }
+    }
+
+    /// Closes `pane` as the `pane.close` key does: asking first while it
+    /// runs work, then on the last tab on a worktree.
+    fn close_pane_id(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pane_step(pane, false, window, cx);
     }
 
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
@@ -1082,6 +1210,10 @@ impl Shell {
                 self.workspace.profiles(),
             )
         };
+        let commands: Vec<Entry> = commands
+            .into_iter()
+            .filter(|entry| self.update_lists(entry))
+            .collect();
         let places = switcher_entries(&self.workspace);
         let placeholder = match mode {
             Mode::Commands => "Execute a command…",
@@ -1098,13 +1230,25 @@ impl Shell {
                 self.command(Command::ListAgentSessions { project, request }, cx);
                 Palette::sessions(project, request)
             }
-            None => Palette::new(mode, commands, places),
+            None => Palette::new(mode, commands, places).with_home(switcher_home(&self.workspace)),
         };
         self.palette = Some(OpenPalette {
             model,
             input,
             scroll: ScrollHandle::new(),
             _input_events: input_events,
+        });
+        // A new list's first prepaint drops a scroll request (gpui learns the
+        // overflow after it), and next-frame callbacks run before that
+        // frame's draw: ask two frames on, once the list has been drawn.
+        cx.on_next_frame(window, |_, window, cx| {
+            cx.on_next_frame(window, |this, _, cx| {
+                if let Some(open) = &this.palette {
+                    open.scroll
+                        .scroll_to_item(open.model.selected().unwrap_or(0));
+                    cx.notify();
+                }
+            });
         });
         cx.notify();
     }
@@ -1122,7 +1266,8 @@ impl Shell {
         let query = input.read(cx).value();
         if let Some(open) = self.palette.as_mut() {
             open.model.set_query(&query);
-            open.scroll.scroll_to_item(0);
+            open.scroll
+                .scroll_to_item(open.model.selected().unwrap_or(0));
             cx.notify();
         }
     }
@@ -1194,7 +1339,7 @@ impl Shell {
             Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
             Target::Split(profile, orientation) => {
                 if let Some(pane) = self.focused_pane() {
-                    self.split_pane(pane, orientation, Some(profile), cx);
+                    self.split_pane(pane, orientation, false, Some(profile), cx);
                 }
             }
             Target::NewTab(profile) => self.new_tab_with(Some(profile.as_str()), cx),
@@ -1349,7 +1494,8 @@ impl Shell {
     }
 
     /// `app: quit YIEN`: closes the window, which quits, asking first while
-    /// agents work (RF-SES-13).
+    /// agents work (RF-SES-13). Pressed again, or held, while the question
+    /// is open it keeps asking.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         if self.window_should_close(window, cx) {
             window.remove_window();
@@ -1365,7 +1511,7 @@ impl Shell {
     ) -> Stateful<Div> {
         CATALOG
             .iter()
-            .filter(|spec| spec.scope == Scope::Window)
+            .filter(|spec| spec.scope == Scope::Window && spec.id != "app.quit")
             .fold(dialog, |dialog, spec| {
                 dialog.on_boxed_action(
                     &*(spec.action)(),
@@ -1376,14 +1522,9 @@ impl Shell {
             })
     }
 
-    /// Enter on the question: yes, except for quitting, where Enter keeps
-    /// the window and only the button quits.
+    /// Enter on the question: yes, quitting included.
     fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.confirm {
-            Some(c) if !c.asked.enter_accepts() => self.confirm_cancel(&ConfirmCancel, window, cx),
-            Some(_) => self.accept_confirm(window, cx),
-            None => {}
-        }
+        self.accept_confirm(window, cx);
     }
 
     /// The question's yes button.
@@ -1396,6 +1537,14 @@ impl Shell {
                 self.command(Command::CloseProject { project }, cx);
                 self.give_back_keyboard(window, cx);
             }
+            Asked::CloseTab { tab, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_tab_step(tab, true, window, cx);
+            }
+            Asked::ClosePane { pane, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_pane_step(pane, true, window, cx);
+            }
             Asked::Quit => {
                 tracing::info!("quit anyway while agents work");
                 self.quit_confirmed = true;
@@ -1405,7 +1554,10 @@ impl Shell {
     }
 
     fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.take().is_some() {
+        if let Some(confirm) = self.confirm.take() {
+            if matches!(confirm.asked, Asked::Quit) {
+                self.quit_cancelled(cx);
+            }
             self.give_back_keyboard(window, cx);
         }
     }
@@ -1416,11 +1568,6 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
-        let (cancel_keys, accept_keys) = if confirm.asked.enter_accepts() {
-            ("Esc", "Enter")
-        } else {
-            ("Enter · Esc", "")
-        };
         let (title, detail, accept, id) = match &confirm.asked {
             Asked::CloseProject { project, name } => {
                 let detail = match self.workspace.busy_panes_of(*project) {
@@ -1442,6 +1589,18 @@ impl Shell {
                     "confirm-close-project",
                 )
             }
+            Asked::CloseTab { tab, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_tab_detail(self.workspace.busy_panes_of_tab(*tab)),
+                "Close tab",
+                "confirm-close-tab",
+            ),
+            Asked::ClosePane { pane, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_pane_detail(self.workspace.pane(*pane).is_busy()).to_owned(),
+                "Close pane",
+                "confirm-close-pane",
+            ),
             Asked::Quit => (
                 "Quit YIEN?".to_owned(),
                 quit_detail(&self.workspace),
@@ -1453,11 +1612,7 @@ impl Shell {
             h_flex()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(if keys.is_empty() {
-                    label.to_owned()
-                } else {
-                    format!("{label} ({keys})")
-                })
+                .aria_label(format!("{label} ({keys})"))
                 .items_center()
                 .gap(px(8.0))
                 .px(px(12.0))
@@ -1468,15 +1623,7 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(label)
-                .when(!keys.is_empty(), |b| {
-                    b.child(
-                        div()
-                            .text_size(t.text(11.5))
-                            .text_color(t.faint)
-                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                            .child(keys),
-                    )
-                })
+                .child(key_hint(keys, &t))
         };
         Some(
             div()
@@ -1526,13 +1673,13 @@ impl Shell {
                                 .gap(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(t.text(13.0))
-                                .child(button("confirm-cancel", "Cancel", cancel_keys).on_click(
+                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.confirm_cancel(&ConfirmCancel, window, cx);
                                     }),
                                 ))
                                 .child(
-                                    button("confirm-accept", accept, accept_keys)
+                                    button("confirm-accept", accept, "Enter")
                                         .font_weight(FontWeight::MEDIUM)
                                         .border_color(t.muted)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1700,8 +1847,9 @@ impl Shell {
         }
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -1715,10 +1863,19 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(project)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(project),
+                )
                 .child("/")
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.text)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tab.name.clone()),
@@ -1735,53 +1892,85 @@ impl Shell {
             .border_color(t.line)
             .child(
                 h_flex()
-                    .size_full()
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .h_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pr(px(10.0))
+                    .pr(px(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
-                            .flex_none()
+                            .flex_1()
+                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
                             .items_center()
-                            .gap(px(8.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(img(assets::MARK).size(px(20.0)))
-                            .child("YIEN"),
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child("YIEN"),
+                            )
+                            .child(div().flex_1().w_0().min_w_0().children(crumbs)),
                     )
-                    .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_palette_pill(cx))
-                    .child(div().flex_1())
-                    .child(self.render_need_count(cx))
+                    .child(self.render_palette_pill(&layout, cx))
                     .child(
-                        icon_button("toggle-theme", assets::THEME, &t)
-                            .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_theme(&ToggleTheme, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                            .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                            .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_bar(&ToggleContextBar, window, cx)
-                            })),
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.0))
+                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
+                            .child(self.render_need_count(cx))
+                            .when(layout.theme_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-theme", assets::THEME, &t)
+                                        .aria_label(format!(
+                                            "Toggle sumi and washi theme ({THEME_KEYS})"
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_theme(&ToggleTheme, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.tab_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                        .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                        .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.context_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                        .aria_label(format!(
+                                            "Toggle context bar ({CONTEXT_BAR_KEYS})"
+                                        ))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                        .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                        })),
+                                )
+                            }),
                     ),
             )
     }
 
     /// The title bar button that opens the palette, as the prototype's.
-    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_pill(
+        &self,
+        layout: &TitleLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         h_flex()
             .id("palette-pill")
@@ -1789,8 +1978,9 @@ impl Shell {
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
             .flex_none()
-            .w(px(420.0))
-            .max_w(relative(0.4))
+            .w(px(PILL_WIDTH))
+            .max_w(relative(PILL_SHARE))
+            .min_w(px(PILL_LEAST))
             .items_center()
             .gap(px(10.0))
             .px(px(10.0))
@@ -1807,14 +1997,23 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_palette(Mode::Commands, window, cx);
             }))
-            .child(div().flex_1().min_w_0().child("Execute a command"))
             .child(
                 div()
-                    .flex_none()
-                    .text_size(t.text(11.0))
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(PALETTE_KEYS),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child("Execute a command"),
             )
+            .when(layout.pill_keys, |pill| {
+                pill.child(
+                    div()
+                        .flex_none()
+                        .text_size(t.text(11.0))
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(PALETTE_KEYS),
+                )
+            })
     }
 
     /// The command palette or the switcher over the window (RF-NAV-01,
@@ -1824,13 +2023,14 @@ impl Shell {
         let t = self.theme;
         let model = &open.model;
         let selected = model.selected();
+        let tree = model.shows_tree();
         let rows: Vec<AnyElement> = model
             .rows()
             .iter()
             .enumerate()
             .filter_map(|(at, row)| {
                 let entry = model.entry(row)?;
-                Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
+                Some(self.render_palette_row(at, row, entry, selected == Some(at), tree, cx))
             })
             .collect();
         let label = match model.listing() {
@@ -1910,25 +2110,28 @@ impl Shell {
         row: &Row,
         entry: &Entry,
         selected: bool,
+        tree: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme;
+        let (shown, dim) = entry.drawn(tree);
+        let nested = shown.len() < entry.text.len();
+        // Hits are offsets into the whole text, so a shortened text drops them.
+        let hits: &[usize] = if nested { &[] } else { &row.hits };
         let style = |color: Rgba, weight: FontWeight| HighlightStyle {
             color: Some(color.into()),
             font_weight: Some(weight),
             ..HighlightStyle::default()
         };
-        let runs = ink_runs(&entry.text, entry.dim, &row.hits)
-            .into_iter()
-            .map(|(range, ink)| {
-                let look = match ink {
-                    Ink::Text => style(t.text, FontWeight::NORMAL),
-                    Ink::Dim => style(t.muted, FontWeight::NORMAL),
-                    Ink::Hit => style(t.ai, FontWeight::BOLD),
-                };
-                (range, look)
-            });
-        let text = StyledText::new(entry.text.clone()).with_highlights(runs);
+        let runs = ink_runs(shown, dim, hits).into_iter().map(|(range, ink)| {
+            let look = match ink {
+                Ink::Text => style(t.text, FontWeight::NORMAL),
+                Ink::Dim => style(t.muted, FontWeight::NORMAL),
+                Ink::Hit => style(t.ai, FontWeight::BOLD),
+            };
+            (range, look)
+        });
+        let text = StyledText::new(shown.to_owned()).with_highlights(runs);
         let hint_color = match entry.state {
             Some(AgentState::NeedsYou) => t.shu,
             Some(AgentState::Error) => t.ochre,
@@ -1954,6 +2157,10 @@ impl Shell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.run_palette(Some(at), window, cx);
             }))
+            .when(nested, |r| {
+                r.pl(px(PALETTE_INDENT))
+                    .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
+            })
             .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
             .child(
                 div()
@@ -2064,6 +2271,7 @@ impl Shell {
             .child(
                 v_flex()
                     .id("tab-list")
+                    .track_scroll(&self.tab_drag.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2215,12 +2423,12 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
+            .child(self.new_tab_button(project, cx).ml_auto())
             .child(
                 div()
                     .id(("close-project", id.get()))
                     .role(Role::Button)
                     .aria_label(format!("Close project {}", project.name))
-                    .ml_auto()
                     .flex()
                     .flex_none()
                     .items_center()
@@ -2259,8 +2467,14 @@ impl Shell {
             Some(project) => format!("{project} / {}", tab.name),
             None => tab.name.clone(),
         };
+        // Grouped by state, rows of several projects mix, so none is dragged.
+        let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
+        let drop_target = !with_project;
+        let mark = self.row_mark(id);
+        let close_shown = active || self.ringed_tab() == Some(id);
         div()
             .id(("tab", id.get()))
+            .group(tab_controls::row_group(id))
             .role(Role::Tab)
             .aria_label(match tab.worktree {
                 Some(_) => format!("{name}, worktree, {}", state.label()),
@@ -2298,6 +2512,12 @@ impl Shell {
                     this.select_tab(id, window, cx);
                 }
             }))
+            .when(draggable, |row| self.draggable_row(row, tab, cx))
+            .when(drop_target, |row| self.drop_target_row(row, tab, cx))
+            .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
+            .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
+                row.child(drop_line(mark == RowMark::LineAbove, &t))
+            })
             .child(
                 h_flex()
                     .items_center()
@@ -2324,7 +2544,8 @@ impl Shell {
                                 .size(px(12.0))
                                 .text_color(t.ai),
                         )
-                    }),
+                    })
+                    .child(self.close_tab_button(id, &name, close_shown, cx)),
             )
             .when(second_line, |row| {
                 row.child(
@@ -2425,8 +2646,10 @@ impl Shell {
                 .text_size(t.text(18.0))
                 .child("No tab is open");
         };
-        let rects = tab.rects();
-        let single = rects.len() == 1;
+        let rects = match self.shown_layout(tab) {
+            Some(shown) => tab.rects_in(&shown),
+            None => tab.rects(),
+        };
         let cells: Vec<AnyElement> = rects
             .into_iter()
             .map(|(id, rect)| {
@@ -2438,11 +2661,19 @@ impl Shell {
                     .w(relative(rect.w))
                     .h(relative(rect.h))
                     .p(px(HALF_GUTTER))
-                    .child(self.render_pane(tab, &pane, single, cx))
+                    .child(self.render_pane(tab, &pane, cx))
                     .into_any_element()
             })
             .collect();
-        area.child(div().relative().size_full().children(cells))
+        let dividers = self.render_dividers(tab, cx);
+        area.child(
+            div()
+                .relative()
+                .size_full()
+                .child(self.watch_pane_area())
+                .children(cells)
+                .children(dividers),
+        )
     }
 
     /// The pane area with no project at all: an invitation to add one.
@@ -2505,7 +2736,6 @@ impl Shell {
         &self,
         tab: &TabView,
         pane: &PaneView,
-        single: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = self.theme;
@@ -2516,7 +2746,17 @@ impl Shell {
             AgentState::Error => t.ochre,
             _ => t.term_muted,
         };
+        let id = pane.id;
+        let folder = pane.cwd.as_deref().unwrap_or(&tab.dir);
+        let folder_shown = folder_label(
+            folder,
+            self.home.as_deref(),
+            cfg!(windows),
+            PANE_FOLDER_CHARS,
+        );
+        let heads = Rc::clone(&self.pane_heads);
         let head = h_flex()
+            .relative()
             .flex_none()
             .items_center()
             .gap(px(8.0))
@@ -2538,17 +2778,26 @@ impl Shell {
                     .child(pane.name.clone()),
             )
             .child(div().flex_none().child(pane.profile.clone()))
-            .when(single, |h| {
-                h.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(t.text(12.0))
-                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                        .child(tab.dir.clone()),
-                )
-            })
+            .child(
+                // Only the lead shrinks, so a narrow head still shows the
+                // last folder.
+                h_flex()
+                    .id(("pane-folder", id.get()))
+                    .aria_label(format!("Folder {folder}"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(t.text(12.0))
+                    .text_color(t.term_faint)
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(folder_shown.lead),
+                    )
+                    .child(div().flex_none().child(folder_shown.last)),
+            )
             .child(
                 div()
                     .ml_auto()
@@ -2568,7 +2817,35 @@ impl Shell {
                 )
             })
             .child(self.split_button(pane, Orientation::Horizontal, cx))
-            .child(self.split_button(pane, Orientation::Vertical, cx));
+            .child(self.split_button(pane, Orientation::Vertical, cx))
+            .child(self.pane_menu_button(pane, cx))
+            .child(self.pane_close_button(pane, cx))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Or the root, which tracks focus, takes the keyboard
+                    // back from the menu as this mouse-down bubbles up.
+                    window.prevent_default();
+                    this.open_menu(id, MenuKind::Pane, event.position, false, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.focus_pane_from_head(id, window, cx);
+                }),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        heads.borrow_mut().insert(id, bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         let menu = self
             .split_menu
             .filter(|(p, _)| *p == pane.id)
@@ -2683,6 +2960,78 @@ impl Shell {
             .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
     }
 
+    /// A click on a pane head gives that pane the focus and the keyboard,
+    /// not the window root.
+    fn focus_pane_from_head(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminals.get(&pane) {
+            let handle = terminal.read(cx).handle().clone();
+            window.focus(&handle, cx);
+            self.keyboard_on = Some(pane);
+            self.keyboard_in_bar = false;
+        }
+        self.command(Command::FocusPane { pane }, cx);
+    }
+
+    /// A 20 px pane head button, as the split buttons.
+    fn head_button(&self, key: &'static str, pane: PaneId, icon: &'static str) -> Stateful<Div> {
+        let t = self.theme;
+        let hover = t.term_raised;
+        div()
+            .id((key, pane.get()))
+            .occlude()
+            .role(Role::Button)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(20.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// Opens the pane's menu of actions (RF-PAN-20), as in the prototype.
+    fn pane_menu_button(&self, pane: &PaneView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = pane.id;
+        let open = self.menu_open_for(id);
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            shortcut(&keymap, &OpenPaneMenu)
+        };
+        let label = match keys {
+            Some(keys) => format!("Pane actions for {} ({keys})", pane.name),
+            None => format!("Pane actions for {}", pane.name),
+        };
+        self.head_button("pane-actions", id, assets::DOTS)
+            .aria_label(label)
+            .aria_expanded(open)
+            .when(open, |b| b.bg(self.theme.term_raised))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.pane_menu_clicked(id, event.position(), window, cx);
+            }))
+    }
+
+    /// Closes the pane, asking first on the last tab on a worktree.
+    fn pane_close_button(&self, pane: &PaneView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = pane.id;
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            shortcut(&keymap, &ClosePane)
+        };
+        let label = match keys {
+            Some(keys) => format!("Close {} ({keys})", pane.name),
+            None => format!("Close {}", pane.name),
+        };
+        self.head_button("pane-close", id, assets::CLOSE)
+            .aria_label(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_pane_id(id, window, cx);
+            }))
+    }
+
     /// The profiles a split can start, under the pane head (RF-PAN-18).
     fn render_split_menu(
         &self,
@@ -2717,7 +3066,7 @@ impl Shell {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.split_pane(pane, orientation, Some(id.clone()), cx);
+                        this.split_pane(pane, orientation, false, Some(id.clone()), cx);
                     }))
                     .child(
                         div()
@@ -3098,8 +3447,10 @@ impl Render for Shell {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
-        // A drag that just ended sends its width here.
+        // A drag that just ended sends its width or its share here.
         self.save_side_bars(cx);
+        self.forget_ended_tab_drag(cx);
+        self.finish_divider_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3112,10 +3463,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::toggle_review_mode))
             .on_drag_move(cx.listener(Self::on_bar_drag))
+            .on_drag_move(cx.listener(Self::on_divider_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::split_left))
+            .on_action(cx.listener(Self::split_up))
             .on_action(cx.listener(Self::close_pane))
             .on_action(cx.listener(Self::focus_left))
             .on_action(cx.listener(Self::focus_right))
@@ -3145,6 +3499,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::worktree_cancel))
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
+            .on_action(cx.listener(Self::open_pane_menu))
+            .on_action(cx.listener(Self::terminate_pane))
+            .on_action(cx.listener(Self::copy_session_id))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::toggle_notifications_muted))
             .on_action(cx.listener(Self::toggle_tab_muted))
@@ -3153,6 +3510,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::confirm_accept))
             .on_action(cx.listener(Self::confirm_cancel))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::move_tab_up))
+            .on_action(cx.listener(Self::move_tab_down))
             .on_action(cx.listener(Self::rename_confirm))
             .on_action(cx.listener(Self::rename_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
@@ -3169,6 +3529,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_leave))
             .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
+            .on_action(cx.listener(Self::divider_left))
+            .on_action(cx.listener(Self::divider_right))
+            .on_action(cx.listener(Self::divider_up))
+            .on_action(cx.listener(Self::divider_down))
+            .on_action(cx.listener(Self::divider_next))
+            .on_action(cx.listener(Self::divider_previous))
+            .on_action(cx.listener(Self::divider_leave))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::refresh_files))
@@ -3178,6 +3545,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::show_whats_new))
+            .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
@@ -3193,7 +3562,7 @@ impl Render for Shell {
             .text_color(t.text)
             .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -3211,7 +3580,26 @@ impl Render for Shell {
             .children(self.render_palette(cx))
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
+            .children(self.render_menu(cx))
+            .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
+    }
+}
+
+/// The line between two tab rows where a dragged tab would land
+/// (RF-ESP-16): indigo like the other drag marks, never red (RN-01).
+fn drop_line(above: bool, t: &Theme) -> Div {
+    let line = div()
+        .absolute()
+        .left(px(4.0))
+        .right(px(4.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(t.ai);
+    if above {
+        line.top(px(-2.0))
+    } else {
+        line.bottom(px(-2.0))
     }
 }
 
@@ -3243,6 +3631,16 @@ fn icon_button(id: &'static str, icon: &'static str, t: &Theme) -> Stateful<Div>
         .child(svg().path(icon).size(px(16.0)).text_color(t.muted))
 }
 
+/// The key beside a dialog button's label. In the label's family: the mono
+/// family's metrics drew it below the label's line.
+fn key_hint(keys: &'static str, t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_size(t.text(11.5))
+        .text_color(t.faint)
+        .child(keys)
+}
+
 /// The state glyph in its 14 px slot. The shape tells the state, the colour
 /// only reinforces it.
 fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
@@ -3260,6 +3658,12 @@ fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
         )
 }
 
+/// The user's home folder from the environment, if set.
+fn home_folder() -> Option<String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(var).ok().filter(|home| !home.is_empty())
+}
+
 fn toggled(on: bool) -> Toggled {
     if on { Toggled::True } else { Toggled::False }
 }
@@ -3275,7 +3679,8 @@ fn now_ms() -> u64 {
 /// The catalog command behind each mouse control above, so every one has a
 /// palette row (RF-NAV-02). A new clickable control adds its command here.
 /// Tab rows are reached through the switcher; the split menu's profiles
-/// through `profile_splits`.
+/// through `profile_splits`; the pane and terminal menus' items each name
+/// their command in `PaneAction::command`.
 #[cfg(test)]
 const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("theme button", "theme.toggle"),
@@ -3289,10 +3694,19 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("add project button", "project.add"),
     ("empty state's add project button", "project.add"),
     ("project head close button", "project.close"),
+    ("project head new tab button", "tab.new"),
     ("close project dialog buttons", "project.close"),
+    ("close tab dialog buttons", "tab.close"),
+    ("close pane dialog buttons", "pane.close"),
     ("relaunch button", "pane.relaunch"),
+    ("pane head close button", "pane.close"),
+    ("pane actions button", "pane.actions"),
+    ("pane head right click", "pane.actions"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
+    ("tab row drag", "tab.move_up"),
+    ("tab row drag", "tab.move_down"),
+    ("tab row close button", "tab.close"),
     ("worktree prompt buttons", "tab.new_worktree"),
     ("worktree question buttons", "pane.close"),
     ("context bar's Changes tab", "changes.show"),
@@ -3304,7 +3718,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::{Asked, MOUSE_COMMANDS, no_tab_label};
+    use super::{MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
     use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
@@ -3323,16 +3737,6 @@ mod tests {
             ..WorkspaceSnapshot::default()
         });
         assert_eq!(no_tab_label(&tabs_closed), "No tab is open");
-    }
-
-    #[test]
-    fn rf_ses_13_enter_never_quits_but_closes_a_project() {
-        assert!(!Asked::Quit.enter_accepts());
-        let close = Asked::CloseProject {
-            project: ProjectId::new(1),
-            name: "yien".to_owned(),
-        };
-        assert!(close.enter_accepts());
     }
 
     #[test]

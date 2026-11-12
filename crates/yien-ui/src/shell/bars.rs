@@ -16,8 +16,8 @@ const EDGE_WIDTH: f32 = 6.0;
 /// What a drag of a bar's edge carries.
 pub(super) struct BarDrag(Bar);
 
-/// A drag of a bar's edge draws nothing under the pointer.
-struct NoGhost;
+/// A drag of a bar's edge, or of a tab row, draws nothing under the pointer.
+pub(super) struct NoGhost;
 
 impl Render for NoGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

@@ -324,6 +324,7 @@ mod tests {
             pane: shell,
             orientation: Orientation::Horizontal,
             profile: Some(ProfileId::new("claude")),
+            before: false,
         });
         let claude = focused(&mut events, Some(shell));
         let token = loop {

@@ -291,6 +291,18 @@ pub enum Command {
         /// The new name; empty goes back to the automatic name.
         name: String,
     },
+    /// Moves a tab within its project's tabs (RF-ESP-16). A tab is never
+    /// moved to another project: a `project` that is not the tab's own
+    /// refuses the move.
+    MoveTab {
+        /// The tab.
+        tab: TabId,
+        /// The project the tab is in.
+        project: ProjectId,
+        /// Where the tab ends up among its project's tabs, counted from 0
+        /// once it has left its old place; past the last tab means last.
+        to_index: u32,
+    },
     /// Mutes or unmutes a tab's toasts and taskbar flashes (RF-ATN-11). Its
     /// red mark, the counter and the badge stay (RF-ATN-16).
     SetTabMuted {
@@ -356,12 +368,16 @@ pub enum Command {
     /// Splits a pane and starts a program in the new one (RF-PAN-01,
     /// RF-PAN-18).
     SplitPane {
-        /// The pane to split; the new pane goes after it.
+        /// The pane to split.
         pane: PaneId,
         /// Side by side or stacked.
         orientation: Orientation,
         /// The profile to launch; the user's shell when `None`.
         profile: Option<ProfileId>,
+        /// Puts the new pane before the split one (left of it or above it)
+        /// instead of after it.
+        #[serde(default)]
+        before: bool,
     },
     /// Closes a pane and terminates its program. Closing the last pane of a
     /// tab closes the tab.
@@ -387,6 +403,20 @@ pub enum Command {
         pane: PaneId,
         /// The fraction to add; negative shrinks.
         delta: f32,
+    },
+    /// Moves the divider between two neighbouring children of a split, so
+    /// the first takes `share` of the space the two hold together; the rest
+    /// of the split stays put (RF-PAN-02). Ignored when the panes are not on
+    /// the two sides of one divider, or `share` is not strictly between 0
+    /// and 1; a share closer than [`crate::MIN_DIVIDER_SHARE`] to either end
+    /// is clamped there.
+    SetDivider {
+        /// Any pane in the child before the divider.
+        before: PaneId,
+        /// Any pane in the child after it.
+        after: PaneId,
+        /// The first child's part of the pair's space.
+        share: f32,
     },
     /// Exchanges two panes of the same tab; their programs keep running
     /// (RF-PAN-05).
@@ -1016,6 +1046,14 @@ pub enum CoreMsg {
         /// The selected text, or `None` when nothing is selected.
         text: Option<String>,
     },
+    /// A program in the pane asked to write the system clipboard (OSC 52).
+    /// Take the text with the core handle's `take_clipboard`: it is at most
+    /// 1 MiB, the latest write wins, and no further notice is sent until it
+    /// is taken. Reads are never offered. Never log the text.
+    ClipboardReady {
+        /// The pane.
+        pane: PaneId,
+    },
     /// Something failed. The message says what happened and what to do.
     Error {
         /// The pane it concerns, if any.
@@ -1115,10 +1153,22 @@ mod tests {
                 pane: PaneId::new(3),
                 orientation: Orientation::Vertical,
                 profile: Some(ProfileId::new("claude")),
+                before: false,
+            },
+            Command::SplitPane {
+                pane: PaneId::new(3),
+                orientation: Orientation::Horizontal,
+                profile: None,
+                before: true,
             },
             Command::ResizeSplit {
                 pane: PaneId::new(3),
                 delta: -0.25,
+            },
+            Command::SetDivider {
+                before: PaneId::new(3),
+                after: PaneId::new(4),
+                share: 0.375,
             },
             Command::CloseProject {
                 project: ProjectId::new(1),
@@ -1130,6 +1180,11 @@ mod tests {
             Command::RenameTab {
                 tab: TabId::new(2),
                 name: "review".into(),
+            },
+            Command::MoveTab {
+                tab: TabId::new(2),
+                project: ProjectId::new(1),
+                to_index: 3,
             },
             Command::SetTabMuted {
                 tab: TabId::new(2),
@@ -1189,6 +1244,20 @@ mod tests {
         for command in commands {
             assert_eq!(round_trip(&command), command);
         }
+    }
+
+    #[test]
+    fn a_split_without_a_side_puts_the_new_pane_after() {
+        let split = Command::SplitPane {
+            pane: PaneId::new(3),
+            orientation: Orientation::Vertical,
+            profile: None,
+            before: false,
+        };
+        let json = serde_json::to_string(&split).unwrap();
+        let older = json.replace(",\"before\":false", "");
+        assert_ne!(older, json);
+        assert_eq!(serde_json::from_str::<Command>(&older).unwrap(), split);
     }
 
     #[test]
@@ -1308,6 +1377,9 @@ mod tests {
             },
             CoreMsg::Notice {
                 message: "Removed the worktree.".into(),
+            },
+            CoreMsg::ClipboardReady {
+                pane: PaneId::new(3),
             },
             CoreMsg::AgentSessions {
                 project: ProjectId::new(1),

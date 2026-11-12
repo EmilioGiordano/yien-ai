@@ -59,6 +59,23 @@ pub const SCHEMA: &[Setting] = &[
               panes started after it; running panes keep theirs.",
     },
     Setting {
+        key: "terminal.osc52_copy",
+        default: "true",
+        doc: "true: a program in a pane may write the system clipboard with the OSC 52 \
+              sequence, which is how Claude Code, opencode, vim and tmux copy a selection \
+              they made themselves; YIEN shows \"Copied from <pane>\". Only writes to the \
+              clipboard (target c, or none) is honoured, up to 1 MiB; writes to the primary \
+              selection (s, p) are ignored and a program can never read the clipboard. \
+              false: such copies are ignored. Applies at once.",
+    },
+    Setting {
+        key: "update.check",
+        default: "true",
+        doc: "true: once a day YIEN asks GitHub whether a newer YIEN was released and \
+              says so in the status bar; nothing is downloaded or installed until you \
+              ask. false: YIEN makes no network request for updates.",
+    },
+    Setting {
         key: "editor",
         default: "\"\"",
         doc: "The command that opens files, such as \"code\" or \"notepad\". Empty: the \
@@ -67,7 +84,14 @@ pub const SCHEMA: &[Setting] = &[
 ];
 
 /// Tables that only group other keys.
-pub(crate) const TABLES: &[&str] = &["ui", "ui.font", "ui.tabs", "terminal", "terminal.font"];
+pub(crate) const TABLES: &[&str] = &[
+    "ui",
+    "ui.font",
+    "ui.tabs",
+    "terminal",
+    "terminal.font",
+    "update",
+];
 
 /// The table that maps command ids to chords (RF-CFG-03).
 pub(crate) const KEYS_TABLE: &str = "keys";

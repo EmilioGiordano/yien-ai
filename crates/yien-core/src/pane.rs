@@ -138,6 +138,29 @@ pub(crate) fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
     engine.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The most a program may put on the clipboard in one write, in bytes.
+const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
+
+/// Why a clipboard write is not forwarded.
+#[derive(Debug, PartialEq, Eq)]
+enum Refused {
+    /// Empty: it would only clear the user's clipboard.
+    Empty,
+    /// Over [`MAX_CLIPBOARD_BYTES`], with its length.
+    TooLong(usize),
+}
+
+/// The text to forward for a clipboard write, or why not.
+fn clipboard_text(text: String) -> Result<String, Refused> {
+    if text.is_empty() {
+        Err(Refused::Empty)
+    } else if text.len() > MAX_CLIPBOARD_BYTES {
+        Err(Refused::TooLong(text.len()))
+    } else {
+        Ok(text)
+    }
+}
+
 /// The kind of attention state a pane is in, if any: "needs you", error
 /// or done. A pane keeps its place in the attention order while its state
 /// stays of the same kind.
@@ -630,6 +653,9 @@ impl Actor {
                 self.start_pending().await;
             }
         }
+        // The service forgets the slot when it stops the pane, but a write
+        // this actor absorbed after that would stay there for good.
+        self.ctx.clipboards.forget(self.id);
     }
 
     /// When a pane still waiting for its size starts anyway: soon after its
@@ -1117,6 +1143,12 @@ impl Actor {
             self.outbox.replies.push_back(out.replies);
             self.flush();
         }
+        if let Some(text) = out.clipboard {
+            self.report_clipboard(text);
+        }
+        if let Some(len) = out.selection_write_refused {
+            tracing::debug!(pane = self.id.get(), len, "primary selection write refused");
+        }
         if let Some(title) = out.title {
             self.report(PaneEvent::Title(match title {
                 TitleChange::Set(t) => Some(t),
@@ -1136,6 +1168,22 @@ impl Actor {
         }
         self.step(&Signal::Output);
         self.dirty = true;
+    }
+
+    fn report_clipboard(&self, text: String) {
+        match clipboard_text(text) {
+            Ok(text) => {
+                if self.ctx.clipboards.put(self.id, text) {
+                    self.report(PaneEvent::Clipboard);
+                }
+            }
+            Err(Refused::Empty) => {
+                tracing::debug!(pane = self.id.get(), "empty clipboard write ignored");
+            }
+            Err(Refused::TooLong(len)) => {
+                tracing::debug!(pane = self.id.get(), len, "clipboard write over the limit");
+            }
+        }
     }
 
     /// Writes what the outbox holds, replies first, then the resize, then the
@@ -1454,6 +1502,18 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_09_a_clipboard_write_over_one_mebibyte_is_dropped() {
+        let at_limit = "a".repeat(MAX_CLIPBOARD_BYTES);
+        assert_eq!(clipboard_text(at_limit.clone()), Ok(at_limit));
+        let over = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert_eq!(
+            clipboard_text(over),
+            Err(Refused::TooLong(MAX_CLIPBOARD_BYTES + 1))
+        );
+        assert_eq!(clipboard_text(String::new()), Err(Refused::Empty));
+    }
+
+    #[test]
     fn the_reader_posts_output_then_the_exit() {
         let (events, mut rx, thread) = reader(|b| output(std::str::from_utf8(b).unwrap()));
         events.send(PtyEvent::Output(b"hi".to_vec())).unwrap();
@@ -1557,6 +1617,7 @@ mod tests {
                 attention: Arc::default(),
                 ui_size: Arc::new(watch::Sender::new(None)),
                 consoles: Arc::default(),
+                clipboards: Arc::default(),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
