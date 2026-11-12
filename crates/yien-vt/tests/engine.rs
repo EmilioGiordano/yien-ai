@@ -572,6 +572,10 @@ fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
         e.feed(b"\x1b[c\x1b[>1u\x1b[?u\x1b[6n").replies,
         b"\x1b[?6c\x1b[?1u\x1b[1;1R"
     );
+    // The query cut across two reads is still answered before the attributes.
+    let mut e = engine(20, 5);
+    assert!(e.feed(b"\x1b[?").replies.is_empty());
+    assert_eq!(e.feed(b"u\x1b[c").replies, b"\x1b[?0u\x1b[?6c");
 }
 
 /// A program that enters the alternate screen, asks for mouse reports and
