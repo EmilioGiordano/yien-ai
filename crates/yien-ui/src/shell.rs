@@ -587,11 +587,30 @@ impl Shell {
 
     /// Any mouse button hides the keyboard rings until a key moves the
     /// keyboard again; the keyboard itself stays where the click put it.
-    fn on_pointer_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_pointer_down(&mut self, cx: &mut Context<Self>) {
         if self.modality != Modality::Pointer {
             self.modality = Modality::Pointer;
             cx.notify();
         }
+    }
+
+    /// Calls `on_pointer_down` for every mouse button in the window. Not a
+    /// capture listener on the root: gpui runs those only while the root is
+    /// hovered, and an `occlude`d element on top (the icon buttons) hides it.
+    fn watch_pointer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let shell = cx.entity().downgrade();
+        canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = shell.update(cx, |this, cx| this.on_pointer_down(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     /// Whether `bar` draws its keyboard ring at this render (RF-NAV-08).
@@ -3040,7 +3059,7 @@ impl Render for Shell {
         v_flex()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
-            .capture_any_mouse_down(cx.listener(Self::on_pointer_down))
+            .child(self.watch_pointer(cx))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
