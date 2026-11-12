@@ -29,6 +29,7 @@ mod shell;
 mod sidebars;
 mod terminal;
 mod theme;
+mod title_bar;
 mod tray;
 mod worktree;
 
