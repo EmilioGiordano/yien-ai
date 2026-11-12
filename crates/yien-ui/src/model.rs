@@ -350,6 +350,10 @@ pub struct WorkspaceView {
     notifications_muted: bool,
     /// The tab bar lists tabs in sections by state (RF-ATN-07).
     group_by_state: bool,
+    /// Tab moves sent to the core and not yet answered, per project
+    /// (RF-ESP-16). While any is out, an older project update must not put
+    /// back the order the window already moved past.
+    moves_in_flight: HashMap<ProjectId, usize>,
 }
 
 impl WorkspaceView {
@@ -377,13 +381,36 @@ impl WorkspaceView {
         view
     }
 
-    /// A project was added or changed. Its tab order is the core's.
+    /// A project was added or changed. Its tab order is the core's, except
+    /// while tab moves of the window are in flight: each update then answers
+    /// one of them, and the window keeps its own order until the last answer
+    /// or an update that already matches it, taking only tabs added or
+    /// closed meanwhile.
     pub fn project_updated(&mut self, info: &ProjectInfo) {
+        let local = self
+            .projects
+            .iter()
+            .find(|p| p.id == info.id)
+            .map(|p| &p.tabs);
+        let tabs = match (self.moves_in_flight.get_mut(&info.id), local) {
+            (Some(n), Some(local)) if *n > 0 && *local != info.tabs => {
+                *n -= 1;
+                if *n == 0 {
+                    info.tabs.clone()
+                } else {
+                    keep_order(local, &info.tabs)
+                }
+            }
+            _ => {
+                self.moves_in_flight.remove(&info.id);
+                info.tabs.clone()
+            }
+        };
         let project = ProjectView {
             id: info.id,
             name: info.name.clone(),
             root: info.root.clone(),
-            tabs: info.tabs.clone(),
+            tabs,
         };
         if info.collapsed {
             self.folded.insert(info.id);
@@ -463,6 +490,7 @@ impl WorkspaceView {
         let gone = tabs.into_iter().flat_map(|t| self.tab_closed(t)).collect();
         self.projects.retain(|p| p.id != id);
         self.folded.remove(&id);
+        self.moves_in_flight.remove(&id);
         if self.last_project == Some(id) {
             self.last_project = None;
         }
@@ -941,6 +969,7 @@ impl WorkspaceView {
         }
         let tab = project.tabs.remove(from);
         project.tabs.insert(to, tab);
+        *self.moves_in_flight.entry(project.id).or_default() += 1;
         true
     }
 
@@ -1003,6 +1032,14 @@ impl WorkspaceView {
     fn tabs_in_order(&self) -> impl Iterator<Item = &TabView> {
         self.projects.iter().flat_map(|p| self.tabs_of(p))
     }
+}
+
+/// `local`'s order for the tabs `core` still lists, then the tabs only
+/// `core` lists, in its order.
+fn keep_order(local: &[TabId], core: &[TabId]) -> Vec<TabId> {
+    let mut tabs: Vec<TabId> = local.iter().filter(|t| core.contains(t)).copied().collect();
+    tabs.extend(core.iter().filter(|t| !local.contains(t)));
+    tabs
 }
 
 /// The name to send when a tab rename ends with `typed` in the field: `None`
@@ -1733,9 +1770,66 @@ mod tests {
         assert!(!view.move_tab(TabId::new(12), 2), "its own place");
         assert!(!view.move_tab(TabId::new(99), 0));
         assert_eq!(view.place_of(TabId::new(99)), None);
-        // The core's order wins once it arrives.
+        // The core answers both moves; after that its order wins.
+        view.project_updated(&project(1, &[12, 10, 11]));
+        assert_eq!(ids(&view), [10, 11, 12], "an answer older than the window");
+        view.project_updated(&project(1, &[10, 11, 12]));
         view.project_updated(&project(1, &[11, 12, 10]));
         assert_eq!(ids(&view), [11, 12, 10]);
+    }
+
+    #[test]
+    fn rf_esp_16_a_late_core_answer_does_not_undo_a_held_key() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3, 4])],
+            tabs: vec![
+                tab(1, 1, &[10]),
+                tab(2, 1, &[20]),
+                tab(3, 1, &[30]),
+                tab(4, 1, &[40]),
+            ],
+            ..Default::default()
+        });
+        let ids = |view: &WorkspaceView| -> Vec<u64> {
+            view.drawn_tabs().iter().map(|t| t.get()).collect()
+        };
+        // Ctrl+Shift+PgDn held on tab 1: each press moves it one down from
+        // the order the window shows, and the core answers each move late.
+        let press = |view: &mut WorkspaceView| {
+            let (_, from, len) = view.place_of(TabId::new(1)).unwrap();
+            let to = crate::tab_order::step(from, len, true).unwrap();
+            assert!(view.move_tab(TabId::new(1), to));
+        };
+        press(&mut view);
+        press(&mut view);
+        view.project_updated(&project(1, &[2, 1, 3, 4]));
+        assert_eq!(ids(&view), [2, 3, 1, 4], "the first answer is older");
+        press(&mut view);
+        assert_eq!(ids(&view), [2, 3, 4, 1], "three presses, three moves");
+        view.project_updated(&project(1, &[2, 3, 1, 4]));
+        assert_eq!(ids(&view), [2, 3, 4, 1]);
+        // The last answer, already with a tab opened meanwhile.
+        view.project_updated(&project(1, &[2, 3, 4, 1, 5]));
+        view.tab_updated(&tab(5, 1, &[50]));
+        assert_eq!(ids(&view), [2, 3, 4, 1, 5]);
+        // Every move answered: the core's order is taken as it comes.
+        view.project_updated(&project(1, &[5, 2, 3, 4, 1]));
+        assert_eq!(ids(&view), [5, 2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn rf_esp_16_an_answer_in_flight_keeps_tabs_added_or_closed_meanwhile() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3])],
+            tabs: vec![tab(1, 1, &[10]), tab(2, 1, &[20]), tab(3, 1, &[30])],
+            ..Default::default()
+        });
+        assert!(view.move_tab(TabId::new(3), 0));
+        assert!(view.move_tab(TabId::new(1), 2));
+        // An older order with tab 2 gone and tab 4 new.
+        view.project_updated(&project(1, &[3, 1, 4]));
+        let ids: Vec<u64> = view.projects()[0].tabs.iter().map(|t| t.get()).collect();
+        assert_eq!(ids, [3, 1, 4]);
     }
 
     #[test]
