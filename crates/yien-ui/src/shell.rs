@@ -197,14 +197,6 @@ enum Asked {
     Quit,
 }
 
-impl Asked {
-    /// The keys of Cancel and of the yes button. Enter answers yes in the
-    /// quit question too, Emilio's choice; the quit key only opens it.
-    fn keys(&self) -> (&'static str, &'static str) {
-        ("Esc", "Enter")
-    }
-}
-
 /// The palette's model and the widgets drawing it.
 struct OpenPalette {
     model: Palette,
@@ -1401,7 +1393,7 @@ impl Shell {
         CATALOG
             .iter()
             .filter(|spec| spec.scope == Scope::Window && spec.id != "app.quit")
-            .fold(dialog.on_action(cx.listener(Self::quit)), |dialog, spec| {
+            .fold(dialog, |dialog, spec| {
                 dialog.on_boxed_action(
                     &*(spec.action)(),
                     cx.listener(|this, _: &dyn Action, window, cx| {
@@ -1454,7 +1446,6 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
-        let (cancel_keys, accept_keys) = confirm.asked.keys();
         let (title, detail, accept, id) = match &confirm.asked {
             Asked::CloseProject { project, name } => {
                 let detail = match self.workspace.busy_panes_of(*project) {
@@ -1499,11 +1490,7 @@ impl Shell {
             h_flex()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(if keys.is_empty() {
-                    label.to_owned()
-                } else {
-                    format!("{label} ({keys})")
-                })
+                .aria_label(format!("{label} ({keys})"))
                 .items_center()
                 .gap(px(8.0))
                 .px(px(12.0))
@@ -1514,7 +1501,7 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(label)
-                .when(!keys.is_empty(), |b| b.child(key_hint(keys, &t)))
+                .child(key_hint(keys, &t))
         };
         Some(
             div()
@@ -1564,13 +1551,13 @@ impl Shell {
                                 .gap(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(t.text(13.0))
-                                .child(button("confirm-cancel", "Cancel", cancel_keys).on_click(
+                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.confirm_cancel(&ConfirmCancel, window, cx);
                                     }),
                                 ))
                                 .child(
-                                    button("confirm-accept", accept, accept_keys)
+                                    button("confirm-accept", accept, "Enter")
                                         .font_weight(FontWeight::MEDIUM)
                                         .border_color(t.muted)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -3393,10 +3380,10 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::{Asked, MOUSE_COMMANDS, no_tab_label};
+    use super::{MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
-    use yien_proto::{PaneId, ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
+    use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
 
     #[test]
     fn the_context_bar_says_no_project_only_when_there_is_none() {
@@ -3412,27 +3399,6 @@ mod tests {
             ..WorkspaceSnapshot::default()
         });
         assert_eq!(no_tab_label(&tabs_closed), "No tab is open");
-    }
-
-    #[test]
-    fn rf_ses_13_enter_quits_from_the_quit_question_and_esc_cancels() {
-        assert_eq!(Asked::Quit.keys(), ("Esc", "Enter"));
-        for asked in [
-            Asked::CloseProject {
-                project: ProjectId::new(1),
-                name: "yien".to_owned(),
-            },
-            Asked::CloseTab {
-                tab: TabId::new(1),
-                name: "Tab 1".to_owned(),
-            },
-            Asked::ClosePane {
-                pane: PaneId::new(1),
-                name: "pwsh".to_owned(),
-            },
-        ] {
-            assert_eq!(asked.keys(), ("Esc", "Enter"));
-        }
     }
 
     #[test]
