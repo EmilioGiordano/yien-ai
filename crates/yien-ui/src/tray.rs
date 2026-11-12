@@ -141,6 +141,22 @@ pub(crate) fn close_request(working: usize, asking: bool, confirmed: bool) -> Cl
     }
 }
 
+/// The quit key pressed (RF-SES-13). While the quit question is open it
+/// answers yes, but only as a new press: a key released since the question
+/// opened. A held key repeats, and must not open and confirm in one go.
+pub(crate) fn quit_key_request(
+    working: usize,
+    asking: bool,
+    released_since_asked: bool,
+    confirmed: bool,
+) -> CloseRequest {
+    match (asking, released_since_asked) {
+        (true, true) => CloseRequest::Close,
+        (true, false) => CloseRequest::StillAsking,
+        (false, _) => close_request(working, false, confirmed),
+    }
+}
+
 /// What the quit question says about the working agents.
 pub(crate) fn quit_detail(working: usize) -> String {
     match working {
@@ -383,6 +399,24 @@ mod tests {
         assert_eq!(close_request(1, false, true), CloseRequest::Close);
         // The agents finished while the question was up: closing goes on.
         assert_eq!(close_request(0, true, false), CloseRequest::Close);
+    }
+
+    #[test]
+    fn rf_ses_13_the_quit_key_again_quits_but_a_held_one_keeps_asking() {
+        assert_eq!(
+            quit_key_request(2, false, false, false),
+            CloseRequest::Ask(2)
+        );
+        assert_eq!(
+            quit_key_request(0, false, false, false),
+            CloseRequest::Close
+        );
+        assert_eq!(
+            quit_key_request(2, true, false, false),
+            CloseRequest::StillAsking,
+            "a repeat of the press that opened the question"
+        );
+        assert_eq!(quit_key_request(2, true, true, false), CloseRequest::Close);
     }
 
     #[test]

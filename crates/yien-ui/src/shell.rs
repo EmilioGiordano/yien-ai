@@ -43,7 +43,7 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
-use crate::tray::{CloseRequest, close_request, quit_detail};
+use crate::tray::{CloseRequest, close_request, quit_detail, quit_key_request};
 
 mod bars;
 mod files;
@@ -138,6 +138,9 @@ pub(crate) struct Shell {
     confirm: Option<Confirm>,
     /// The user chose to quit with agents working; closing no longer asks.
     quit_confirmed: bool,
+    /// A key came up since the open question was asked: the quit key
+    /// pressed now is a new press, not a held repeat.
+    key_released_since_asked: bool,
     /// The attention tray, while open (RF-ATN-13).
     tray: Option<Tray>,
     /// When a mouse-down outside the tray last closed it. The click that
@@ -202,6 +205,15 @@ impl Asked {
     /// there Enter cancels like Escape and only the button quits.
     fn enter_accepts(&self) -> bool {
         !matches!(self, Asked::Quit)
+    }
+
+    /// The keys shown on Cancel and on the yes button. Enter still cancels
+    /// the quit question, unshown: one key per button.
+    fn keys(&self) -> (&'static str, &'static str) {
+        match self {
+            Asked::Quit => ("Esc", QUIT_KEYS),
+            _ => ("Esc", "Enter"),
+        }
     }
 }
 
@@ -340,6 +352,7 @@ impl Shell {
             session_requests: 0,
             confirm: None,
             quit_confirmed: false,
+            key_released_since_asked: false,
             tray,
             tray_closed_at: None,
             renaming: None,
@@ -1356,6 +1369,7 @@ impl Shell {
         self.finish_rename(true, window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        self.key_released_since_asked = false;
         self.confirm = Some(Confirm { asked, focus });
         cx.notify();
     }
@@ -1383,10 +1397,32 @@ impl Shell {
     }
 
     /// `app: quit YIEN`: closes the window, which quits, asking first while
-    /// agents work (RF-SES-13).
+    /// agents work (RF-SES-13). While that question is open, a new press of
+    /// the quit key answers yes; a held one does not.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.window_should_close(window, cx) {
-            window.remove_window();
+        let asking = self
+            .confirm
+            .as_ref()
+            .is_some_and(|c| matches!(c.asked, Asked::Quit));
+        match quit_key_request(
+            self.workspace.working_panes(),
+            asking,
+            self.key_released_since_asked,
+            self.quit_confirmed,
+        ) {
+            CloseRequest::Close => {
+                if asking {
+                    tracing::info!("quit anyway while agents work");
+                }
+                self.quit_confirmed = true;
+                self.confirm = None;
+                window.remove_window();
+            }
+            CloseRequest::Ask(working) => {
+                tracing::info!(working, "quit asked while agents work");
+                self.ask(Asked::Quit, window, cx);
+            }
+            CloseRequest::StillAsking => {}
         }
     }
 
@@ -1399,8 +1435,8 @@ impl Shell {
     ) -> Stateful<Div> {
         CATALOG
             .iter()
-            .filter(|spec| spec.scope == Scope::Window)
-            .fold(dialog, |dialog, spec| {
+            .filter(|spec| spec.scope == Scope::Window && spec.id != "app.quit")
+            .fold(dialog.on_action(cx.listener(Self::quit)), |dialog, spec| {
                 dialog.on_boxed_action(
                     &*(spec.action)(),
                     cx.listener(|this, _: &dyn Action, window, cx| {
@@ -1458,11 +1494,7 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
-        let (cancel_keys, accept_keys) = if confirm.asked.enter_accepts() {
-            ("Esc", "Enter")
-        } else {
-            ("Enter · Esc", "")
-        };
+        let (cancel_keys, accept_keys) = confirm.asked.keys();
         let (title, detail, accept, id) = match &confirm.asked {
             Asked::CloseProject { project, name } => {
                 let detail = match self.workspace.busy_panes_of(*project) {
@@ -1552,6 +1584,9 @@ impl Shell {
                         .shadow_lg()
                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                             this.confirm_cancel(&ConfirmCancel, window, cx);
+                        }))
+                        .on_key_up(cx.listener(|this, _: &KeyUpEvent, _, _| {
+                            this.key_released_since_asked = true;
                         }))
                         .map(|dialog| self.close_on_window_commands(dialog, cx))
                         .child(
@@ -3402,6 +3437,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
     use super::{Asked, MOUSE_COMMANDS, no_tab_label};
+    use crate::actions::QUIT_KEYS;
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
     use yien_proto::{PaneId, ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
@@ -3444,6 +3480,19 @@ mod tests {
             }
             .enter_accepts()
         );
+    }
+
+    #[test]
+    fn rf_ses_13_each_dialog_button_shows_one_key_and_quit_shows_the_quit_key() {
+        assert_eq!(Asked::Quit.keys(), ("Esc", QUIT_KEYS));
+        let close = Asked::CloseTab {
+            tab: TabId::new(1),
+            name: "Tab 1".to_owned(),
+        };
+        assert_eq!(close.keys(), ("Esc", "Enter"));
+        for (cancel, accept) in [Asked::Quit.keys(), close.keys()] {
+            assert!(!cancel.contains('·') && !accept.contains('·'));
+        }
     }
 
     #[test]

@@ -128,7 +128,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleTabGrouping,
         []
     ),
-    command!("app.quit", "app: quit YIEN", Quit, []),
+    command!("app.quit", "app: quit YIEN", Quit, ["ctrl-shift-q"]),
     command!(
         "agent.resume_session",
         "agent: resume a past session…",
@@ -559,6 +559,7 @@ mod tests {
             ("palette.open", PALETTE_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
             ("tab.new", NEW_TAB_KEYS),
+            ("app.quit", QUIT_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }
