@@ -39,8 +39,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.workspace.project_for_new_tab() else {
-            self.notice = Some("There is no project to open a worktree tab in.".to_owned());
-            cx.notify();
+            self.say("There is no project to open a worktree tab in.", cx);
             return;
         };
         let project_name = self
@@ -99,7 +98,7 @@ impl Shell {
             Ok((branch, base)) => {
                 let project = prompt.project;
                 self.worktree_prompt = None;
-                self.notice = Some(format!("Creating a worktree for {branch}…"));
+                self.say(format!("Creating a worktree for {branch}…"), cx);
                 self.command(
                     Command::NewWorktreeTab {
                         project,
