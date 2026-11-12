@@ -14,12 +14,14 @@ pub(super) const HINTED: [(&str, &str); 3] = [
     ("region.next", "move focus"),
 ];
 
-/// How long a plain notice stays up; an error stays until dismissed.
+/// How long a plain notice stays up; a warning or an error stays until
+/// dismissed.
 pub(super) const INFO_LIFETIME: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoticeKind {
     Info,
+    Warning,
     Error,
 }
 
@@ -31,10 +33,24 @@ pub(crate) struct Notice {
 }
 
 impl Notice {
+    pub(crate) fn new(text: impl Into<String>, kind: NoticeKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+        }
+    }
+
     pub(crate) fn info(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             kind: NoticeKind::Info,
+        }
+    }
+
+    pub(crate) fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: NoticeKind::Warning,
         }
     }
 
@@ -50,7 +66,18 @@ impl Notice {
 pub(super) fn lifetime(kind: NoticeKind) -> Option<Duration> {
     match kind {
         NoticeKind::Info => Some(INFO_LIFETIME),
-        NoticeKind::Error => None,
+        NoticeKind::Warning | NoticeKind::Error => None,
+    }
+}
+
+/// The kind of a notice a settings reading puts up: a reading that failed
+/// is an error; one that loaded and still has something to say (a warning,
+/// or the start's profile problems) is a warning.
+pub(super) fn reading_kind(loaded: bool) -> NoticeKind {
+    if loaded {
+        NoticeKind::Warning
+    } else {
+        NoticeKind::Error
     }
 }
 
@@ -68,7 +95,7 @@ pub(super) enum Line {
 }
 
 /// The hints for the commands that have keys now; `keys` answers with a
-/// command's current keys, `None` when it is unbound (RF-NAV-03, RF-CFG-03).
+/// command's current keys, `None` when it is unbound (RF-CFG-03).
 pub(super) fn hints(keys: impl Fn(&str) -> Option<String>) -> Vec<String> {
     HINTED
         .iter()
@@ -168,6 +195,14 @@ mod tests {
         assert!(timer_clears(Some(NoticeKind::Info), 3, 3));
         assert!(!timer_clears(Some(NoticeKind::Error), 3, 3));
         assert!(!timer_clears(None, 3, 3));
+    }
+
+    #[test]
+    fn a_warning_stays_and_a_failed_reading_is_an_error() {
+        assert_eq!(lifetime(NoticeKind::Warning), None);
+        assert!(!timer_clears(Some(NoticeKind::Warning), 3, 3));
+        assert_eq!(reading_kind(true), NoticeKind::Warning);
+        assert_eq!(reading_kind(false), NoticeKind::Error);
     }
 
     #[test]
