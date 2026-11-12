@@ -65,6 +65,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Waited: Integer;
+  Started: Integer;
 begin
   Result := '';
   if StartedByYien() then begin
@@ -74,8 +75,15 @@ begin
       Waited := Waited + 250;
     end;
   end;
-  if CheckForMutexes('Local\YIENRunning') then
+  if CheckForMutexes('Local\YIENRunning') then begin
     Result := 'Close YIEN before installing or upgrading, then run Setup again. YIEN was not closed.';
+    // The update gives up; the user must not be left without a YIEN.
+    if StartedByYien() then begin
+      Log('YIEN was still running after 30 seconds; the update was not installed and the installed YIEN is started again.');
+      if FileExists(ExpandConstant('{app}\yien.exe')) then
+        Exec(ExpandConstant('{app}\yien.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Started);
+    end;
+  end;
 end;
 
 function InitializeUninstall(): Boolean;
