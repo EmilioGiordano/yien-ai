@@ -23,8 +23,9 @@ ignore = [
 ]
 
 [licenses]
-# Anything not listed is rejected, which keeps out the GPL family (GPL, AGPL,
-# LGPL) while the project licence is undecided (TBD-04).
+# YIEN is GPL-3.0-or-later. The allow list stays the permissive list, all
+# compatible with GPLv3; anything not listed is rejected. Adding a dependency
+# under another licence is a deliberate decision, made here.
 allow = [
     "MIT",
     "Apache-2.0",
