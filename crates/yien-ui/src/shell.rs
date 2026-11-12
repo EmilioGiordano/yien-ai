@@ -191,6 +191,8 @@ enum Asked {
     CloseProject { project: ProjectId, name: String },
     /// Closing a tab whose panes run work (RF-ESP-03).
     CloseTab { tab: TabId, name: String },
+    /// Closing a pane that runs work.
+    ClosePane { pane: PaneId, name: String },
     /// Quitting while agents work (RF-SES-13).
     Quit,
 }
@@ -561,6 +563,7 @@ impl Shell {
         let gone = self.confirm.as_ref().is_some_and(|c| match &c.asked {
             Asked::CloseProject { project, .. } => self.workspace.project(*project).is_none(),
             Asked::CloseTab { tab, .. } => self.workspace.tab(*tab).is_none(),
+            Asked::ClosePane { pane, .. } => self.workspace.tab_of(*pane).is_none(),
             Asked::Quit => false,
         });
         if gone {
@@ -949,11 +952,15 @@ impl Shell {
     /// Closes the focused pane; closing the last tab on a worktree asks
     /// first whether to keep the worktree (RF-ESP-07).
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.focused_pane()
-            && !self.ask_before_closing(pane, window, cx)
-        {
-            self.command(Command::ClosePane { pane }, cx);
+        if let Some(pane) = self.focused_pane() {
+            self.close_pane_id(pane, window, cx);
         }
+    }
+
+    /// Closes `pane` as the `pane.close` key does: asking first while it
+    /// runs work, then on the last tab on a worktree.
+    fn close_pane_id(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pane_step(pane, false, window, cx);
     }
 
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
@@ -1427,6 +1434,10 @@ impl Shell {
                 self.give_back_keyboard(window, cx);
                 self.close_tab_step(tab, true, window, cx);
             }
+            Asked::ClosePane { pane, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_pane_step(pane, true, window, cx);
+            }
             Asked::Quit => {
                 tracing::info!("quit anyway while agents work");
                 self.quit_confirmed = true;
@@ -1478,6 +1489,12 @@ impl Shell {
                 tab_controls::close_tab_detail(self.workspace.busy_panes_of_tab(*tab)),
                 "Close tab",
                 "confirm-close-tab",
+            ),
+            Asked::ClosePane { pane, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_pane_detail(self.workspace.pane(*pane).is_busy()).to_owned(),
+                "Close pane",
+                "confirm-close-pane",
             ),
             Asked::Quit => (
                 "Quit YIEN?".to_owned(),
@@ -3364,6 +3381,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("project head new tab button", "tab.new"),
     ("close project dialog buttons", "project.close"),
     ("close tab dialog buttons", "tab.close"),
+    ("close pane dialog buttons", "pane.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
@@ -3384,7 +3402,7 @@ mod tests {
     use super::{Asked, MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
-    use yien_proto::{ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
+    use yien_proto::{PaneId, ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
 
     #[test]
     fn the_context_bar_says_no_project_only_when_there_is_none() {
@@ -3414,6 +3432,13 @@ mod tests {
             Asked::CloseTab {
                 tab: TabId::new(1),
                 name: "Tab 1".to_owned(),
+            }
+            .enter_accepts()
+        );
+        assert!(
+            Asked::ClosePane {
+                pane: PaneId::new(1),
+                name: "pwsh".to_owned(),
             }
             .enter_accepts()
         );

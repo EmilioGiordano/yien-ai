@@ -32,6 +32,15 @@ pub(crate) fn close_tab_detail(busy: usize) -> String {
     }
 }
 
+/// What the question before closing a pane with work running says.
+pub(crate) fn close_pane_detail(busy: bool) -> &'static str {
+    if busy {
+        "This pane is still running an agent or a program; closing it stops it."
+    } else {
+        "Nothing in it is running any more."
+    }
+}
+
 /// The group a tab row's hover is tracked under, so its × shows with it.
 pub(super) fn row_group(tab: TabId) -> SharedString {
     format!("tab-row-{}", tab.get()).into()
@@ -127,7 +136,7 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_tab_detail, close_tab_label, new_tab_label};
+    use super::{close_pane_detail, close_tab_detail, close_tab_label, new_tab_label};
     use crate::catalog::default_keys;
 
     #[test]
@@ -141,6 +150,15 @@ mod tests {
     #[test]
     fn rf_esp_03_the_close_button_names_its_tab() {
         assert_eq!(close_tab_label("Tab 2"), "Close tab Tab 2");
+    }
+
+    #[test]
+    fn rf_esp_03_the_close_pane_question_says_it_stops_the_work() {
+        assert_eq!(
+            close_pane_detail(true),
+            "This pane is still running an agent or a program; closing it stops it."
+        );
+        assert!(close_pane_detail(false).contains("Nothing"));
     }
 
     #[test]

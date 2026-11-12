@@ -224,12 +224,12 @@ impl PaneView {
     }
 }
 
-/// The next step of closing a whole tab (RF-ESP-03, RF-ESP-07).
+/// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CloseTabStep {
+pub(crate) enum CloseStep {
     /// Ask first: panes would stop while they work.
     AskBusy,
-    /// Ask whether to keep or remove the tab's worktree.
+    /// Ask whether to keep or remove the worktree.
     AskWorktree(Box<Question>),
     /// Close it now.
     Close,
@@ -821,13 +821,26 @@ impl WorkspaceView {
     /// What closing the whole of `tab` does next: ask about the work it
     /// would stop, unless `stop_confirmed`; then ask about its worktree
     /// (RF-ESP-07); else close.
-    pub(crate) fn close_tab_step(&self, tab: TabId, stop_confirmed: bool) -> CloseTabStep {
+    pub(crate) fn close_tab_step(&self, tab: TabId, stop_confirmed: bool) -> CloseStep {
         if !stop_confirmed && self.busy_panes_of_tab(tab) > 0 {
-            return CloseTabStep::AskBusy;
+            return CloseStep::AskBusy;
         }
         match self.close_tab_question(tab) {
-            Some(question) => CloseTabStep::AskWorktree(Box::new(question)),
-            None => CloseTabStep::Close,
+            Some(question) => CloseStep::AskWorktree(Box::new(question)),
+            None => CloseStep::Close,
+        }
+    }
+
+    /// What closing `pane` does next: ask about the work it would stop,
+    /// unless `stop_confirmed`; then, when it is the last pane of the last
+    /// tab on a worktree, ask about the worktree (RF-ESP-07); else close.
+    pub(crate) fn close_pane_step(&self, pane: PaneId, stop_confirmed: bool) -> CloseStep {
+        if !stop_confirmed && self.pane(pane).is_busy() {
+            return CloseStep::AskBusy;
+        }
+        match self.worktree_question(pane) {
+            Some(question) => CloseStep::AskWorktree(Box::new(question)),
+            None => CloseStep::Close,
         }
     }
 
@@ -2074,23 +2087,17 @@ mod tests {
         assert_eq!(view.busy_panes_of_tab(TabId::new(10)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(10), false),
-            CloseTabStep::AskBusy
+            CloseStep::AskBusy
         );
-        assert_eq!(
-            view.close_tab_step(TabId::new(10), true),
-            CloseTabStep::Close
-        );
+        assert_eq!(view.close_tab_step(TabId::new(10), true), CloseStep::Close);
         // Tab 20: an idle shell that finished a command.
-        assert_eq!(
-            view.close_tab_step(TabId::new(20), false),
-            CloseTabStep::Close
-        );
+        assert_eq!(view.close_tab_step(TabId::new(20), false), CloseStep::Close);
         // A shell running a command it marked with OSC 133 works.
         view.pane_updated(&pane(200, 20, P::Working));
         assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(20), false),
-            CloseTabStep::AskBusy
+            CloseStep::AskBusy
         );
         // An agent program at rest still runs.
         let mut claude = pane(200, 20, P::Idle);
@@ -2099,7 +2106,7 @@ mod tests {
         assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(20), false),
-            CloseTabStep::AskBusy
+            CloseStep::AskBusy
         );
         assert_eq!(view.busy_panes_of_tab(TabId::new(99)), 0);
     }
@@ -2122,17 +2129,87 @@ mod tests {
         assert_eq!(view.busy_panes_of_tab(TabId::new(30)), 2);
         assert_eq!(
             view.close_tab_step(TabId::new(30), false),
-            CloseTabStep::AskBusy
+            CloseStep::AskBusy
         );
         match view.close_tab_step(TabId::new(30), true) {
-            CloseTabStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),
+            CloseStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),
             other => panic!("expected the worktree question, got {other:?}"),
         }
         view.pane_updated(&pane(300, 30, P::Idle));
         view.pane_updated(&pane(301, 30, P::Idle));
         assert!(matches!(
             view.close_tab_step(TabId::new(30), false),
-            CloseTabStep::AskWorktree(_)
+            CloseStep::AskWorktree(_)
+        ));
+    }
+
+    #[test]
+    fn rf_esp_03_closing_a_pane_asks_while_it_runs_work() {
+        let mut view = demo();
+        // Tab 10: 100 needs you, 101 is a shell at its prompt.
+        assert_eq!(
+            view.close_pane_step(PaneId::new(100), false),
+            CloseStep::AskBusy
+        );
+        assert_eq!(
+            view.close_pane_step(PaneId::new(100), true),
+            CloseStep::Close
+        );
+        assert_eq!(
+            view.close_pane_step(PaneId::new(101), false),
+            CloseStep::Close,
+            "only the pane closed counts, not its tab"
+        );
+        // A shell running a command it marked with OSC 133 works.
+        view.pane_updated(&pane(101, 10, P::Working));
+        assert_eq!(
+            view.close_pane_step(PaneId::new(101), false),
+            CloseStep::AskBusy
+        );
+        // An agent program at rest still runs; once it exited it does not.
+        let mut claude = pane(200, 20, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::AskBusy
+        );
+        claude.running = false;
+        claude.exit_code = Some(0);
+        view.pane_updated(&claude);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::Close
+        );
+        // A pane whose details have not arrived counts as busy.
+        view.tab_updated(&tab(11, 1, &[110, 111]));
+        assert_eq!(
+            view.close_pane_step(PaneId::new(111), false),
+            CloseStep::AskBusy
+        );
+    }
+
+    #[test]
+    fn rf_esp_07_closing_the_busy_last_pane_on_a_worktree_asks_about_work_then_worktree() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&wt);
+        view.pane_updated(&pane(300, 30, P::Working));
+
+        assert_eq!(
+            view.close_pane_step(PaneId::new(300), false),
+            CloseStep::AskBusy
+        );
+        match view.close_pane_step(PaneId::new(300), true) {
+            CloseStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),
+            other => panic!("expected the worktree question, got {other:?}"),
+        }
+        view.pane_updated(&pane(300, 30, P::Idle));
+        assert!(matches!(
+            view.close_pane_step(PaneId::new(300), false),
+            CloseStep::AskWorktree(_)
         ));
     }
 

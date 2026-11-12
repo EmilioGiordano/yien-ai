@@ -11,7 +11,7 @@ use yien_proto::{Command, PaneId, ProjectId, TabId, WorktreeCheck};
 use super::{Asked, CONFIRM_WIDTH, PALETTE_TOP, Shell};
 use crate::actions::*;
 use crate::catalog::{CATALOG, Scope};
-use crate::model::CloseTabStep;
+use crate::model::CloseStep;
 use crate::theme::Theme;
 use crate::worktree::{Answer, Question, Step, parse_prompt, prompt_hint};
 
@@ -124,20 +124,26 @@ impl Shell {
         }
     }
 
-    /// Asks before closing `pane` when that closes the last tab on a
-    /// worktree, and has the core check the worktree meanwhile. `false` when
-    /// there is nothing to ask.
-    pub(super) fn ask_before_closing(
+    /// The next step of closing `pane`; `stop_confirmed` once the user
+    /// agreed to stop the work running in it. The worktree question has the
+    /// core check the worktree meanwhile.
+    pub(super) fn close_pane_step(
         &mut self,
         pane: PaneId,
+        stop_confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(question) = self.workspace.worktree_question(pane) else {
-            return false;
-        };
-        self.ask_worktree_question(question, window, cx);
-        true
+    ) {
+        match self.workspace.close_pane_step(pane, stop_confirmed) {
+            CloseStep::AskBusy => {
+                let name = self.workspace.pane(pane).name;
+                self.ask(Asked::ClosePane { pane, name }, window, cx);
+            }
+            CloseStep::AskWorktree(question) => {
+                self.ask_worktree_question(*question, window, cx);
+            }
+            CloseStep::Close => self.command(Command::ClosePane { pane }, cx),
+        }
     }
 
     /// Closes the whole of `tab`, asking first while any of its panes
@@ -165,16 +171,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match self.workspace.close_tab_step(tab, stop_confirmed) {
-            CloseTabStep::AskBusy => {
+            CloseStep::AskBusy => {
                 let Some(name) = self.workspace.tab(tab).map(|t| t.name.clone()) else {
                     return;
                 };
                 self.ask(Asked::CloseTab { tab, name }, window, cx);
             }
-            CloseTabStep::AskWorktree(question) => {
+            CloseStep::AskWorktree(question) => {
                 self.ask_worktree_question(*question, window, cx);
             }
-            CloseTabStep::Close => self.command(Command::CloseTab { tab }, cx),
+            CloseStep::Close => self.command(Command::CloseTab { tab }, cx),
         }
     }
 
