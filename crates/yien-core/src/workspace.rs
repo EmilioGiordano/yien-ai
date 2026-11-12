@@ -1330,6 +1330,80 @@ mod tests {
         assert_eq!(info.focused, new);
     }
 
+    fn split_before(ws: &mut Workspace, pane: PaneId, orientation: Orientation) -> PaneId {
+        let fx = run(
+            ws,
+            Command::SplitPane {
+                pane,
+                orientation,
+                profile: None,
+                before: true,
+            },
+        );
+        spawned(&fx)[0]
+    }
+
+    /// The flex of every child of the root split, which must be one along
+    /// `orientation`.
+    fn root_flex(layout: &LayoutNode, orientation: Orientation) -> Vec<f32> {
+        let LayoutNode::Split {
+            orientation: o,
+            children,
+        } = layout
+        else {
+            panic!("expected a split, got {layout:?}");
+        };
+        assert_eq!(*o, orientation);
+        children.iter().map(|c| c.flex).collect()
+    }
+
+    #[test]
+    fn rf_pan_01_split_left_puts_a_focused_pane_before_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, first) = project(&mut ws);
+        let new = split_before(&mut ws, first, Orientation::Horizontal);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [new, first]);
+        assert_eq!(info.focused, new);
+        assert_eq!(root_flex(&info.layout, Orientation::Horizontal), [0.5, 0.5]);
+        ws.check().unwrap();
+    }
+
+    #[test]
+    fn rf_pan_01_split_up_puts_a_focused_pane_above_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, first) = project(&mut ws);
+        let new = split_before(&mut ws, first, Orientation::Vertical);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [new, first]);
+        assert_eq!(info.focused, new);
+        assert_eq!(root_flex(&info.layout, Orientation::Vertical), [0.5, 0.5]);
+        ws.check().unwrap();
+    }
+
+    #[test]
+    fn rf_pan_01_split_left_inside_a_row_halves_only_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let fx = run(
+            &mut ws,
+            Command::SplitPane {
+                pane: a,
+                orientation: Orientation::Horizontal,
+                profile: None,
+                before: false,
+            },
+        );
+        let b = spawned(&fx)[0];
+        let new = split_before(&mut ws, b, Orientation::Horizontal);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [a, new, b]);
+        let flex = root_flex(&info.layout, Orientation::Horizontal);
+        assert_eq!(flex, [0.5, 0.25, 0.25]);
+        assert!((flex.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        ws.check().unwrap();
+    }
+
     #[test]
     fn rf_pan_20_closing_the_last_pane_closes_its_tab() {
         let mut ws = Workspace::new();
