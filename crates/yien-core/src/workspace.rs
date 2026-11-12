@@ -648,7 +648,8 @@ impl Workspace {
     }
 
     /// Moves a tab to `to_index` among its project's tabs, clamped to the
-    /// last place. The project is announced only when the order changed.
+    /// last place. The project is announced for every valid move, changed
+    /// or not.
     fn move_tab(
         &mut self,
         tab: TabId,
@@ -675,8 +676,9 @@ impl Workspace {
         if to != from {
             let moved = p.tabs.remove(from);
             p.tabs.insert(to, moved);
-            fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
         }
+        // Even unchanged: the window counts one answer per move it sent.
+        fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
         Ok(())
     }
 
@@ -2037,8 +2039,11 @@ mod tests {
         // Past the last tab means last.
         run(&mut ws, move_to(b, p, u32::MAX));
         assert_eq!(ws.snapshot().projects[0].tabs, [a, c, b]);
-        // Its own place again changes nothing and announces nothing.
-        assert!(emitted(&run(&mut ws, move_to(b, p, 9))).is_empty());
+        // Its own place again changes nothing, and is still answered.
+        assert!(matches!(
+            emitted(&run(&mut ws, move_to(b, p, 9)))[..],
+            [CoreMsg::ProjectUpdated(info)] if info.tabs == [a, c, b]
+        ));
         assert!(ws.apply(move_to(TabId::new(99), p, 0), &resolve).is_err());
     }
 
