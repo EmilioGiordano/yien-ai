@@ -22,6 +22,21 @@ use yien_session::{MemStore, SessionSnapshot, Store, StoreError, load};
 /// PowerShell's first start on a cold machine can take many seconds.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Keeps the typed test commands out of the developer's own history file.
+const NO_HISTORY: &str =
+    "try { Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction Stop } catch {}";
+
+/// `program` with YIEN's hook, as panes start it, but without the
+/// developer's profile and history.
+fn test_powershell(program: &str) -> ShellCommand {
+    let mut shell = ShellCommand::new(program).reporting_cwd(None);
+    let hook = shell.args.pop().unwrap();
+    assert_eq!(shell.args, ["-NoLogo", "-NoExit", "-Command"]);
+    shell.args.insert(1, "-NoProfile".into());
+    shell.args.push(format!("{NO_HISTORY}; {hook}"));
+    shell
+}
+
 #[derive(Clone, Default)]
 struct Shared(Arc<Mutex<MemStore>>);
 
@@ -129,7 +144,7 @@ fn on_path(program: &str) -> bool {
 /// Opens a project, follows the pane through `cd`, quits and starts again
 /// on the saved session.
 fn follows_cd_and_restores_there(program: &str) {
-    let shell = ShellCommand::new(program).reporting_cwd(None);
+    let shell = test_powershell(program);
     let odd = odd_folder(program.trim_end_matches(".exe"));
     let odd_text = odd.to_str().unwrap().to_owned();
     let store = Shared::default();
