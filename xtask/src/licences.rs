@@ -9,6 +9,8 @@ use anyhow::{Context, bail};
 
 use crate::dist::Package;
 
+const COPYRIGHT_FROM_SOURCE_NOTE: &str =
+    "licence text from SPDX template, copyright lines copied from the source";
 const NO_COPYRIGHT_NOTE: &str = "licence text from SPDX template, no copyright line in source";
 
 /// The SPDX templates in `third-party/licenses/`, by id. They carry no copyright line.
@@ -31,6 +33,93 @@ pub struct Text {
     pub label: String,
     pub body: String,
     pub from_template: bool,
+    /// For a template: the copyright lines copied above it from the package source.
+    pub has_copyright: bool,
+}
+
+/// Extra licence files inside a package, by package name (any version), that
+/// cover code compiled into the binaries. A listed file that is missing fails the build.
+const EXTRA_FILES: [(&str, &[&str]); 1] =
+    [("regex-syntax", &["src/unicode_tables/LICENSE-UNICODE"])];
+
+/// The extra licence files listed for a package name.
+pub fn extra_files(name: &str) -> &'static [&'static str] {
+    EXTRA_FILES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(&[], |(_, files)| files)
+}
+
+/// Packages whose source refers to a licence text the crate does not ship; the
+/// text is vendored in `third-party/licenses/`. It never counts as the package's own licence.
+const VENDORED_EXTRAS: [(&str, &str, &str); 3] = [
+    ("accesskit", ACCESSKIT_CHROMIUM_LABEL, ACCESSKIT_CHROMIUM),
+    (
+        "accesskit_consumer",
+        ACCESSKIT_CHROMIUM_LABEL,
+        ACCESSKIT_CHROMIUM,
+    ),
+    (
+        "accesskit_windows",
+        ACCESSKIT_CHROMIUM_LABEL,
+        ACCESSKIT_CHROMIUM,
+    ),
+];
+const ACCESSKIT_CHROMIUM_LABEL: &str =
+    "upstream LICENSE.chromium, not shipped in the crate; referenced by its source";
+const ACCESSKIT_CHROMIUM: &str =
+    include_str!("../../third-party/licenses/accesskit-LICENSE.chromium.txt");
+
+/// The vendored extra texts for a package name (any version).
+pub fn vendored_extras(name: &str) -> Vec<Text> {
+    VENDORED_EXTRAS
+        .iter()
+        .filter(|(n, _, _)| *n == name)
+        .map(|(_, label, body)| Text {
+            label: (*label).to_owned(),
+            body: tidy(body),
+            from_template: false,
+            has_copyright: false,
+        })
+        .collect()
+}
+
+/// Whether a file is a licence proper: `LICENSE*`, `LICENCE*`, `COPYING*`,
+/// `UNLICENSE*`, or the manifest's `license-file`. `NOTICE` and `COPYRIGHT` are not.
+pub fn covers_licence(label: &str, license_file: Option<&str>) -> bool {
+    let name = label.rsplit(['/', '\\']).next().unwrap_or(label);
+    let upper = name.to_ascii_uppercase();
+    let manifest = license_file
+        .and_then(|f| f.rsplit(['/', '\\']).next())
+        .is_some_and(|f| f == name);
+    manifest
+        || ["LICENSE", "LICENCE", "COPYING", "UNLICENSE"]
+            .iter()
+            .any(|p| upper.starts_with(p))
+}
+
+/// The lines of source text that state a copyright, with comment markers
+/// stripped, in order and without repeats. `(c)` counts only with a digit.
+pub fn copyright_lines(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let lower = raw.to_ascii_lowercase();
+        let marked = lower.contains("copyright")
+            || raw.contains('\u{a9}')
+            || (lower.contains("(c)") && raw.bytes().any(|b| b.is_ascii_digit()));
+        if !marked {
+            continue;
+        }
+        let line = raw
+            .trim_start_matches(|c: char| {
+                matches!(c, '/' | '*' | '!' | '#' | '>') || c.is_whitespace()
+            })
+            .trim_end_matches(|c: char| c == '/' || c == '*' || c.is_whitespace());
+        if !line.is_empty() && !found.iter().any(|l| l == line) {
+            found.push(line.to_owned());
+        }
+    }
+    found
 }
 
 /// Whether a file name in a package folder holds a licence or notice text:
@@ -105,6 +194,7 @@ pub fn template_texts(expression: &str) -> Vec<Text> {
                 label: id.clone(),
                 body: tidy(template(id)?),
                 from_template: true,
+                has_copyright: false,
             })
         })
         .collect();
@@ -115,23 +205,46 @@ pub fn template_texts(expression: &str) -> Vec<Text> {
     texts
 }
 
-/// The texts of one package: its own files when it has any with content,
-/// otherwise the templates of its declared licence.
-pub fn package_texts(package: &Package, files: Vec<(String, String)>) -> Vec<Text> {
-    let own: Vec<Text> = files
+/// Whether one of a package's own files is its licence, so no template is needed.
+pub fn covered_by_own_files(package: &Package, files: &[(String, String)]) -> bool {
+    files.iter().any(|(label, body)| {
+        !body.trim().is_empty() && covers_licence(label, package.license_file.as_deref())
+    })
+}
+
+/// The texts of one package: its own files when one of them is a licence;
+/// otherwise the templates of its declared licence, each headed by the
+/// `copyright` lines found in the source, followed by any notice files.
+pub fn package_texts(
+    package: &Package,
+    files: Vec<(String, String)>,
+    copyright: &[String],
+) -> Vec<Text> {
+    let covered = covered_by_own_files(package, &files);
+    let own = files
         .into_iter()
         .filter(|(_, body)| !body.trim().is_empty())
         .map(|(label, body)| Text {
             label,
             body: tidy(&body),
             from_template: false,
-        })
-        .collect();
-    if own.is_empty() {
-        template_texts(&package.license)
-    } else {
-        own
+            has_copyright: false,
+        });
+    if covered {
+        return own.collect();
     }
+    let mut texts = template_texts(&package.license);
+    if texts.is_empty() {
+        return texts;
+    }
+    if !copyright.is_empty() {
+        for text in &mut texts {
+            text.body = format!("{}\n\n{}", copyright.join("\n"), text.body);
+            text.has_copyright = true;
+        }
+    }
+    texts.extend(own);
+    texts
 }
 
 /// The packages that ended with no text, as `name version (licence)`.
@@ -149,7 +262,9 @@ pub fn render(entries: &[(Package, Vec<Text>)]) -> String {
     let mut groups: Vec<(&str, BTreeSet<String>)> = Vec::new();
     for (package, texts) in entries {
         for text in texts {
-            let note = if text.from_template {
+            let note = if text.from_template && text.has_copyright {
+                format!("{COPYRIGHT_FROM_SOURCE_NOTE}: {}", text.label)
+            } else if text.from_template {
                 format!("{NO_COPYRIGHT_NOTE}: {}", text.label)
             } else {
                 format!("file {}", text.label)
@@ -198,7 +313,65 @@ pub fn render_checked(entries: &[(Package, Vec<Text>)]) -> anyhow::Result<String
     Ok(render(entries))
 }
 
-/// Reads the licence files in a package's folder as `(file name, text)`.
+/// Reads the files in `extra` (relative to `dir`) as `(relative path, text)`;
+/// a missing one is an error.
+fn read_extra(dir: &Path, extra: &[&str]) -> anyhow::Result<Vec<(String, String)>> {
+    let mut files = Vec::new();
+    for rel in extra {
+        let path = dir.join(rel);
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("the listed licence file {} is missing", path.display()))?;
+        files.push((
+            (*rel).to_owned(),
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ));
+    }
+    Ok(files)
+}
+
+/// The copyright lines in a package's `src/**/*.rs` and root `README*`.
+fn read_copyright(dir: &Path) -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, out),
+                Ok(t) if t.is_file() && path.extension().is_some_and(|e| e == "rs") => {
+                    out.push(path)
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    walk(&dir.join("src"), &mut paths);
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.starts_with("readme") && entry.file_type().is_ok_and(|t| t.is_file()) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+    let mut found: Vec<String> = Vec::new();
+    for path in paths {
+        if let Ok(bytes) = std::fs::read(&path) {
+            for line in copyright_lines(&String::from_utf8_lossy(&bytes)) {
+                if !found.contains(&line) {
+                    found.push(line);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Reads the licence files in a package's folder as `(file name, text)`,
+/// then the extra files listed for it.
 fn read_files(package: &Package) -> anyhow::Result<Vec<(String, String)>> {
     let dir = &package.manifest_dir;
     let mut names = Vec::new();
@@ -222,6 +395,7 @@ fn read_files(package: &Package) -> anyhow::Result<Vec<(String, String)>> {
             .map_or(name.clone(), |n| n.to_string_lossy().into_owned());
         files.push((label, String::from_utf8_lossy(&bytes).into_owned()));
     }
+    files.extend(read_extra(dir, extra_files(&package.name))?);
     Ok(files)
 }
 
@@ -230,7 +404,14 @@ fn read_files(package: &Package) -> anyhow::Result<Vec<(String, String)>> {
 pub fn build(packages: &[Package]) -> anyhow::Result<String> {
     let mut entries = Vec::new();
     for package in packages {
-        let texts = package_texts(package, read_files(package)?);
+        let files = read_files(package)?;
+        let copyright = if covered_by_own_files(package, &files) {
+            Vec::new()
+        } else {
+            read_copyright(&package.manifest_dir)
+        };
+        let mut texts = package_texts(package, files, &copyright);
+        texts.extend(vendored_extras(&package.name));
         entries.push((package.clone(), texts));
     }
     render_checked(&entries)
@@ -312,6 +493,7 @@ mod tests {
         let texts = package_texts(
             &p,
             vec![file("LICENSE", "Copyright (c) A\r\n\r\nMIT text\r\n\r\n")],
+            &[],
         );
         assert_eq!(texts.len(), 1);
         assert_eq!(texts[0].body, "Copyright (c) A\n\nMIT text\n");
@@ -321,7 +503,7 @@ mod tests {
     #[test]
     fn a_package_without_files_falls_back_to_the_templates_of_its_licence() {
         let p = package("a", "MIT OR Apache-2.0 OR 0BSD");
-        let texts = package_texts(&p, vec![file("LICENSE", "  \n")]);
+        let texts = package_texts(&p, vec![file("LICENSE", "  \n")], &[]);
         let labels: Vec<&str> = texts.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, ["MIT", "Apache-2.0"]);
         assert!(texts.iter().all(|t| t.from_template));
@@ -336,7 +518,7 @@ mod tests {
     #[test]
     fn a_licence_with_no_template_and_no_file_has_no_text() {
         let p = package("odd", "0BSD");
-        assert!(package_texts(&p, Vec::new()).is_empty());
+        assert!(package_texts(&p, Vec::new(), &[]).is_empty());
     }
 
     #[test]
@@ -364,6 +546,7 @@ mod tests {
                 package_texts(
                     &package("c", "MIT"),
                     vec![file("LICENSE", "Copyright (c) C\n")],
+                    &[],
                 ),
             ),
         ];
@@ -394,6 +577,7 @@ mod tests {
                 file("LICENSE-MIT", "mit body"),
                 file("LICENSE-APACHE", "apache body"),
             ],
+            &[],
         );
         let out = render_checked(&[(p, texts)]).unwrap();
         assert!(out.contains("[file LICENSE-MIT]"));
@@ -413,5 +597,121 @@ mod tests {
                 "{id} has a copyright line"
             );
         }
+    }
+
+    #[test]
+    fn copyright_lines_are_copied_verbatim_without_comment_markers() {
+        let src = "//! Copyright 2021 The AccessKit Authors. All rights reserved.\n\
+                   // Copyright (c) 2023.\n\
+                   /* copyright 2020 X */\n\
+                   // Copyright 2021 The AccessKit Authors. All rights reserved.\n\
+                   let c = (c) + d;\n\
+                   fn main() {}\n";
+        assert_eq!(
+            copyright_lines(src),
+            [
+                "Copyright 2021 The AccessKit Authors. All rights reserved.",
+                "Copyright (c) 2023.",
+                "copyright 2020 X"
+            ]
+        );
+        assert!(copyright_lines("fn main() {}\n").is_empty());
+    }
+
+    #[test]
+    fn a_template_gets_the_copyright_lines_found_in_the_source() {
+        let p = package("a", "MIT");
+        let lines = ["Copyright 2021 The A Authors.".to_owned()];
+        let texts = package_texts(&p, Vec::new(), &lines);
+        assert!(
+            texts[0]
+                .body
+                .starts_with("Copyright 2021 The A Authors.\n\nMIT License")
+        );
+        assert!(texts[0].has_copyright);
+        let out = render_checked(&[(p, texts)]).unwrap();
+        assert!(out.contains("copyright lines copied from the source: MIT"));
+        assert!(!out.contains("no copyright line in source"));
+    }
+
+    #[test]
+    fn a_template_without_copyright_lines_keeps_the_no_copyright_note() {
+        let p = package("a", "MIT");
+        let texts = package_texts(&p, Vec::new(), &[]);
+        assert!(!texts[0].has_copyright);
+        let out = render_checked(&[(p, texts)]).unwrap();
+        assert!(out.contains("no copyright line in source: MIT"));
+    }
+
+    #[test]
+    fn a_notice_file_alone_does_not_cover_the_licence() {
+        let p = package("a", "MIT");
+        let files = vec![
+            file("NOTICE", "Notice text"),
+            file("COPYRIGHT", "Copyright 2020 B"),
+        ];
+        assert!(!covered_by_own_files(&p, &files));
+        let texts = package_texts(&p, files, &[]);
+        let labels: Vec<&str> = texts.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["MIT", "NOTICE", "COPYRIGHT"]);
+        assert!(texts[0].from_template && !texts[1].from_template);
+    }
+
+    #[test]
+    fn a_notice_file_with_no_known_template_still_fails() {
+        let p = package("a", "0BSD");
+        assert!(package_texts(&p, vec![file("NOTICE", "n")], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_manifest_licence_file_covers_the_licence() {
+        let mut p = package("a", "MIT");
+        p.license_file = Some("docs/terms.txt".to_owned());
+        assert!(covered_by_own_files(&p, &[file("terms.txt", "terms")]));
+        assert!(covers_licence("LICENSE-MIT", None));
+        assert!(covers_licence("src/unicode_tables/LICENSE-UNICODE", None));
+        assert!(!covers_licence("NOTICE", None));
+    }
+
+    #[test]
+    fn regex_syntax_lists_its_nested_unicode_licence_for_any_version() {
+        assert_eq!(
+            extra_files("regex-syntax"),
+            ["src/unicode_tables/LICENSE-UNICODE"]
+        );
+        assert!(extra_files("regex").is_empty());
+    }
+
+    #[test]
+    fn accesskit_packages_get_the_vendored_chromium_licence_beside_the_template() {
+        for name in ["accesskit", "accesskit_consumer", "accesskit_windows"] {
+            let extras = vendored_extras(name);
+            assert_eq!(extras.len(), 1, "{name}");
+            assert!(extras[0].body.contains("The Chromium Authors"));
+            assert!(extras[0].body.contains("Redistribution and use"));
+        }
+        assert!(vendored_extras("accesskit_other").is_empty());
+
+        let p = package("accesskit", "MIT OR Apache-2.0");
+        let mut texts = package_texts(&p, Vec::new(), &[]);
+        texts.extend(vendored_extras(&p.name));
+        let labels: Vec<&str> = texts.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels[..2], ["MIT", "Apache-2.0"]);
+        let out = render_checked(&[(p, texts)]).unwrap();
+        assert!(out.contains(
+            "[file upstream LICENSE.chromium, not shipped in the crate; referenced by its source]"
+        ));
+    }
+
+    #[test]
+    fn a_listed_extra_file_that_is_missing_fails_loudly() {
+        let dir = std::env::temp_dir().join(format!("yien-xtask-extra-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/LICENSE-X"), "text").unwrap();
+        let found = read_extra(&dir, &["src/LICENSE-X"]).unwrap();
+        assert_eq!(found, [file("src/LICENSE-X", "text")]);
+        let error = read_extra(&dir, &["src/NOPE"]).unwrap_err();
+        assert!(format!("{error:#}").contains("NOPE"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
