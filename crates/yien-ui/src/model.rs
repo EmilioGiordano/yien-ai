@@ -1458,6 +1458,19 @@ mod tests {
     }
 
     #[test]
+    fn rf_nav_04_a_pane_keeps_the_folder_its_shell_reported_last() {
+        let mut view = demo();
+        assert_eq!(view.pane(PaneId::new(110)).cwd, None);
+        let mut moved = pane(110, 11, P::Idle);
+        moved.cwd = Some("C:/Code/yien/crates".into());
+        view.pane_updated(&moved);
+        assert_eq!(
+            view.pane(PaneId::new(110)).cwd.as_deref(),
+            Some("C:/Code/yien/crates")
+        );
+    }
+
+    #[test]
     fn rf_pan_19_a_pane_still_starting_has_not_exited() {
         let mut view = demo();
         let mut starting = pane(110, 11, P::Idle);
