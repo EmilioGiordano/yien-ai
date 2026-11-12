@@ -51,6 +51,14 @@ pub const SCHEMA: &[Setting] = &[
         doc: "The terminals' text size in pixels, 8 to 32.",
     },
     Setting {
+        key: "terminal.shell_integration",
+        default: "true",
+        doc: "true: PowerShell and cmd report their folder at each prompt, so a pane \
+              reopens where you left it; your profile and prompt stay as they are. \
+              false: panes reopen in the folder they started in. A change applies to \
+              panes started after it; running panes keep theirs.",
+    },
+    Setting {
         key: "editor",
         default: "\"\"",
         doc: "The command that opens files, such as \"code\" or \"notepad\". Empty: the \

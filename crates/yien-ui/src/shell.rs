@@ -37,13 +37,16 @@ use crate::model::{
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
+    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
 use crate::region::{self, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::{TerminalEvent, TerminalPane};
 use crate::theme::{Theme, ThemeKind};
+use crate::title_bar::{
+    PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
@@ -64,6 +67,8 @@ use tray::Tray;
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+/// The left padding of a pane row under its tab in the switcher's tree.
+const PALETTE_INDENT: f32 = 20.0;
 const CONFIRM_WIDTH: f32 = 440.0;
 /// Test-only: when set, the window opens with the attention tray open, so a
 /// window check can capture it without sending keys.
@@ -1146,13 +1151,25 @@ impl Shell {
                 self.command(Command::ListAgentSessions { project, request }, cx);
                 Palette::sessions(project, request)
             }
-            None => Palette::new(mode, commands, places),
+            None => Palette::new(mode, commands, places).with_home(switcher_home(&self.workspace)),
         };
         self.palette = Some(OpenPalette {
             model,
             input,
             scroll: ScrollHandle::new(),
             _input_events: input_events,
+        });
+        // A new list's first prepaint drops a scroll request (gpui learns the
+        // overflow after it), and next-frame callbacks run before that
+        // frame's draw: ask two frames on, once the list has been drawn.
+        cx.on_next_frame(window, |_, window, cx| {
+            cx.on_next_frame(window, |this, _, cx| {
+                if let Some(open) = &this.palette {
+                    open.scroll
+                        .scroll_to_item(open.model.selected().unwrap_or(0));
+                    cx.notify();
+                }
+            });
         });
         cx.notify();
     }
@@ -1170,7 +1187,8 @@ impl Shell {
         let query = input.read(cx).value();
         if let Some(open) = self.palette.as_mut() {
             open.model.set_query(&query);
-            open.scroll.scroll_to_item(0);
+            open.scroll
+                .scroll_to_item(open.model.selected().unwrap_or(0));
             cx.notify();
         }
     }
@@ -1748,8 +1766,9 @@ impl Shell {
         }
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -1763,10 +1782,19 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(project)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(project),
+                )
                 .child("/")
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.text)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tab.name.clone()),
@@ -1783,53 +1811,85 @@ impl Shell {
             .border_color(t.line)
             .child(
                 h_flex()
-                    .size_full()
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .h_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pr(px(10.0))
+                    .pr(px(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
-                            .flex_none()
+                            .flex_1()
+                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
                             .items_center()
-                            .gap(px(8.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(img(assets::MARK).size(px(20.0)))
-                            .child("YIEN"),
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child("YIEN"),
+                            )
+                            .child(div().flex_1().w_0().min_w_0().children(crumbs)),
                     )
-                    .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_palette_pill(cx))
-                    .child(div().flex_1())
-                    .child(self.render_need_count(cx))
+                    .child(self.render_palette_pill(&layout, cx))
                     .child(
-                        icon_button("toggle-theme", assets::THEME, &t)
-                            .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_theme(&ToggleTheme, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                            .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                            .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_bar(&ToggleContextBar, window, cx)
-                            })),
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.0))
+                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
+                            .child(self.render_need_count(cx))
+                            .when(layout.theme_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-theme", assets::THEME, &t)
+                                        .aria_label(format!(
+                                            "Toggle sumi and washi theme ({THEME_KEYS})"
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_theme(&ToggleTheme, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.tab_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                        .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                        .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.context_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                        .aria_label(format!(
+                                            "Toggle context bar ({CONTEXT_BAR_KEYS})"
+                                        ))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                        .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                        })),
+                                )
+                            }),
                     ),
             )
     }
 
     /// The title bar button that opens the palette, as the prototype's.
-    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_pill(
+        &self,
+        layout: &TitleLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         h_flex()
             .id("palette-pill")
@@ -1837,8 +1897,9 @@ impl Shell {
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
             .flex_none()
-            .w(px(420.0))
-            .max_w(relative(0.4))
+            .w(px(PILL_WIDTH))
+            .max_w(relative(PILL_SHARE))
+            .min_w(px(PILL_LEAST))
             .items_center()
             .gap(px(10.0))
             .px(px(10.0))
@@ -1855,14 +1916,23 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_palette(Mode::Commands, window, cx);
             }))
-            .child(div().flex_1().min_w_0().child("Execute a command"))
             .child(
                 div()
-                    .flex_none()
-                    .text_size(t.text(11.0))
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(PALETTE_KEYS),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child("Execute a command"),
             )
+            .when(layout.pill_keys, |pill| {
+                pill.child(
+                    div()
+                        .flex_none()
+                        .text_size(t.text(11.0))
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(PALETTE_KEYS),
+                )
+            })
     }
 
     /// The command palette or the switcher over the window (RF-NAV-01,
@@ -1872,13 +1942,14 @@ impl Shell {
         let t = self.theme;
         let model = &open.model;
         let selected = model.selected();
+        let tree = model.shows_tree();
         let rows: Vec<AnyElement> = model
             .rows()
             .iter()
             .enumerate()
             .filter_map(|(at, row)| {
                 let entry = model.entry(row)?;
-                Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
+                Some(self.render_palette_row(at, row, entry, selected == Some(at), tree, cx))
             })
             .collect();
         let label = match model.listing() {
@@ -1958,25 +2029,28 @@ impl Shell {
         row: &Row,
         entry: &Entry,
         selected: bool,
+        tree: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme;
+        let (shown, dim) = entry.drawn(tree);
+        let nested = shown.len() < entry.text.len();
+        // Hits are offsets into the whole text, so a shortened text drops them.
+        let hits: &[usize] = if nested { &[] } else { &row.hits };
         let style = |color: Rgba, weight: FontWeight| HighlightStyle {
             color: Some(color.into()),
             font_weight: Some(weight),
             ..HighlightStyle::default()
         };
-        let runs = ink_runs(&entry.text, entry.dim, &row.hits)
-            .into_iter()
-            .map(|(range, ink)| {
-                let look = match ink {
-                    Ink::Text => style(t.text, FontWeight::NORMAL),
-                    Ink::Dim => style(t.muted, FontWeight::NORMAL),
-                    Ink::Hit => style(t.ai, FontWeight::BOLD),
-                };
-                (range, look)
-            });
-        let text = StyledText::new(entry.text.clone()).with_highlights(runs);
+        let runs = ink_runs(shown, dim, hits).into_iter().map(|(range, ink)| {
+            let look = match ink {
+                Ink::Text => style(t.text, FontWeight::NORMAL),
+                Ink::Dim => style(t.muted, FontWeight::NORMAL),
+                Ink::Hit => style(t.ai, FontWeight::BOLD),
+            };
+            (range, look)
+        });
+        let text = StyledText::new(shown.to_owned()).with_highlights(runs);
         let hint_color = match entry.state {
             Some(AgentState::NeedsYou) => t.shu,
             Some(AgentState::Error) => t.ochre,
@@ -2002,6 +2076,10 @@ impl Shell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.run_palette(Some(at), window, cx);
             }))
+            .when(nested, |r| {
+                r.pl(px(PALETTE_INDENT))
+                    .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
+            })
             .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
             .child(
                 div()
@@ -3364,7 +3442,7 @@ impl Render for Shell {
             .text_color(t.text)
             .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()

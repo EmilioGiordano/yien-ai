@@ -4,12 +4,15 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use yien_config::{Loaded, ThemeSetting};
 use yien_platform::config_file::{self, Watcher};
 use yien_proto::TerminalPalette;
 use yien_ui::{ConfigUpdate, Settings, SettingsHost};
+
+use crate::shell_switch::ShellSwitch;
 
 /// Opens the file through the platform layer.
 struct Host {
@@ -33,10 +36,13 @@ impl SettingsHost for Host {
 }
 
 /// The first reading, the watcher sending the later ones, and the opener,
-/// with the watcher to stop on quit. Without a data dir the window runs on
-/// the defaults. `profile_problems` go to the status bar with the first
-/// reading.
-pub(crate) fn start(profile_problems: Vec<String>) -> (Settings, Option<Watcher>) {
+/// with the watcher to stop on quit, and the switch that hands every later
+/// `terminal.shell_integration` to the core. Without a data dir the window
+/// runs on the defaults. `profile_problems` go to the status bar with the
+/// first reading.
+pub(crate) fn start(
+    profile_problems: Vec<String>,
+) -> (Settings, Option<Watcher>, Arc<ShellSwitch>) {
     let (send, updates) = mpsc::unbounded_channel();
     let path = yien_platform::paths::config_file()
         .inspect_err(|e| tracing::warn!("no data dir, the settings file is off: {e}"))
@@ -48,7 +54,8 @@ pub(crate) fn start(profile_problems: Vec<String>) -> (Settings, Option<Watcher>
             host: Box::new(Host { path }),
             profile_problems,
         };
-        return (settings, None);
+        let switch = Arc::new(ShellSwitch::new(shell_integration(&settings.initial)));
+        return (settings, None, switch);
     };
     match config_file::create_if_absent(&file, &yien_config::default_file(&yien_ui::commands())) {
         Ok(true) => tracing::info!("wrote the default settings file"),
@@ -58,18 +65,24 @@ pub(crate) fn start(profile_problems: Vec<String>) -> (Settings, Option<Watcher>
     // The stamp before the text: a save in between is seen as a change.
     let stamp = config_file::stamp(&file);
     let initial = reading(config_file::read(&file));
-    let watcher = config_file::watch(file, stamp, move |text| send.send(reading(text)).is_ok())
-        .inspect_err(|error| {
-            tracing::warn!("the settings file is not watched, changes need a restart: {error}");
-        })
-        .ok();
+    let switch = Arc::new(ShellSwitch::new(shell_integration(&initial)));
+    let to_core = Arc::clone(&switch);
+    let watcher = config_file::watch(file, stamp, move |text| {
+        let update = reading(text);
+        to_core.reading(&update);
+        send.send(update).is_ok()
+    })
+    .inspect_err(|error| {
+        tracing::warn!("the settings file is not watched, changes need a restart: {error}");
+    })
+    .ok();
     let settings = Settings {
         initial,
         updates,
         host: Box::new(Host { path }),
         profile_problems,
     };
-    (settings, watcher)
+    (settings, watcher, switch)
 }
 
 /// The palette panes start on, from the first reading: `None` when the
@@ -84,6 +97,18 @@ pub(crate) fn start_palette(initial: &ConfigUpdate) -> Option<TerminalPalette> {
         ThemeSetting::Sumi => Some(TerminalPalette::Sumi),
         ThemeSetting::Washi => Some(TerminalPalette::Washi),
         ThemeSetting::System => None,
+    }
+}
+
+/// Whether shells report their folder, from the first reading: a file that
+/// does not read keeps the default, on. Later readings go through
+/// [`ShellSwitch`].
+pub(crate) fn shell_integration(initial: &ConfigUpdate) -> bool {
+    match initial {
+        ConfigUpdate::Loaded(loaded) => loaded.config.shell_integration,
+        ConfigUpdate::Invalid(_) | ConfigUpdate::Unreadable(_) => {
+            yien_config::Config::default().shell_integration
+        }
     }
 }
 
@@ -106,6 +131,18 @@ mod tests {
 
     fn palette_for(text: &str) -> Option<TerminalPalette> {
         start_palette(&reading(Ok(Some(text.to_owned()))))
+    }
+
+    #[test]
+    fn rf_ses_01_shells_report_their_folder_unless_the_file_says_no() {
+        let read = |text: &str| shell_integration(&reading(Ok(Some(text.to_owned()))));
+        assert!(read(""));
+        assert!(!read("terminal.shell_integration = false"));
+        assert!(
+            read("terminal.shell_integration = 0"),
+            "invalid keeps the default"
+        );
+        assert!(shell_integration(&reading(Ok(None))));
     }
 
     #[test]
