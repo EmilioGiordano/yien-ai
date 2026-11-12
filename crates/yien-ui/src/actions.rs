@@ -121,9 +121,6 @@ actions!(
         TerminatePane,
         /// Copies the focused pane's agent session id (RF-PAN-20).
         CopySessionId,
-        /// Closes the selected tab; on a worktree it asks first whether to
-        /// keep the worktree (RF-ESP-03, RF-ESP-07).
-        CloseTab,
         /// Moves the open menu's cursor one item up.
         MenuUp,
         /// Moves the open menu's cursor one item down.
@@ -181,6 +178,16 @@ actions!(
         CloseProject,
         /// Edits the selected tab's name in place (RF-ESP-16).
         RenameTab,
+        /// Closes the whole tab: the one under the tab bar's cursor while
+        /// the bar has the keyboard, else the selected one. A tab on a
+        /// worktree asks first (RF-ESP-03, RF-ESP-07).
+        CloseTab,
+        /// Moves the tab one place up in its project: the tab under the tab
+        /// bar's cursor while the bar has the keyboard, else the selected
+        /// one (RF-ESP-16, RNF-16).
+        MoveTabUp,
+        /// Moves the tab one place down in its project, as [`MoveTabUp`].
+        MoveTabDown,
         /// Keeps the name typed in the tab rename field.
         RenameConfirm,
         /// Leaves the tab rename field without changing the name.
@@ -274,6 +281,7 @@ pub(crate) const TRAY_KEYS: &str = "Ctrl+Shift+M";
 pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
+pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());

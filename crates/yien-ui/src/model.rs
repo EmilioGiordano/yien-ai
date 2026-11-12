@@ -229,6 +229,17 @@ impl PaneView {
     }
 }
 
+/// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CloseStep {
+    /// Ask first: panes would stop while they work.
+    AskBusy,
+    /// Ask whether to keep or remove the worktree.
+    AskWorktree(Box<Question>),
+    /// Close it now.
+    Close,
+}
+
 /// One tab: a working directory, maybe a branch, and its panes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabView {
@@ -355,6 +366,10 @@ pub struct WorkspaceView {
     notifications_muted: bool,
     /// The tab bar lists tabs in sections by state (RF-ATN-07).
     group_by_state: bool,
+    /// Tab moves sent to the core and not yet answered, per project
+    /// (RF-ESP-16). While any is out, an older project update must not put
+    /// back the order the window already moved past.
+    moves_in_flight: HashMap<ProjectId, usize>,
 }
 
 impl WorkspaceView {
@@ -382,13 +397,36 @@ impl WorkspaceView {
         view
     }
 
-    /// A project was added or changed. Its tab order is the core's.
+    /// A project was added or changed. Its tab order is the core's, except
+    /// while tab moves of the window are in flight: each update then answers
+    /// one of them, and the window keeps its own order until the last answer
+    /// or an update that already matches it, taking only tabs added or
+    /// closed meanwhile.
     pub fn project_updated(&mut self, info: &ProjectInfo) {
+        let local = self
+            .projects
+            .iter()
+            .find(|p| p.id == info.id)
+            .map(|p| &p.tabs);
+        let tabs = match (self.moves_in_flight.get_mut(&info.id), local) {
+            (Some(n), Some(local)) if *n > 0 && *local != info.tabs => {
+                *n -= 1;
+                if *n == 0 {
+                    info.tabs.clone()
+                } else {
+                    keep_order(local, &info.tabs)
+                }
+            }
+            _ => {
+                self.moves_in_flight.remove(&info.id);
+                info.tabs.clone()
+            }
+        };
         let project = ProjectView {
             id: info.id,
             name: info.name.clone(),
             root: info.root.clone(),
-            tabs: info.tabs.clone(),
+            tabs,
         };
         if info.collapsed {
             self.folded.insert(info.id);
@@ -468,6 +506,7 @@ impl WorkspaceView {
         let gone = tabs.into_iter().flat_map(|t| self.tab_closed(t)).collect();
         self.projects.retain(|p| p.id != id);
         self.folded.remove(&id);
+        self.moves_in_flight.remove(&id);
         if self.last_project == Some(id) {
             self.last_project = None;
         }
@@ -746,12 +785,13 @@ impl WorkspaceView {
         if tab.layout.panes().len() > 1 {
             return None;
         }
-        self.tab_worktree_question(tab.id)
+        self.close_tab_question(tab.id)
     }
 
-    /// The question to ask before closing the whole tab `tab`, when it is the
-    /// last tab on a worktree (RF-ESP-07), however many panes it has.
-    pub(crate) fn tab_worktree_question(&self, tab: TabId) -> Option<Question> {
+    /// The question to ask before closing the whole of `tab`, whatever its
+    /// panes (RF-ESP-07): the tab is on a worktree no other tab works in.
+    /// `None` closes at once.
+    pub(crate) fn close_tab_question(&self, tab: TabId) -> Option<Question> {
         let tab = self.tab(tab)?;
         let worktree = tab.worktree.as_deref()?;
         let shared = self.tabs.values().any(|t| {
@@ -769,6 +809,44 @@ impl WorkspaceView {
                 tab.branch.clone(),
             )
         })
+    }
+
+    /// How many panes of a tab closing it would stop while they work
+    /// ([`PaneView::is_busy`]).
+    pub fn busy_panes_of_tab(&self, tab: TabId) -> usize {
+        self.tab(tab).map_or(0, |t| {
+            t.layout
+                .panes()
+                .into_iter()
+                .filter(|p| self.pane(*p).is_busy())
+                .count()
+        })
+    }
+
+    /// What closing the whole of `tab` does next: ask about the work it
+    /// would stop, unless `stop_confirmed`; then ask about its worktree
+    /// (RF-ESP-07); else close.
+    pub(crate) fn close_tab_step(&self, tab: TabId, stop_confirmed: bool) -> CloseStep {
+        if !stop_confirmed && self.busy_panes_of_tab(tab) > 0 {
+            return CloseStep::AskBusy;
+        }
+        match self.close_tab_question(tab) {
+            Some(question) => CloseStep::AskWorktree(Box::new(question)),
+            None => CloseStep::Close,
+        }
+    }
+
+    /// What closing `pane` does next: ask about the work it would stop,
+    /// unless `stop_confirmed`; then, when it is the last pane of the last
+    /// tab on a worktree, ask about the worktree (RF-ESP-07); else close.
+    pub(crate) fn close_pane_step(&self, pane: PaneId, stop_confirmed: bool) -> CloseStep {
+        if !stop_confirmed && self.pane(pane).is_busy() {
+            return CloseStep::AskBusy;
+        }
+        match self.worktree_question(pane) {
+            Some(question) => CloseStep::AskWorktree(Box::new(question)),
+            None => CloseStep::Close,
+        }
     }
 
     /// The tab a pane belongs to.
@@ -929,6 +1007,41 @@ impl WorkspaceView {
         }
     }
 
+    /// Where a tab sits among its project's tabs (RF-ESP-16): the project,
+    /// its place and how many tabs the project lists.
+    pub fn place_of(&self, id: TabId) -> Option<(ProjectId, usize, usize)> {
+        let project = self.projects.iter().find(|p| p.tabs.contains(&id))?;
+        let at = project.tabs.iter().position(|t| *t == id)?;
+        Some((project.id, at, project.tabs.len()))
+    }
+
+    /// Moves a tab to place `to` among its project's tabs, clamped to the
+    /// last place as the core does, ahead of the core's confirmation
+    /// (RF-ESP-16). Returns whether the order changed.
+    pub fn move_tab(&mut self, id: TabId, to: usize) -> bool {
+        let Some(project) = self.projects.iter_mut().find(|p| p.tabs.contains(&id)) else {
+            return false;
+        };
+        let Some(from) = project.tabs.iter().position(|t| *t == id) else {
+            return false;
+        };
+        let to = to.min(project.tabs.len() - 1);
+        if to == from {
+            return false;
+        }
+        let tab = project.tabs.remove(from);
+        project.tabs.insert(to, tab);
+        *self.moves_in_flight.entry(project.id).or_default() += 1;
+        true
+    }
+
+    /// The core refused a command that names no pane, which a tab move
+    /// may have been. Its answer will not come, so the next update of every
+    /// project is taken as the core sends it (RF-ESP-16).
+    pub fn command_refused(&mut self) {
+        self.moves_in_flight.clear();
+    }
+
     /// Whether a project's tabs are hidden in the tab bar.
     pub fn is_folded(&self, id: ProjectId) -> bool {
         self.folded.contains(&id)
@@ -988,6 +1101,14 @@ impl WorkspaceView {
     fn tabs_in_order(&self) -> impl Iterator<Item = &TabView> {
         self.projects.iter().flat_map(|p| self.tabs_of(p))
     }
+}
+
+/// `local`'s order for the tabs `core` still lists, then the tabs only
+/// `core` lists, in its order.
+fn keep_order(local: &[TabId], core: &[TabId]) -> Vec<TabId> {
+    let mut tabs: Vec<TabId> = local.iter().filter(|t| core.contains(t)).copied().collect();
+    tabs.extend(core.iter().filter(|t| !local.contains(t)));
+    tabs
 }
 
 /// The name to send when a tab rename ends with `typed` in the field: `None`
@@ -1135,7 +1256,9 @@ pub(crate) fn folder_label(
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{AgentState as P, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot};
+    use yien_proto::{
+        AgentState as P, Command, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot,
+    };
 
     use super::*;
 
@@ -1281,22 +1404,34 @@ mod tests {
     }
 
     #[test]
-    fn rf_esp_07_closing_a_whole_worktree_tab_asks_however_many_panes_it_has() {
+    fn rf_esp_07_closing_a_split_worktree_tab_from_its_row_still_asks() {
         let mut view = demo();
         let mut wt = tab(30, 1, &[300, 301]);
         wt.worktree = Some("C:/Code/app-wt/feat-x".into());
         wt.dir = "C:/Code/app-wt/feat-x".into();
+        wt.branch = Some("feat/x".into());
         view.tab_updated(&wt);
+
         assert!(view.worktree_question(PaneId::new(300)).is_none());
-        let q = view.tab_worktree_question(TabId::new(30)).unwrap();
+        let q = view.close_tab_question(TabId::new(30)).unwrap();
         assert_eq!(q.tab, TabId::new(30));
-        assert!(view.tab_worktree_question(TabId::new(10)).is_none());
-        assert!(view.tab_worktree_question(TabId::new(99)).is_none());
+        assert_eq!(q.worktree, "C:/Code/app-wt/feat-x");
+        assert_eq!(
+            q.keep(),
+            Command::CloseTab {
+                tab: TabId::new(30)
+            }
+        );
+        assert!(view.close_tab_question(TabId::new(10)).is_none());
+        assert!(view.close_tab_question(TabId::new(99)).is_none());
 
         let mut other = tab(31, 1, &[310]);
         other.dir = "C:/Code/app-wt/feat-x".into();
         view.tab_updated(&other);
-        assert!(view.tab_worktree_question(TabId::new(30)).is_none());
+        assert!(
+            view.close_tab_question(TabId::new(30)).is_none(),
+            "another tab still works in the worktree"
+        );
     }
 
     #[test]
@@ -1905,6 +2040,134 @@ mod tests {
     }
 
     #[test]
+    fn rf_esp_16_a_moved_tab_shows_in_its_new_place_before_the_core_confirms() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[10, 11, 12]), project(2, &[20])],
+            tabs: vec![tab(10, 1, &[100]), tab(11, 1, &[110]), tab(12, 1, &[120])],
+            active_tab: Some(TabId::new(11)),
+            ..Default::default()
+        });
+        let ids = |view: &WorkspaceView| -> Vec<u64> {
+            view.drawn_tabs().iter().map(|t| t.get()).collect()
+        };
+        assert_eq!(
+            view.place_of(TabId::new(12)),
+            Some((ProjectId::new(1), 2, 3))
+        );
+        assert!(view.move_tab(TabId::new(12), 0));
+        assert_eq!(ids(&view), [12, 10, 11]);
+        assert_eq!(view.selected_tab().map(|t| t.id.get()), Some(11));
+        // Clamped to the last place, as the core does.
+        assert!(view.move_tab(TabId::new(12), 99));
+        assert_eq!(ids(&view), [10, 11, 12]);
+        assert!(!view.move_tab(TabId::new(12), 2), "its own place");
+        assert!(!view.move_tab(TabId::new(99), 0));
+        assert_eq!(view.place_of(TabId::new(99)), None);
+        // The core answers both moves; after that its order wins.
+        view.project_updated(&project(1, &[12, 10, 11]));
+        assert_eq!(ids(&view), [10, 11, 12], "an answer older than the window");
+        view.project_updated(&project(1, &[10, 11, 12]));
+        view.project_updated(&project(1, &[11, 12, 10]));
+        assert_eq!(ids(&view), [11, 12, 10]);
+    }
+
+    #[test]
+    fn rf_esp_16_a_late_core_answer_does_not_undo_a_held_key() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3, 4])],
+            tabs: vec![
+                tab(1, 1, &[10]),
+                tab(2, 1, &[20]),
+                tab(3, 1, &[30]),
+                tab(4, 1, &[40]),
+            ],
+            ..Default::default()
+        });
+        let ids = |view: &WorkspaceView| -> Vec<u64> {
+            view.drawn_tabs().iter().map(|t| t.get()).collect()
+        };
+        // Ctrl+Shift+PgDn held on tab 1: each press moves it one down from
+        // the order the window shows, and the core answers each move late.
+        let press = |view: &mut WorkspaceView| {
+            let (_, from, len) = view.place_of(TabId::new(1)).unwrap();
+            let to = crate::tab_order::step(from, len, true).unwrap();
+            assert!(view.move_tab(TabId::new(1), to));
+        };
+        press(&mut view);
+        press(&mut view);
+        view.project_updated(&project(1, &[2, 1, 3, 4]));
+        assert_eq!(ids(&view), [2, 3, 1, 4], "the first answer is older");
+        press(&mut view);
+        assert_eq!(ids(&view), [2, 3, 4, 1], "three presses, three moves");
+        view.project_updated(&project(1, &[2, 3, 1, 4]));
+        assert_eq!(ids(&view), [2, 3, 4, 1]);
+        // The last answer, already with a tab opened meanwhile.
+        view.project_updated(&project(1, &[2, 3, 4, 1, 5]));
+        view.tab_updated(&tab(5, 1, &[50]));
+        assert_eq!(ids(&view), [2, 3, 4, 1, 5]);
+        // Every move answered: the core's order is taken as it comes.
+        view.project_updated(&project(1, &[5, 2, 3, 4, 1]));
+        assert_eq!(ids(&view), [5, 2, 3, 4, 1]);
+    }
+
+    fn three_tabs_with_two_moves_in_flight() -> WorkspaceView {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3])],
+            tabs: vec![tab(1, 1, &[10]), tab(2, 1, &[20]), tab(3, 1, &[30])],
+            ..Default::default()
+        });
+        assert!(view.move_tab(TabId::new(3), 0));
+        assert!(view.move_tab(TabId::new(1), 2));
+        view
+    }
+
+    fn order(view: &WorkspaceView) -> Vec<u64> {
+        view.projects()[0].tabs.iter().map(|t| t.get()).collect()
+    }
+
+    #[test]
+    fn rf_esp_16_an_answer_equal_to_the_window_order_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        // The core found the second move a no-op and answers with the order
+        // the window already shows.
+        view.project_updated(&project(1, &[3, 2, 1]));
+        view.project_updated(&project(1, &[2, 3, 1]));
+        assert_eq!(order(&view), [2, 3, 1], "no answer is still awaited");
+    }
+
+    #[test]
+    fn rf_esp_16_a_refused_command_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        view.command_refused();
+        view.project_updated(&project(1, &[1, 2, 3]));
+        assert_eq!(order(&view), [1, 2, 3]);
+    }
+
+    #[test]
+    fn rf_esp_16_a_closed_project_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        view.project_closed(ProjectId::new(1));
+        assert!(view.moves_in_flight.is_empty());
+        view.project_updated(&project(1, &[1, 2, 3]));
+        assert_eq!(order(&view), [1, 2, 3]);
+    }
+
+    #[test]
+    fn rf_esp_16_an_answer_in_flight_keeps_tabs_added_or_closed_meanwhile() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3])],
+            tabs: vec![tab(1, 1, &[10]), tab(2, 1, &[20]), tab(3, 1, &[30])],
+            ..Default::default()
+        });
+        assert!(view.move_tab(TabId::new(3), 0));
+        assert!(view.move_tab(TabId::new(1), 2));
+        // An older order with tab 2 gone and tab 4 new.
+        view.project_updated(&project(1, &[3, 1, 4]));
+        let ids: Vec<u64> = view.projects()[0].tabs.iter().map(|t| t.get()).collect();
+        assert_eq!(ids, [3, 1, 4]);
+    }
+
+    #[test]
     fn rf_esp_17_folding_hides_tabs_and_selecting_unfolds() {
         let mut view = demo();
         let second = ProjectId::new(2);
@@ -2011,6 +2274,139 @@ mod tests {
         claude.exit_code = Some(0);
         view.pane_updated(&claude);
         assert_eq!(view.busy_panes_of(ProjectId::new(2)), 0, "an exited agent");
+    }
+
+    #[test]
+    fn rf_esp_03_closing_a_tab_asks_while_any_of_its_panes_runs_work() {
+        let mut view = demo();
+        // Tab 10: 100 needs you, 101 is a shell at its prompt.
+        assert_eq!(view.busy_panes_of_tab(TabId::new(10)), 1);
+        assert_eq!(
+            view.close_tab_step(TabId::new(10), false),
+            CloseStep::AskBusy
+        );
+        assert_eq!(view.close_tab_step(TabId::new(10), true), CloseStep::Close);
+        // Tab 20: an idle shell that finished a command.
+        assert_eq!(view.close_tab_step(TabId::new(20), false), CloseStep::Close);
+        // A shell running a command it marked with OSC 133 works.
+        view.pane_updated(&pane(200, 20, P::Working));
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
+        assert_eq!(
+            view.close_tab_step(TabId::new(20), false),
+            CloseStep::AskBusy
+        );
+        // An agent program at rest still runs.
+        let mut claude = pane(200, 20, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
+        assert_eq!(
+            view.close_tab_step(TabId::new(20), false),
+            CloseStep::AskBusy
+        );
+        assert_eq!(view.busy_panes_of_tab(TabId::new(99)), 0);
+    }
+
+    #[test]
+    fn rf_esp_07_a_busy_worktree_tab_asks_about_the_work_then_the_worktree() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300, 301]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&wt);
+        assert_eq!(
+            view.busy_panes_of_tab(TabId::new(30)),
+            2,
+            "panes whose details have not arrived count as busy"
+        );
+        view.pane_updated(&pane(300, 30, P::Working));
+        view.pane_updated(&pane(301, 30, P::Working));
+
+        assert_eq!(view.busy_panes_of_tab(TabId::new(30)), 2);
+        assert_eq!(
+            view.close_tab_step(TabId::new(30), false),
+            CloseStep::AskBusy
+        );
+        match view.close_tab_step(TabId::new(30), true) {
+            CloseStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),
+            other => panic!("expected the worktree question, got {other:?}"),
+        }
+        view.pane_updated(&pane(300, 30, P::Idle));
+        view.pane_updated(&pane(301, 30, P::Idle));
+        assert!(matches!(
+            view.close_tab_step(TabId::new(30), false),
+            CloseStep::AskWorktree(_)
+        ));
+    }
+
+    #[test]
+    fn rf_esp_03_closing_a_pane_asks_while_it_runs_work() {
+        let mut view = demo();
+        // Tab 10: 100 needs you, 101 is a shell at its prompt.
+        assert_eq!(
+            view.close_pane_step(PaneId::new(100), false),
+            CloseStep::AskBusy
+        );
+        assert_eq!(
+            view.close_pane_step(PaneId::new(100), true),
+            CloseStep::Close
+        );
+        assert_eq!(
+            view.close_pane_step(PaneId::new(101), false),
+            CloseStep::Close,
+            "only the pane closed counts, not its tab"
+        );
+        // A shell running a command it marked with OSC 133 works.
+        view.pane_updated(&pane(101, 10, P::Working));
+        assert_eq!(
+            view.close_pane_step(PaneId::new(101), false),
+            CloseStep::AskBusy
+        );
+        // An agent program at rest still runs; once it exited it does not.
+        let mut claude = pane(200, 20, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::AskBusy
+        );
+        claude.running = false;
+        claude.exit_code = Some(0);
+        view.pane_updated(&claude);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::Close
+        );
+        // A pane whose details have not arrived counts as busy.
+        view.tab_updated(&tab(11, 1, &[110, 111]));
+        assert_eq!(
+            view.close_pane_step(PaneId::new(111), false),
+            CloseStep::AskBusy
+        );
+    }
+
+    #[test]
+    fn rf_esp_07_closing_the_busy_last_pane_on_a_worktree_asks_about_work_then_worktree() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&wt);
+        view.pane_updated(&pane(300, 30, P::Working));
+
+        assert_eq!(
+            view.close_pane_step(PaneId::new(300), false),
+            CloseStep::AskBusy
+        );
+        match view.close_pane_step(PaneId::new(300), true) {
+            CloseStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),
+            other => panic!("expected the worktree question, got {other:?}"),
+        }
+        view.pane_updated(&pane(300, 30, P::Idle));
+        assert!(matches!(
+            view.close_pane_step(PaneId::new(300), false),
+            CloseStep::AskWorktree(_)
+        ));
     }
 
     #[test]

@@ -128,7 +128,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleTabGrouping,
         []
     ),
-    command!("app.quit", "app: quit YIEN", Quit, []),
+    command!("app.quit", "app: quit YIEN", Quit, ["ctrl-shift-q"]),
     command!(
         "agent.resume_session",
         "agent: resume a past session…",
@@ -167,6 +167,18 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
     ),
     command!("tab.rename", "tab: rename tab", RenameTab, []),
     command!("tab.close", "tab: close tab", CloseTab, []),
+    command!(
+        "tab.move_up",
+        "tab: move tab up",
+        MoveTabUp,
+        ["ctrl-shift-pageup"]
+    ),
+    command!(
+        "tab.move_down",
+        "tab: move tab down",
+        MoveTabDown,
+        ["ctrl-shift-pagedown"]
+    ),
     command!("tab.next", "tab: next tab", NextTab, ["ctrl-tab"]),
     command!(
         "tab.previous",
@@ -556,6 +568,7 @@ mod tests {
             ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),
             ("palette.open", PALETTE_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
+            ("tab.new", NEW_TAB_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

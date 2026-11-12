@@ -2,7 +2,7 @@
 //! change returns the effects the service must carry out (messages for the UI,
 //! panes to start or stop), so the invariants are testable without a PTY.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
@@ -446,6 +446,11 @@ impl Workspace {
                     (!name.is_empty() && name != t.default_name).then(|| name.to_owned());
                 self.emit_tab(tab, &mut fx);
             }
+            Command::MoveTab {
+                tab,
+                project,
+                to_index,
+            } => self.move_tab(tab, project, to_index, &mut fx)?,
             Command::SetTabMuted { tab, muted } => {
                 let t = self.tab_mut(tab)?;
                 if t.muted != muted {
@@ -643,6 +648,41 @@ impl Workspace {
         Ok(())
     }
 
+    /// Moves a tab to `to_index` among its project's tabs, clamped to the
+    /// last place. The project is announced for every valid move, changed
+    /// or not.
+    fn move_tab(
+        &mut self,
+        tab: TabId,
+        project: ProjectId,
+        to_index: u32,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let own = self.tab(tab)?.project;
+        if own != project {
+            return Err(CoreError::OtherProject(tab, project));
+        }
+        let p = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project)
+            .ok_or(CoreError::UnknownProject(project))?;
+        let from = p
+            .tabs
+            .iter()
+            .position(|t| *t == tab)
+            .ok_or(CoreError::UnknownTab(tab))?;
+        let last = p.tabs.len() - 1;
+        let to = usize::try_from(to_index).map_or(last, |i| i.min(last));
+        if to != from {
+            let moved = p.tabs.remove(from);
+            p.tabs.insert(to, moved);
+        }
+        // Even unchanged: the window counts one answer per move it sent.
+        fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
+        Ok(())
+    }
+
     /// Goes to a project already registered: its selected tab, else its
     /// first; a project with no tab left gets a new one with the shell.
     fn open_project(
@@ -765,6 +805,7 @@ impl Workspace {
     ) -> Result<(), CoreError> {
         let tab_id = TabId::new(self.next()?);
         let pane = PaneId::new(self.next()?);
+        let automatic = self.free_tab_name(project);
         let p = self
             .projects
             .iter_mut()
@@ -774,7 +815,7 @@ impl Workspace {
         let custom_name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
         let (default_name, dir, branch, worktree) = match worktree {
             Some((dir, branch)) => (branch.clone(), dir.clone(), Some(branch), Some(dir)),
-            None => (format!("Tab {}", p.tabs.len()), p.root.clone(), None, None),
+            None => (automatic, p.root.clone(), None, None),
         };
         let tree = Tree::new();
         let leaves = tree.panes().into_iter().map(|leaf| (leaf, pane)).collect();
@@ -803,6 +844,21 @@ impl Workspace {
         self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
         Ok(())
+    }
+
+    /// The smallest `Tab N` that no tab of the project shows or would go
+    /// back to, so closing a tab never makes the next one a twin.
+    fn free_tab_name(&self, project: ProjectId) -> String {
+        let taken: HashSet<&str> = self
+            .tabs
+            .iter()
+            .filter(|t| t.project == project)
+            .flat_map(|t| std::iter::once(t.default_name.as_str()).chain(t.custom_name.as_deref()))
+            .collect();
+        (1..=taken.len() + 1)
+            .map(|n| format!("Tab {n}"))
+            .find(|name| !taken.contains(name.as_str()))
+            .unwrap_or_default()
     }
 
     /// Adds a pane and starts its program, resuming the agent session
@@ -2026,6 +2082,131 @@ mod tests {
         assert!(ws.apply(unknown, &resolve).is_err());
     }
 
+    fn new_tab(ws: &mut Workspace, project: ProjectId) -> TabId {
+        let fx = run(
+            ws,
+            Command::NewTab {
+                project,
+                name: None,
+                profile: None,
+            },
+        );
+        ws.tab_of(spawned(&fx)[0]).unwrap()
+    }
+
+    fn move_to(tab: TabId, project: ProjectId, to_index: u32) -> Command {
+        Command::MoveTab {
+            tab,
+            project,
+            to_index,
+        }
+    }
+
+    #[test]
+    fn rf_esp_16_a_moved_tab_takes_its_new_place_in_its_project() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let b = new_tab(&mut ws, p);
+        let c = new_tab(&mut ws, p);
+        let selected = ws.snapshot().active_tab;
+        let fx = run(&mut ws, move_to(c, p, 0));
+        assert!(matches!(
+            emitted(&fx)[..],
+            [CoreMsg::ProjectUpdated(info)] if info.tabs == [c, a, b]
+        ));
+        assert_eq!(ws.snapshot().active_tab, selected, "moving never selects");
+        run(&mut ws, move_to(c, p, 2));
+        assert_eq!(ws.snapshot().projects[0].tabs, [a, b, c]);
+        run(&mut ws, move_to(a, p, 1));
+        assert_eq!(ws.snapshot().projects[0].tabs, [b, a, c]);
+        // Past the last tab means last.
+        run(&mut ws, move_to(b, p, u32::MAX));
+        assert_eq!(ws.snapshot().projects[0].tabs, [a, c, b]);
+        // Its own place again changes nothing, and is still answered.
+        assert!(matches!(
+            emitted(&run(&mut ws, move_to(b, p, 9)))[..],
+            [CoreMsg::ProjectUpdated(info)] if info.tabs == [a, c, b]
+        ));
+        assert!(ws.apply(move_to(TabId::new(99), p, 0), &resolve).is_err());
+    }
+
+    #[test]
+    fn rf_esp_16_a_tab_never_moves_to_another_project() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        run(
+            &mut ws,
+            Command::NewProject {
+                root: "D:/other".into(),
+                name: None,
+            },
+        );
+        let snap = ws.snapshot();
+        let (first, second) = (snap.projects[0].id, snap.projects[1].id);
+        let before = snap.projects;
+        let refused = ws.apply(move_to(a, second, 0), &resolve);
+        assert!(matches!(refused, Err(CoreError::OtherProject(t, p)) if t == a && p == second));
+        assert_eq!(ws.snapshot().projects, before);
+        let unknown = ws.apply(move_to(a, ProjectId::new(99), 0), &resolve);
+        assert!(unknown.is_err());
+        assert!(ws.apply(move_to(a, first, 0), &resolve).is_ok());
+    }
+
+    #[test]
+    fn rf_ses_02_a_moved_tab_keeps_its_place_after_a_restart() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let b = new_tab(&mut ws, p);
+        let c = new_tab(&mut ws, p);
+        run(&mut ws, move_to(c, p, 0));
+        run(&mut ws, move_to(a, p, 2));
+        let mut store = yien_session::MemStore::new();
+        yien_session::save(&mut store, &ws.to_session()).unwrap();
+        let loaded = yien_session::load(&store).restored.unwrap().snapshot;
+        let disk = Disk {
+            existing: folders(&loaded).into_iter().collect(),
+            home: None,
+        };
+        let mut back = Workspace::new();
+        let (_, notes) = back.restore(&loaded, &resolve, &disk);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(back.snapshot().projects[0].tabs, [c, b, a]);
+    }
+
+    #[test]
+    fn rf_esp_03_a_new_tab_takes_the_smallest_automatic_name_free_in_its_project() {
+        let mut ws = Workspace::new();
+        let (first, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let name = |ws: &Workspace, tab: TabId| ws.tab(tab).unwrap().default_name.clone();
+        let second = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, second), "Tab 2");
+        run(&mut ws, Command::CloseTab { tab: first });
+        let again = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, again), "Tab 1", "not a second Tab 2");
+        // A name the user gave counts too, so clearing it later shows no twin.
+        run(
+            &mut ws,
+            Command::RenameTab {
+                tab: again,
+                name: "Tab 3".into(),
+            },
+        );
+        let fourth = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, fourth), "Tab 4");
+        // Another project's names do not count.
+        run(
+            &mut ws,
+            Command::NewProject {
+                root: "D:/other".into(),
+                name: None,
+            },
+        );
+        assert_eq!(ws.snapshot().tabs.last().unwrap().name, "Tab 1");
+    }
+
     #[test]
     fn rf_esp_17_a_folded_project_unfolds_when_one_of_its_tabs_is_selected() {
         let mut ws = Workspace::new();
@@ -2348,6 +2529,7 @@ mod tests {
         CloseProject(usize),
         Collapse(usize, bool),
         RenameTab(usize, usize),
+        MoveTab(usize, usize),
         NewTab(usize),
         CloseTab(usize),
         SelectTab(usize),
@@ -2370,6 +2552,7 @@ mod tests {
             i.clone().prop_map(Op::CloseProject),
             (i.clone(), any::<bool>()).prop_map(|(a, b)| Op::Collapse(a, b)),
             (i.clone(), i.clone()).prop_map(|(a, b)| Op::RenameTab(a, b)),
+            (i.clone(), i.clone()).prop_map(|(a, b)| Op::MoveTab(a, b)),
             i.clone().prop_map(Op::NewTab),
             i.clone().prop_map(Op::CloseTab),
             i.clone().prop_map(Op::SelectTab),
@@ -2423,6 +2606,14 @@ mod tests {
                 tab: pick(&tabs, *i)?,
                 name: ["", " ", "review", "Ñandú 2"][n % 4].into(),
             },
+            Op::MoveTab(i, to) => {
+                let tab = pick(&tabs, *i)?;
+                Command::MoveTab {
+                    tab,
+                    project: ws.tab(tab).ok()?.project,
+                    to_index: u32::try_from(*to).ok()?,
+                }
+            }
             Op::NewTab(i) => Command::NewTab {
                 project: pick(&projects, *i)?,
                 name: None,

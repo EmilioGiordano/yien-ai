@@ -275,6 +275,9 @@ pub enum CoreError {
         /// The file, as `profiles/<name>.toml`.
         file: String,
     },
+    /// Moving a tab into another project.
+    #[error("tab {} is not in project {}; tabs move only within their project", .0.get(), .1.get())]
+    OtherProject(TabId, ProjectId),
     /// Swapping or moving panes across tabs.
     #[error("panes {} and {} are in different tabs; move panes only within a tab", .0.get(), .1.get())]
     DifferentTabs(PaneId, PaneId),

@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use gpui_kit::*;
-use yien_proto::{Command, Orientation, PaneId, TabId};
+use yien_proto::{Command, Orientation, PaneId};
 
 use super::Shell;
 use super::menu::{
@@ -361,7 +361,7 @@ impl Shell {
             PaneAction::NewTab => self.new_tab_with(None, cx),
             PaneAction::CloseTab => {
                 if let Some(tab) = self.workspace.tab_of(pane).map(|t| t.id) {
-                    self.close_tab_id(tab, window, cx);
+                    self.close_tab_now(tab, window, cx);
                 }
             }
             PaneAction::ClosePane => self.close_pane_id(pane, window, cx),
@@ -408,23 +408,6 @@ impl Shell {
     ) {
         if let Some(pane) = self.focused_pane() {
             self.copy_session_id_of(pane, cx);
-        }
-    }
-
-    /// Closes a whole tab; the last tab on a worktree asks first whether to
-    /// keep the worktree (RF-ESP-07).
-    fn close_tab_id(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ask_before_closing_tab(tab, window, cx) {
-            self.command(Command::CloseTab { tab }, cx);
-        }
-    }
-
-    pub(super) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        match self.workspace.selected_tab().map(|t| t.id) {
-            Some(tab) => self.close_tab_id(tab, window, cx),
-            None => {
-                self.say("There is no tab to close.", cx);
-            }
         }
     }
 }

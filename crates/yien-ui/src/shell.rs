@@ -55,12 +55,15 @@ mod menu;
 mod pane_menu;
 mod settings;
 mod status;
+mod tab_controls;
+mod tab_drag;
 mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use status::{Line, Notice};
+use tab_drag::{RowMark, TabDragState};
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -175,6 +178,8 @@ pub(crate) struct Shell {
     context_focus: FocusHandle,
     /// The tab row the arrows are on while the tab bar has the keyboard.
     tab_cursor: Option<TabId>,
+    /// A tab row being dragged to another place in its project (RF-ESP-16).
+    tab_drag: TabDragState,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
     /// Whether the last move came from the keyboard or a mouse button; the
@@ -205,16 +210,12 @@ struct Confirm {
 enum Asked {
     /// Closing a project that has work running.
     CloseProject { project: ProjectId, name: String },
+    /// Closing a tab whose panes run work (RF-ESP-03).
+    CloseTab { tab: TabId, name: String },
+    /// Closing a pane that runs work.
+    ClosePane { pane: PaneId, name: String },
     /// Quitting while agents work (RF-SES-13).
     Quit,
-}
-
-impl Asked {
-    /// Whether Enter answers yes. Quitting would stop agents mid-turn, so
-    /// there Enter cancels like Escape and only the button quits.
-    fn enter_accepts(&self) -> bool {
-        !matches!(self, Asked::Quit)
-    }
 }
 
 /// The palette's model and the widgets drawing it.
@@ -266,6 +267,9 @@ impl Shell {
         let activation = cx.observe_window_activation(window, |shell, window, cx| {
             let focused = window.is_window_active();
             shell.send(ClientMsg::WindowFocus { focused }, cx);
+            if !focused {
+                shell.cancel_tab_drag(window, cx);
+            }
             shell.alerts.refresh_badge();
             shell.update_alerts(window, cx);
         });
@@ -292,6 +296,18 @@ impl Shell {
         Self::listen_to_settings(settings.updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
+        });
+        // Before any binding: Escape must end a tab drag without reaching
+        // the pane, where it would interrupt the agent.
+        let shell = cx.weak_entity();
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key == "escape" {
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.cancel_tab_drag(window, cx) {
+                        cx.stop_propagation();
+                    }
+                });
+            }
         });
         let files = FilesPanel::new(files, window, cx);
         let this = cx.weak_entity();
@@ -351,10 +367,11 @@ impl Shell {
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
             tab_cursor: None,
+            tab_drag: TabDragState::default(),
             keyboard_region: Region::Panes,
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
-            _subscriptions: vec![activation, appearance],
+            _subscriptions: vec![activation, appearance, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
@@ -444,6 +461,9 @@ impl Shell {
                 }
                 CoreMsg::Error { pane, message } => {
                     self.fail(message, cx);
+                    if pane.is_none() {
+                        self.workspace.command_refused();
+                    }
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
                     if pane.is_none()
@@ -569,6 +589,8 @@ impl Shell {
     fn drop_stale_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gone = self.confirm.as_ref().is_some_and(|c| match &c.asked {
             Asked::CloseProject { project, .. } => self.workspace.project(*project).is_none(),
+            Asked::CloseTab { tab, .. } => self.workspace.tab(*tab).is_none(),
+            Asked::ClosePane { pane, .. } => self.workspace.tab_of(*pane).is_none(),
             Asked::Quit => false,
         });
         if gone {
@@ -652,9 +674,16 @@ impl Shell {
         canvas(
             |_, _, _| (),
             move |_, (), window, _| {
+                let down = shell.clone();
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.on_pointer_down(cx));
+                        let _ = down.update(cx, |this, cx| this.on_pointer_down(cx));
+                    }
+                });
+                // Wherever the button comes up, a tab drag ends there.
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
                     }
                 });
             },
@@ -906,14 +935,7 @@ impl Shell {
     /// With every tab closed it falls back to the project selected last.
     fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
         match self.workspace.project_for_new_tab() {
-            Some(project) => self.command(
-                Command::NewTab {
-                    project,
-                    name: None,
-                    profile: profile.map(ProfileId::new),
-                },
-                cx,
-            ),
+            Some(project) => self.new_tab_in(project, profile, cx),
             None => {
                 self.say("There is no project to open a tab in.".to_owned(), cx);
             }
@@ -974,12 +996,10 @@ impl Shell {
         }
     }
 
-    /// Closes `pane` as the `pane.close` key does, asking first on the last
-    /// tab on a worktree.
+    /// Closes `pane` as the `pane.close` key does: asking first while it
+    /// runs work, then on the last tab on a worktree.
     fn close_pane_id(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ask_before_closing(pane, window, cx) {
-            self.command(Command::ClosePane { pane }, cx);
-        }
+        self.close_pane_step(pane, false, window, cx);
     }
 
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
@@ -1415,7 +1435,8 @@ impl Shell {
     }
 
     /// `app: quit YIEN`: closes the window, which quits, asking first while
-    /// agents work (RF-SES-13).
+    /// agents work (RF-SES-13). Pressed again, or held, while the question
+    /// is open it keeps asking.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         if self.window_should_close(window, cx) {
             window.remove_window();
@@ -1431,7 +1452,7 @@ impl Shell {
     ) -> Stateful<Div> {
         CATALOG
             .iter()
-            .filter(|spec| spec.scope == Scope::Window)
+            .filter(|spec| spec.scope == Scope::Window && spec.id != "app.quit")
             .fold(dialog, |dialog, spec| {
                 dialog.on_boxed_action(
                     &*(spec.action)(),
@@ -1442,14 +1463,9 @@ impl Shell {
             })
     }
 
-    /// Enter on the question: yes, except for quitting, where Enter keeps
-    /// the window and only the button quits.
+    /// Enter on the question: yes, quitting included.
     fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.confirm {
-            Some(c) if !c.asked.enter_accepts() => self.confirm_cancel(&ConfirmCancel, window, cx),
-            Some(_) => self.accept_confirm(window, cx),
-            None => {}
-        }
+        self.accept_confirm(window, cx);
     }
 
     /// The question's yes button.
@@ -1461,6 +1477,14 @@ impl Shell {
             Asked::CloseProject { project, .. } => {
                 self.command(Command::CloseProject { project }, cx);
                 self.give_back_keyboard(window, cx);
+            }
+            Asked::CloseTab { tab, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_tab_step(tab, true, window, cx);
+            }
+            Asked::ClosePane { pane, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_pane_step(pane, true, window, cx);
             }
             Asked::Quit => {
                 tracing::info!("quit anyway while agents work");
@@ -1482,11 +1506,6 @@ impl Shell {
         let confirm = self.confirm.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
-        let (cancel_keys, accept_keys) = if confirm.asked.enter_accepts() {
-            ("Esc", "Enter")
-        } else {
-            ("Enter · Esc", "")
-        };
         let (title, detail, accept, id) = match &confirm.asked {
             Asked::CloseProject { project, name } => {
                 let detail = match self.workspace.busy_panes_of(*project) {
@@ -1508,6 +1527,18 @@ impl Shell {
                     "confirm-close-project",
                 )
             }
+            Asked::CloseTab { tab, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_tab_detail(self.workspace.busy_panes_of_tab(*tab)),
+                "Close tab",
+                "confirm-close-tab",
+            ),
+            Asked::ClosePane { pane, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_pane_detail(self.workspace.pane(*pane).is_busy()).to_owned(),
+                "Close pane",
+                "confirm-close-pane",
+            ),
             Asked::Quit => (
                 "Quit YIEN?".to_owned(),
                 quit_detail(self.workspace.working_panes()),
@@ -1519,11 +1550,7 @@ impl Shell {
             h_flex()
                 .id(id)
                 .role(Role::Button)
-                .aria_label(if keys.is_empty() {
-                    label.to_owned()
-                } else {
-                    format!("{label} ({keys})")
-                })
+                .aria_label(format!("{label} ({keys})"))
                 .items_center()
                 .gap(px(8.0))
                 .px(px(12.0))
@@ -1534,15 +1561,7 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(label)
-                .when(!keys.is_empty(), |b| {
-                    b.child(
-                        div()
-                            .text_size(t.text(11.5))
-                            .text_color(t.faint)
-                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                            .child(keys),
-                    )
-                })
+                .child(key_hint(keys, &t))
         };
         Some(
             div()
@@ -1592,13 +1611,13 @@ impl Shell {
                                 .gap(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(t.text(13.0))
-                                .child(button("confirm-cancel", "Cancel", cancel_keys).on_click(
+                                .child(button("confirm-cancel", "Cancel", "Esc").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.confirm_cancel(&ConfirmCancel, window, cx);
                                     }),
                                 ))
                                 .child(
-                                    button("confirm-accept", accept, accept_keys)
+                                    button("confirm-accept", accept, "Enter")
                                         .font_weight(FontWeight::MEDIUM)
                                         .border_color(t.muted)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -2190,6 +2209,7 @@ impl Shell {
             .child(
                 v_flex()
                     .id("tab-list")
+                    .track_scroll(&self.tab_drag.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2341,12 +2361,12 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
+            .child(self.new_tab_button(project, cx).ml_auto())
             .child(
                 div()
                     .id(("close-project", id.get()))
                     .role(Role::Button)
                     .aria_label(format!("Close project {}", project.name))
-                    .ml_auto()
                     .flex()
                     .flex_none()
                     .items_center()
@@ -2385,8 +2405,14 @@ impl Shell {
             Some(project) => format!("{project} / {}", tab.name),
             None => tab.name.clone(),
         };
+        // Grouped by state, rows of several projects mix, so none is dragged.
+        let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
+        let drop_target = !with_project;
+        let mark = self.row_mark(id);
+        let close_shown = active || self.ringed_tab() == Some(id);
         div()
             .id(("tab", id.get()))
+            .group(tab_controls::row_group(id))
             .role(Role::Tab)
             .aria_label(match tab.worktree {
                 Some(_) => format!("{name}, worktree, {}", state.label()),
@@ -2424,6 +2450,12 @@ impl Shell {
                     this.select_tab(id, window, cx);
                 }
             }))
+            .when(draggable, |row| self.draggable_row(row, tab, cx))
+            .when(drop_target, |row| self.drop_target_row(row, tab, cx))
+            .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
+            .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
+                row.child(drop_line(mark == RowMark::LineAbove, &t))
+            })
             .child(
                 h_flex()
                     .items_center()
@@ -2450,7 +2482,8 @@ impl Shell {
                                 .size(px(12.0))
                                 .text_color(t.ai),
                         )
-                    }),
+                    })
+                    .child(self.close_tab_button(id, &name, close_shown, cx)),
             )
             .when(second_line, |row| {
                 row.child(
@@ -3343,6 +3376,7 @@ impl Render for Shell {
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
         // A drag that just ended sends its width here.
         self.save_side_bars(cx);
+        self.forget_ended_tab_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3393,7 +3427,6 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_pane_menu))
             .on_action(cx.listener(Self::terminate_pane))
             .on_action(cx.listener(Self::copy_session_id))
-            .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::toggle_notifications_muted))
             .on_action(cx.listener(Self::toggle_tab_muted))
@@ -3402,6 +3435,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::confirm_accept))
             .on_action(cx.listener(Self::confirm_cancel))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::move_tab_up))
+            .on_action(cx.listener(Self::move_tab_down))
             .on_action(cx.listener(Self::rename_confirm))
             .on_action(cx.listener(Self::rename_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
@@ -3465,6 +3501,23 @@ impl Render for Shell {
     }
 }
 
+/// The line between two tab rows where a dragged tab would land
+/// (RF-ESP-16): indigo like the other drag marks, never red (RN-01).
+fn drop_line(above: bool, t: &Theme) -> Div {
+    let line = div()
+        .absolute()
+        .left(px(4.0))
+        .right(px(4.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(t.ai);
+    if above {
+        line.top(px(-2.0))
+    } else {
+        line.bottom(px(-2.0))
+    }
+}
+
 /// The indigo ring drawn over a bar that holds the keyboard (RF-NAV-08);
 /// the bar must be `relative`.
 fn focus_ring(t: &Theme) -> Div {
@@ -3491,6 +3544,16 @@ fn icon_button(id: &'static str, icon: &'static str, t: &Theme) -> Stateful<Div>
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(svg().path(icon).size(px(16.0)).text_color(t.muted))
+}
+
+/// The key beside a dialog button's label. In the label's family: the mono
+/// family's metrics drew it below the label's line.
+fn key_hint(keys: &'static str, t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_size(t.text(11.5))
+        .text_color(t.faint)
+        .child(keys)
 }
 
 /// The state glyph in its 14 px slot. The shape tells the state, the colour
@@ -3546,13 +3609,19 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("add project button", "project.add"),
     ("empty state's add project button", "project.add"),
     ("project head close button", "project.close"),
+    ("project head new tab button", "tab.new"),
     ("close project dialog buttons", "project.close"),
+    ("close tab dialog buttons", "tab.close"),
+    ("close pane dialog buttons", "pane.close"),
     ("relaunch button", "pane.relaunch"),
     ("pane head close button", "pane.close"),
     ("pane actions button", "pane.actions"),
     ("pane head right click", "pane.actions"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
+    ("tab row drag", "tab.move_up"),
+    ("tab row drag", "tab.move_down"),
+    ("tab row close button", "tab.close"),
     ("worktree prompt buttons", "tab.new_worktree"),
     ("worktree question buttons", "pane.close"),
     ("context bar's Changes tab", "changes.show"),
@@ -3564,7 +3633,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
-    use super::{Asked, MOUSE_COMMANDS, no_tab_label};
+    use super::{MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
     use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
@@ -3583,16 +3652,6 @@ mod tests {
             ..WorkspaceSnapshot::default()
         });
         assert_eq!(no_tab_label(&tabs_closed), "No tab is open");
-    }
-
-    #[test]
-    fn rf_ses_13_enter_never_quits_but_closes_a_project() {
-        assert!(!Asked::Quit.enter_accepts());
-        let close = Asked::CloseProject {
-            project: ProjectId::new(1),
-            name: "yien".to_owned(),
-        };
-        assert!(close.enter_accepts());
     }
 
     #[test]
