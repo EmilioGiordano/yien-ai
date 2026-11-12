@@ -41,6 +41,17 @@ pub(crate) fn centring_margins() -> (f32, f32) {
     (extra.max(0.0), (-extra).max(0.0))
 }
 
+/// The width the pill's `max_w` percentage resolves against: the row's content
+/// box, inside the bar's padding, the window buttons and the row's padding.
+pub(crate) fn row_width(window: f32) -> f32 {
+    window - BAR_LEFT_PADDING - CONTROLS * CONTROL_WIDTH - ROW_RIGHT_PADDING
+}
+
+/// The most the pill may take, as the shell caps it.
+pub(crate) fn pill_cap(window: f32) -> f32 {
+    PILL_SHARE * row_width(window)
+}
+
 /// What the title bar draws at a given width.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TitleLayout {
@@ -66,7 +77,7 @@ impl TitleLayout {
         let pill = loop {
             let gaps = (3 + buttons) as f32 * GAP;
             let rest = room - fixed - buttons as f32 * BUTTON - gaps;
-            let pill = rest.min(PILL_WIDTH).min(PILL_SHARE * room);
+            let pill = rest.min(PILL_WIDTH).min(pill_cap(window));
             if pill >= text_need || buttons == 0 {
                 break pill;
             }
@@ -89,7 +100,8 @@ impl TitleLayout {
 #[cfg(test)]
 mod tests {
     use super::{
-        BAR_LEFT_PADDING, CONTROL_WIDTH, CONTROLS, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+        BAR_LEFT_PADDING, CONTROL_WIDTH, CONTROLS, PILL_SHARE, ROW_RIGHT_PADDING, TitleLayout,
+        centring_margins, pill_cap, row_width,
     };
 
     const BIGGEST: f32 = 20.0 / 13.0;
@@ -186,10 +198,19 @@ mod tests {
             while window >= 300.0 {
                 if TitleLayout::at(window, scale).centred {
                     let (l, r) = centring_margins();
-                    assert!(window - 124.0 - 24.0 - l - r >= 2.0 * 28.0, "{window}");
+                    assert!(row_width(window) - 24.0 - l - r >= 2.0 * 28.0, "{window}");
                 }
                 window -= 5.0;
             }
+        }
+    }
+
+    #[test]
+    fn rnf_19_pill_budget_is_the_share_of_the_real_row() {
+        for window in [960.0_f32, 1280.0, 1920.0] {
+            let row = window - BAR_LEFT_PADDING - CONTROLS * CONTROL_WIDTH - ROW_RIGHT_PADDING;
+            assert_eq!(row_width(window), row);
+            assert_eq!(pill_cap(window), PILL_SHARE * row);
         }
     }
 }
