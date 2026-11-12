@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_layout::{Shape, Tree};
-use yien_proto::{AgentState, PaneId, ProjectId, SideBar, SideBars, TabId};
+use yien_proto::{AgentState, PaneId, ProjectId, SideBar, SideBars, TabId, same_folder};
 use yien_session::{
     AgentRecord, LayoutRecord, PaneRecord, ProjectRecord, ResumeAction, Selection, SessionRef,
     SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord, resume_plan,
@@ -404,7 +404,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
         // A folder the pane reports other than the one it was started in is
         // the user moving on; the fallback folder itself is never saved.
         let cwd = match &p.cwd {
-            Some(cwd) if *cwd != p.launch_cwd => cwd.clone(),
+            Some(cwd) if !same_folder(cwd, &p.launch_cwd) => cwd.clone(),
             _ => kept.cwd.clone(),
         };
         return PaneRecord {
@@ -901,6 +901,44 @@ mod tests {
         back.on_pane_event(shell, PaneEvent::Cwd("C:/Code/other".into()));
         let resaved = back.to_session();
         assert_eq!(resaved.projects[0].tabs[0].panes[0].cwd, "C:/Code/other");
+    }
+
+    #[test]
+    fn rf_ses_12_the_fallback_folder_in_another_spelling_is_not_saved() {
+        let (mut ws, pane) = workspace("shell");
+        let mut saved = ws.to_session();
+        saved.projects[0].tabs[1].panes[0].cwd = "E:/offline".into();
+        let mut disk = all_exist(&saved);
+        disk.existing.remove("E:/offline");
+        let (mut back, fx, _) = restore(&saved, &disk);
+        assert_eq!(spawn_of(&fx, pane).1, ROOT);
+        // A shell's prompt hook reports the folder as the OS spells it.
+        let mut spellings = vec!["C:/Code/yien/"];
+        if cfg!(windows) {
+            spellings.push(r"c:\code\YIEN");
+        }
+        for spelling in spellings {
+            back.on_pane_event(pane, PaneEvent::Cwd(spelling.into()));
+            let resaved = back.to_session();
+            assert_eq!(resaved.projects[0].tabs[1].panes[0].cwd, "E:/offline");
+        }
+        back.on_pane_event(pane, PaneEvent::Cwd(r"C:\Windows".into()));
+        let resaved = back.to_session();
+        assert_eq!(resaved.projects[0].tabs[1].panes[0].cwd, r"C:\Windows");
+        ws.on_pane_event(pane, PaneEvent::Cwd(r"C:\Windows".into()));
+        assert_eq!(
+            ws.to_session().projects[0].tabs[1].panes[0].cwd,
+            r"C:\Windows"
+        );
+    }
+
+    #[test]
+    fn rf_ses_01_an_unchanged_folder_is_not_announced_again() {
+        let (mut ws, pane) = workspace("shell");
+        let fx = ws.on_pane_event(pane, PaneEvent::Cwd(r"C:\Windows".into()));
+        assert_eq!(fx.len(), 1, "{fx:?}");
+        let fx = ws.on_pane_event(pane, PaneEvent::Cwd(r"C:\Windows".into()));
+        assert!(fx.is_empty(), "{fx:?}");
     }
 
     #[test]

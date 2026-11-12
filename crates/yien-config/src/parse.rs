@@ -126,6 +126,9 @@ impl Walk<'_> {
             "terminal.font.family" => {
                 self.loaded.config.terminal_font.family = non_empty(self.string(path, value)?);
             }
+            "terminal.shell_integration" => {
+                self.loaded.config.shell_integration = self.boolean(path, value)?;
+            }
             "ui.font.size" => {
                 self.loaded.config.ui_font.size = self.size(path, value, MAX_UI_FONT_SIZE)?;
             }
@@ -145,6 +148,16 @@ impl Walk<'_> {
             other => Err(self.problem(
                 value.span(),
                 format!("{path} must be a string, not {}", other.type_str()),
+            )),
+        }
+    }
+
+    fn boolean(&self, path: &str, value: &Spanned<DeValue<'_>>) -> Result<bool, Problem> {
+        match value.get_ref() {
+            DeValue::Boolean(b) => Ok(*b),
+            other => Err(self.problem(
+                value.span(),
+                format!("{path} must be true or false, not {}", other.type_str()),
             )),
         }
     }
@@ -331,6 +344,26 @@ group = \"project\"")
             p.message.contains("\"project\" or \"state\""),
             "{}",
             p.message
+        );
+    }
+
+    #[test]
+    fn rf_ses_01_shell_integration_is_on_unless_turned_off() {
+        assert!(ok("").config.shell_integration);
+        assert!(
+            ok("terminal.shell_integration = true")
+                .config
+                .shell_integration
+        );
+        let off = ok("[terminal]\nshell_integration = false");
+        assert!(!off.config.shell_integration);
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        let p = err("\nterminal.shell_integration = \"no\"\n");
+        assert_eq!((p.line, p.column), (2, 30));
+        assert!(
+            p.message
+                .contains("terminal.shell_integration must be true or false, not string"),
+            "{p}"
         );
     }
 

@@ -1034,8 +1034,10 @@ impl Workspace {
                 self.emit_pane(pane, &mut fx);
             }
             PaneEvent::Cwd(cwd) => {
-                p.cwd = Some(cwd);
-                self.emit_pane(pane, &mut fx);
+                if p.cwd.as_deref() != Some(cwd.as_str()) {
+                    p.cwd = Some(cwd);
+                    self.emit_pane(pane, &mut fx);
+                }
             }
             PaneEvent::SessionId { launch, .. } | PaneEvent::EndedByUser { launch }
                 if launch != p.launch => {}

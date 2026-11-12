@@ -105,7 +105,7 @@ pub struct KeyOverride {
 }
 
 /// Every setting, with the defaults for what the file leaves out.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// `theme`.
     pub theme: ThemeSetting,
@@ -118,8 +118,26 @@ pub struct Config {
     pub editor: Option<String>,
     /// `ui.tabs.group`: how the tab bar lists tabs (RF-ATN-07).
     pub tab_grouping: TabGrouping,
+    /// `terminal.shell_integration`: PowerShell and cmd report their folder
+    /// at each prompt, so a restored pane opens where the user left it
+    /// (RF-SES-01). Applies to panes started after a change.
+    pub shell_integration: bool,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeSetting::default(),
+            ui_font: FontSetting::default(),
+            terminal_font: FontSetting::default(),
+            editor: None,
+            tab_grouping: TabGrouping::default(),
+            shell_integration: true,
+            keys: Vec::new(),
+        }
+    }
 }
 
 /// A place in the file and what is wrong there. Lines and columns start at 1.
