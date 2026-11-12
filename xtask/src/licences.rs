@@ -84,42 +84,86 @@ pub fn vendored_extras(name: &str) -> Vec<Text> {
         .collect()
 }
 
-/// Whether a file is a licence proper: `LICENSE*`, `LICENCE*`, `COPYING*`,
-/// `UNLICENSE*`, or the manifest's `license-file`. `NOTICE` and `COPYRIGHT` are not.
+/// Whether a file is a licence proper: a root-level `LICENSE*`, `LICENCE*`,
+/// `COPYING*` or `UNLICENSE*`, or the manifest's `license-file`. `NOTICE`,
+/// `COPYRIGHT` and nested files (the extras) are not.
 pub fn covers_licence(label: &str, license_file: Option<&str>) -> bool {
-    let name = label.rsplit(['/', '\\']).next().unwrap_or(label);
-    let upper = name.to_ascii_uppercase();
+    if label.contains(['/', '\\']) {
+        return false;
+    }
+    let upper = label.to_ascii_uppercase();
     let manifest = license_file
         .and_then(|f| f.rsplit(['/', '\\']).next())
-        .is_some_and(|f| f == name);
+        .is_some_and(|f| f == label);
     manifest
         || ["LICENSE", "LICENCE", "COPYING", "UNLICENSE"]
             .iter()
             .any(|p| upper.starts_with(p))
 }
 
-/// The lines of source text that state a copyright, with comment markers
-/// stripped, in order and without repeats. `(c)` counts only with a digit.
-pub fn copyright_lines(text: &str) -> Vec<String> {
+/// The lines of `text` that state a copyright, with comment markers stripped,
+/// in order and without repeats. A line counts only when, after the markers, it
+/// starts with `Copyright`, `(c)` or `©` followed by a year or a name (a digit
+/// or a capital letter). With `comments_only` (Rust source) it must also be a
+/// comment line.
+pub fn copyright_lines(text: &str, comments_only: bool) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for raw in text.lines() {
-        let lower = raw.to_ascii_lowercase();
-        let marked = lower.contains("copyright")
-            || raw.contains('\u{a9}')
-            || (lower.contains("(c)") && raw.bytes().any(|b| b.is_ascii_digit()));
-        if !marked {
+        let trimmed = raw.trim_start();
+        if comments_only
+            && !["//", "/*", "*", "#"]
+                .iter()
+                .any(|m| trimmed.starts_with(m))
+        {
             continue;
         }
-        let line = raw
+        let line = trimmed
             .trim_start_matches(|c: char| {
                 matches!(c, '/' | '*' | '!' | '#' | '>') || c.is_whitespace()
             })
             .trim_end_matches(|c: char| c == '/' || c == '*' || c.is_whitespace());
-        if !line.is_empty() && !found.iter().any(|l| l == line) {
+        let lower = line.to_ascii_lowercase();
+        let rest = if lower.starts_with("copyright") {
+            &line["copyright".len()..]
+        } else if lower.starts_with("(c)") {
+            &line[3..]
+        } else if let Some(r) = line.strip_prefix('\u{a9}') {
+            r
+        } else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let rest = if rest.to_ascii_lowercase().starts_with("(c)") {
+            rest[3..].trim_start()
+        } else {
+            rest.strip_prefix('\u{a9}').unwrap_or(rest).trim_start()
+        };
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c.is_uppercase())
+            && !found.iter().any(|l| l == line)
+        {
             found.push(line.to_owned());
         }
     }
     found
+}
+
+/// Whether a path inside a package holds tests, benchmarks or examples, whose
+/// header fragments are not the package's own notice.
+pub fn is_test_path(relative: &Path) -> bool {
+    let in_dir = relative.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("tests" | "benches" | "examples")
+        )
+    });
+    let name = relative
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    in_dir || name.ends_with("_tests.rs") || name.ends_with("_test.rs") || name == "tests.rs"
 }
 
 /// Whether a file name in a package folder holds a licence or notice text:
@@ -348,6 +392,9 @@ fn read_copyright(dir: &Path) -> Vec<String> {
     }
     let mut paths = Vec::new();
     walk(&dir.join("src"), &mut paths);
+    paths.retain(|p| !is_test_path(p.strip_prefix(dir).unwrap_or(p)));
+    paths.sort();
+    let readme_start = paths.len();
     if let Ok(read) = std::fs::read_dir(dir) {
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
@@ -356,11 +403,11 @@ fn read_copyright(dir: &Path) -> Vec<String> {
             }
         }
     }
-    paths.sort();
+    paths[readme_start..].sort();
     let mut found: Vec<String> = Vec::new();
-    for path in paths {
-        if let Ok(bytes) = std::fs::read(&path) {
-            for line in copyright_lines(&String::from_utf8_lossy(&bytes)) {
+    for (i, path) in paths.iter().enumerate() {
+        if let Ok(bytes) = std::fs::read(path) {
+            for line in copyright_lines(&String::from_utf8_lossy(&bytes), i < readme_start) {
                 if !found.contains(&line) {
                     found.push(line);
                 }
@@ -603,19 +650,63 @@ mod tests {
     fn copyright_lines_are_copied_verbatim_without_comment_markers() {
         let src = "//! Copyright 2021 The AccessKit Authors. All rights reserved.\n\
                    // Copyright (c) 2023.\n\
-                   /* copyright 2020 X */\n\
+                   /* Copyright 2020 X */\n\
                    // Copyright 2021 The AccessKit Authors. All rights reserved.\n\
-                   let c = (c) + d;\n\
                    fn main() {}\n";
         assert_eq!(
-            copyright_lines(src),
+            copyright_lines(src, true),
             [
                 "Copyright 2021 The AccessKit Authors. All rights reserved.",
                 "Copyright (c) 2023.",
-                "copyright 2020 X"
+                "Copyright 2020 X"
             ]
         );
-        assert!(copyright_lines("fn main() {}\n").is_empty());
+        assert!(copyright_lines("fn main() {}\n", true).is_empty());
+    }
+
+    #[test]
+    fn copyright_lines_reject_code_and_sentences() {
+        let lyon = "let c0 = c.dot(c);\nlet c1 = b.dot(c) * S::THREE;\n\
+                    let c2 = b.dot(b) * S::TWO + a.dot(c);\n";
+        let zune = "_mm256_extractf128_si256::<0>(c)\n_mm256_extractf128_si256::<1>(c)\n";
+        let earcut =
+            "// with or without fee is hereby granted, provided that the above copyright notice\n";
+        for text in [lyon, zune, earcut] {
+            assert!(copyright_lines(text, true).is_empty(), "{text}");
+            assert!(copyright_lines(text, false).is_empty(), "{text}");
+        }
+        assert!(copyright_lines("// Copyright notice follows\n", true).is_empty());
+        assert!(copyright_lines("let s = \"Copyright 2021 X\";\n", true).is_empty());
+    }
+
+    #[test]
+    fn copyright_lines_accept_readme_text_and_the_symbol_forms() {
+        let readme = "Copyright (c) 2023.\n(C) 2020 Someone\n\u{a9} 2019 Other\n";
+        assert_eq!(
+            copyright_lines(readme, false),
+            [
+                "Copyright (c) 2023.",
+                "(C) 2020 Someone",
+                "\u{a9} 2019 Other"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_benchmark_and_example_paths_are_skipped() {
+        for path in [
+            "src/earcut_tests.rs",
+            "src/a_test.rs",
+            "src/tests.rs",
+            "tests/x.rs",
+            "src/tests/x.rs",
+            "benches/b.rs",
+            "examples/e.rs",
+        ] {
+            assert!(is_test_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_test_path(Path::new("src/lib.rs")));
+        assert!(!is_test_path(Path::new("src/contest.rs")));
     }
 
     #[test]
@@ -669,7 +760,7 @@ mod tests {
         p.license_file = Some("docs/terms.txt".to_owned());
         assert!(covered_by_own_files(&p, &[file("terms.txt", "terms")]));
         assert!(covers_licence("LICENSE-MIT", None));
-        assert!(covers_licence("src/unicode_tables/LICENSE-UNICODE", None));
+        assert!(!covers_licence("src/unicode_tables/LICENSE-UNICODE", None));
         assert!(!covers_licence("NOTICE", None));
     }
 
