@@ -43,7 +43,7 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
-use crate::title_bar::{PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
+use crate::title_bar::{CENTRE_SHIFT, PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
@@ -1711,48 +1711,67 @@ impl Shell {
                     .pr(px(10.0))
                     .child(
                         h_flex()
-                            .flex_none()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .items_center()
-                            .gap(px(8.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(img(assets::MARK).size(px(20.0)))
-                            .child("YIEN"),
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child("YIEN"),
+                            )
+                            .child(div().flex_1().min_w_0().children(crumbs)),
                     )
-                    .child(div().flex_1().min_w_0().children(crumbs))
                     .child(self.render_palette_pill(&layout, cx))
-                    .child(div().flex_1())
-                    .child(self.render_need_count(cx))
-                    .when(layout.theme_button, |bar| {
-                        bar.child(
-                            icon_button("toggle-theme", assets::THEME, &t)
-                                .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_theme(&ToggleTheme, window, cx)
-                                })),
-                        )
-                    })
-                    .when(layout.tab_bar_button, |bar| {
-                        bar.child(
-                            icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                                .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                                .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                                .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                                })),
-                        )
-                    })
-                    .when(layout.context_bar_button, |bar| {
-                        bar.child(
-                            icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                                .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                                .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                                .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_context_bar(&ToggleContextBar, window, cx)
-                                })),
-                        )
-                    }),
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.0))
+                            .when(layout.centred, |side| side.ml(px(CENTRE_SHIFT)))
+                            .child(self.render_need_count(cx))
+                            .when(layout.theme_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-theme", assets::THEME, &t)
+                                        .aria_label(format!(
+                                            "Toggle sumi and washi theme ({THEME_KEYS})"
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_theme(&ToggleTheme, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.tab_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                        .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                        .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.context_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                        .aria_label(format!(
+                                            "Toggle context bar ({CONTEXT_BAR_KEYS})"
+                                        ))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                        .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                        })),
+                                )
+                            }),
+                    ),
             )
     }
 
@@ -1768,6 +1787,7 @@ impl Shell {
             .occlude()
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
+            .flex_none()
             .w(px(PILL_WIDTH))
             .max_w(relative(PILL_SHARE))
             .min_w(px(PILL_LEAST))
