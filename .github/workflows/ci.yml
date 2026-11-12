@@ -45,7 +45,6 @@ jobs:
 
   dist:
     name: portable build (windows)
-    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

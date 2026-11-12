@@ -21,7 +21,7 @@ use crate::actions::*;
 use crate::assets;
 use crate::file_tree::{Activation, FileTree, Row, SearchRequest};
 use crate::files::{Files, FilesHost};
-use crate::region::Region;
+use crate::region::{Modality, Region};
 use crate::sidebars::{self, Bar};
 
 /// How long typing must pause before the filter searches.
@@ -321,6 +321,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
+        self.open_files_view(window, cx);
+    }
+
+    fn open_files_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.change_side_bars(|b| sidebars::show(b, Bar::Context), window, cx);
         self.context_view = ContextView::Files;
         self.sync_files(window, cx);
@@ -341,6 +346,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
         self.change_side_bars(|b| sidebars::show(b, Bar::Context), window, cx);
         self.context_view = ContextView::Changes;
         self.sync_files(window, cx);
@@ -370,6 +376,7 @@ impl Shell {
     }
 
     pub(super) fn file_tree_up(&mut self, _: &FileTreeUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.modality = Modality::Keyboard;
         self.with_tree(cx, |tree| {
             tree.move_cursor(-1);
             Activation::Nothing
@@ -382,6 +389,7 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
         self.with_tree(cx, |tree| {
             tree.move_cursor(1);
             Activation::Nothing
@@ -399,6 +407,7 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
         if self.filter_has_text() {
             cx.propagate();
             return;
@@ -415,6 +424,7 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
         if self.filter_has_text() {
             cx.propagate();
             return;
@@ -428,6 +438,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modality = Modality::Keyboard;
         let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         self.with_tree(cx, FileTree::activate);
         self.sync_filter_text(was_filtering, window, cx);
@@ -525,11 +536,8 @@ impl Shell {
                     })),
             )
             .child(
-                tab("context-tab-files", "Files", ContextView::Files).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.show_files(&ShowFiles, window, cx);
-                    },
-                )),
+                tab("context-tab-files", "Files", ContextView::Files)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_files_view(window, cx))),
             )
             .child(div().flex_1())
             .child(self.render_review_button(cx))
@@ -647,7 +655,7 @@ impl Shell {
         let cursor = tree.cursor_index(&rows);
         let t = self.theme;
         let mono = self.fonts.mono.clone();
-        let ringed = self.keyboard_region == Region::ContextBar;
+        let ringed = self.ringed(Region::ContextBar);
         let hover = t.hover;
         rows.into_iter()
             .enumerate()
