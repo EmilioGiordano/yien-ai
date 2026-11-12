@@ -58,6 +58,21 @@ pub(crate) struct Entry {
     /// The agent state the row shows, if it stands for panes.
     pub(crate) state: Option<AgentState>,
     pub(crate) target: Target,
+    /// How deep the row sits in the switcher's tree: 1 for a pane under
+    /// its tab, 0 otherwise.
+    pub(crate) depth: u8,
+}
+
+impl Entry {
+    /// The text the row draws and how much of it is dimmed. In the
+    /// switcher's tree a pane row sits under its tab, so the dimmed
+    /// `project / tab ›` before its name is left out.
+    pub(crate) fn drawn(&self, tree: bool) -> (&str, usize) {
+        match self.text.get(self.dim..) {
+            Some(rest) if tree && self.depth > 0 => (rest.strip_prefix(' ').unwrap_or(rest), 0),
+            _ => (&self.text, self.dim),
+        }
+    }
 }
 
 impl std::fmt::Debug for Entry {
@@ -67,6 +82,7 @@ impl std::fmt::Debug for Entry {
             .field("hint", &self.hint)
             .field("state", &self.state)
             .field("target", &self.target)
+            .field("depth", &self.depth)
             .finish_non_exhaustive()
     }
 }
@@ -89,6 +105,8 @@ pub(crate) struct Palette {
     query: String,
     rows: Vec<Row>,
     selected: usize,
+    /// The row the switcher selects while the query is empty.
+    home: Option<Target>,
     /// In [`Mode::Sessions`]: the project listed, the request its answer
     /// carries, whether it is still being read, and whether that failed.
     sessions_of: Option<ProjectId>,
@@ -112,6 +130,7 @@ impl Palette {
             query: String::new(),
             rows: Vec::new(),
             selected: 0,
+            home: None,
             sessions_of: None,
             request: 0,
             loading: false,
@@ -119,6 +138,14 @@ impl Palette {
         };
         palette.refilter();
         palette
+    }
+
+    /// The same palette, selecting the row that goes to `home` whenever the
+    /// switcher's query is empty (RF-NAV-05).
+    pub(crate) fn with_home(mut self, home: Option<Target>) -> Self {
+        self.home = home;
+        self.refilter();
+        self
     }
 
     /// The past sessions list of `project`, empty while they are read; the
@@ -223,13 +250,26 @@ impl Palette {
         }
     }
 
+    /// Whether the switcher lists every row as a tree: its query is empty,
+    /// so the rows keep their order and panes sit under their tabs.
+    pub(crate) fn shows_tree(&self) -> bool {
+        self.listing() == Mode::Switcher && self.search().trim().is_empty()
+    }
+
     fn refilter(&mut self) {
         let source = self.source();
-        self.rows = rank(self.search(), source.iter().map(|e| e.text.as_str()))
+        let rows: Vec<Row> = rank(self.search(), source.iter().map(|e| e.text.as_str()))
             .into_iter()
             .map(|(entry, Match { hits, .. })| Row { entry, hits })
             .collect();
-        self.selected = 0;
+        let home = match &self.home {
+            Some(home) if self.shows_tree() => rows
+                .iter()
+                .position(|r| source.get(r.entry).is_some_and(|e| e.target == *home)),
+            _ => None,
+        };
+        self.rows = rows;
+        self.selected = home.unwrap_or(0);
     }
 
     /// The rows that match, best first.
@@ -281,6 +321,7 @@ pub(crate) fn command_entries(
             hint: shortcut(at).unwrap_or_default(),
             state: None,
             target: Target::Command(at),
+            depth: 0,
         })
         .collect();
     entries.extend(profile_tabs(profiles).into_iter().map(|tab| Entry {
@@ -289,6 +330,7 @@ pub(crate) fn command_entries(
         hint: String::new(),
         state: None,
         target: Target::NewTab(tab.profile),
+        depth: 0,
     }));
     entries.extend(profile_splits(profiles).into_iter().map(|split| Entry {
         dim: "pane:".len(),
@@ -296,57 +338,62 @@ pub(crate) fn command_entries(
         hint: String::new(),
         state: None,
         target: Target::Split(split.profile, split.orientation),
+        depth: 0,
     }));
     entries
 }
 
-/// The switcher's rows (RF-NAV-04): tabs, the most recently used first and
-/// the selected one last, so Enter on an empty query goes back to the
-/// previous tab (RF-NAV-05); then every pane; then the projects. Each shows
-/// its agent state, red when it needs you (RN-01).
+/// The switcher's rows (RF-NAV-04) as a tree in the tab bar's order:
+/// each tab as `project / tab`, then its panes in layout order one level
+/// deeper; then the projects. A pane row names its project, tab and folder,
+/// so two panes running the same program can be told apart when filtered;
+/// a name two panes of one tab share gets the pane's place in it, `(2)`.
+/// Each row shows its agent state, red when it needs you (RN-01).
 pub(crate) fn switcher_entries(ws: &WorkspaceView) -> Vec<Entry> {
-    let selected = ws.selected_tab().map(|t| t.id);
-    let project_name = |id: ProjectId| {
-        ws.projects()
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default()
-    };
-    let mut tabs = ws.tabs_by_recent();
-    if let Some(at) = tabs.iter().position(|t| Some(t.id) == selected) {
-        let current = tabs.remove(at);
-        tabs.push(current);
-    }
-    let mut entries: Vec<Entry> = tabs
-        .iter()
-        .map(|tab| {
+    let mut entries = Vec::new();
+    for project in ws.projects() {
+        for tab in ws.tabs_of(project) {
             let state = ws.tab_state(tab);
-            let project = project_name(tab.project);
-            Entry {
-                dim: project.len() + 2,
-                text: format!("{project} / {}", tab.name),
+            let context = format!("{} / {}", project.name, tab.name);
+            entries.push(Entry {
+                dim: project.name.len() + " /".len(),
+                text: context.clone(),
                 hint: state.label().to_owned(),
                 state: Some(state),
                 target: Target::Tab(tab.id),
-            }
-        })
-        .collect();
-    for tab in &tabs {
-        for id in tab.layout.panes() {
-            let pane = ws.pane(id);
-            let hint = if pane.profile.is_empty() {
-                pane.state.label().to_owned()
-            } else {
-                format!("{} · {}", pane.profile, pane.state.label())
-            };
-            entries.push(Entry {
-                dim: tab.name.len() + " ›".len(),
-                text: format!("{} › {}", tab.name, pane.name),
-                hint,
-                state: Some(pane.state),
-                target: Target::Pane(id),
+                depth: 0,
             });
+            let panes: Vec<_> = tab
+                .layout
+                .panes()
+                .into_iter()
+                .map(|id| ws.pane(id))
+                .collect();
+            for (at, pane) in panes.iter().enumerate() {
+                let id = pane.id;
+                let mut text = format!("{context} › {}", pane.name);
+                if panes.iter().filter(|p| p.name == pane.name).count() > 1 {
+                    text.push_str(&format!(" ({})", at + 1));
+                }
+                let folder = folder_name(pane.cwd.as_deref().unwrap_or(&tab.dir));
+                if !folder.is_empty() {
+                    text.push_str(" · ");
+                    text.push_str(folder);
+                }
+                let hint = if pane.profile.is_empty() {
+                    pane.state.label().to_owned()
+                } else {
+                    format!("{} · {}", pane.profile, pane.state.label())
+                };
+                entries.push(Entry {
+                    dim: context.len() + " ›".len(),
+                    text,
+                    hint,
+                    state: Some(pane.state),
+                    target: Target::Pane(id),
+                    depth: 1,
+                });
+            }
         }
     }
     for project in ws.projects() {
@@ -364,9 +411,29 @@ pub(crate) fn switcher_entries(ws: &WorkspaceView) -> Vec<Entry> {
             hint,
             state,
             target: Target::Project(project.id),
+            depth: 0,
         });
     }
     entries
+}
+
+/// The row an empty switcher selects: the tab used before the current one,
+/// so Ctrl+Shift+O then Enter goes back to it (RF-NAV-05).
+pub(crate) fn switcher_home(ws: &WorkspaceView) -> Option<Target> {
+    let selected = ws.selected_tab().map(|t| t.id);
+    ws.tabs_by_recent()
+        .into_iter()
+        .find(|t| Some(t.id) != selected)
+        .map(|t| Target::Tab(t.id))
+}
+
+/// The last component of a folder path, `/` or `\` separated.
+fn folder_name(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(name) if !name.is_empty() => name,
+        _ => path,
+    }
 }
 
 /// The rows of a sessions list (RF-SES-07): each session's title, how long
@@ -409,6 +476,7 @@ pub(crate) fn session_entries(
                 hint,
                 state,
                 target,
+                depth: 0,
             }
         })
         .collect()
@@ -522,7 +590,7 @@ mod tests {
             id: TabId::new(id),
             project: ProjectId::new(project),
             name: name.into(),
-            dir: "C:/Code".into(),
+            dir: PROJECT_DIRS[usize::try_from(project).unwrap() - 1].into(),
             branch: None,
             layout,
             focused: PaneId::new(panes[0]),
@@ -555,34 +623,56 @@ mod tests {
 
     const NEEDS: P = P::NeedsYou(NeedsReason::Permission);
 
-    /// yien: "editor" (panes 100 pwsh, 101 claude needs you), "server" (110);
-    /// notes: "draft" (200). "editor" is selected.
-    fn workspace() -> WorkspaceView {
-        let project = |id: u64, name: &str, tabs: &[u64]| ProjectInfo {
+    /// The folder the tabs of project 1, 2 and 3 start in.
+    const PROJECT_DIRS: [&str; 3] = ["C:/Code/yien", "D:\\notes\\", "C:/Code/app"];
+
+    fn project(id: u64, name: &str, tabs: &[u64]) -> ProjectInfo {
+        ProjectInfo {
             id: ProjectId::new(id),
             name: name.into(),
             root: "C:/Code".into(),
             tabs: tabs.iter().map(|t| TabId::new(*t)).collect(),
             collapsed: false,
-        };
+        }
+    }
+
+    fn view(projects: Vec<ProjectInfo>, tabs: Vec<TabInfo>, panes: Vec<PaneInfo>) -> WorkspaceView {
+        let active_tab = tabs.first().map(|t| t.id);
         WorkspaceView::from_snapshot(&WorkspaceSnapshot {
-            projects: vec![project(1, "yien", &[10, 11]), project(2, "notes", &[20])],
-            tabs: vec![
-                tab(10, 1, "editor", &[100, 101]),
-                tab(11, 1, "server", &[110]),
-                tab(20, 2, "draft", &[200]),
-            ],
-            panes: vec![
-                pane(100, 10, "pwsh", P::Idle),
-                pane(101, 10, "claude", NEEDS),
-                pane(110, 11, "cargo", P::Working),
-                pane(200, 20, "pwsh", P::Idle),
-            ],
-            active_tab: Some(TabId::new(10)),
+            projects,
+            tabs,
+            panes,
+            active_tab,
             profiles: vec![],
             notifications_muted: false,
             side_bars: Default::default(),
         })
+    }
+
+    /// yien: "editor" (panes 100 pwsh, 101 claude needs you), "server" (110
+    /// cargo, in `crates/yien-ui`); notes: "draft" (200). "editor" is
+    /// selected.
+    fn workspace() -> WorkspaceView {
+        let mut cargo = pane(110, 11, "cargo", P::Working);
+        cargo.cwd = Some("C:/Code/yien/crates/yien-ui".into());
+        view(
+            vec![project(1, "yien", &[10, 11]), project(2, "notes", &[20])],
+            vec![
+                tab(10, 1, "editor", &[100, 101]),
+                tab(11, 1, "server", &[110]),
+                tab(20, 2, "draft", &[200]),
+            ],
+            vec![
+                pane(100, 10, "pwsh", P::Idle),
+                pane(101, 10, "claude", NEEDS),
+                cargo,
+                pane(200, 20, "pwsh", P::Idle),
+            ],
+        )
+    }
+
+    fn switcher(ws: &WorkspaceView) -> Palette {
+        Palette::new(Mode::Switcher, commands(), switcher_entries(ws)).with_home(switcher_home(ws))
     }
 
     fn commands() -> Vec<Entry> {
@@ -658,18 +748,17 @@ mod tests {
     }
 
     #[test]
-    fn rf_nav_04_the_switcher_lists_tabs_panes_and_projects() {
-        let palette = Palette::new(Mode::Switcher, commands(), switcher_entries(&workspace()));
+    fn rf_nav_04_the_switcher_lists_each_tab_with_its_panes_then_the_projects() {
         assert_eq!(
-            texts(&palette),
+            texts(&switcher(&workspace())),
             [
-                "yien / server",
-                "notes / draft",
                 "yien / editor",
-                "server › cargo",
-                "draft › pwsh",
-                "editor › pwsh",
-                "editor › claude",
+                "yien / editor › pwsh · yien",
+                "yien / editor › claude · yien",
+                "yien / server",
+                "yien / server › cargo · yien-ui",
+                "notes / draft",
+                "notes / draft › pwsh · notes",
                 "yien",
                 "notes",
             ]
@@ -677,14 +766,174 @@ mod tests {
     }
 
     #[test]
+    fn rf_nav_04_unrenamed_tabs_of_two_projects_are_told_apart() {
+        let mut moved = pane(200, 20, "powershell", P::Idle);
+        moved.cwd = Some("C:\\Users\\me\\scratch".into());
+        let ws = view(
+            vec![project(1, "yien", &[10]), project(2, "notes", &[20])],
+            vec![tab(10, 1, "Tab 1", &[100]), tab(20, 2, "Tab 1", &[200])],
+            vec![pane(100, 10, "powershell", P::Idle), moved],
+        );
+        let mut palette = switcher(&ws);
+        let drawn = |palette: &Palette| -> Vec<String> {
+            let tree = palette.shows_tree();
+            palette
+                .rows()
+                .iter()
+                .filter_map(|r| palette.entry(r))
+                .map(|e| e.drawn(tree).0.to_owned())
+                .collect()
+        };
+        assert!(palette.shows_tree());
+        assert_eq!(
+            drawn(&palette),
+            [
+                "yien / Tab 1",
+                "powershell · yien",
+                "notes / Tab 1",
+                "powershell · scratch",
+                "yien",
+                "notes",
+            ]
+        );
+        palette.set_query("powershell");
+        assert!(!palette.shows_tree());
+        assert_eq!(
+            drawn(&palette),
+            [
+                "yien / Tab 1 › powershell · yien",
+                "notes / Tab 1 › powershell · scratch",
+            ]
+        );
+    }
+
+    #[test]
+    fn rf_nav_04_a_tabs_panes_follow_it_in_layout_order_one_level_deeper() {
+        let mut build = tab(30, 3, "build", &[302]);
+        build.layout = LayoutNode::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![
+                LayoutChild {
+                    flex: 1.0,
+                    node: LayoutNode::Pane(PaneId::new(302)),
+                },
+                LayoutChild {
+                    flex: 1.0,
+                    node: tab(0, 3, "", &[300, 301]).layout,
+                },
+            ],
+        };
+        let ws = view(
+            vec![project(3, "app", &[30, 31])],
+            vec![build, tab(31, 3, "docs", &[310])],
+            vec![
+                pane(300, 30, "claude", P::Working),
+                pane(301, 30, "codex", P::Idle),
+                pane(302, 30, "pwsh", P::Idle),
+                pane(310, 31, "pwsh", P::Idle),
+            ],
+        );
+        let entries = switcher_entries(&ws);
+        let tree: Vec<(Target, u8)> = entries
+            .iter()
+            .map(|e| (e.target.clone(), e.depth))
+            .collect();
+        assert_eq!(
+            tree,
+            [
+                (Target::Tab(TabId::new(30)), 0),
+                (Target::Pane(PaneId::new(302)), 1),
+                (Target::Pane(PaneId::new(300)), 1),
+                (Target::Pane(PaneId::new(301)), 1),
+                (Target::Tab(TabId::new(31)), 0),
+                (Target::Pane(PaneId::new(310)), 1),
+                (Target::Project(ProjectId::new(3)), 0),
+            ]
+        );
+        assert_eq!(entries[1].drawn(true), ("pwsh · app", 0));
+        assert_eq!(
+            entries[1].drawn(false),
+            ("app / build › pwsh · app", "app / build ›".len())
+        );
+        assert_eq!(entries[0].drawn(true), ("app / build", "app /".len()));
+        assert_eq!(entries[1].hint, "Shell · Idle");
+    }
+
+    #[test]
+    fn rf_nav_04_panes_of_one_tab_with_the_same_name_carry_their_place() {
+        let ws = view(
+            vec![project(1, "yien", &[10])],
+            vec![tab(10, 1, "Tab 1", &[100, 101, 102])],
+            vec![
+                pane(100, 10, "powershell", P::Idle),
+                pane(101, 10, "claude", P::Idle),
+                pane(102, 10, "powershell", P::Idle),
+            ],
+        );
+        let mut palette = switcher(&ws);
+        let tree = palette.shows_tree();
+        let drawn: Vec<String> = palette
+            .rows()
+            .iter()
+            .filter_map(|r| palette.entry(r))
+            .map(|e| e.drawn(tree).0.to_owned())
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "yien / Tab 1",
+                "powershell (1) · yien",
+                "claude · yien",
+                "powershell (3) · yien",
+                "yien",
+            ]
+        );
+        palette.set_query("powershell");
+        assert_eq!(
+            texts(&palette),
+            [
+                "yien / Tab 1 › powershell (1) · yien",
+                "yien / Tab 1 › powershell (3) · yien",
+            ]
+        );
+    }
+
+    #[test]
+    fn rf_nav_04_a_query_keeps_each_matching_panes_context() {
+        let mut palette = switcher(&workspace());
+        palette.set_query("pwsh");
+        assert_eq!(
+            texts(&palette),
+            [
+                "yien / editor › pwsh · yien",
+                "notes / draft › pwsh · notes"
+            ]
+        );
+        let first = palette.entry(&palette.rows()[0]).unwrap();
+        assert_eq!(first.drawn(palette.shows_tree()).1, "yien / editor ›".len());
+        // A tab's name lists the tab, then its panes.
+        palette.set_query("server");
+        assert_eq!(
+            texts(&palette),
+            ["yien / server", "yien / server › cargo · yien-ui"]
+        );
+        // The pane's folder matches too.
+        palette.set_query("yien-ui");
+        assert_eq!(palette.target(), Some(Target::Pane(PaneId::new(110))));
+    }
+
+    #[test]
     fn rf_nav_04_rows_that_need_you_are_marked() {
         let entries = switcher_entries(&workspace());
         let state = |text: &str| entries.iter().find(|e| e.text == text).unwrap().state;
         assert_eq!(state("yien / editor"), Some(AgentState::NeedsYou));
-        assert_eq!(state("editor › claude"), Some(AgentState::NeedsYou));
+        assert_eq!(
+            state("yien / editor › claude · yien"),
+            Some(AgentState::NeedsYou)
+        );
         assert_eq!(state("yien"), Some(AgentState::NeedsYou));
         assert_eq!(state("yien / server"), Some(AgentState::Working));
-        assert_eq!(state("editor › pwsh"), Some(AgentState::Idle));
+        assert_eq!(state("yien / editor › pwsh · yien"), Some(AgentState::Idle));
         assert_eq!(state("notes"), None);
         let notes = entries.iter().find(|e| e.text == "notes").unwrap();
         assert_eq!(notes.hint, "project · 1 tab");
@@ -692,7 +941,7 @@ mod tests {
 
     #[test]
     fn rf_nav_04_typing_a_tab_name_selects_that_tab() {
-        let mut palette = Palette::new(Mode::Switcher, commands(), switcher_entries(&workspace()));
+        let mut palette = switcher(&workspace());
         palette.set_query("draf");
         assert_eq!(palette.target(), Some(Target::Tab(TabId::new(20))));
         palette.set_query("claude");
@@ -706,8 +955,36 @@ mod tests {
         let mut ws = workspace();
         ws.select_tab(TabId::new(20));
         ws.select_tab(TabId::new(10));
-        let palette = Palette::new(Mode::Switcher, commands(), switcher_entries(&ws));
+        let mut palette = switcher(&ws);
         assert_eq!(palette.target(), Some(Target::Tab(TabId::new(20))));
+        assert_eq!(palette.selected(), Some(5));
+        palette.set_query("claude");
+        assert_eq!(palette.selected(), Some(0));
+        palette.set_query("");
+        assert_eq!(palette.target(), Some(Target::Tab(TabId::new(20))));
+        palette.move_by(-1);
+        assert_eq!(palette.target(), Some(Target::Pane(PaneId::new(110))));
+    }
+
+    #[test]
+    fn rf_nav_05_an_only_tab_is_the_first_row() {
+        let ws = view(
+            vec![project(1, "yien", &[10])],
+            vec![tab(10, 1, "editor", &[100])],
+            vec![pane(100, 10, "pwsh", P::Idle)],
+        );
+        assert_eq!(switcher_home(&ws), None);
+        assert_eq!(switcher(&ws).target(), Some(Target::Tab(TabId::new(10))));
+    }
+
+    #[test]
+    fn rf_nav_04_a_pane_row_shows_the_last_folder_of_its_path() {
+        assert_eq!(folder_name("C:/Code/yien"), "yien");
+        assert_eq!(folder_name("C:\\Code\\yien\\"), "yien");
+        assert_eq!(folder_name("C:\\"), "C:");
+        assert_eq!(folder_name("/"), "/");
+        assert_eq!(folder_name("~"), "~");
+        assert_eq!(folder_name(""), "");
     }
 
     #[test]
