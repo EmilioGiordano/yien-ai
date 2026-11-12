@@ -391,3 +391,30 @@ fn a_crashed_pane_that_needed_you_drops_the_red_mark() {
     assert_eq!(info.state, AgentState::Idle);
     assert_eq!(info.needs_you_since, None);
 }
+
+#[test]
+fn rf_pan_09_closing_a_pane_leaves_no_clipboard_write_behind() {
+    let mut h = Harness::start();
+    let (first, _first_child) = h.project();
+    for _ in 0..20 {
+        h.send(ClientMsg::Command(Command::SplitPane {
+            pane: first,
+            orientation: yien_proto::Orientation::Horizontal,
+            profile: None,
+            before: false,
+        }));
+        let pane = h.wait_for(|m| match m {
+            CoreMsg::PaneUpdated(p) if p.id != first => Some(p.id),
+            _ => None,
+        });
+        let child = h.child();
+        child.output(b"\x1b]52;c;aGVsbG8=\x07");
+        h.send(ClientMsg::Command(Command::ClosePane { pane }));
+        h.wait_for(|m| match m {
+            CoreMsg::PaneClosed { pane: p } if *p == pane => Some(()),
+            _ => None,
+        });
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.core.clipboards.waiting(), 0);
+}

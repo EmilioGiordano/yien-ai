@@ -487,6 +487,23 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
+                CoreMsg::ClipboardReady { pane } => {
+                    let name = self.workspace.pane(pane).name;
+                    let enabled = self.settings.config().osc52_copy;
+                    if let Some((text, notice)) = crate::settings::osc52_copy(
+                        || self.link.take_clipboard(pane),
+                        enabled,
+                        &name,
+                        cfg!(windows),
+                    ) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        let showing = self.notice.as_ref().map(|n| n.kind);
+                        if status::copy_notice_replaces(showing) {
+                            self.say(notice, cx);
+                        }
+                    }
+                    continue;
+                }
                 CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {

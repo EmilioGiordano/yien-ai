@@ -20,7 +20,7 @@ pub(crate) struct Reports {
 
 impl Reports {
     /// Records `event` for `pane`. A detail (state, title, directory, session
-    /// id, selection) replaces the same detail reported since the last
+    /// id, selection, clipboard) replaces the same detail reported since the last
     /// lifecycle event; lifecycle events keep their order.
     pub fn push(&self, pane: PaneId, event: PaneEvent) {
         {
