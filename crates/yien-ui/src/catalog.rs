@@ -559,7 +559,6 @@ mod tests {
             ("palette.open", PALETTE_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
             ("tab.new", NEW_TAB_KEYS),
-            ("app.quit", QUIT_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

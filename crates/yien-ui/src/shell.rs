@@ -43,7 +43,7 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
-use crate::tray::{CloseRequest, close_request, quit_detail, quit_key_request, releases_quit_key};
+use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
 mod files;
@@ -138,9 +138,6 @@ pub(crate) struct Shell {
     confirm: Option<Confirm>,
     /// The user chose to quit with agents working; closing no longer asks.
     quit_confirmed: bool,
-    /// The quit key pressed now answers the quit question: the question
-    /// was not opened by the quit key, or that key came up since.
-    quit_armed: bool,
     /// The attention tray, while open (RF-ATN-13).
     tray: Option<Tray>,
     /// When a mouse-down outside the tray last closed it. The click that
@@ -201,19 +198,10 @@ enum Asked {
 }
 
 impl Asked {
-    /// Whether Enter answers yes. Quitting would stop agents mid-turn, so
-    /// there Enter cancels like Escape and only the button quits.
-    fn enter_accepts(&self) -> bool {
-        !matches!(self, Asked::Quit)
-    }
-
-    /// The keys shown on Cancel and on the yes button. Enter still cancels
-    /// the quit question, unshown: one key per button.
+    /// The keys of Cancel and of the yes button. Enter answers yes in the
+    /// quit question too, Emilio's choice; the quit key only opens it.
     fn keys(&self) -> (&'static str, &'static str) {
-        match self {
-            Asked::Quit => ("Esc", QUIT_KEYS),
-            _ => ("Esc", "Enter"),
-        }
+        ("Esc", "Enter")
     }
 }
 
@@ -352,7 +340,6 @@ impl Shell {
             session_requests: 0,
             confirm: None,
             quit_confirmed: false,
-            quit_armed: false,
             tray,
             tray_closed_at: None,
             renaming: None,
@@ -1369,7 +1356,6 @@ impl Shell {
         self.finish_rename(true, window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.quit_armed = false;
         self.confirm = Some(Confirm { asked, focus });
         cx.notify();
     }
@@ -1390,8 +1376,6 @@ impl Shell {
             CloseRequest::Ask(working) => {
                 tracing::info!(working, "quit asked while agents work");
                 self.ask(Asked::Quit, window, cx);
-                // Opened by the OS close, not the quit key: its press is new.
-                self.quit_armed = true;
                 false
             }
             CloseRequest::StillAsking => false,
@@ -1399,32 +1383,11 @@ impl Shell {
     }
 
     /// `app: quit YIEN`: closes the window, which quits, asking first while
-    /// agents work (RF-SES-13). While that question is open, a new press of
-    /// the quit key answers yes; a held one does not.
+    /// agents work (RF-SES-13). Pressed again, or held, while the question
+    /// is open it keeps asking.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        let asking = self
-            .confirm
-            .as_ref()
-            .is_some_and(|c| matches!(c.asked, Asked::Quit));
-        match quit_key_request(
-            self.workspace.working_panes(),
-            asking,
-            self.quit_armed,
-            self.quit_confirmed,
-        ) {
-            CloseRequest::Close => {
-                if asking {
-                    tracing::info!("quit anyway while agents work");
-                }
-                self.quit_confirmed = true;
-                self.confirm = None;
-                window.remove_window();
-            }
-            CloseRequest::Ask(working) => {
-                tracing::info!(working, "quit asked while agents work");
-                self.ask(Asked::Quit, window, cx);
-            }
-            CloseRequest::StillAsking => {}
+        if self.window_should_close(window, cx) {
+            window.remove_window();
         }
     }
 
@@ -1448,14 +1411,9 @@ impl Shell {
             })
     }
 
-    /// Enter on the question: yes, except for quitting, where Enter keeps
-    /// the window and only the button quits.
+    /// Enter on the question: yes, quitting included.
     fn confirm_accept(&mut self, _: &ConfirmAccept, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.confirm {
-            Some(c) if !c.asked.enter_accepts() => self.confirm_cancel(&ConfirmCancel, window, cx),
-            Some(_) => self.accept_confirm(window, cx),
-            None => {}
-        }
+        self.accept_confirm(window, cx);
     }
 
     /// The question's yes button.
@@ -1586,14 +1544,6 @@ impl Shell {
                         .shadow_lg()
                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                             this.confirm_cancel(&ConfirmCancel, window, cx);
-                        }))
-                        .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, _| {
-                            let quit_key = window
-                                .highest_precedence_binding_for_action(&Quit)
-                                .and_then(|b| b.keystrokes().last().map(|k| k.inner().key.clone()));
-                            if releases_quit_key(&event.keystroke.key, quit_key.as_deref()) {
-                                this.quit_armed = true;
-                            }
                         }))
                         .map(|dialog| self.close_on_window_commands(dialog, cx))
                         .child(
@@ -3444,7 +3394,6 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
     use super::{Asked, MOUSE_COMMANDS, no_tab_label};
-    use crate::actions::QUIT_KEYS;
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
     use yien_proto::{PaneId, ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
@@ -3466,39 +3415,23 @@ mod tests {
     }
 
     #[test]
-    fn rf_ses_13_enter_never_quits_but_closes_a_project() {
-        assert!(!Asked::Quit.enter_accepts());
-        let close = Asked::CloseProject {
-            project: ProjectId::new(1),
-            name: "yien".to_owned(),
-        };
-        assert!(close.enter_accepts());
-        assert!(
+    fn rf_ses_13_enter_quits_from_the_quit_question_and_esc_cancels() {
+        assert_eq!(Asked::Quit.keys(), ("Esc", "Enter"));
+        for asked in [
+            Asked::CloseProject {
+                project: ProjectId::new(1),
+                name: "yien".to_owned(),
+            },
             Asked::CloseTab {
                 tab: TabId::new(1),
                 name: "Tab 1".to_owned(),
-            }
-            .enter_accepts()
-        );
-        assert!(
+            },
             Asked::ClosePane {
                 pane: PaneId::new(1),
                 name: "pwsh".to_owned(),
-            }
-            .enter_accepts()
-        );
-    }
-
-    #[test]
-    fn rf_ses_13_each_dialog_button_shows_one_key_and_quit_shows_the_quit_key() {
-        assert_eq!(Asked::Quit.keys(), ("Esc", QUIT_KEYS));
-        let close = Asked::CloseTab {
-            tab: TabId::new(1),
-            name: "Tab 1".to_owned(),
-        };
-        assert_eq!(close.keys(), ("Esc", "Enter"));
-        for (cancel, accept) in [Asked::Quit.keys(), close.keys()] {
-            assert!(!cancel.contains('·') && !accept.contains('·'));
+            },
+        ] {
+            assert_eq!(asked.keys(), ("Esc", "Enter"));
         }
     }
 
