@@ -43,7 +43,7 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
-use crate::tray::{CloseRequest, close_request, quit_detail, quit_key_request};
+use crate::tray::{CloseRequest, close_request, quit_detail, quit_key_request, releases_quit_key};
 
 mod bars;
 mod files;
@@ -138,9 +138,9 @@ pub(crate) struct Shell {
     confirm: Option<Confirm>,
     /// The user chose to quit with agents working; closing no longer asks.
     quit_confirmed: bool,
-    /// A key came up since the open question was asked: the quit key
-    /// pressed now is a new press, not a held repeat.
-    key_released_since_asked: bool,
+    /// The quit key pressed now answers the quit question: the question
+    /// was not opened by the quit key, or that key came up since.
+    quit_armed: bool,
     /// The attention tray, while open (RF-ATN-13).
     tray: Option<Tray>,
     /// When a mouse-down outside the tray last closed it. The click that
@@ -352,7 +352,7 @@ impl Shell {
             session_requests: 0,
             confirm: None,
             quit_confirmed: false,
-            key_released_since_asked: false,
+            quit_armed: false,
             tray,
             tray_closed_at: None,
             renaming: None,
@@ -1369,7 +1369,7 @@ impl Shell {
         self.finish_rename(true, window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.key_released_since_asked = false;
+        self.quit_armed = false;
         self.confirm = Some(Confirm { asked, focus });
         cx.notify();
     }
@@ -1390,6 +1390,8 @@ impl Shell {
             CloseRequest::Ask(working) => {
                 tracing::info!(working, "quit asked while agents work");
                 self.ask(Asked::Quit, window, cx);
+                // Opened by the OS close, not the quit key: its press is new.
+                self.quit_armed = true;
                 false
             }
             CloseRequest::StillAsking => false,
@@ -1407,7 +1409,7 @@ impl Shell {
         match quit_key_request(
             self.workspace.working_panes(),
             asking,
-            self.key_released_since_asked,
+            self.quit_armed,
             self.quit_confirmed,
         ) {
             CloseRequest::Close => {
@@ -1585,8 +1587,13 @@ impl Shell {
                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                             this.confirm_cancel(&ConfirmCancel, window, cx);
                         }))
-                        .on_key_up(cx.listener(|this, _: &KeyUpEvent, _, _| {
-                            this.key_released_since_asked = true;
+                        .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, _| {
+                            let quit_key = window
+                                .highest_precedence_binding_for_action(&Quit)
+                                .and_then(|b| b.keystrokes().last().map(|k| k.inner().key.clone()));
+                            if releases_quit_key(&event.keystroke.key, quit_key.as_deref()) {
+                                this.quit_armed = true;
+                            }
                         }))
                         .map(|dialog| self.close_on_window_commands(dialog, cx))
                         .child(

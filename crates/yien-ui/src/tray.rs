@@ -142,19 +142,25 @@ pub(crate) fn close_request(working: usize, asking: bool, confirmed: bool) -> Cl
 }
 
 /// The quit key pressed (RF-SES-13). While the quit question is open it
-/// answers yes, but only as a new press: a key released since the question
-/// opened. A held key repeats, and must not open and confirm in one go.
+/// answers yes only when `armed`: a new press, not the press that opened
+/// the question repeating while held.
 pub(crate) fn quit_key_request(
     working: usize,
     asking: bool,
-    released_since_asked: bool,
+    armed: bool,
     confirmed: bool,
 ) -> CloseRequest {
-    match (asking, released_since_asked) {
+    match (asking, armed) {
         (true, true) => CloseRequest::Close,
         (true, false) => CloseRequest::StillAsking,
         (false, _) => close_request(working, false, confirmed),
     }
+}
+
+/// Whether a key coming up arms the quit key: only the quit key's own key.
+/// Another key released meanwhile (rollover) leaves a held quit key held.
+pub(crate) fn releases_quit_key(released: &str, quit_key: Option<&str>) -> bool {
+    quit_key.is_some_and(|key| key.eq_ignore_ascii_case(released))
 }
 
 /// What the quit question says about the working agents.
@@ -417,6 +423,16 @@ mod tests {
             "a repeat of the press that opened the question"
         );
         assert_eq!(quit_key_request(2, true, true, false), CloseRequest::Close);
+    }
+
+    #[test]
+    fn rf_ses_13_only_the_quit_key_coming_up_makes_the_next_press_new() {
+        assert!(releases_quit_key("q", Some("q")));
+        assert!(
+            !releases_quit_key("a", Some("q")),
+            "another key released while the quit key is held"
+        );
+        assert!(!releases_quit_key("q", None), "the quit command has no key");
     }
 
     #[test]
