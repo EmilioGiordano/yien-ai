@@ -211,6 +211,8 @@ actions!(
         TabBarLeave,
         /// Gives the keyboard back to the pane from the context bar.
         ContextBarLeave,
+        /// Takes down the status bar's notice.
+        DismissNotice,
         /// Shows the selected tab's files in the context bar and gives the
         /// keyboard to their filter (RF-CTX-01).
         ShowFiles,
@@ -235,7 +237,7 @@ actions!(
     ]
 );
 
-/// The keys, with the label the status bar shows for each.
+/// The keys, with the label the palette, menus and aria labels show for each.
 pub(crate) const TAB_BAR_KEYS: &str = "Ctrl+Shift+E";
 pub(crate) const CONTEXT_BAR_KEYS: &str = "Ctrl+Shift+D";
 pub(crate) const REVIEW_KEYS: &str = "Ctrl+Shift+R";
@@ -301,6 +303,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("enter", TabBarSelect, tab_bar),
         KeyBinding::new("escape", TabBarLeave, tab_bar),
         KeyBinding::new("escape", ContextBarLeave, context_bar),
+        KeyBinding::new("escape", DismissNotice, Some("YienShell && !Terminal")),
         KeyBinding::new("up", FileTreeUp, file_tree),
         KeyBinding::new("down", FileTreeDown, file_tree),
         KeyBinding::new("left", FileTreeCollapse, file_tree),
@@ -369,6 +372,7 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TabBarSelect),
         Box::new(TabBarLeave),
         Box::new(ContextBarLeave),
+        Box::new(DismissNotice),
         Box::new(FileTreeUp),
         Box::new(FileTreeDown),
         Box::new(FileTreeCollapse),
@@ -577,6 +581,13 @@ mod tests {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
         assert!(first_is("f6", &files, &FocusNextRegion));
+    }
+
+    #[test]
+    fn escape_dismisses_the_notice_but_never_in_a_terminal_or_over_an_overlay() {
+        assert!(first_is("escape", &["Root", CONTEXT], &DismissNotice));
+        assert_eq!(matches("escape", &TERMINAL_STACK), 0);
+        assert!(first_is("escape", &PALETTE_STACK, &PaletteClose));
     }
 
     #[test]

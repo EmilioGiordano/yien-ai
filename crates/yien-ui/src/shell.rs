@@ -23,7 +23,7 @@ use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
-use crate::catalog::{CATALOG, Scope, shortcut, spec};
+use crate::catalog::{CATALOG, Scope, shortcut};
 use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
@@ -53,7 +53,7 @@ mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
-use status::Line;
+use status::{Line, Notice};
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -118,9 +118,9 @@ pub(crate) struct Shell {
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
     /// The last error from the core, shown in the status bar.
-    notice: Option<String>,
-    /// The text of the notice that reports a failure, drawn heavier.
-    error_notice: Option<String>,
+    notice: Option<Notice>,
+    /// Counts the notices shown, so a stale timer cannot clear a newer one.
+    notice_generation: u64,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
     split_menu: Option<(PaneId, Orientation)>,
     /// The chooser a mouse-down outside it just closed, and when. The click
@@ -236,10 +236,7 @@ impl Shell {
                 }
             }
             let _ = this.update(cx, |shell, cx| {
-                let stopped = "The YIEN core stopped. Restart YIEN.".to_owned();
-                shell.error_notice = Some(stopped.clone());
-                shell.notice = Some(stopped);
-                cx.notify();
+                shell.fail("The YIEN core stopped. Restart YIEN.", cx);
             });
         })
         .detach();
@@ -312,7 +309,7 @@ impl Shell {
             terminals: HashMap::new(),
             keyboard_on: None,
             notice: None,
-            error_notice: None,
+            notice_generation: 0,
             split_menu: None,
             menu_closed: None,
             palette: None,
@@ -334,7 +331,9 @@ impl Shell {
             _subscriptions: vec![activation, appearance],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
-        shell.notice.clone_from(&shell.profiles_notice);
+        if let Some(text) = shell.profiles_notice.clone() {
+            shell.say(text, cx);
+        }
         shell.apply_config(settings.initial, window, cx);
         if let Some(tray) = &shell.tray {
             window.focus(tray.focus(), cx);
@@ -411,8 +410,7 @@ impl Shell {
                     self.workspace.set_notifications_muted(muted);
                 }
                 CoreMsg::Error { pane, message } => {
-                    self.error_notice = Some(message.clone());
-                    self.notice = Some(message);
+                    self.fail(message, cx);
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
                     if pane.is_none()
@@ -421,7 +419,7 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
-                CoreMsg::Notice { message } => self.notice = Some(message),
+                CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {
                     project,
@@ -703,6 +701,46 @@ impl Shell {
         self.give_back_keyboard(window, cx);
     }
 
+    /// Puts up a plain notice, which takes itself down after a few seconds.
+    pub(super) fn say(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show(Notice::info(text), cx);
+    }
+
+    /// Puts up an error, which stays until it is dismissed or replaced.
+    pub(super) fn fail(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show(Notice::error(text), cx);
+    }
+
+    pub(super) fn show(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        self.notice_generation += 1;
+        let shown = self.notice_generation;
+        let lifetime = status::lifetime(notice.kind);
+        self.notice = Some(notice);
+        if let Some(lifetime) = lifetime {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(lifetime).await;
+                let _ = this.update(cx, |shell, cx| {
+                    let kind = shell.notice.as_ref().map(|n| n.kind);
+                    if status::timer_clears(kind, shown, shell.notice_generation) {
+                        shell.notice = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn dismiss_notice(&mut self, _: &DismissNotice, _: &mut Window, cx: &mut Context<Self>) {
+        if self.notice.take().is_none() {
+            cx.propagate();
+            return;
+        }
+        self.notice_generation += 1;
+        cx.notify();
+    }
+
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
         self.give_back_keyboard(window, cx);
     }
@@ -826,8 +864,7 @@ impl Shell {
                 cx,
             ),
             None => {
-                self.notice = Some("There is no project to open a tab in.".to_owned());
-                cx.notify();
+                self.say("There is no project to open a tab in.".to_owned(), cx);
             }
         }
     }
@@ -848,8 +885,7 @@ impl Shell {
         match self.workspace.next_waiting(self.focused_pane()) {
             Some(pane) => self.command(Command::FocusPane { pane }, cx),
             None => {
-                self.notice = Some("Nobody is waiting for you.".to_owned());
-                cx.notify();
+                self.say("Nobody is waiting for you.".to_owned(), cx);
             }
         }
     }
@@ -1014,8 +1050,7 @@ impl Shell {
             Mode::Sessions => match self.workspace.project_for_new_tab() {
                 Some(project) => Some(project),
                 None => {
-                    self.notice = Some("Add a project to list its past sessions.".to_owned());
-                    cx.notify();
+                    self.say("Add a project to list its past sessions.".to_owned(), cx);
                     return;
                 }
             },
@@ -1176,8 +1211,7 @@ impl Shell {
         if pane.exited {
             self.command(Command::RelaunchPane { pane: id }, cx);
         } else {
-            self.notice = Some(format!("{} has not exited.", pane.name));
-            cx.notify();
+            self.say(format!("{} has not exited.", pane.name), cx);
         }
     }
 
@@ -1215,19 +1249,18 @@ impl Shell {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(error) => {
-                let failed = format!("The folder picker failed: {error}");
-                self.error_notice = Some(failed.clone());
-                self.notice = Some(failed);
-                cx.notify();
+                self.fail(format!("The folder picker failed: {error}"), cx);
                 return;
             }
         };
         let Some(root) = path.to_str() else {
-            self.notice = Some(format!(
-                "{} cannot be a project: its name is not valid Unicode.",
-                path.display()
-            ));
-            cx.notify();
+            self.fail(
+                format!(
+                    "{} cannot be a project: its name is not valid Unicode.",
+                    path.display()
+                ),
+                cx,
+            );
             return;
         };
         match self.workspace.folder_target(root) {
@@ -1247,8 +1280,7 @@ impl Shell {
         match self.workspace.project_for_new_tab() {
             Some(project) => self.request_close(project, window, cx),
             None => {
-                self.notice = Some("There is no project to close.".to_owned());
-                cx.notify();
+                self.say("There is no project to close.".to_owned(), cx);
             }
         }
     }
@@ -1505,8 +1537,7 @@ impl Shell {
         match self.workspace.selected_tab().map(|t| t.id) {
             Some(tab) => self.start_rename(tab, window, cx),
             None => {
-                self.notice = Some("There is no tab to rename.".to_owned());
-                cx.notify();
+                self.say("There is no tab to rename.".to_owned(), cx);
             }
         }
     }
@@ -1601,18 +1632,17 @@ impl Shell {
     ) {
         let muted = !self.workspace.notifications_muted();
         self.workspace.set_notifications_muted(muted);
-        self.notice = Some(mute_notice(muted, "Notifications"));
+        self.say(mute_notice(muted, "Notifications"), cx);
         self.command(Command::SetNotificationsMuted { muted }, cx);
         cx.notify();
     }
 
     fn toggle_tab_muted(&mut self, _: &ToggleTabMuted, _: &mut Window, cx: &mut Context<Self>) {
         let Some((tab, muted)) = self.workspace.selected_tab().map(|t| (t.id, !t.muted)) else {
-            self.notice = Some("There is no tab to mute.".to_owned());
-            cx.notify();
+            self.say("There is no tab to mute.".to_owned(), cx);
             return;
         };
-        self.notice = Some(mute_notice(muted, "This tab's notifications"));
+        self.say(mute_notice(muted, "This tab's notifications"), cx);
         self.command(Command::SetTabMuted { tab, muted }, cx);
         cx.notify();
     }
@@ -2955,33 +2985,23 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if deleted {
-            self.notice = Some(format!("{path} was deleted; there is nothing to open."));
-            cx.notify();
+            self.say(format!("{path} was deleted; there is nothing to open."), cx);
             return;
         }
         let Some(root) = root else { return };
         match join_relative(root, path) {
             Some(file) => self.open_file(file, cx),
             None => {
-                self.notice = Some(format!("{path} is not inside the repository."));
-                cx.notify();
+                self.say(format!("{path} is not inside the repository."), cx);
             }
         }
     }
 
-    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ws = &self.workspace;
-        let hints = {
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            status::hints(|id| shortcut(&keymap, (spec(id)?.action)().as_ref()))
-        };
-        let notice = self.notice.as_deref().map(|text| {
-            let error = self.error_notice.as_deref() == Some(text);
-            (text, error)
-        });
-        let right = status::line(notice, &hints);
+        let hints = status::live_hints(&cx.key_bindings().borrow());
+        let right = status::line(self.notice.as_ref(), &hints);
         h_flex()
             .id("status-bar")
             .role(Role::ContentInfo)
@@ -3024,6 +3044,12 @@ impl Shell {
                             .into_any_element(),
                         Line::Notice { text, error } => div()
                             .id("notice")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.notice = None;
+                                shell.notice_generation += 1;
+                                cx.notify();
+                            }))
                             .role(Role::Status)
                             .min_w_0()
                             .overflow_hidden()
@@ -3131,6 +3157,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_down))
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
+            .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_changes))

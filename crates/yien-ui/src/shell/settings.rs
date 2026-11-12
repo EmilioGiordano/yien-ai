@@ -71,12 +71,24 @@ impl Shell {
             self.workspace.set_group_by_state(grouped);
             self.tab_cursor = None;
         }
-        (self.notice, self.settings_notice) = after_reading(
-            self.notice.as_deref(),
+        let before = self.notice.as_ref().map(|n| n.text.clone());
+        let (text, settings_notice) = after_reading(
+            before.as_deref(),
             self.settings_notice.as_deref(),
             self.profiles_notice.as_deref(),
             &notices,
         );
+        self.settings_notice = settings_notice;
+        if text != before {
+            match text {
+                Some(text) if !loaded => self.fail(text, cx),
+                Some(text) => self.say(text, cx),
+                None => {
+                    self.notice = None;
+                    self.notice_generation += 1;
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -173,8 +185,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             if let Ok(Some(error)) = outcome.await {
                 let _ = this.update(cx, |shell, cx| {
-                    shell.notice = Some(error);
-                    cx.notify();
+                    shell.fail(error, cx);
                 });
             }
         })
