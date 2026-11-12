@@ -44,6 +44,10 @@ impl CoreClient for Client {
     fn take_frame(&self, pane: PaneId) -> Option<Frame> {
         self.0.take_frame(pane)
     }
+
+    fn take_clipboard(&self, pane: PaneId) -> Option<String> {
+        self.0.take_clipboard(pane)
+    }
 }
 
 fn main() -> ExitCode {

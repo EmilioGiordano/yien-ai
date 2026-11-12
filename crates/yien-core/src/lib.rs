@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+mod clipboards;
 mod consoles;
 mod convert;
 mod git;
@@ -275,6 +276,9 @@ pub enum CoreError {
         /// The file, as `profiles/<name>.toml`.
         file: String,
     },
+    /// Moving a tab into another project.
+    #[error("tab {} is not in project {}; tabs move only within their project", .0.get(), .1.get())]
+    OtherProject(TabId, ProjectId),
     /// Swapping or moving panes across tabs.
     #[error("panes {} and {} are in different tabs; move panes only within a tab", .0.get(), .1.get())]
     DifferentTabs(PaneId, PaneId),
@@ -386,6 +390,7 @@ impl Core {
         let screens = config.screens.clone().and_then(|store| {
             screens::Screens::start(store, config.screen_interval, Arc::clone(&config.clock))
         });
+        let clipboards = Arc::<clipboards::Clipboards>::default();
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),
@@ -396,6 +401,7 @@ impl Core {
             attention: Arc::new(AtomicU64::new(0)),
             ui_size: Arc::new(tokio::sync::watch::Sender::new(None)),
             consoles: Arc::clone(&consoles),
+            clipboards: Arc::clone(&clipboards),
         };
         runtime.spawn(service::run(
             ctx,
@@ -413,6 +419,7 @@ impl Core {
             writer,
             screens,
             consoles,
+            clipboards,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -447,6 +454,7 @@ pub struct CoreHandle {
     writer: Option<Arc<persist::Writer>>,
     screens: Option<Arc<screens::Screens>>,
     consoles: Arc<Consoles>,
+    clipboards: Arc<clipboards::Clipboards>,
     _runtime: Arc<RuntimeGuard>,
 }
 
@@ -614,6 +622,22 @@ impl CoreHandle {
     pub fn take_frame(&self, pane: PaneId) -> Option<Frame> {
         let slot = links(&self.panes).get(&pane).map(|l| Arc::clone(&l.frame));
         slot?.take()
+    }
+
+    /// Takes the latest text a program in `pane` asked to put on the clipboard,
+    /// the one announced by [`CoreMsg::ClipboardReady`]. Later writes replace
+    /// an untaken one, and the next notice comes only after a take.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use yien_core::{Core, CoreConfig};
+    /// # use yien_proto::PaneId;
+    /// # let (core, _events) = Core::start(Arc::new(yien_pty::FakePty::new()), CoreConfig::default())?;
+    /// assert!(core.take_clipboard(PaneId::new(99)).is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn take_clipboard(&self, pane: PaneId) -> Option<String> {
+        self.clipboards.take(pane)
     }
 }
 

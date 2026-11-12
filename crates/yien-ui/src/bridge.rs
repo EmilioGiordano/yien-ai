@@ -52,6 +52,9 @@ pub enum Refused {
 ///     fn take_frame(&self, _pane: PaneId) -> Option<Frame> {
 ///         None
 ///     }
+///     fn take_clipboard(&self, _pane: PaneId) -> Option<String> {
+///         None
+///     }
 /// }
 /// assert!(Nowhere.send(ClientMsg::WindowFocus { focused: true }).is_err());
 /// assert!(Nowhere.take_frame(PaneId::new(1)).is_none());
@@ -63,6 +66,10 @@ pub trait CoreClient: 'static {
     /// The newest frame of `pane` not taken yet, if any. Called after
     /// `CoreMsg::PaneFrameReady` and whenever a pane comes into view.
     fn take_frame(&self, pane: PaneId) -> Option<Frame>;
+
+    /// The newest text a program in `pane` asked to put on the clipboard and
+    /// the UI has not taken yet. Called after `CoreMsg::ClipboardReady`.
+    fn take_clipboard(&self, pane: PaneId) -> Option<String>;
 }
 
 /// What became of a message handed to the [`Link`].
@@ -273,6 +280,11 @@ impl Link {
         self.client.take_frame(pane)
     }
 
+    /// The newest clipboard write of `pane` the core holds for the UI.
+    pub(crate) fn take_clipboard(&self, pane: PaneId) -> Option<String> {
+        self.client.take_clipboard(pane)
+    }
+
     #[cfg(test)]
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.get()
@@ -384,6 +396,10 @@ mod tests {
         }
 
         fn take_frame(&self, _pane: PaneId) -> Option<Frame> {
+            None
+        }
+
+        fn take_clipboard(&self, _pane: PaneId) -> Option<String> {
             None
         }
     }

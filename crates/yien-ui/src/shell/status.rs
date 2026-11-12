@@ -115,6 +115,12 @@ pub(super) fn behind(
     }
 }
 
+/// Whether the "Copied from" notice may take the bar: not while a warning or
+/// an error stands, which the user has not dismissed yet.
+pub(super) fn copy_notice_replaces(showing: Option<NoticeKind>) -> bool {
+    !matches!(showing, Some(NoticeKind::Warning | NoticeKind::Error))
+}
+
 /// What the right side of the bar shows.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Line {
@@ -160,6 +166,14 @@ mod tests {
                 .find(|(bound_id, _)| *bound_id == id)
                 .map(|(_, keys)| (*keys).to_owned())
         }
+    }
+
+    #[test]
+    fn rf_pan_09_a_copy_notice_never_replaces_a_warning_or_an_error() {
+        assert!(copy_notice_replaces(None));
+        assert!(copy_notice_replaces(Some(NoticeKind::Info)));
+        assert!(!copy_notice_replaces(Some(NoticeKind::Warning)));
+        assert!(!copy_notice_replaces(Some(NoticeKind::Error)));
     }
 
     #[test]

@@ -59,6 +59,16 @@ pub const SCHEMA: &[Setting] = &[
               panes started after it; running panes keep theirs.",
     },
     Setting {
+        key: "terminal.osc52_copy",
+        default: "true",
+        doc: "true: a program in a pane may write the system clipboard with the OSC 52 \
+              sequence, which is how Claude Code, opencode, vim and tmux copy a selection \
+              they made themselves; YIEN shows \"Copied from <pane>\". Only writes to the \
+              clipboard (target c, or none) is honoured, up to 1 MiB; writes to the primary \
+              selection (s, p) are ignored and a program can never read the clipboard. \
+              false: such copies are ignored. Applies at once.",
+    },
+    Setting {
         key: "update.check",
         default: "true",
         doc: "true: once a day YIEN asks GitHub whether a newer YIEN was released and \
