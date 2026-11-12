@@ -376,6 +376,120 @@ fn rf_pan_09_switching_screens_ends_the_selection() {
 }
 
 #[test]
+fn rf_pan_09_a_reset_ends_the_selection() {
+    let mut e = engine(20, 5);
+    select_two(&mut e);
+    e.feed(b"\x1bc");
+    assert_eq!(e.selection_text(), None);
+    e.feed(b"one\r\ntwo words\r\nthree");
+    assert_eq!(e.selection_text(), None);
+}
+
+#[test]
+fn rf_pan_09_erasing_the_scrollback_ends_a_selection_in_it() {
+    let mut e = engine(20, 3);
+    numbered_lines(&mut e, 10);
+    e.scroll(3);
+    e.start_selection(vp(0, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(0, 5), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("line 6"));
+    e.feed(b"\x1b[3J");
+    assert_eq!(e.selection_text(), None);
+}
+
+/// A full-screen program with a header, a footer and a scrolling region
+/// between them, rows two and three selected.
+fn selected_in_a_region() -> AlacrittyEngine {
+    let mut e = engine(20, 6);
+    e.feed(b"\x1b[?1049h\x1b[Hhead\r\nr2 alpha\r\nr3 beta\r\nr4 gamma\r\nr5 delta\r\nfoot");
+    e.feed(b"\x1b[2;5r");
+    e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+    e.update_selection(vp(2, 6), Side::Right);
+    assert_eq!(e.selection_text().as_deref(), Some("r2 alpha\nr3 beta"));
+    e
+}
+
+fn no_cell_is_selected(e: &AlacrittyEngine) -> bool {
+    e.frame()
+        .lines
+        .iter()
+        .flatten()
+        .all(|cell| !cell.flags.contains(CellFlags::SELECTED))
+}
+
+#[test]
+fn rf_pan_09_text_scrolled_out_of_the_top_of_a_region_is_no_longer_selected() {
+    let mut e = selected_in_a_region();
+    e.feed(b"\x1b[5;1H\nn1\nn2\nn3\nn4");
+    assert_eq!(e.selection_text(), None);
+    assert!(no_cell_is_selected(&e));
+}
+
+#[test]
+fn rf_pan_09_text_pushed_out_of_the_bottom_of_a_region_is_no_longer_selected() {
+    let mut e = selected_in_a_region();
+    e.feed(b"\x1b[2;1H\x1bM\x1bM\x1bM\x1bM");
+    assert_eq!(e.selection_text(), None);
+    assert!(no_cell_is_selected(&e));
+}
+
+#[test]
+fn rf_pan_09_text_pushed_out_by_inserted_lines_is_no_longer_selected() {
+    let mut e = selected_in_a_region();
+    e.feed(b"\x1b[2;1H\x1b[4L");
+    assert_eq!(e.selection_text(), None);
+    assert!(no_cell_is_selected(&e));
+}
+
+#[test]
+fn rf_pan_09_a_scroll_in_a_region_then_an_erase_keeps_what_is_left_selected() {
+    let mut e = selected_in_a_region();
+    e.feed(b"\x1b[5;1H\nn1\x1b[2;1H\x1b[2Kr3 beta");
+    assert_eq!(e.selection_text().as_deref(), Some("r3 beta"));
+}
+
+#[test]
+fn rf_pan_09_an_erase_and_a_scroll_select_the_same_however_they_are_read() {
+    let output = b"\r\nfour\x1b[1;1H\x1b[2Ktwo words\x1b[3;5H";
+    let selected = |e: &mut AlacrittyEngine| {
+        e.feed(b"one\r\ntwo words\r\nthree");
+        e.start_selection(vp(1, 0), Side::Left, SelectionKind::Simple);
+        e.update_selection(vp(1, 2), Side::Right);
+    };
+    for cut in 0..=output.len() {
+        let mut e = engine(20, 3);
+        selected(&mut e);
+        e.feed(&output[..cut]);
+        e.feed(&output[cut..]);
+        assert_eq!(e.selection_text().as_deref(), Some("two"), "cut at {cut}");
+        assert!(selected_cell(&e, 0, 0), "cut at {cut}");
+        assert!(!selected_cell(&e, 1, 0), "cut at {cut}");
+    }
+
+    let mut e = engine(20, 3);
+    selected(&mut e);
+    e.feed(b"\x1b[?2026h");
+    e.feed(output);
+    e.feed(b"\x1b[?2026l");
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+    assert!(selected_cell(&e, 0, 0));
+
+    let mut e = engine(20, 3);
+    selected(&mut e);
+    e.feed(b"\x1b[?2026h");
+    e.feed(output);
+    e.flush_sync();
+    assert_eq!(e.selection_text().as_deref(), Some("two"));
+    assert!(selected_cell(&e, 0, 0));
+}
+
+fn selected_cell(e: &AlacrittyEngine, row: usize, col: usize) -> bool {
+    e.frame().lines[row][col]
+        .flags
+        .contains(CellFlags::SELECTED)
+}
+
+#[test]
 fn rf_pan_09_copied_text_joins_wrapped_lines_and_drops_trailing_spaces() {
     let mut e = engine(10, 4);
     e.feed(b"abcdefghijklmno\r\nxy   \r\nz");
