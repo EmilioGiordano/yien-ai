@@ -157,6 +157,12 @@ actions!(
         CloseProject,
         /// Edits the selected tab's name in place (RF-ESP-16).
         RenameTab,
+        /// Moves the tab one place up in its project: the tab under the tab
+        /// bar's cursor while the bar has the keyboard, else the selected
+        /// one (RF-ESP-16, RNF-16).
+        MoveTabUp,
+        /// Moves the tab one place down in its project, as [`MoveTabUp`].
+        MoveTabDown,
         /// Keeps the name typed in the tab rename field.
         RenameConfirm,
         /// Leaves the tab rename field without changing the name.

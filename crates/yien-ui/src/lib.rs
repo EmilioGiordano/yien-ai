@@ -27,6 +27,7 @@ mod region;
 mod settings;
 mod shell;
 mod sidebars;
+mod tab_order;
 mod terminal;
 mod theme;
 mod tray;

@@ -49,11 +49,13 @@ mod bars;
 mod files;
 mod settings;
 mod status;
+mod tab_drag;
 mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
 use status::{Line, Notice};
+use tab_drag::{RowMark, TabDragState};
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -154,6 +156,8 @@ pub(crate) struct Shell {
     context_focus: FocusHandle,
     /// The tab row the arrows are on while the tab bar has the keyboard.
     tab_cursor: Option<TabId>,
+    /// A tab row being dragged to another place in its project (RF-ESP-16).
+    tab_drag: TabDragState,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
     /// Whether the last move came from the keyboard or a mouse button; the
@@ -245,6 +249,9 @@ impl Shell {
         let activation = cx.observe_window_activation(window, |shell, window, cx| {
             let focused = window.is_window_active();
             shell.send(ClientMsg::WindowFocus { focused }, cx);
+            if !focused {
+                shell.cancel_tab_drag(window, cx);
+            }
             shell.alerts.refresh_badge();
             shell.update_alerts(window, cx);
         });
@@ -271,6 +278,18 @@ impl Shell {
         Self::listen_to_settings(settings.updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
+        });
+        // Before any binding: Escape must end a tab drag without reaching
+        // the pane, where it would interrupt the agent.
+        let shell = cx.weak_entity();
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key == "escape" {
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.cancel_tab_drag(window, cx) {
+                        cx.stop_propagation();
+                    }
+                });
+            }
         });
         let files = FilesPanel::new(files, window, cx);
         let this = cx.weak_entity();
@@ -325,10 +344,11 @@ impl Shell {
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
             tab_cursor: None,
+            tab_drag: TabDragState::default(),
             keyboard_region: Region::Panes,
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
-            _subscriptions: vec![activation, appearance],
+            _subscriptions: vec![activation, appearance, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
@@ -615,9 +635,16 @@ impl Shell {
         canvas(
             |_, _, _| (),
             move |_, (), window, _| {
+                let down = shell.clone();
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.on_pointer_down(cx));
+                        let _ = down.update(cx, |this, cx| this.on_pointer_down(cx));
+                    }
+                });
+                // Wherever the button comes up, a tab drag ends there.
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
                     }
                 });
             },
@@ -2064,6 +2091,7 @@ impl Shell {
             .child(
                 v_flex()
                     .id("tab-list")
+                    .track_scroll(&self.tab_drag.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2259,6 +2287,9 @@ impl Shell {
             Some(project) => format!("{project} / {}", tab.name),
             None => tab.name.clone(),
         };
+        // Grouped by state, rows of several projects mix, so none is dragged.
+        let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
+        let mark = self.row_mark(id);
         div()
             .id(("tab", id.get()))
             .role(Role::Tab)
@@ -2298,6 +2329,11 @@ impl Shell {
                     this.select_tab(id, window, cx);
                 }
             }))
+            .when(draggable, |row| self.draggable_row(row, tab, cx))
+            .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
+            .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
+                row.child(drop_line(mark == RowMark::LineAbove, &t))
+            })
             .child(
                 h_flex()
                     .items_center()
@@ -3100,6 +3136,7 @@ impl Render for Shell {
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
         // A drag that just ended sends its width here.
         self.save_side_bars(cx);
+        self.forget_ended_tab_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3153,6 +3190,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::confirm_accept))
             .on_action(cx.listener(Self::confirm_cancel))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::move_tab_up))
+            .on_action(cx.listener(Self::move_tab_down))
             .on_action(cx.listener(Self::rename_confirm))
             .on_action(cx.listener(Self::rename_cancel))
             .on_action(cx.listener(Self::toggle_command_palette))
@@ -3212,6 +3251,23 @@ impl Render for Shell {
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
             .children(self.render_confirm(cx))
+    }
+}
+
+/// The line between two tab rows where a dragged tab would land
+/// (RF-ESP-16): indigo like the other drag marks, never red (RN-01).
+fn drop_line(above: bool, t: &Theme) -> Div {
+    let line = div()
+        .absolute()
+        .left(px(4.0))
+        .right(px(4.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(t.ai);
+    if above {
+        line.top(px(-2.0))
+    } else {
+        line.bottom(px(-2.0))
     }
 }
 
@@ -3293,6 +3349,8 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
+    ("tab row drag", "tab.move_up"),
+    ("tab row drag", "tab.move_down"),
     ("worktree prompt buttons", "tab.new_worktree"),
     ("worktree question buttons", "pane.close"),
     ("context bar's Changes tab", "changes.show"),

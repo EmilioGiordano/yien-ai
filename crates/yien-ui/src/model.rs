@@ -917,6 +917,33 @@ impl WorkspaceView {
         }
     }
 
+    /// Where a tab sits among its project's tabs (RF-ESP-16): the project,
+    /// its place and how many tabs the project lists.
+    pub fn place_of(&self, id: TabId) -> Option<(ProjectId, usize, usize)> {
+        let project = self.projects.iter().find(|p| p.tabs.contains(&id))?;
+        let at = project.tabs.iter().position(|t| *t == id)?;
+        Some((project.id, at, project.tabs.len()))
+    }
+
+    /// Moves a tab to place `to` among its project's tabs, clamped to the
+    /// last place as the core does, ahead of the core's confirmation
+    /// (RF-ESP-16). Returns whether the order changed.
+    pub fn move_tab(&mut self, id: TabId, to: usize) -> bool {
+        let Some(project) = self.projects.iter_mut().find(|p| p.tabs.contains(&id)) else {
+            return false;
+        };
+        let Some(from) = project.tabs.iter().position(|t| *t == id) else {
+            return false;
+        };
+        let to = to.min(project.tabs.len() - 1);
+        if to == from {
+            return false;
+        }
+        let tab = project.tabs.remove(from);
+        project.tabs.insert(to, tab);
+        true
+    }
+
     /// Whether a project's tabs are hidden in the tab bar.
     pub fn is_folded(&self, id: ProjectId) -> bool {
         self.folded.contains(&id)
@@ -1680,6 +1707,35 @@ mod tests {
             assert!(view.pane_state(PaneId::new(id), P::Working));
         }
         assert_eq!(view.next_done(None), None);
+    }
+
+    #[test]
+    fn rf_esp_16_a_moved_tab_shows_in_its_new_place_before_the_core_confirms() {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[10, 11, 12]), project(2, &[20])],
+            tabs: vec![tab(10, 1, &[100]), tab(11, 1, &[110]), tab(12, 1, &[120])],
+            active_tab: Some(TabId::new(11)),
+            ..Default::default()
+        });
+        let ids = |view: &WorkspaceView| -> Vec<u64> {
+            view.drawn_tabs().iter().map(|t| t.get()).collect()
+        };
+        assert_eq!(
+            view.place_of(TabId::new(12)),
+            Some((ProjectId::new(1), 2, 3))
+        );
+        assert!(view.move_tab(TabId::new(12), 0));
+        assert_eq!(ids(&view), [12, 10, 11]);
+        assert_eq!(view.selected_tab().map(|t| t.id.get()), Some(11));
+        // Clamped to the last place, as the core does.
+        assert!(view.move_tab(TabId::new(12), 99));
+        assert_eq!(ids(&view), [10, 11, 12]);
+        assert!(!view.move_tab(TabId::new(12), 2), "its own place");
+        assert!(!view.move_tab(TabId::new(99), 0));
+        assert_eq!(view.place_of(TabId::new(99)), None);
+        // The core's order wins once it arrives.
+        view.project_updated(&project(1, &[11, 12, 10]));
+        assert_eq!(ids(&view), [11, 12, 10]);
     }
 
     #[test]

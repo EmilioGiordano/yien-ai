@@ -166,6 +166,18 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-n"]
     ),
     command!("tab.rename", "tab: rename tab", RenameTab, []),
+    command!(
+        "tab.move_up",
+        "tab: move tab up",
+        MoveTabUp,
+        ["ctrl-shift-pageup"]
+    ),
+    command!(
+        "tab.move_down",
+        "tab: move tab down",
+        MoveTabDown,
+        ["ctrl-shift-pagedown"]
+    ),
     command!("tab.next", "tab: next tab", NextTab, ["ctrl-tab"]),
     command!(
         "tab.previous",
