@@ -925,6 +925,11 @@ impl Actor {
             }
             PaneCmd::CopySelection => {
                 let text = lock(&self.engine).selection_text();
+                tracing::debug!(
+                    pane = self.id.get(),
+                    selected = text.is_some(),
+                    "selection read"
+                );
                 self.report(PaneEvent::Selection(text));
             }
             PaneCmd::View { visible, seen } => {
@@ -980,6 +985,8 @@ impl Actor {
                 self.restored = None;
             }
             self.step(&Signal::Input);
+            lock(&self.engine).clear_selection();
+            self.dirty = true;
         }
         if self.session.is_some() && !input.bytes.is_empty() {
             self.outbox.input.push_back(input.bytes);

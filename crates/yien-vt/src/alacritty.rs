@@ -16,6 +16,7 @@ use alacritty_terminal::vte::ansi::{
     self, Color, CursorShape as TermCursorShape, CursorStyle, Processor, Timeout,
 };
 
+use crate::keep_selection::KeepSelection;
 use crate::osc_scan::OscScanner;
 use crate::palette::{Palette, Rgb};
 use crate::screen_dump::{self, DumpLimits};
@@ -299,7 +300,8 @@ impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8]) -> VtOutput {
         let mut out = VtOutput::default();
         self.osc.scan_into(bytes, &mut out.signals);
-        self.parser.advance(&mut self.term, bytes);
+        self.parser
+            .advance(&mut KeepSelection(&mut self.term), bytes);
         self.collect(&mut out);
         out
     }
@@ -315,7 +317,7 @@ impl VtEngine for AlacrittyEngine {
     fn flush_sync(&mut self) -> VtOutput {
         let mut out = VtOutput::default();
         if self.sync_pending() {
-            self.parser.stop_sync(&mut self.term);
+            self.parser.stop_sync(&mut KeepSelection(&mut self.term));
         }
         self.collect(&mut out);
         out

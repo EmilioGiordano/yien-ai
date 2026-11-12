@@ -14,7 +14,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use yien_agent::Profile;
 use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand, ShutdownError};
-use yien_proto::frame::Frame;
+use yien_proto::frame::{CellFlags, Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
     ProfileId, ProjectId, TabId, TerminalPalette,
@@ -775,30 +775,98 @@ pattern = '(?m)^Do you want to proceed\?'
     );
 }
 
-#[test]
-fn copy_selection_returns_the_selected_text() {
-    use yien_proto::frame::{SelectionKind, Side, ViewportPoint};
-    let mut h = Harness::start();
-    let (_, pane, child) = h.project();
-    child.output(b"copy me");
-    h.frame_with(pane, "copy me");
+/// Drags from the first cell of the first row to its column `to`, then
+/// waits for the frame that shows the selection.
+fn drag_first_row(h: &mut Harness, pane: PaneId, to: u16) {
     h.send(ClientMsg::StartSelection {
         pane,
         at: ViewportPoint::new(0, 0),
         side: Side::Left,
         kind: SelectionKind::Simple,
     });
+    extend_first_row(h, pane, to);
+}
+
+fn extend_first_row(h: &mut Harness, pane: PaneId, to: u16) {
     h.send(ClientMsg::UpdateSelection {
         pane,
-        at: ViewportPoint::new(0, 3),
+        at: ViewportPoint::new(0, to),
         side: Side::Right,
     });
+    h.frame_where(pane, |f| selected(f, to));
+}
+
+fn selected(frame: &Frame, col: u16) -> bool {
+    frame.lines[0][usize::from(col)]
+        .flags
+        .contains(CellFlags::SELECTED)
+}
+
+fn copied(h: &mut Harness, pane: PaneId) -> Option<String> {
     h.send(ClientMsg::CopySelection { pane });
-    let text = h.wait_for(|m| match m {
+    h.wait_for(|m| match m {
         CoreMsg::SelectionText { pane: p, text } if *p == pane => Some(text.clone()),
         _ => None,
+    })
+}
+
+#[test]
+fn rf_pan_09_copy_returns_the_selected_text() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"copy me");
+    h.frame_with(pane, "copy me");
+    drag_first_row(&mut h, pane, 3);
+    assert_eq!(copied(&mut h, pane).as_deref(), Some("copy"));
+}
+
+#[test]
+fn rf_pan_09_copy_without_a_selection_answers_nothing() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"copy me");
+    h.frame_with(pane, "copy me");
+    assert_eq!(copied(&mut h, pane), None);
+}
+
+#[test]
+fn rf_pan_09_a_drag_survives_the_program_redrawing_its_line() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"copy me");
+    h.frame_with(pane, "copy me");
+    drag_first_row(&mut h, pane, 0);
+    child.output(b"\r\x1b[2Kcopy me!");
+    h.frame_with(pane, "copy me!");
+    extend_first_row(&mut h, pane, 3);
+    assert_eq!(copied(&mut h, pane).as_deref(), Some("copy"));
+}
+
+#[test]
+fn rf_pan_09_typing_ends_the_selection() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"copy me");
+    h.frame_with(pane, "copy me");
+    drag_first_row(&mut h, pane, 3);
+    h.input(pane, b"x");
+    h.frame_where(pane, |f| !selected(f, 0));
+    assert_eq!(copied(&mut h, pane), None);
+}
+
+#[test]
+fn rf_pan_09_focus_and_mouse_reports_keep_the_selection() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"copy me");
+    h.frame_with(pane, "copy me");
+    drag_first_row(&mut h, pane, 3);
+    h.send(ClientMsg::Report {
+        pane,
+        bytes: InputBytes::new(b"\x1b[I".to_vec()),
     });
-    assert_eq!(text.as_deref(), Some("copy"));
+    next_input(&child);
+    assert_eq!(copied(&mut h, pane).as_deref(), Some("copy"));
 }
 
 #[test]

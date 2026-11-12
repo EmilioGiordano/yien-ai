@@ -474,6 +474,24 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_09_copy_and_paste_keys_run_in_a_focused_terminal_only() {
+        assert!(first_is("ctrl-shift-c", &TERMINAL_STACK, &CopySelection));
+        assert!(first_is("ctrl-shift-v", &TERMINAL_STACK, &PasteClipboard));
+        assert_eq!(matches("ctrl-shift-c", &TERMINAL_STACK), 1);
+        for keys in ["ctrl-shift-c", "ctrl-shift-v"] {
+            assert_eq!(matches(keys, &["Root", CONTEXT]), 0, "{keys}");
+            assert_eq!(matches(keys, &PALETTE_STACK), 0, "{keys}");
+        }
+    }
+
+    #[test]
+    fn rf_pan_09_ctrl_c_and_ctrl_v_stay_with_the_program() {
+        for keys in ["ctrl-c", "ctrl-v"] {
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
+    }
+
+    #[test]
     fn rf_nav_05_ctrl_and_a_digit_go_to_that_tab() {
         let wanted: [&dyn Action; 9] = [
             &GoToTab1, &GoToTab2, &GoToTab3, &GoToTab4, &GoToTab5, &GoToTab6, &GoToTab7, &GoToTab8,

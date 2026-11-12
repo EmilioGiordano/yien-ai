@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod alacritty;
+mod keep_selection;
 pub mod osc_scan;
 mod palette;
 mod screen_dump;

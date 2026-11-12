@@ -11,12 +11,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_input::Mods;
 use yien_input::mouse::{self, Action, Button};
-use yien_proto::frame::{Frame, Modes, Rgb, SelectionKind, ViewportPoint};
+use yien_proto::frame::{Frame, Modes, Rgb, ViewportPoint};
 use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
 use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
 use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
-use crate::grid::{self, CursorPaint, PastePlan, PromptKey, Underline, WheelAction};
+use crate::grid::{self, CursorPaint, PastePlan, Pointer, PromptKey, Underline, WheelAction};
 use crate::theme::Theme;
 
 /// The terminal font size when the settings name none.
@@ -263,6 +263,7 @@ impl TerminalPane {
     }
 
     fn copy(&mut self, _: &CopySelection, _: &mut Window, cx: &mut Context<Self>) {
+        tracing::debug!(pane = self.id.get(), "copy asked");
         self.send(ClientMsg::CopySelection { pane: self.id }, cx);
     }
 
@@ -325,9 +326,8 @@ impl TerminalPane {
         mouse::report(&event, grid::tracking(&modes), grid::encoding(&modes))
     }
 
-    /// Whether the program owns the mouse; Shift hands it back to the terminal.
     fn program_owns_mouse(&self, modifiers: &Modifiers) -> bool {
-        self.modes().mouse != yien_proto::frame::MouseTracking::Off && !modifiers.shift
+        grid::pointer(&self.modes(), modifiers.shift) == Pointer::Program
     }
 
     fn on_mouse_down(
@@ -359,15 +359,7 @@ impl TerminalPane {
         if button != Button::Left {
             return;
         }
-        let kind = if event.modifiers.alt {
-            SelectionKind::Block
-        } else {
-            match event.click_count {
-                2 => SelectionKind::Semantic,
-                n if n >= 3 => SelectionKind::Lines,
-                _ => SelectionKind::Simple,
-            }
-        };
+        let kind = grid::selection_kind(event.click_count, event.modifiers.alt);
         self.selecting = true;
         self.send(
             ClientMsg::StartSelection {

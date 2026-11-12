@@ -6,8 +6,8 @@ use yien_input::mouse::{self, Action, Button, MouseEvent};
 use yien_input::paste::{self, Risk};
 use yien_input::{Key, Mods};
 use yien_proto::frame::{
-    Cell, CellFlags, Cursor, CursorShape, Frame, Modes, MouseEncoding, MouseTracking, Rgb, Side,
-    ViewportPoint,
+    Cell, CellFlags, Cursor, CursorShape, Frame, Modes, MouseEncoding, MouseTracking, Rgb,
+    SelectionKind, Side, ViewportPoint,
 };
 
 /// Columns and rows that fit `width` by `height` pixels, at least one of each.
@@ -388,6 +388,47 @@ pub(crate) fn encoding(modes: &Modes) -> mouse::Encoding {
     }
 }
 
+/// Who a button press in the grid goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pointer {
+    /// The program asked for the mouse: it gets a report.
+    Program,
+    /// The terminal selects text.
+    Terminal,
+}
+
+/// A program that asked for the mouse gets it; holding Shift keeps it for
+/// the terminal, so text in a full-screen program can still be selected.
+pub(crate) fn pointer(modes: &Modes, shift: bool) -> Pointer {
+    if modes.mouse != MouseTracking::Off && !shift {
+        Pointer::Program
+    } else {
+        Pointer::Terminal
+    }
+}
+
+/// How a left press selects: cells, words from a double click, lines from a
+/// triple one, a rectangle with Alt.
+pub(crate) fn selection_kind(click_count: usize, alt: bool) -> SelectionKind {
+    match click_count {
+        _ if alt => SelectionKind::Block,
+        0 | 1 => SelectionKind::Simple,
+        2 => SelectionKind::Semantic,
+        _ => SelectionKind::Lines,
+    }
+}
+
+/// The selected text as the clipboard gets it: lines end in `\r\n` where
+/// `crlf` is set, as Windows programs expect, and in `\n` elsewhere.
+pub(crate) fn clipboard_text(text: &str, crlf: bool) -> String {
+    let unix = text.replace("\r\n", "\n");
+    if crlf {
+        unix.replace('\n', "\r\n")
+    } else {
+        unix
+    }
+}
+
 /// `lines` positive means away from the user. Shift keeps the wheel for the
 /// terminal even when the program asked for the mouse.
 pub(crate) fn wheel_action(
@@ -400,7 +441,7 @@ pub(crate) fn wheel_action(
         return None;
     }
     let count = lines.unsigned_abs().min(100) as usize;
-    if modes.mouse != MouseTracking::Off && !mods.shift {
+    if pointer(modes, mods.shift) == Pointer::Program {
         let event = MouseEvent {
             button: if lines > 0 {
                 Button::WheelUp
@@ -816,6 +857,47 @@ mod tests {
             Some(WheelAction::Report(b"\x1b[<64;3;2M\x1b[<64;3;2M".to_vec()))
         );
         assert_eq!(wheel_action(2, &m, at, SHIFT), Some(WheelAction::Scroll(2)));
+    }
+
+    #[test]
+    fn rf_pan_09_a_press_selects_unless_the_program_asked_for_the_mouse() {
+        assert_eq!(pointer(&modes(), false), Pointer::Terminal);
+        assert_eq!(pointer(&modes(), true), Pointer::Terminal);
+    }
+
+    #[test]
+    fn rf_pan_09_shift_selects_in_a_program_that_asked_for_the_mouse() {
+        for mouse in [
+            MouseTracking::Click,
+            MouseTracking::Drag,
+            MouseTracking::Motion,
+        ] {
+            let m = Modes { mouse, ..modes() };
+            assert_eq!(pointer(&m, false), Pointer::Program, "{mouse:?}");
+            assert_eq!(pointer(&m, true), Pointer::Terminal, "{mouse:?}");
+        }
+    }
+
+    #[test]
+    fn rf_pan_09_double_click_selects_a_word_and_triple_click_a_line() {
+        assert_eq!(selection_kind(0, false), SelectionKind::Simple);
+        assert_eq!(selection_kind(1, false), SelectionKind::Simple);
+        assert_eq!(selection_kind(2, false), SelectionKind::Semantic);
+        assert_eq!(selection_kind(3, false), SelectionKind::Lines);
+        assert_eq!(selection_kind(7, false), SelectionKind::Lines);
+        for clicks in 0..4 {
+            assert_eq!(selection_kind(clicks, true), SelectionKind::Block);
+        }
+    }
+
+    #[test]
+    fn rf_pan_09_copied_lines_end_as_the_system_expects() {
+        assert_eq!(clipboard_text("one\ntwo\n", true), "one\r\ntwo\r\n");
+        assert_eq!(clipboard_text("one\ntwo\n", false), "one\ntwo\n");
+        assert_eq!(clipboard_text("one\r\ntwo", true), "one\r\ntwo");
+        assert_eq!(clipboard_text("one\r\ntwo", false), "one\ntwo");
+        assert_eq!(clipboard_text("one", true), "one");
+        assert_eq!(clipboard_text("", true), "");
     }
 
     #[test]
