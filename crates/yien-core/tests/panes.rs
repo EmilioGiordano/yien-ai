@@ -638,6 +638,31 @@ fn rf_age_07_a_turn_done_unseen_goes_idle_once_the_window_is_focused() {
 }
 
 #[test]
+fn rn_01_a_shell_command_never_turns_its_pane_red() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    // The marks as the PowerShell hook writes them, then a command that
+    // prints what an agent would use to ask for the user.
+    child.output(b"\x1b]133;A\x1b\\PS> \x1b]133;B\x1b\\\r\n\x1b]133;C\x1b\\");
+    assert_eq!(h.state(pane), AgentState::Working);
+    child.output(b"\x1b]9;Claude needs your permission\x07\x1b]777;notify;Claude;waiting\x07");
+    child.output(b"\x07\x1b[20;1HDo you want to proceed?\r\n> 1. Yes\r\n");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut states = Vec::new();
+    while Instant::now() < deadline {
+        if let Ok(CoreMsg::PaneState { pane: p, state }) = h.events.try_recv()
+            && p == pane
+        {
+            states.push(state);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(states.is_empty(), "{states:?}");
+    child.output(b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\");
+    assert_eq!(h.state(pane), AgentState::Done);
+}
+
+#[test]
 fn rnf_22_a_profile_from_the_user_folder_launches_without_recompiling() {
     let dir = std::env::temp_dir().join(format!("yien-core-user-profiles-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
