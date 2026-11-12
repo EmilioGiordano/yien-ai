@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_19_narrowing_drops_pieces_in_order_and_never_brings_them_back() {
+    fn rf_pan_12_narrowing_drops_pieces_in_order_and_never_brings_them_back() {
         let mut last: Option<(f32, PaneHeadLayout)> = None;
         sweep(|width, scale, _, now| {
             if let Some((was, before)) = last.filter(|(w, _)| *w > width) {
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_19_a_kept_button_is_never_cut_half_way() {
+    fn rf_pan_12_a_kept_button_is_never_cut_half_way() {
         sweep(|width, scale, text, now| {
             let any_button = now.split_buttons || now.menu_button || now.close_button;
             if any_button {
@@ -353,6 +353,41 @@ mod tests {
         for width in [80.0, 90.0, 100.0] {
             let now = PaneHeadLayout::at(width, 1.0, &text);
             assert!(now.close_button && !now.shell_name, "{now:?} at {width}");
+        }
+    }
+
+    /// The least width that holds the glyph and these buttons with the head's
+    /// padding and gaps, and nothing else: counted here from the constants,
+    /// not through `need`.
+    fn bare(buttons: usize) -> f32 {
+        // Glyph, the program (shrunk to nothing), the spacer, the buttons.
+        let children = 3 + buttons;
+        2.0 * PADDING + GLYPH + buttons as f32 * BUTTON + (children - 1) as f32 * GAP
+    }
+
+    #[test]
+    fn rf_pan_12_the_buttons_kept_always_fit_whole() {
+        sweep(|width, scale, _, now| {
+            let buttons = 2 * usize::from(now.split_buttons)
+                + usize::from(now.menu_button)
+                + usize::from(now.close_button);
+            if buttons > 0 {
+                assert!(bare(buttons) <= width, "{now:?} at {width}, {scale}");
+            }
+        });
+    }
+
+    #[test]
+    fn rf_pan_12_an_agent_tag_stays_while_the_close_button_goes() {
+        for scale in SCALES {
+            let text = claude();
+            let tag = 6.0 * 0.6 * 12.5 * scale;
+            // Room for the glyph and the whole tag, not for the button too.
+            let width = 2.0 * PADDING + GLYPH + tag + 2.0 * GAP;
+            let now = PaneHeadLayout::at(width, scale, &text);
+            assert!(!now.close_button, "{now:?} at {scale}");
+            let left = width - 2.0 * PADDING - GLYPH - 2.0 * GAP;
+            assert!(left >= tag, "the tag has its full width at {scale}");
         }
     }
 
