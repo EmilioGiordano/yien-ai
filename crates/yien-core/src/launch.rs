@@ -223,6 +223,8 @@ pub(crate) fn resolve(
     let id = profile.map_or(SHELL_PROFILE, ProfileId::as_str);
     let found = profiles.iter().find(|p| p.id == id);
     let Some(found) = found else {
+        // Reached when the user's `shell.toml` is broken: the marks come from
+        // YIEN's own launch arguments, and OSC 133 can never turn a pane red.
         if id == SHELL_PROFILE {
             return Ok(LaunchPlan {
                 profile: SHELL_PROFILE.to_owned(),
@@ -230,7 +232,7 @@ pub(crate) fn resolve(
                 args: shell.args.clone(),
                 resume_args: Vec::new(),
                 env: shell.env.clone(),
-                machine: MachineConfig::unprofiled(),
+                machine: MachineConfig::new(&[Source::Osc133], None),
                 screen: Vec::new(),
                 profile_name: "Shell".to_owned(),
                 default_name: shell.display_name(),
@@ -563,10 +565,33 @@ mod tests {
     }
 
     #[test]
-    fn shell_works_without_any_profiles() {
+    fn rf_age_05_the_shell_reads_command_marks_even_without_its_profile() {
         let plan = resolve(None, &[], &shell()).unwrap();
         assert_eq!(plan.program, "pwsh.exe");
-        assert!(!plan.machine.declares(Source::Osc133));
+        assert_eq!(plan.profile, SHELL_PROFILE);
+        assert!(plan.machine.declares(Source::Osc133));
+        let builtin = resolve(None, &builtin_profiles().unwrap(), &shell()).unwrap();
+        assert_eq!(plan.machine, builtin.machine);
+        assert!(!plan.hooks);
+    }
+
+    #[test]
+    fn rf_age_05_a_powershell_pane_starts_with_the_marks_and_reads_them() {
+        let pwsh = ShellCommand::new("pwsh.exe").reporting_cwd(None);
+        for profiles in [Vec::new(), builtin_profiles().unwrap()] {
+            let plan = resolve(None, &profiles, &pwsh).unwrap();
+            assert!(plan.machine.declares(Source::Osc133));
+            let fill = Fill {
+                pane: PaneId::new(1),
+                session_id: None,
+                resume: None,
+                hooks: None,
+            };
+            let spec = plan.spec(&fill, "C:/Code", 80, 24);
+            let script = args(&spec).pop().unwrap();
+            assert!(script.contains("']133;C'"), "{script}");
+            assert!(script.contains("']133;D;'"), "{script}");
+        }
     }
 
     #[test]
