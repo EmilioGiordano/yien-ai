@@ -39,6 +39,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
+use crate::pane_head::{self, HeadText, PaneHeadLayout, program_tag, runs_agent};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
@@ -92,6 +93,8 @@ const MAX_BATCH: usize = 1024;
 const CLAUDE_PROFILE: &str = "claude";
 /// The longest folder a pane head shows before cutting its first names.
 const PANE_FOLDER_CHARS: usize = 48;
+const SIGNAL_LOST: &str = "signal lost";
+const SHELL_NAME_SHRINK: f32 = 1000.0;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -2650,10 +2653,17 @@ impl Shell {
             Some(shown) => tab.rects_in(&shown),
             None => tab.rects(),
         };
+        let area_width = self.pane_area.get().0;
         let cells: Vec<AnyElement> = rects
             .into_iter()
             .map(|(id, rect)| {
                 let pane = self.workspace.pane(id);
+                // Before the first paint the area is unknown: draw it wide.
+                let cell = if area_width > 0.0 {
+                    area_width * rect.w - 2.0 * HALF_GUTTER
+                } else {
+                    f32::INFINITY
+                };
                 div()
                     .absolute()
                     .left(relative(rect.x))
@@ -2661,7 +2671,7 @@ impl Shell {
                     .w(relative(rect.w))
                     .h(relative(rect.h))
                     .p(px(HALF_GUTTER))
-                    .child(self.render_pane(tab, &pane, cx))
+                    .child(self.render_pane(tab, &pane, cell, cx))
                     .into_any_element()
             })
             .collect();
@@ -2736,11 +2746,13 @@ impl Shell {
         &self,
         tab: &TabView,
         pane: &PaneView,
+        cell: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = self.theme;
         let focused = pane.id == tab.focused;
         let needs = pane.state.needs_you();
+        let (border, border_color) = t.pane_border(focused, needs);
         let state_color = match pane.state {
             AgentState::NeedsYou => t.shu,
             AgentState::Error => t.ochre,
@@ -2754,72 +2766,113 @@ impl Shell {
             cfg!(windows),
             PANE_FOLDER_CHARS,
         );
+        let tag = program_tag(pane);
+        let text = HeadText {
+            name: &pane.name,
+            profile: &pane.profile,
+            tag,
+            agent: runs_agent(pane),
+            folder_lead: &folder_shown.lead,
+            folder_last: &folder_shown.last,
+            state: pane.state.label(),
+            signal_lost: pane.signal_lost.then_some(SIGNAL_LOST),
+        };
+        let shows = PaneHeadLayout::at(cell - 2.0 * border, f32::from(t.text(1.0)), &text);
+        let separate = text.separate_name();
+        // Text shrinks and ellipsizes; buttons never do, so a wrong width
+        // guess cuts words, not a button.
+        let words = |s: String| div().min_w_0().overflow_hidden().text_ellipsis().child(s);
+        let primary = |s: String| {
+            words(s)
+                .text_color(t.term_text)
+                .font_weight(FontWeight::MEDIUM)
+        };
+        let who = if separate && shows.profile {
+            words(pane.profile.clone())
+        } else if separate && shows.name {
+            words(tag.to_owned())
+        } else if separate {
+            primary(tag.to_owned())
+        } else {
+            primary(pane.name.clone())
+        }
+        .when(!text.agent, |mut d| {
+            // A shell's name counts only a few letters in the layout, so it
+            // gives way before any other text.
+            d.style().flex_shrink = Some(SHELL_NAME_SHRINK);
+            d
+        });
         let heads = Rc::clone(&self.pane_heads);
         let head = h_flex()
             .relative()
             .flex_none()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(pane_head::GAP))
             .min_w_0()
-            .px(px(8.0))
+            .overflow_hidden()
+            .px(px(pane_head::PADDING))
             .py(px(5.0))
             .border_b_1()
             .border_color(t.term_line)
             .whitespace_nowrap()
-            .text_size(t.text(12.5))
+            .text_size(t.text(pane_head::TEXT_SIZE))
             .text_color(t.term_muted)
             .when(focused, |h| h.bg(t.term_raised))
             .child(glyph(pane.state, &t))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(t.term_text)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(pane.name.clone()),
-            )
-            .child(div().flex_none().child(pane.profile.clone()))
-            .child(
-                // Only the lead shrinks, so a narrow head still shows the
-                // last folder.
-                h_flex()
-                    .id(("pane-folder", id.get()))
-                    .aria_label(format!("Folder {folder}"))
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_size(t.text(12.0))
-                    .text_color(t.term_faint)
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(folder_shown.lead),
-                    )
-                    .child(div().flex_none().child(folder_shown.last)),
-            )
-            .child(
-                div()
-                    .ml_auto()
-                    .flex_none()
-                    .text_color(state_color)
-                    .child(pane.state.label()),
-            )
-            .when(pane.signal_lost, |h| {
+            .when(separate && shows.name, |h| {
+                h.child(primary(pane.name.clone()))
+            })
+            .child(who)
+            .when(!separate && shows.profile, |h| {
+                h.child(words(pane.profile.clone()))
+            })
+            .when(shows.folder_last, |h| {
                 h.child(
-                    div()
+                    // Only the lead shrinks, so a narrow head still shows
+                    // the last folder.
+                    h_flex()
+                        .id(("pane-folder", id.get()))
+                        .aria_label(format!("Folder {folder}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_size(t.text(pane_head::FOLDER_SIZE))
+                        .text_color(t.term_faint)
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .when(shows.folder_lead, |f| {
+                            f.child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(folder_shown.lead.clone()),
+                            )
+                        })
+                        .child(div().flex_none().child(folder_shown.last.clone())),
+                )
+            })
+            .child(div().flex_1())
+            .when(shows.state_label, |h| {
+                h.child(words(pane.state.label().to_owned()).text_color(state_color))
+            })
+            .when(pane.signal_lost && shows.signal_lost, |h| {
+                h.child(
+                    words(SIGNAL_LOST.to_owned())
                         .id(("signal-lost", pane.id.get()))
                         .role(Role::Status)
                         .aria_label("Signal lost: the agent's state cannot be told")
-                        .flex_none()
-                        .text_color(t.ochre)
-                        .child("signal lost"),
+                        .text_color(t.ochre),
                 )
             })
-            .child(self.split_button(pane, Orientation::Horizontal, cx))
-            .child(self.split_button(pane, Orientation::Vertical, cx))
-            .child(self.pane_menu_button(pane, cx))
-            .child(self.pane_close_button(pane, cx))
+            .when(shows.split_buttons, |h| {
+                h.child(self.split_button(pane, Orientation::Horizontal, cx))
+                    .child(self.split_button(pane, Orientation::Vertical, cx))
+            })
+            .when(shows.menu_button, |h| {
+                h.child(self.pane_menu_button(pane, cx))
+            })
+            .when(shows.close_button, |h| {
+                h.child(self.pane_close_button(pane, cx))
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2890,20 +2943,29 @@ impl Shell {
             Some(terminal) => terminal.clone().into_any_element(),
             None => div().flex_1().into_any_element(),
         };
+        let mut pane_label = format!("{} pane", pane.name);
+        if separate {
+            pane_label.push_str(&format!(", {tag}"));
+        }
+        pane_label.push_str(&format!(", {}", pane.state.label()));
+        if pane.signal_lost && !shows.signal_lost {
+            pane_label.push_str(", signal lost");
+        }
+        if !shows.folder_last {
+            pane_label.push_str(&format!(", in {folder}"));
+        }
         v_flex()
             .id(("pane", pane.id.get()))
             .role(Role::Group)
-            .aria_label(format!("{} pane, {}", pane.name, pane.state.label()))
+            .aria_label(pane_label)
             .relative()
             .size_full()
             .overflow_hidden()
             .rounded(px(8.0))
             .bg(t.term_bg)
             .text_color(t.term_text)
-            .map(|p| {
-                let (width, color) = t.pane_border(focused, needs);
-                p.border(px(width)).border_color(color)
-            })
+            .border(px(border))
+            .border_color(border_color)
             .child(head)
             .children(exited)
             .child(body)

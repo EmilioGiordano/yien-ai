@@ -346,8 +346,12 @@ impl Shell {
     pub(super) fn watch_pane_area(&self) -> impl IntoElement {
         let area = self.pane_area.clone();
         canvas(
-            move |bounds, _, _| {
-                area.set((bounds.size.width.as_f32(), bounds.size.height.as_f32()));
+            move |bounds, window, _| {
+                let size = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
+                // Pane heads lay out from this size, read during render.
+                if area.replace(size) != size {
+                    window.on_next_frame(|window, _| window.refresh());
+                }
             },
             |_, (), _, _| {},
         )
