@@ -2584,16 +2584,24 @@ impl Shell {
             )
             .child(div().flex_none().child(pane.profile.clone()))
             .child(
-                div()
+                // Only the lead shrinks, so a narrow head still shows the
+                // last folder.
+                h_flex()
                     .id(("pane-folder", id.get()))
                     .aria_label(format!("Folder {folder}"))
                     .min_w_0()
                     .overflow_hidden()
-                    .text_ellipsis()
                     .text_size(t.text(12.0))
                     .text_color(t.term_faint)
                     .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(folder_shown),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(folder_shown.lead),
+                    )
+                    .child(div().flex_none().child(folder_shown.last)),
             )
             .child(
                 div()

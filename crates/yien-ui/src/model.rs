@@ -1018,16 +1018,54 @@ pub(crate) fn frames_to_take(
     panes.into_iter().filter(|p| has_view(*p)).collect()
 }
 
-/// A folder as a pane head shows it (RF-ESP-04): under `home` it starts with
-/// `~`, and past `max_chars` its first folders give way to `…` so the last
-/// one stays readable. With `windows`, either slash separates and names
-/// compare without case.
+/// A folder as a pane head shows it (RF-ESP-04), in two parts: `last`, the
+/// last name, which must stay visible, and `lead`, what comes before it and
+/// may be cut when the head is narrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FolderLabel {
+    pub(crate) lead: String,
+    pub(crate) last: String,
+}
+
+impl FolderLabel {
+    #[cfg(test)]
+    fn text(&self) -> String {
+        format!("{}{}", self.lead, self.last)
+    }
+}
+
+/// A Windows path without its `\\?\` prefix; `\\?\UNC\server` is `\\server`.
+fn without_verbatim(path: &str) -> String {
+    for unc in [r"\\?\UNC\", "//?/UNC/"] {
+        if let Some(rest) = path.strip_prefix(unc) {
+            return format!(r"\\{rest}");
+        }
+    }
+    path.strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+        .unwrap_or(path)
+        .to_owned()
+}
+
+/// `dir` as a pane head shows it: under `home` it starts with `~`, and past
+/// `max_chars` its first folders give way to `…` so the last one stays
+/// readable. With `windows`, either slash separates, names compare without
+/// case and a `\\?\` prefix is dropped.
 pub(crate) fn folder_label(
     dir: &str,
     home: Option<&str>,
     windows: bool,
     max_chars: usize,
-) -> String {
+) -> FolderLabel {
+    let plain = |path: &str| {
+        if windows {
+            without_verbatim(path)
+        } else {
+            path.to_owned()
+        }
+    };
+    let dir = plain(dir);
+    let dir = dir.as_str();
     let is_sep = |c: char| c == '/' || (windows && c == '\\');
     let sep = if windows && dir.contains('\\') {
         '\\'
@@ -1048,7 +1086,7 @@ pub(crate) fn folder_label(
         }
     };
     let dir_parts = parts(dir);
-    let home_parts = home.map(parts).unwrap_or_default();
+    let home_parts = home.map(|h| parts(&plain(h))).unwrap_or_default();
     let under_home = !home_parts.is_empty()
         && dir_parts.len() >= home_parts.len()
         && home_parts.iter().zip(&dir_parts).all(|(h, d)| same(h, d));
@@ -1065,23 +1103,34 @@ pub(crate) fn folder_label(
             trimmed.to_owned()
         }
     };
-    if full.chars().count() <= max_chars {
-        return full;
-    }
-    let names = parts(&full);
-    let mut kept: Vec<&str> = Vec::new();
-    // "…" and a separator come before the names kept.
-    let mut len = 2;
-    for name in names.iter().rev() {
-        let more = name.chars().count() + usize::from(!kept.is_empty());
-        if !kept.is_empty() && len + more > max_chars {
-            break;
+    let shown = if full.chars().count() <= max_chars {
+        full
+    } else {
+        let names = parts(&full);
+        let mut kept: Vec<&str> = Vec::new();
+        // "…" and a separator come before the names kept.
+        let mut len = 2;
+        for name in names.iter().rev() {
+            let more = name.chars().count() + usize::from(!kept.is_empty());
+            if !kept.is_empty() && len + more > max_chars {
+                break;
+            }
+            len += more;
+            kept.push(name);
         }
-        len += more;
-        kept.push(name);
+        kept.reverse();
+        format!("…{sep}{}", kept.join(&sep.to_string()))
+    };
+    match shown.rfind(is_sep) {
+        Some(at) if at + 1 < shown.len() => FolderLabel {
+            lead: shown[..=at].to_owned(),
+            last: shown[at + 1..].to_owned(),
+        },
+        _ => FolderLabel {
+            lead: String::new(),
+            last: shown,
+        },
     }
-    kept.reverse();
-    format!("…{sep}{}", kept.join(&sep.to_string()))
 }
 
 #[cfg(test)]
@@ -1252,33 +1301,26 @@ mod tests {
 
     #[test]
     fn rf_esp_04_a_folder_under_home_starts_with_a_tilde() {
+        let label = |dir: &str, home: Option<&str>, windows: bool| {
+            folder_label(dir, home, windows, 60).text()
+        };
         let home = Some(r"C:\Users\me");
-        assert_eq!(
-            folder_label(r"c:\users\ME\Code\yien", home, true, 60),
-            r"~\Code\yien"
-        );
-        assert_eq!(folder_label("C:/Users/me/Code", home, true, 60), "~/Code");
-        assert_eq!(folder_label(r"C:\Users\me\", home, true, 60), "~");
+        assert_eq!(label(r"c:\users\ME\Code\yien", home, true), r"~\Code\yien");
+        assert_eq!(label("C:/Users/me/Code", home, true), "~/Code");
+        assert_eq!(label(r"C:\Users\me\", home, true), "~");
+        assert_eq!(label(r"\\?\C:\Users\me\Code", home, true), r"~\Code");
         // Only a whole folder name matches home.
-        assert_eq!(
-            folder_label("C:/Users/meadow/x", home, true, 60),
-            "C:/Users/meadow/x"
-        );
+        assert_eq!(label("C:/Users/meadow/x", home, true), "C:/Users/meadow/x");
+        // A home at a drive root.
+        assert_eq!(label(r"C:\Code", Some(r"C:\"), true), r"~\Code");
+        assert_eq!(label(r"C:\", Some(r"C:\"), true), "~");
+        assert_eq!(label(r"D:\Code", Some(r"C:\"), true), r"D:\Code");
         // Names keep their case off Windows.
-        assert_eq!(
-            folder_label("/home/Me/x", Some("/home/me"), false, 60),
-            "/home/Me/x"
-        );
-        assert_eq!(
-            folder_label("/home/me/x", Some("/home/me"), false, 60),
-            "~/x"
-        );
-        assert_eq!(
-            folder_label("C:/Code/yien/", None, true, 60),
-            "C:/Code/yien"
-        );
-        assert_eq!(folder_label(r"C:\", None, true, 60), r"C:\");
-        assert_eq!(folder_label("/", None, false, 60), "/");
+        assert_eq!(label("/home/Me/x", Some("/home/me"), false), "/home/Me/x");
+        assert_eq!(label("/home/me/x", Some("/home/me"), false), "~/x");
+        assert_eq!(label("C:/Code/yien/", None, true), "C:/Code/yien");
+        assert_eq!(label(r"C:\", None, true), r"C:\");
+        assert_eq!(label("/", None, false), "/");
     }
 
     #[test]
@@ -1289,13 +1331,35 @@ mod tests {
             true,
             24,
         );
-        assert_eq!(label, r"…\deep\nested\yien-ai");
-        assert!(label.chars().count() <= 24);
+        assert_eq!(label.text(), r"…\deep\nested\yien-ai");
+        assert!(label.text().chars().count() <= 24);
         // The last name stays whole even when it alone is too long.
         assert_eq!(
-            folder_label("/a/a-very-long-folder-name", None, false, 8),
+            folder_label("/a/a-very-long-folder-name", None, false, 8).text(),
             "…/a-very-long-folder-name"
         );
+    }
+
+    #[test]
+    fn rf_esp_04_the_last_folder_is_apart_so_a_narrow_head_keeps_it() {
+        let label = folder_label(r"C:\Users\me\Code\yien", Some(r"C:\Users\me"), true, 60);
+        assert_eq!(label.lead, r"~\Code\");
+        assert_eq!(label.last, "yien");
+        let short = folder_label("~", None, true, 60);
+        assert_eq!((short.lead.as_str(), short.last.as_str()), ("", "~"));
+        let root = folder_label(r"C:\", None, true, 60);
+        assert_eq!((root.lead.as_str(), root.last.as_str()), ("", r"C:\"));
+    }
+
+    #[test]
+    fn rf_esp_04_a_share_keeps_its_two_slashes_until_it_is_cut() {
+        let share = r"\\server\share\team\yien";
+        assert_eq!(folder_label(share, None, true, 60).text(), share);
+        let verbatim = folder_label(r"\\?\UNC\server\share\team\yien", None, true, 60);
+        assert_eq!(verbatim.text(), share);
+        let cut = folder_label(r"\\server\share\team\some-long-name\yien", None, true, 22);
+        assert_eq!(cut.text(), r"…\some-long-name\yien");
+        assert_eq!(cut.last, "yien");
     }
 
     #[test]
