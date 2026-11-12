@@ -1,9 +1,7 @@
 //! The installer's `.sha256` file, as `xtask installer` writes it
 //! (`sha256sum` format), and the digest of what was downloaded.
 
-use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
@@ -73,9 +71,8 @@ impl<W: Write> Write for Hashing<W> {
     }
 }
 
-/// The lower-case hex SHA-256 of a file.
-pub(crate) fn file_digest(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+/// The lower-case hex SHA-256 of what `file` reads from here on.
+pub(crate) fn reader_digest(file: &mut impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -100,7 +97,7 @@ mod tests {
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
-    fn rnf_21_the_sidecar_xtask_writes_is_read_back() {
+    fn the_sidecar_xtask_writes_is_read_back() {
         // The exact format of `xtask installer`'s `sha256_sidecar`.
         let text = format!("{ABC}  {NAME}\n");
         assert_eq!(expected_digest(&text, NAME), Ok(ABC.to_owned()));
@@ -153,10 +150,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("abc.bin");
         std::fs::write(&file, b"abc").unwrap();
-        assert_eq!(file_digest(&file).unwrap(), ABC);
+        assert_eq!(
+            reader_digest(&mut std::fs::File::open(&file).unwrap()).unwrap(),
+            ABC
+        );
         std::fs::write(&file, b"abd").unwrap();
         assert_ne!(
-            file_digest(&file).unwrap(),
+            reader_digest(&mut std::fs::File::open(&file).unwrap()).unwrap(),
             ABC,
             "a changed byte changes it"
         );

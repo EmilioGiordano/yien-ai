@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use semver::Version;
 
-use super::checksum::{CHECKSUM_LIMIT, Hashing, expected_digest, file_digest};
+use super::checksum::{CHECKSUM_LIMIT, Hashing, expected_digest, reader_digest};
 use super::release::{LIST_LIMIT, RELEASES_URL, Release, newest_after, releases, setup_name};
 use super::schedule::Saved;
 
@@ -139,11 +139,28 @@ pub(crate) fn installer_args(log: &Path) -> Vec<OsString> {
     ]
 }
 
-/// Starts the installer once more checked against its digest, as the user
-/// itself, never elevated: a plain process start, which fails rather than
-/// asks when a program wants elevation.
+/// Opens a file for reading while nobody may write, rename or delete it.
+#[cfg(windows)]
+pub(crate) fn open_locked(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ only: no FILE_SHARE_WRITE or FILE_SHARE_DELETE.
+    fs::OpenOptions::new().read(true).share_mode(1).open(path)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn open_locked(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+/// Starts the installer as the user itself, never elevated: a plain
+/// process start, which fails rather than asks when a program wants
+/// elevation. The file is checked against its digest through a handle that
+/// denies writing and deleting, held until the process has started, so it
+/// cannot be swapped between the check and the start (on Windows; Windows
+/// lets a process start from a file opened that way).
 pub(crate) fn launch(installer: &Downloaded) -> Result<(), String> {
-    let digest = file_digest(&installer.path).map_err(|e| e.to_string())?;
+    let mut file = open_locked(&installer.path).map_err(|e| e.to_string())?;
+    let digest = reader_digest(&mut file).map_err(|e| e.to_string())?;
     if digest != installer.digest {
         return Err("the installer changed after it was checked".into());
     }
@@ -163,7 +180,9 @@ pub(crate) fn launch(installer: &Downloaded) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     command.args(installer_args(&log));
-    command.spawn().map(drop).map_err(|e| e.to_string())
+    let started = command.spawn().map(drop).map_err(|e| e.to_string());
+    drop(file);
+    started
 }
 
 #[cfg(test)]
@@ -239,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_21_a_check_keeps_the_newest_release_and_the_time() {
+    fn a_check_keeps_the_newest_release_and_the_time() {
         let json = serde_json::to_vec(&serde_json::Value::Array(vec![
             entry("v0.1.0", false, false),
             entry("v0.3.0", true, false),
@@ -267,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_21_a_matching_download_is_kept_and_older_ones_removed() {
+    fn a_matching_download_is_kept_and_older_ones_removed() {
         let r = release("0.2.0");
         let sidecar = format!("{}  {}\n", sha(PAYLOAD), r.setup.name);
         let web = canned(vec![
@@ -392,7 +411,7 @@ mod tests {
     /// server; never GitHub.
     #[cfg(windows)]
     #[test]
-    fn rnf_21_download_and_verify_through_a_local_server() {
+    fn download_and_verify_through_a_local_server() {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -423,6 +442,30 @@ mod tests {
         let got = download(&Web { loopback: true }, &r, &dir).unwrap();
         assert_eq!(fs::read(&got.path).unwrap(), PAYLOAD);
         server.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The installer is held against writing and deleting from the check
+    /// to the start, and Windows still starts a program from it.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_installer_cannot_be_swapped_but_still_starts() {
+        let dir = temp("locked");
+        fs::create_dir_all(&dir).unwrap();
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+        let exe = dir.join("program.exe");
+        fs::copy(system.join("System32").join("cmd.exe"), &exe).unwrap();
+        let locked = open_locked(&exe).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&exe).is_err());
+        assert!(fs::remove_file(&exe).is_err());
+        assert!(fs::rename(&exe, dir.join("other.exe")).is_err());
+        let status = std::process::Command::new(&exe)
+            .args(["/c", "exit", "0"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(locked);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

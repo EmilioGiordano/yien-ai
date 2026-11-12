@@ -152,7 +152,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rnf_21_pre_releases_count_and_drafts_do_not() {
+    fn pre_releases_count_and_drafts_do_not() {
         let json = list(vec![
             entry("v0.3.0", true, false),
             entry("v0.2.0", false, true),
