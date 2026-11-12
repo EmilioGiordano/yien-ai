@@ -274,7 +274,13 @@ impl TabView {
     /// Each visible pane with its rectangle as fractions of the pane area, in
     /// tree order. A maximized pane fills the area alone.
     pub(crate) fn rects(&self) -> Vec<(PaneId, Rect)> {
-        let all = pane_rects(&self.layout);
+        self.rects_in(&self.layout)
+    }
+
+    /// The same, with `layout` in place of the tab's: a divider drag shows
+    /// its own before the core answers.
+    pub(crate) fn rects_in(&self, layout: &LayoutNode) -> Vec<(PaneId, Rect)> {
+        let all = pane_rects(layout);
         match self.maximized {
             Some(max) if all.iter().any(|(p, _)| *p == max) => vec![(max, Rect::FULL)],
             _ => all,

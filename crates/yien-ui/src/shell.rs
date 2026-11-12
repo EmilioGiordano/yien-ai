@@ -39,7 +39,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::region::{self, Modality, Region};
+use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::{TerminalEvent, TerminalPane};
@@ -48,6 +48,7 @@ use crate::title_bar::{PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
+mod dividers;
 mod files;
 mod menu;
 mod pane_menu;
@@ -57,6 +58,7 @@ mod tab_drag;
 mod tray;
 mod worktrees;
 
+use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use status::{Line, Notice};
@@ -187,6 +189,12 @@ pub(crate) struct Shell {
     /// focus; a click in a bar focuses it too, and the pane must still get
     /// the keyboard after it.
     keyboard_in_bar: bool,
+    /// The divider the pointer took (RF-PAN-02).
+    divider_grab: Option<DividerGrab>,
+    /// The dividers as a place the keyboard can be, and the one it is on.
+    divider_focus: FocusHandle,
+    divider_cursor: Option<DividerKey>,
+    pane_area: PaneArea,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -372,6 +380,10 @@ impl Shell {
             keyboard_region: Region::Panes,
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
+            divider_grab: None,
+            divider_focus: cx.focus_handle(),
+            divider_cursor: None,
+            pane_area: PaneArea::default(),
             _subscriptions: vec![activation, appearance, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
@@ -420,7 +432,10 @@ impl Shell {
                         ready.remove(&pane);
                     }
                 }
-                CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
+                CoreMsg::TabUpdated(info) => {
+                    self.workspace.tab_updated(&info);
+                    self.divider_settled(info.id);
+                }
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
                         ready.remove(&pane);
@@ -622,6 +637,7 @@ impl Shell {
     /// Moves the keyboard to the selected tab's focused pane when that
     /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_divider_cursor(window, cx);
         self.keyboard_in_bar =
             region::bar_claim_holds(self.keyboard_in_bar, self.region(window, cx));
         if self.overlay_has_keyboard() || self.keyboard_in_bar {
@@ -651,6 +667,8 @@ impl Shell {
             Region::TabBar
         } else if self.context_focus.contains_focused(window, cx) {
             Region::ContextBar
+        } else if self.divider_focus.is_focused(window) {
+            Region::Dividers
         } else {
             Region::Panes
         }
@@ -708,6 +726,7 @@ impl Shell {
             forward,
             self.bar_shown(Bar::Tab),
             self.bar_shown(Bar::Context),
+            !self.divider_keys(cx).is_empty(),
         );
         match to {
             Region::TabBar => {
@@ -724,6 +743,7 @@ impl Shell {
                 window.focus(&self.context_focus, cx);
                 self.keyboard_in_bar = true;
             }
+            Region::Dividers => self.focus_dividers(forward, window, cx),
             Region::Panes => self.give_back_keyboard(window, cx),
         }
         cx.notify();
@@ -2561,7 +2581,10 @@ impl Shell {
                 .text_size(t.text(18.0))
                 .child("No tab is open");
         };
-        let rects = tab.rects();
+        let rects = match self.shown_layout(tab) {
+            Some(shown) => tab.rects_in(&shown),
+            None => tab.rects(),
+        };
         let cells: Vec<AnyElement> = rects
             .into_iter()
             .map(|(id, rect)| {
@@ -2577,7 +2600,15 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
-        area.child(div().relative().size_full().children(cells))
+        let dividers = self.render_dividers(tab, cx);
+        area.child(
+            div()
+                .relative()
+                .size_full()
+                .child(self.watch_pane_area())
+                .children(cells)
+                .children(dividers),
+        )
     }
 
     /// The pane area with no project at all: an invitation to add one.
@@ -3351,9 +3382,10 @@ impl Render for Shell {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
-        // A drag that just ended sends its width here.
+        // A drag that just ended sends its width or its share here.
         self.save_side_bars(cx);
         self.forget_ended_tab_drag(cx);
+        self.finish_divider_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3366,6 +3398,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::toggle_review_mode))
             .on_drag_move(cx.listener(Self::on_bar_drag))
+            .on_drag_move(cx.listener(Self::on_divider_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))
@@ -3429,6 +3462,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_leave))
             .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
+            .on_action(cx.listener(Self::divider_left))
+            .on_action(cx.listener(Self::divider_right))
+            .on_action(cx.listener(Self::divider_up))
+            .on_action(cx.listener(Self::divider_down))
+            .on_action(cx.listener(Self::divider_next))
+            .on_action(cx.listener(Self::divider_previous))
+            .on_action(cx.listener(Self::divider_leave))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::refresh_files))
