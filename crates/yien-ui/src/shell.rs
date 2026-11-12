@@ -53,7 +53,7 @@ mod status;
 mod tray;
 mod worktrees;
 
-use dividers::{DividerGrab, PaneArea};
+use dividers::{DividerGrab, DividerKey, PaneArea};
 use files::{ContextView, FilesPanel};
 use status::{Line, Notice};
 use tray::Tray;
@@ -168,6 +168,9 @@ pub(crate) struct Shell {
     keyboard_in_bar: bool,
     /// The divider the pointer took (RF-PAN-02).
     divider_grab: Option<DividerGrab>,
+    /// The dividers as a place the keyboard can be, and the one it is on.
+    divider_focus: FocusHandle,
+    divider_cursor: Option<DividerKey>,
     pane_area: PaneArea,
     _subscriptions: Vec<Subscription>,
 }
@@ -334,6 +337,8 @@ impl Shell {
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
             divider_grab: None,
+            divider_focus: cx.focus_handle(),
+            divider_cursor: None,
             pane_area: PaneArea::default(),
             _subscriptions: vec![activation, appearance],
         };
@@ -574,6 +579,7 @@ impl Shell {
     /// Moves the keyboard to the selected tab's focused pane when that
     /// changes. A bar that holds the keyboard keeps it until the user leaves.
     fn sync_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_divider_cursor(window, cx);
         self.keyboard_in_bar =
             region::bar_claim_holds(self.keyboard_in_bar, self.region(window, cx));
         if self.overlay_has_keyboard() || self.keyboard_in_bar {
@@ -603,6 +609,8 @@ impl Shell {
             Region::TabBar
         } else if self.context_focus.contains_focused(window, cx) {
             Region::ContextBar
+        } else if self.divider_focus.is_focused(window) {
+            Region::Dividers
         } else {
             Region::Panes
         }
@@ -653,6 +661,7 @@ impl Shell {
             forward,
             self.bar_shown(Bar::Tab),
             self.bar_shown(Bar::Context),
+            !self.divider_keys(cx).is_empty(),
         );
         match to {
             Region::TabBar => {
@@ -669,6 +678,7 @@ impl Shell {
                 window.focus(&self.context_focus, cx);
                 self.keyboard_in_bar = true;
             }
+            Region::Dividers => self.focus_dividers(forward, window, cx),
             Region::Panes => self.give_back_keyboard(window, cx),
         }
         cx.notify();
@@ -3192,6 +3202,13 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_leave))
             .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
+            .on_action(cx.listener(Self::divider_left))
+            .on_action(cx.listener(Self::divider_right))
+            .on_action(cx.listener(Self::divider_up))
+            .on_action(cx.listener(Self::divider_down))
+            .on_action(cx.listener(Self::divider_next))
+            .on_action(cx.listener(Self::divider_previous))
+            .on_action(cx.listener(Self::divider_leave))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_changes))
             .on_action(cx.listener(Self::refresh_files))

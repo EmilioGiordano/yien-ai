@@ -42,6 +42,9 @@ pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
 /// Key context of the attention tray (RF-ATN-13).
 pub(crate) const TRAY_CONTEXT: &str = "YienTray";
 
+/// Key context of a pane divider while it holds the keyboard (RF-PAN-02).
+pub(crate) const DIVIDER_CONTEXT: &str = "YienDivider";
+
 actions!(
     yien,
     [
@@ -211,6 +214,20 @@ actions!(
         TabBarLeave,
         /// Gives the keyboard back to the pane from the context bar.
         ContextBarLeave,
+        /// Moves the focused divider of side-by-side panes left.
+        DividerLeft,
+        /// Moves the focused divider of side-by-side panes right.
+        DividerRight,
+        /// Moves the focused divider of stacked panes up.
+        DividerUp,
+        /// Moves the focused divider of stacked panes down.
+        DividerDown,
+        /// Gives the keyboard to the next divider of the tab.
+        DividerNext,
+        /// Gives the keyboard to the previous divider of the tab.
+        DividerPrevious,
+        /// Gives the keyboard back to the pane from a divider.
+        DividerLeave,
         /// Takes down the status bar's notice.
         DismissNotice,
         /// Shows the selected tab's files in the context bar and gives the
@@ -278,6 +295,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
     let file_tree = Some(file_tree.as_str());
     let tray = Some(TRAY_CONTEXT);
+    let divider = Some(DIVIDER_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -314,6 +332,13 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("down", TrayDown, tray),
         KeyBinding::new("enter", TrayConfirm, tray),
         KeyBinding::new("escape", TrayClose, tray),
+        KeyBinding::new("left", DividerLeft, divider),
+        KeyBinding::new("right", DividerRight, divider),
+        KeyBinding::new("up", DividerUp, divider),
+        KeyBinding::new("down", DividerDown, divider),
+        KeyBinding::new("tab", DividerNext, divider),
+        KeyBinding::new("shift-tab", DividerPrevious, divider),
+        KeyBinding::new("escape", DividerLeave, divider),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -383,6 +408,13 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TrayDown),
         Box::new(TrayConfirm),
         Box::new(TrayClose),
+        Box::new(DividerLeft),
+        Box::new(DividerRight),
+        Box::new(DividerUp),
+        Box::new(DividerDown),
+        Box::new(DividerNext),
+        Box::new(DividerPrevious),
+        Box::new(DividerLeave),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -437,6 +469,24 @@ mod tests {
 
     const PALETTE_STACK: [&str; 4] = ["Root", CONTEXT, PALETTE_CONTEXT, "Input"];
     const TERMINAL_STACK: [&str; 3] = ["Root", CONTEXT, TERMINAL_CONTEXT];
+
+    #[test]
+    fn rf_pan_02_a_focused_divider_owns_the_arrows_tab_and_escape() {
+        let stack = ["Root", CONTEXT, DIVIDER_CONTEXT];
+        for (keys, action) in [
+            ("left", &DividerLeft as &dyn Action),
+            ("right", &DividerRight),
+            ("up", &DividerUp),
+            ("down", &DividerDown),
+            ("tab", &DividerNext),
+            ("shift-tab", &DividerPrevious),
+            ("escape", &DividerLeave),
+        ] {
+            assert!(first_is(keys, &stack, action), "{keys}");
+            assert!(!first_is(keys, &TERMINAL_STACK, action), "{keys}");
+        }
+        assert!(first_is("f6", &stack, &FocusNextRegion));
+    }
 
     #[test]
     fn rf_nav_01_the_palette_keys_win_over_the_text_input() {

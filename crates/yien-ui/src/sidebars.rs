@@ -432,6 +432,7 @@ mod tests {
                 true,
                 shown(&bars, Bar::Tab),
                 shown(&bars, Bar::Context),
+                false,
             )
         };
         assert_eq!(next(Region::Panes), Region::TabBar);
@@ -442,7 +443,8 @@ mod tests {
                 Region::Panes,
                 true,
                 shown(&bars, Bar::Tab),
-                shown(&bars, Bar::Context)
+                shown(&bars, Bar::Context),
+                false,
             ),
             Region::Panes
         );

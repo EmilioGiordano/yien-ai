@@ -1,4 +1,5 @@
-//! Dragging the dividers between panes (RF-PAN-02). The geometry is
+//! Dragging the dividers between panes, and moving them with the arrows
+//! once F6 gave them the keyboard (RF-PAN-02). The geometry is
 //! `crate::layout`; this draws the hit strips and tells the core, which
 //! keeps the new sizes in the session.
 
@@ -10,8 +11,10 @@ use gpui_kit::*;
 use yien_proto::{Command, LayoutNode, Orientation, PaneId, TabId};
 
 use super::{HALF_GUTTER, Shell};
+use crate::actions::*;
 use crate::layout::{self, Divider};
 use crate::model::TabView;
+use crate::region::{self, Region};
 
 /// The least terminal a drag or an arrow leaves a pane.
 const MIN_COLS: f32 = 10.0;
@@ -109,6 +112,17 @@ impl Shell {
         }
     }
 
+    /// The selected tab's dividers by key, in reading order.
+    pub(super) fn divider_keys(&self, cx: &App) -> Vec<DividerKey> {
+        self.workspace
+            .selected_tab()
+            .map(|tab| self.tab_dividers(tab, cx))
+            .unwrap_or_default()
+            .iter()
+            .map(|d| (d.before, d.after))
+            .collect()
+    }
+
     fn find_divider(&self, key: DividerKey, cx: &App) -> Option<(TabId, Divider)> {
         let tab = self.workspace.selected_tab()?;
         let divider = self
@@ -173,6 +187,14 @@ impl Shell {
         if grab.sent || cx.has_active_drag() {
             return;
         }
+        // A pane closed mid-drag: the core would answer with an error.
+        if self
+            .find_divider(grab.key, cx)
+            .is_none_or(|(tab, _)| tab != grab.tab)
+        {
+            self.divider_grab = None;
+            return;
+        }
         self.divider_grab = Some(DividerGrab { sent: true, ..grab });
         self.set_divider(grab.key, share, cx);
     }
@@ -183,6 +205,104 @@ impl Shell {
         if self.divider_grab.is_some_and(|g| g.sent && g.tab == tab) {
             self.divider_grab = None;
         }
+    }
+
+    /// Keeps the divider cursor on a drawn divider while the dividers have
+    /// the keyboard, and hands the keyboard to the pane once none is left.
+    /// Runs after core updates, never from render.
+    pub(super) fn keep_divider_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.divider_focus.is_focused(window) {
+            return;
+        }
+        let keys = self.divider_keys(cx);
+        self.divider_cursor = region::divider_on_entry(&keys, self.divider_cursor, true);
+        if self.divider_cursor.is_none() {
+            self.give_back_keyboard(window, cx);
+        }
+    }
+
+    /// F6 or Shift+F6 into the dividers.
+    pub(super) fn focus_dividers(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keys = self.divider_keys(cx);
+        self.divider_cursor = region::divider_on_entry(&keys, self.divider_cursor, forward);
+        if self.divider_cursor.is_none() {
+            self.give_back_keyboard(window, cx);
+            return;
+        }
+        window.focus(&self.divider_focus, cx);
+        self.keyboard_in_bar = true;
+    }
+
+    fn step_divider(&mut self, axis: Orientation, forward: bool, cx: &mut Context<Self>) {
+        self.modality = region::Modality::Keyboard;
+        let Some(key) = self.divider_cursor else {
+            return;
+        };
+        let Some((_, divider)) = self.find_divider(key, cx) else {
+            return;
+        };
+        if divider.orientation != axis {
+            return;
+        }
+        let area = along(axis, self.pane_area.get());
+        if let Some(share) = layout::stepped_share(&divider, forward, area) {
+            self.set_divider(key, share, cx);
+        }
+    }
+
+    pub(super) fn divider_left(&mut self, _: &DividerLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_divider(Orientation::Horizontal, false, cx);
+    }
+
+    pub(super) fn divider_right(
+        &mut self,
+        _: &DividerRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_divider(Orientation::Horizontal, true, cx);
+    }
+
+    pub(super) fn divider_up(&mut self, _: &DividerUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_divider(Orientation::Vertical, false, cx);
+    }
+
+    pub(super) fn divider_down(&mut self, _: &DividerDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_divider(Orientation::Vertical, true, cx);
+    }
+
+    fn cycle_divider(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.modality = region::Modality::Keyboard;
+        let keys = self.divider_keys(cx);
+        self.divider_cursor = region::next_divider(&keys, self.divider_cursor, forward);
+        cx.notify();
+    }
+
+    pub(super) fn divider_next(&mut self, _: &DividerNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_divider(true, cx);
+    }
+
+    pub(super) fn divider_previous(
+        &mut self,
+        _: &DividerPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_divider(false, cx);
+    }
+
+    pub(super) fn divider_leave(
+        &mut self,
+        _: &DividerLeave,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.give_back_keyboard(window, cx);
     }
 
     /// Measures the pane area at each paint, for the drag and the arrows.
@@ -207,6 +327,11 @@ impl Shell {
             a: 0.25,
             ..self.theme.ai
         };
+        let ring = self.ringed(Region::Dividers);
+        // Tracked only while the dividers hold the keyboard: a tracked
+        // element takes the focus on mouse-down, and a drag must leave the
+        // keyboard in the pane.
+        let holding = self.keyboard_region == Region::Dividers;
         let dragged = self
             .divider_grab
             .filter(|g| g.tab == tab.id && g.share.is_some() && !g.sent)
@@ -216,7 +341,8 @@ impl Shell {
             .map(|d| {
                 let key = (d.before, d.after);
                 let names = (self.workspace.pane(d.before), self.workspace.pane(d.after));
-                let lit = dragged == Some(key);
+                let cursor = holding && self.divider_cursor == Some(key);
+                let lit = (ring && cursor) || dragged == Some(key);
                 let tab_id = tab.id;
                 let strip = div()
                     .id(ElementId::Name(
@@ -227,10 +353,15 @@ impl Shell {
                     .aria_numeric_value(f64::from((d.share * 100.0).round()))
                     .aria_min_numeric_value(0.0)
                     .aria_max_numeric_value(100.0)
+                    .aria_numeric_value_step(f64::from(layout::DIVIDER_STEP * 100.0))
                     .occlude()
                     .absolute()
                     .hover(move |s| s.bg(wash))
-                    .when(lit, |s| s.bg(t.focus_ring()));
+                    .when(lit, |s| s.bg(t.focus_ring()))
+                    .when(cursor, |s| {
+                        s.key_context(DIVIDER_CONTEXT)
+                            .track_focus(&self.divider_focus)
+                    });
                 let strip = match d.orientation {
                     Orientation::Horizontal => strip
                         .aria_orientation(accesskit::Orientation::Vertical)

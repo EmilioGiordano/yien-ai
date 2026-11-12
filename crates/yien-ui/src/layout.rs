@@ -212,6 +212,18 @@ pub(crate) fn dragged_share(divider: &Divider, start: f32, moved: f32, area: f32
     (share > 0.0 && share < 1.0).then_some(share)
 }
 
+/// How far one arrow press moves a divider, as a fraction of its split, as
+/// in the prototype.
+pub(crate) const DIVIDER_STEP: f32 = 0.05;
+
+/// The share after one arrow press towards the end of the axis (`forward`:
+/// right or down) or back.
+pub(crate) fn stepped_share(divider: &Divider, forward: bool, area: f32) -> Option<f32> {
+    let step = DIVIDER_STEP * divider.split * area;
+    let moved = if forward { step } else { -step };
+    dragged_share(divider, divider.share, moved, area)
+}
+
 /// The layout with the divider between the children holding `before` and
 /// `after` moved so the first takes `share` of the pair: what a drag shows
 /// until the core answers. `None` when they are not on its two sides.
@@ -455,6 +467,19 @@ mod tests {
             50.0
         ));
         assert!(close(min_length(&column, Orientation::Vertical, MIN), 80.0));
+    }
+
+    #[test]
+    fn rf_pan_02_the_arrows_move_a_divider_by_a_step_of_its_split() {
+        let d = dividers(&sample(), MIN)[1];
+        // The column is the whole height: 5 % of 1000 is 50, a tenth of the pair.
+        let down = stepped_share(&d, true, 1000.0).unwrap();
+        let up = stepped_share(&d, false, 1000.0).unwrap();
+        assert!(close(down, 0.55), "{down}");
+        assert!(close(up, 0.45), "{up}");
+        let mut at_end = d;
+        at_end.share = 0.96;
+        assert!(close(stepped_share(&at_end, true, 1000.0).unwrap(), 0.96));
     }
 
     #[test]
