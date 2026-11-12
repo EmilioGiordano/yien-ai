@@ -2948,6 +2948,9 @@ impl Shell {
             pane_label.push_str(&format!(", {tag}"));
         }
         pane_label.push_str(&format!(", {}", pane.state.label()));
+        if pane.signal_lost && !shows.signal_lost {
+            pane_label.push_str(", signal lost");
+        }
         if !shows.folder_last {
             pane_label.push_str(&format!(", in {folder}"));
         }
