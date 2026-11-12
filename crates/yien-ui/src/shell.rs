@@ -38,7 +38,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
 };
-use crate::region::{self, Region};
+use crate::region::{self, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
@@ -152,6 +152,9 @@ pub(crate) struct Shell {
     tab_cursor: Option<TabId>,
     /// The region that held the keyboard at the last render.
     keyboard_region: Region,
+    /// Whether the last move came from the keyboard or a mouse button; the
+    /// bar rings show only for the keyboard.
+    modality: Modality,
     /// F6 put the keyboard in a bar and it has not been in the pane area
     /// since. Only then does the bar keep it when the core moves the pane
     /// focus; a click in a bar focuses it too, and the pane must still get
@@ -319,6 +322,7 @@ impl Shell {
             context_focus: cx.focus_handle(),
             tab_cursor: None,
             keyboard_region: Region::Panes,
+            modality: Modality::Keyboard,
             keyboard_in_bar: false,
             _subscriptions: vec![activation, appearance],
         };
@@ -581,11 +585,45 @@ impl Shell {
         }
     }
 
+    /// Any mouse button hides the keyboard rings until a key moves the
+    /// keyboard again; the keyboard itself stays where the click put it.
+    fn on_pointer_down(&mut self, cx: &mut Context<Self>) {
+        if self.modality != Modality::Pointer {
+            self.modality = Modality::Pointer;
+            cx.notify();
+        }
+    }
+
+    /// Calls `on_pointer_down` for every mouse button in the window. Not a
+    /// capture listener on the root: gpui runs those only while the root is
+    /// hovered, and an `occlude`d element on top (the icon buttons) hides it.
+    fn watch_pointer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let shell = cx.entity().downgrade();
+        canvas(
+            |_, _, _| (),
+            move |_, (), window, _| {
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = shell.update(cx, |this, cx| this.on_pointer_down(cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// Whether `bar` draws its keyboard ring at this render (RF-NAV-08).
+    pub(super) fn ringed(&self, bar: Region) -> bool {
+        region::ring_on(bar, self.keyboard_region, self.modality)
+    }
+
     /// F6 and Shift+F6 (RF-NAV-08). An overlay keeps the keyboard.
     fn move_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlay_has_keyboard() {
             return;
         }
+        self.modality = Modality::Keyboard;
         let from = self.region(window, cx);
         let to = region::next_region(
             from,
@@ -632,6 +670,7 @@ impl Shell {
     }
 
     fn move_tab_cursor(&mut self, by: isize, cx: &mut Context<Self>) {
+        self.modality = Modality::Keyboard;
         let rows = self.workspace.drawn_tabs();
         let selected = self.workspace.selected_tab().map(|t| t.id);
         self.tab_cursor = region::move_cursor(&rows, self.tab_cursor, selected, by);
@@ -671,8 +710,7 @@ impl Shell {
 
     /// The tab row to ring, while the tab bar has the keyboard.
     fn ringed_tab(&self) -> Option<TabId> {
-        self.tab_cursor
-            .filter(|_| self.keyboard_region == Region::TabBar)
+        self.tab_cursor.filter(|_| self.ringed(Region::TabBar))
     }
 
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1453,6 +1491,7 @@ impl Shell {
     }
 
     fn rename_tab(&mut self, _: &RenameTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.modality = Modality::Keyboard;
         match self.workspace.selected_tab().map(|t| t.id) {
             Some(tab) => self.start_rename(tab, window, cx),
             None => {
@@ -1980,9 +2019,7 @@ impl Shell {
                     .pb(px(10.0))
                     .children(groups),
             )
-            .when(self.keyboard_region == Region::TabBar, |bar| {
-                bar.child(focus_ring(&t))
-            })
+            .when(self.ringed(Region::TabBar), |bar| bar.child(focus_ring(&t)))
             .children(self.render_bar_edge(Bar::Tab, cx))
     }
 
@@ -2682,7 +2719,7 @@ impl Shell {
             .border_l_1()
             .border_color(t.line)
             .bg(t.panel)
-            .when(self.keyboard_region == Region::ContextBar, |bar| {
+            .when(self.ringed(Region::ContextBar), |bar| {
                 bar.child(focus_ring(&t))
             })
             .children(self.render_bar_edge(Bar::Context, cx))
@@ -3022,6 +3059,7 @@ impl Render for Shell {
         v_flex()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
+            .child(self.watch_pointer(cx))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::open_config_file))
             .on_action(cx.listener(Self::toggle_tab_bar))
