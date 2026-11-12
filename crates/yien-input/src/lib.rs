@@ -39,6 +39,12 @@ impl Mods {
         alt: false,
         shift: false,
     };
+    /// Shift alone.
+    pub const SHIFT: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: true,
+    };
 
     fn csi_param(self) -> u8 {
         1 + u8::from(self.shift) + 2 * u8::from(self.alt) + 4 * u8::from(self.ctrl)
@@ -202,6 +208,58 @@ pub fn encode_in(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
     encode(key, mods)
 }
 
+/// The kitty keyboard protocol flag "disambiguate escape codes" (bit 0).
+pub const KITTY_DISAMBIGUATE: u8 = 1;
+
+/// The modes a program set that change how a key press is encoded.
+///
+/// ```
+/// use yien_input::KeyModes;
+///
+/// let modes = KeyModes { win32_input: true, ..KeyModes::default() };
+/// assert!(!modes.app_cursor);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyModes {
+    /// Application cursor keys (DECCKM).
+    pub app_cursor: bool,
+    /// win32-input-mode (DECSET 9001), which ConPTY asks for.
+    pub win32_input: bool,
+    /// The active kitty keyboard protocol flags (`CSI > flags u`).
+    pub kitty_flags: u8,
+}
+
+/// Like [`encode_in`], but Shift+Enter keeps its Shift where the program can
+/// see it: `CSI 13;2u` when the kitty protocol asks to disambiguate, else a
+/// Win32 Shift+Enter key event when win32-input-mode is on, else a plain `\r`.
+/// Every other key is encoded exactly as [`encode_in`] does.
+///
+/// ```
+/// use yien_input::{encode_with, Key, KeyModes, Mods};
+///
+/// let kitty = KeyModes { kitty_flags: 1, ..KeyModes::default() };
+/// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, kitty), Some(b"\x1b[13;2u".to_vec()));
+/// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, KeyModes::default()), Some(b"\r".to_vec()));
+/// assert_eq!(encode_with(&Key::Enter, Mods::NONE, kitty), Some(b"\r".to_vec()));
+/// ```
+pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
+    if *key == Key::Enter && mods == Mods::SHIFT {
+        if modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
+            return Some(b"\x1b[13;2u".to_vec());
+        }
+        if modes.win32_input {
+            // What Windows Terminal sends. PSReadLine binds Shift+Enter to
+            // AddLine but inserts a literal CR for ESC CR (Alt+Enter, unbound).
+            let event = win32::KeyEvent {
+                scan_code: win32::scan::RETURN,
+                ..win32::KeyEvent::down(win32::vk::RETURN, u16::from(b'\r'), Mods::SHIFT)
+            };
+            return Some(win32::press(&event));
+        }
+    }
+    encode_in(key, mods, modes.app_cursor)
+}
+
 /// What a terminal program asked to hear when its pane gains or loses the
 /// keyboard (mode 1004).
 ///
@@ -319,6 +377,158 @@ mod tests {
     #[test]
     fn enter_is_carriage_return() {
         assert_eq!(enc(Key::Enter, Mods::NONE), b"\r");
+    }
+
+    const WIN32: KeyModes = KeyModes {
+        app_cursor: false,
+        win32_input: true,
+        kitty_flags: 0,
+    };
+    const KITTY: KeyModes = KeyModes {
+        app_cursor: false,
+        win32_input: false,
+        kitty_flags: KITTY_DISAMBIGUATE,
+    };
+
+    fn all_modes() -> Vec<KeyModes> {
+        let mut out = Vec::new();
+        for win32_input in [false, true] {
+            for kitty_flags in [0, KITTY_DISAMBIGUATE, 0b1_1111, 0b0_1010] {
+                for app_cursor in [false, true] {
+                    out.push(KeyModes {
+                        app_cursor,
+                        win32_input,
+                        kitty_flags,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn rf_age_02_shift_enter_is_csi_u_when_the_program_asked_to_disambiguate() {
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, KITTY).unwrap(),
+            b"\x1b[13;2u"
+        );
+        let all = KeyModes {
+            kitty_flags: 0b1_1111,
+            ..KITTY
+        };
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, all).unwrap(),
+            b"\x1b[13;2u"
+        );
+    }
+
+    #[test]
+    fn rf_age_02_shift_enter_is_a_win32_event_when_conpty_asked_for_them() {
+        // VK_RETURN, scan code 0x1C, CR, SHIFT_PRESSED, not ENHANCED_KEY
+        // (that bit would make it the keypad Enter): down, then up.
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, WIN32).unwrap(),
+            b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_"
+        );
+    }
+
+    #[test]
+    fn rf_age_02_kitty_disambiguation_wins_over_win32_input_mode() {
+        let both = KeyModes {
+            win32_input: true,
+            ..KITTY
+        };
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, both).unwrap(),
+            b"\x1b[13;2u"
+        );
+        // Flags without disambiguation leave it to win32-input-mode.
+        let other_flags = KeyModes {
+            kitty_flags: 0b0_1010,
+            ..WIN32
+        };
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, other_flags),
+            encode_with(&Key::Enter, Mods::SHIFT, WIN32)
+        );
+    }
+
+    #[test]
+    fn rf_pan_06_shift_enter_without_either_mode_stays_carriage_return() {
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, KeyModes::default()).unwrap(),
+            b"\r"
+        );
+        let no_disambiguation = KeyModes {
+            kitty_flags: 0b0_1010,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, no_disambiguation).unwrap(),
+            b"\r"
+        );
+    }
+
+    #[test]
+    fn rf_pan_06_other_enter_combinations_keep_their_bytes_in_every_mode() {
+        let combos = [
+            Mods::NONE,
+            Mods::CTRL,
+            Mods {
+                alt: true,
+                ..Mods::NONE
+            },
+            Mods {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+            Mods {
+                alt: true,
+                shift: true,
+                ctrl: false,
+            },
+            Mods {
+                ctrl: true,
+                alt: true,
+                shift: true,
+            },
+        ];
+        for modes in all_modes() {
+            for mods in combos {
+                assert_eq!(
+                    encode_with(&Key::Enter, mods, modes).unwrap(),
+                    b"\r",
+                    "{mods:?} in {modes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_keys_other_than_enter_are_encoded_as_before_in_every_mode() {
+        let keys = [
+            Key::Char('c'),
+            Key::Tab,
+            Key::Escape,
+            Key::Backspace,
+            Key::Up,
+            Key::Home,
+            Key::Delete,
+            Key::F(5),
+        ];
+        let combos = [Mods::NONE, Mods::CTRL, Mods::SHIFT];
+        for modes in all_modes() {
+            for key in &keys {
+                for mods in combos {
+                    assert_eq!(
+                        encode_with(key, mods, modes),
+                        encode_in(key, mods, modes.app_cursor),
+                        "{key:?} {mods:?} in {modes:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
