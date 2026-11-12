@@ -275,7 +275,7 @@ impl TerminalPane {
             platform: keystroke.modifiers.platform,
             prefer_text: event.prefer_character_input,
         };
-        if let Some(bytes) = grid::key_bytes(&press, self.modes().app_cursor) {
+        if let Some(bytes) = grid::key_bytes(&press, &self.modes()) {
             self.write_input(bytes, cx);
             cx.stop_propagation();
         }

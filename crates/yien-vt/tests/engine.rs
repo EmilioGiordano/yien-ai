@@ -526,6 +526,58 @@ fn rf_pan_09_powershell_on_the_bundled_conpty_leaves_the_mouse_to_the_terminal()
     assert_eq!(e.selection_text().as_deref(), Some("hello"));
 }
 
+#[test]
+fn rf_age_02_the_bundled_conpty_asks_for_win32_input_mode() {
+    let mut e = engine(100, 30);
+    assert!(!e.modes().win32_input);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    assert!(e.modes().win32_input);
+    assert_eq!(e.frame().modes.kitty_keyboard, 0);
+    // The in-box ConPTY of Windows 10 never asks for it.
+    let mut e = engine(100, 30);
+    e.feed(IN_BOX_CONPTY_FULL_SCREEN);
+    assert!(!e.modes().win32_input);
+}
+
+#[test]
+fn rf_age_02_ris_turns_the_keyboard_modes_off() {
+    let mut e = engine(20, 5);
+    e.feed(b"\x1b[?9001h\x1b[>1u");
+    assert!(e.modes().win32_input);
+    assert_eq!(e.modes().kitty_keyboard, 1);
+    e.feed(b"\x1bc");
+    assert!(!e.modes().win32_input);
+    assert_eq!(e.modes().kitty_keyboard, 0);
+}
+
+#[test]
+fn rf_age_02_kitty_flags_follow_the_screen() {
+    let mut e = engine(20, 5);
+    e.feed(b"\x1b[>1u\x1b[?1049h");
+    assert!(e.modes().alt_screen);
+    assert_eq!(e.modes().kitty_keyboard, 0);
+    e.feed(b"\x1b[>3u\x1b[?1049l");
+    assert_eq!(e.modes().kitty_keyboard, 1);
+    e.feed(b"\x1b[<u");
+    assert_eq!(e.modes().kitty_keyboard, 0);
+}
+
+#[test]
+fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
+    // crossterm asks for the flags and then for device attributes, and takes
+    // the protocol as missing if the attributes come back first.
+    let mut e = engine(20, 5);
+    assert_eq!(e.feed(b"\x1b[?u\x1b[c").replies, b"\x1b[?0u\x1b[?6c");
+    assert_eq!(
+        e.feed(b"\x1b[c\x1b[>1u\x1b[?u\x1b[6n").replies,
+        b"\x1b[?6c\x1b[?1u\x1b[1;1R"
+    );
+    // The query cut across two reads is still answered before the attributes.
+    let mut e = engine(20, 5);
+    assert!(e.feed(b"\x1b[?").replies.is_empty());
+    assert_eq!(e.feed(b"u\x1b[c").replies, b"\x1b[?0u\x1b[?6c");
+}
+
 /// A program that enters the alternate screen, asks for mouse reports and
 /// writes "hello" to the clipboard with OSC 52, as each pseudo console hands
 /// it on. Recorded from real ones, 100 by 30; the in-box one (Windows 10

@@ -415,6 +415,10 @@ pub struct Modes {
     pub mouse: MouseTracking,
     /// How mouse reports are encoded.
     pub mouse_encoding: MouseEncoding,
+    /// Keys may be sent as Win32 key events (mode 9001, which ConPTY asks for).
+    pub win32_input: bool,
+    /// The active kitty keyboard protocol flags; 0 when the program set none.
+    pub kitty_keyboard: u8,
 }
 
 #[cfg(test)]

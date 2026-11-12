@@ -17,6 +17,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::keep_selection::KeepSelection;
+use crate::key_modes::KeyModeTracker;
 use crate::osc_scan::OscScanner;
 use crate::palette::{Palette, Rgb};
 use crate::screen_dump::{self, DumpLimits};
@@ -115,6 +116,7 @@ pub struct AlacrittyEngine {
     parser: Processor<SyncFlag>,
     events: Receiver<Event>,
     osc: OscScanner,
+    keys: KeyModeTracker,
     palette: Palette,
     link_regex: Option<RegexSearch>,
 }
@@ -129,6 +131,9 @@ impl AlacrittyEngine {
                 blinking: false,
             },
             osc52: Osc52::OnlyCopy,
+            // Keep `kitty_keyboard` off: alacritty 0.26 evicts a full keyboard
+            // stack from the title stack and panics when that one is empty.
+            // `KeyModeTracker` keeps the kitty flags instead.
             ..Config::default()
         };
         let (sender, events) = channel();
@@ -138,6 +143,7 @@ impl AlacrittyEngine {
             parser: Processor::new(),
             events,
             osc: OscScanner::new(),
+            keys: KeyModeTracker::new(),
             palette: config.palette,
             link_regex: None,
         }
@@ -305,8 +311,18 @@ impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8]) -> VtOutput {
         let mut out = VtOutput::default();
         self.osc.scan_into(bytes, &mut out.signals);
+        let mut start = 0;
+        for reply in self.keys.scan(bytes) {
+            let part = bytes.get(start..reply.at).unwrap_or_default();
+            self.parser
+                .advance(&mut KeepSelection(&mut self.term), part);
+            self.collect(&mut out);
+            out.replies.extend_from_slice(&reply.bytes);
+            start = reply.at;
+        }
+        let rest = bytes.get(start..).unwrap_or_default();
         self.parser
-            .advance(&mut KeepSelection(&mut self.term), bytes);
+            .advance(&mut KeepSelection(&mut self.term), rest);
         self.collect(&mut out);
         out
     }
@@ -412,6 +428,8 @@ impl VtEngine for AlacrittyEngine {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
             mouse,
             mouse_encoding,
+            win32_input: self.keys.win32_input(),
+            kitty_keyboard: self.keys.kitty_flags(),
         }
     }
 

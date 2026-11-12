@@ -4,7 +4,7 @@
 
 use yien_input::mouse::{self, Action, Button, MouseEvent};
 use yien_input::paste::{self, Risk};
-use yien_input::{Key, Mods};
+use yien_input::{Key, KeyModes, Mods};
 use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, Modes, MouseEncoding, MouseTracking, Rgb,
     SelectionKind, Side, ViewportPoint,
@@ -326,13 +326,19 @@ pub(crate) struct KeyPress<'a> {
 /// The bytes to write for a key press, or `None` to let the text reach the
 /// pane through the input handler (plain and shifted characters, AltGr,
 /// dead keys and the IME), so no character is ever sent twice.
-pub(crate) fn key_bytes(press: &KeyPress<'_>, app_cursor: bool) -> Option<Vec<u8>> {
+pub(crate) fn key_bytes(press: &KeyPress<'_>, modes: &Modes) -> Option<Vec<u8>> {
     if press.prefer_text || press.platform {
         return None;
     }
     let mods = press.mods;
+    let app_cursor = modes.app_cursor;
     if let Some(key) = named_key(press.key) {
-        return yien_input::encode_in(&key, mods, app_cursor);
+        let key_modes = KeyModes {
+            app_cursor,
+            win32_input: modes.win32_input,
+            kitty_flags: modes.kitty_keyboard,
+        };
+        return yien_input::encode_with(&key, mods, key_modes);
     }
     let base = if press.key == "space" {
         ' '
@@ -789,29 +795,32 @@ mod tests {
     #[test]
     fn named_keys_are_encoded_and_follow_app_cursor() {
         assert_eq!(
-            key_bytes(&press("enter", None, Mods::NONE), false).unwrap(),
+            key_bytes(&press("enter", None, Mods::NONE), &modes()).unwrap(),
             b"\r"
         );
         assert_eq!(
-            key_bytes(&press("up", None, Mods::NONE), true).unwrap(),
+            key_bytes(&press("up", None, Mods::NONE), &app_cursor()).unwrap(),
             b"\x1bOA"
         );
         assert_eq!(
-            key_bytes(&press("f5", None, Mods::NONE), false).unwrap(),
+            key_bytes(&press("f5", None, Mods::NONE), &modes()).unwrap(),
             b"\x1b[15~"
         );
         assert_eq!(
-            key_bytes(&press("tab", None, SHIFT), false).unwrap(),
+            key_bytes(&press("tab", None, SHIFT), &modes()).unwrap(),
             b"\x1b[Z"
         );
     }
 
     #[test]
     fn plain_and_shifted_characters_go_through_the_input_handler() {
-        assert_eq!(key_bytes(&press("a", Some("a"), Mods::NONE), false), None);
-        assert_eq!(key_bytes(&press("a", Some("A"), SHIFT), false), None);
         assert_eq!(
-            key_bytes(&press("space", Some(" "), Mods::NONE), false),
+            key_bytes(&press("a", Some("a"), Mods::NONE), &modes()),
+            None
+        );
+        assert_eq!(key_bytes(&press("a", Some("A"), SHIFT), &modes()), None);
+        assert_eq!(
+            key_bytes(&press("space", Some(" "), Mods::NONE), &modes()),
             None
         );
     }
@@ -819,15 +828,15 @@ mod tests {
     #[test]
     fn ctrl_and_alt_combinations_are_encoded_here() {
         assert_eq!(
-            key_bytes(&press("c", None, Mods::CTRL), false).unwrap(),
+            key_bytes(&press("c", None, Mods::CTRL), &modes()).unwrap(),
             vec![0x03]
         );
         assert_eq!(
-            key_bytes(&press("space", None, Mods::CTRL), false).unwrap(),
+            key_bytes(&press("space", None, Mods::CTRL), &modes()).unwrap(),
             vec![0]
         );
         assert_eq!(
-            key_bytes(&press("b", Some("b"), ALT), false).unwrap(),
+            key_bytes(&press("b", Some("b"), ALT), &modes()).unwrap(),
             b"\x1bb"
         );
     }
@@ -844,18 +853,87 @@ mod tests {
             },
         );
         altgr.prefer_text = true;
-        assert_eq!(key_bytes(&altgr, false), None);
+        assert_eq!(key_bytes(&altgr, &modes()), None);
     }
 
     #[test]
     fn the_windows_key_is_left_alone() {
         let mut p = press("e", None, Mods::NONE);
         p.platform = true;
-        assert_eq!(key_bytes(&p, false), None);
+        assert_eq!(key_bytes(&p, &modes()), None);
+    }
+
+    #[test]
+    fn rf_age_02_shift_enter_follows_the_keyboard_mode_the_program_set() {
+        // GPUI reports Shift+Enter as "enter" with no text: CR is a control.
+        let shift_enter = press("enter", None, SHIFT);
+        assert_eq!(key_bytes(&shift_enter, &modes()).unwrap(), b"\r");
+        let conpty = Modes {
+            win32_input: true,
+            ..modes()
+        };
+        assert_eq!(
+            key_bytes(&shift_enter, &conpty).unwrap(),
+            b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_"
+        );
+        let kitty = Modes {
+            kitty_keyboard: 1,
+            ..modes()
+        };
+        assert_eq!(key_bytes(&shift_enter, &kitty).unwrap(), b"\x1b[13;2u");
+        // Under ConPTY the Win32 event wins, so leftover flags never reach PSReadLine.
+        let both = Modes {
+            kitty_keyboard: 1,
+            ..conpty
+        };
+        assert_eq!(
+            key_bytes(&shift_enter, &both),
+            key_bytes(&shift_enter, &conpty)
+        );
+        // Plain Enter is unchanged in every mode.
+        let enter = press("enter", None, Mods::NONE);
+        for m in [modes(), conpty, kitty, both] {
+            assert_eq!(key_bytes(&enter, &m).unwrap(), b"\r");
+            assert_eq!(key_bytes(&press("enter", None, ALT), &m).unwrap(), b"\r");
+            assert_eq!(
+                key_bytes(&press("enter", None, Mods::CTRL), &m).unwrap(),
+                b"\r"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_backspace_and_ctrl_delete_follow_win32_input_mode() {
+        let back = press("backspace", None, Mods::CTRL);
+        let delete = press("delete", None, Mods::CTRL);
+        assert_eq!(key_bytes(&back, &modes()).unwrap(), vec![0x7f]);
+        assert_eq!(key_bytes(&delete, &modes()).unwrap(), b"\x1b[3;5~");
+        let conpty = Modes {
+            win32_input: true,
+            ..modes()
+        };
+        assert_eq!(
+            key_bytes(&back, &conpty).unwrap(),
+            b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_"
+        );
+        assert_eq!(
+            key_bytes(&delete, &conpty).unwrap(),
+            b"\x1b[46;83;0;1;264;1_\x1b[46;83;0;0;264;1_"
+        );
+        // Plain Backspace is unchanged.
+        let plain = press("backspace", None, Mods::NONE);
+        assert_eq!(key_bytes(&plain, &conpty).unwrap(), vec![0x7f]);
     }
 
     fn modes() -> Modes {
         Modes::default()
+    }
+
+    fn app_cursor() -> Modes {
+        Modes {
+            app_cursor: true,
+            ..modes()
+        }
     }
 
     #[test]
