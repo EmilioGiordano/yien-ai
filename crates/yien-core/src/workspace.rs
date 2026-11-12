@@ -106,6 +106,8 @@ pub(crate) enum PaneEvent {
     /// The actor itself died; a relaunch starts a new one.
     Crashed,
     Selection(Option<String>),
+    /// Text a program asked to put on the clipboard (OSC 52).
+    Clipboard(String),
 }
 
 impl PaneEvent {
@@ -121,6 +123,7 @@ impl PaneEvent {
                 | PaneEvent::Cwd(_)
                 | PaneEvent::SessionId { .. }
                 | PaneEvent::Selection(_)
+                | PaneEvent::Clipboard(_)
         )
     }
 }
@@ -1072,6 +1075,9 @@ impl Workspace {
             }
             PaneEvent::Selection(text) => {
                 fx.push(Effect::Emit(CoreMsg::SelectionText { pane, text }));
+            }
+            PaneEvent::Clipboard(text) => {
+                fx.push(Effect::Emit(CoreMsg::ClipboardWrite { pane, text }));
             }
             PaneEvent::Notice(message) => {
                 fx.push(Effect::Emit(CoreMsg::Error {

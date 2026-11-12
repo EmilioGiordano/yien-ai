@@ -138,6 +138,21 @@ pub(crate) fn lock(engine: &Engine) -> MutexGuard<'_, Box<dyn VtEngine>> {
     engine.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The most a program may put on the clipboard in one write, in bytes.
+const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
+
+/// The report for a clipboard write, or the length of one over the limit.
+/// An empty write reports nothing: it would only clear the clipboard.
+fn clipboard_event(text: String) -> Result<PaneEvent, usize> {
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(text.len());
+    }
+    if text.is_empty() {
+        return Err(0);
+    }
+    Ok(PaneEvent::Clipboard(text))
+}
+
 /// The kind of attention state a pane is in, if any: "needs you", error
 /// or done. A pane keeps its place in the attention order while its state
 /// stays of the same kind.
@@ -1117,6 +1132,9 @@ impl Actor {
             self.outbox.replies.push_back(out.replies);
             self.flush();
         }
+        if let Some(text) = out.clipboard {
+            self.report_clipboard(text);
+        }
         if let Some(title) = out.title {
             self.report(PaneEvent::Title(match title {
                 TitleChange::Set(t) => Some(t),
@@ -1136,6 +1154,15 @@ impl Actor {
         }
         self.step(&Signal::Output);
         self.dirty = true;
+    }
+
+    fn report_clipboard(&self, text: String) {
+        match clipboard_event(text) {
+            Ok(event) => self.report(event),
+            Err(len) => {
+                tracing::debug!(pane = self.id.get(), len, "clipboard write over the limit");
+            }
+        }
     }
 
     /// Writes what the outbox holds, replies first, then the resize, then the
@@ -1451,6 +1478,18 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let thread = std::thread::spawn(move || read_loop(events, feed, tx));
         (events_tx, rx, thread)
+    }
+
+    #[test]
+    fn rf_pan_09_a_clipboard_write_over_one_mebibyte_is_dropped() {
+        let at_limit = "a".repeat(MAX_CLIPBOARD_BYTES);
+        assert_eq!(
+            clipboard_event(at_limit.clone()),
+            Ok(PaneEvent::Clipboard(at_limit))
+        );
+        let over = "a".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert_eq!(clipboard_event(over), Err(MAX_CLIPBOARD_BYTES + 1));
+        assert_eq!(clipboard_event(String::new()), Err(0));
     }
 
     #[test]
