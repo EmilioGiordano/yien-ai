@@ -18,13 +18,28 @@ const PILL_TEXT: f32 = 130.0;
 const PILL_KEYS: f32 = 90.0;
 const PILL_CHROME: f32 = 40.0;
 const PILL_MARGIN: f32 = 1.1;
-/// How far the bar's centre sits from the window's: the bar starts after
-/// gpui-component's left padding and ends before its three 34 px window
-/// buttons. The right column's start margin cancels it.
+/// What gpui-component's `TitleBar` puts around YIEN's row: left padding,
+/// window buttons (count, width) and the row's own right padding.
 #[cfg(target_os = "macos")]
-pub(crate) const CENTRE_SHIFT: f32 = -80.0;
+const BAR_LEFT_PADDING: f32 = 80.0;
 #[cfg(not(target_os = "macos"))]
-pub(crate) const CENTRE_SHIFT: f32 = 3.0 * 34.0 - 12.0;
+const BAR_LEFT_PADDING: f32 = 12.0;
+#[cfg(target_os = "macos")]
+const CONTROLS: f32 = 0.0;
+#[cfg(not(target_os = "macos"))]
+const CONTROLS: f32 = 3.0;
+const CONTROL_WIDTH: f32 = 34.0;
+pub(crate) const ROW_RIGHT_PADDING: f32 = 10.0;
+
+/// The margins that put the pill on the window's centre: the end margin of the
+/// left group and the start margin of the right group. Flex shares the room
+/// left after margins equally, so the side with less outside the row needs
+/// the margin.
+pub(crate) fn centring_margins() -> (f32, f32) {
+    let right = CONTROLS * CONTROL_WIDTH + ROW_RIGHT_PADDING;
+    let extra = right - BAR_LEFT_PADDING;
+    (extra.max(0.0), (-extra).max(0.0))
+}
 
 /// What the title bar draws at a given width.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,10 +72,12 @@ impl TitleLayout {
             }
             buttons -= 1;
         };
-        let gaps = (3 + buttons) as f32 * GAP;
-        let slack = room - fixed - buttons as f32 * BUTTON - gaps - pill;
+        let (left_margin, right_margin) = centring_margins();
+        let left_min = LOGO + LOGO_TEXT * scale + GAP;
+        let right_min = COUNTER * scale + buttons as f32 * (BUTTON + GAP);
+        let equal_room = room - 2.0 * GAP - pill - left_margin - right_margin;
         Self {
-            centred: slack >= CENTRE_SHIFT.max(0.0),
+            centred: equal_room >= 2.0 * left_min.max(right_min),
             pill_keys: pill >= keys_need,
             tab_bar_button: buttons >= 1,
             context_bar_button: buttons >= 2,
@@ -71,7 +88,9 @@ impl TitleLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::TitleLayout;
+    use super::{
+        BAR_LEFT_PADDING, CONTROL_WIDTH, CONTROLS, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+    };
 
     const BIGGEST: f32 = 20.0 / 13.0;
 
@@ -132,6 +151,42 @@ mod tests {
                 assert!(!gave_way || !now.centred, "centring came back at {window}");
                 if !now.centred {
                     gave_way = true;
+                }
+                window -= 5.0;
+            }
+        }
+    }
+
+    #[test]
+    fn rf_nav_01_centring_margins_put_the_pill_on_the_window_centre() {
+        let (left, right) = centring_margins();
+        assert!(left == 0.0 || right == 0.0);
+        for window in [960.0_f32, 1280.0, 1600.0, 1920.0] {
+            let pill = 300.0;
+            let gap = 12.0;
+            let controls = CONTROLS * CONTROL_WIDTH;
+            let boxes = (window
+                - BAR_LEFT_PADDING
+                - controls
+                - ROW_RIGHT_PADDING
+                - pill
+                - 2.0 * gap
+                - left
+                - right)
+                / 2.0;
+            let centre = BAR_LEFT_PADDING + boxes + left + gap + pill / 2.0;
+            assert!((centre - window / 2.0).abs() < 0.01, "off at {window}");
+        }
+    }
+
+    #[test]
+    fn rnf_19_centring_only_when_both_groups_can_grow_with_the_margin() {
+        for scale in [1.0, 1.25, 1.5, BIGGEST] {
+            let mut window = 2400.0;
+            while window >= 300.0 {
+                if TitleLayout::at(window, scale).centred {
+                    let (l, r) = centring_margins();
+                    assert!(window - 124.0 - 24.0 - l - r >= 2.0 * 28.0, "{window}");
                 }
                 window -= 5.0;
             }
