@@ -22,7 +22,9 @@ pub(super) enum PaneAction {
     Copy,
     Paste,
     SplitRight,
+    SplitLeft,
     SplitDown,
+    SplitUp,
     ToggleMaximize,
     Relaunch,
     Terminate,
@@ -39,7 +41,9 @@ impl PaneAction {
             PaneAction::Copy => "terminal.copy",
             PaneAction::Paste => "terminal.paste",
             PaneAction::SplitRight => "pane.split_right",
+            PaneAction::SplitLeft => "pane.split_left",
             PaneAction::SplitDown => "pane.split_down",
+            PaneAction::SplitUp => "pane.split_up",
             PaneAction::ToggleMaximize => "pane.maximize",
             PaneAction::Relaunch => "pane.relaunch",
             PaneAction::Terminate => "pane.terminate",
@@ -47,6 +51,18 @@ impl PaneAction {
             PaneAction::NewTab => "tab.new",
             PaneAction::CloseTab => "tab.close",
             PaneAction::ClosePane => "pane.close",
+        }
+    }
+
+    /// For a split, its axis and whether the new pane goes before (left of
+    /// or above) the pane.
+    pub(super) fn split(self) -> Option<(Orientation, bool)> {
+        match self {
+            PaneAction::SplitRight => Some((Orientation::Horizontal, false)),
+            PaneAction::SplitLeft => Some((Orientation::Horizontal, true)),
+            PaneAction::SplitDown => Some((Orientation::Vertical, false)),
+            PaneAction::SplitUp => Some((Orientation::Vertical, true)),
+            _ => None,
         }
     }
 }
@@ -82,7 +98,9 @@ pub(super) fn pane_menu(
     };
     Menu::new(vec![
         item("Split right", SplitRight, true, keys),
+        item("Split left", SplitLeft, true, keys),
         item("Split down", SplitDown, true, keys),
+        item("Split up", SplitUp, true, keys),
         MenuEntry::Separator,
         item(maximize, ToggleMaximize, maximized || !alone, keys),
         item("Relaunch", Relaunch, pane.exited, keys),
@@ -109,7 +127,9 @@ pub(super) fn terminal_menu(
         item("Paste", Paste, true, keys),
         MenuEntry::Separator,
         item("Split right", SplitRight, true, keys),
+        item("Split left", SplitLeft, true, keys),
         item("Split down", SplitDown, true, keys),
+        item("Split up", SplitUp, true, keys),
         MenuEntry::Separator,
         item("New tab", NewTab, true, keys),
         item("Close tab", CloseTab, true, keys),
@@ -318,8 +338,14 @@ impl Shell {
                     terminal.update(cx, |t, cx| t.paste_clipboard(cx));
                 }
             }
-            PaneAction::SplitRight => self.split_pane(pane, Orientation::Horizontal, None, cx),
-            PaneAction::SplitDown => self.split_pane(pane, Orientation::Vertical, None, cx),
+            PaneAction::SplitRight
+            | PaneAction::SplitLeft
+            | PaneAction::SplitDown
+            | PaneAction::SplitUp => {
+                if let Some((orientation, before)) = action.split() {
+                    self.split_pane_on(pane, orientation, before, None, cx);
+                }
+            }
             PaneAction::ToggleMaximize => self.command(Command::ToggleMaximize { pane }, cx),
             PaneAction::Relaunch => self.command(Command::RelaunchPane { pane }, cx),
             PaneAction::Terminate => self.terminate(pane, cx),
@@ -454,7 +480,9 @@ mod tests {
             labels,
             [
                 "Split right",
+                "Split left",
                 "Split down",
+                "Split up",
                 "Maximize",
                 "Relaunch",
                 "Terminate",
@@ -535,12 +563,44 @@ mod tests {
                 "Copy",
                 "Paste",
                 "Split right",
+                "Split left",
                 "Split down",
+                "Split up",
                 "New tab",
                 "Close tab",
                 "Close pane",
             ]
         );
+    }
+
+    #[test]
+    fn rf_pan_01_each_split_item_puts_the_new_pane_on_its_side() {
+        use yien_proto::Orientation::{Horizontal, Vertical};
+        let sides = [
+            ("Split right", Horizontal, false),
+            ("Split left", Horizontal, true),
+            ("Split down", Vertical, false),
+            ("Split up", Vertical, true),
+        ];
+        for menu in [
+            pane_menu(&pane(), false, false, &no_keys),
+            terminal_menu(false, &no_keys),
+        ] {
+            let splits: Vec<_> = menu
+                .entries()
+                .iter()
+                .filter_map(|e| match e {
+                    MenuEntry::Item(i) => i.action.split().map(|(o, before)| {
+                        let title = spec(i.action.command()).unwrap().title;
+                        assert_eq!(title, format!("pane: {}", i.label.to_lowercase()));
+                        (i.label.as_str(), o, before)
+                    }),
+                    MenuEntry::Separator => None,
+                })
+                .collect();
+            assert_eq!(splits, sides);
+        }
+        assert_eq!(PaneAction::ClosePane.split(), None);
     }
 
     #[test]
