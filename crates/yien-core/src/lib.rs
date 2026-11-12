@@ -196,7 +196,7 @@ impl Default for CoreConfig {
     /// The user's shell, the built-in profiles and the real clock.
     fn default() -> Self {
         Self {
-            shell: default_shell(),
+            shell: default_shell(true),
             profiles: yien_agent::builtin_profiles().unwrap_or_default(),
             vt: VtConfig::default(),
             clock: Arc::new(MonotonicClock::new()),
