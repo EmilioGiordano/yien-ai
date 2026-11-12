@@ -87,6 +87,17 @@ pub(crate) fn start_palette(initial: &ConfigUpdate) -> Option<TerminalPalette> {
     }
 }
 
+/// Whether shells report their folder, from the first reading: a file that
+/// does not read keeps the default, on.
+pub(crate) fn shell_integration(initial: &ConfigUpdate) -> bool {
+    match initial {
+        ConfigUpdate::Loaded(loaded) => loaded.config.shell_integration,
+        ConfigUpdate::Invalid(_) | ConfigUpdate::Unreadable(_) => {
+            yien_config::Config::default().shell_integration
+        }
+    }
+}
+
 /// What one read of the file means for the window. A removed file keeps
 /// the last valid settings; it is not written again until the next start.
 fn reading(text: io::Result<Option<String>>) -> ConfigUpdate {
@@ -106,6 +117,18 @@ mod tests {
 
     fn palette_for(text: &str) -> Option<TerminalPalette> {
         start_palette(&reading(Ok(Some(text.to_owned()))))
+    }
+
+    #[test]
+    fn rf_ses_01_shells_report_their_folder_unless_the_file_says_no() {
+        let read = |text: &str| shell_integration(&reading(Ok(Some(text.to_owned()))));
+        assert!(read(""));
+        assert!(!read("terminal.shell_integration = false"));
+        assert!(
+            read("terminal.shell_integration = 0"),
+            "invalid keeps the default"
+        );
+        assert!(shell_integration(&reading(Ok(None))));
     }
 
     #[test]
