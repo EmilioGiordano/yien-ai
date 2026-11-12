@@ -24,6 +24,7 @@ mod matcher;
 mod model;
 mod palette;
 mod region;
+mod release_notes;
 mod settings;
 mod shell;
 mod sidebars;
@@ -32,6 +33,7 @@ mod terminal;
 mod theme;
 mod title_bar;
 mod tray;
+mod update;
 mod worktree;
 
 use std::rc::Rc;
@@ -46,6 +48,7 @@ pub use bridge::{CoreClient, Refused};
 pub use files::{Files, FilesHost, ListDone, OpenDone, SearchDone};
 pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
 pub use settings::{ConfigUpdate, Settings, SettingsHost};
+pub use update::{UpdateHost, UpdateOffer, Updates};
 
 use crate::bridge::Link;
 use crate::shell::Shell;
@@ -74,6 +77,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// `files` lists, searches and opens the selected tab's files for the
 /// context bar (RF-CTX-01, RF-CTX-03).
 ///
+/// `updates` brings each newer YIEN the update check finds, and downloads
+/// and installs one when the user asks.
+///
 /// `on_quit` runs once when the app quits, including at Windows logoff or
 /// shutdown, where gpui ends the process without returning from `run`.
 ///
@@ -82,8 +88,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// # fn os() -> std::rc::Rc<dyn yien_ui::OsAttention> { unimplemented!() }
 /// # fn settings() -> yien_ui::Settings { unimplemented!() }
 /// # fn files() -> yien_ui::Files { unimplemented!() }
+/// # fn updates() -> yien_ui::Updates { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, os(), settings(), files(), || println!("bye"));
+/// yien_ui::run(client, events, os(), settings(), files(), updates(), || println!("bye"));
 /// ```
 pub fn run(
     client: Box<dyn CoreClient>,
@@ -91,6 +98,7 @@ pub fn run(
     attention: Rc<dyn OsAttention>,
     settings: Settings,
     files: Files,
+    updates: Updates,
     on_quit: impl FnOnce() + 'static,
 ) {
     gpui_kit::application()
@@ -122,7 +130,7 @@ pub fn run(
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
                 cx.new(|cx| {
                     Shell::new(
-                        link, events, attention, settings, files, base_keys, window, cx,
+                        link, events, attention, settings, files, updates, base_keys, window, cx,
                     )
                 })
             });

@@ -48,6 +48,9 @@ pub(crate) const MENU_CONTEXT: &str = "YienMenu";
 /// Key context of a pane divider while it holds the keyboard (RF-PAN-02).
 pub(crate) const DIVIDER_CONTEXT: &str = "YienDivider";
 
+/// Key context of a newer release's notes.
+pub(crate) const WHATS_NEW_CONTEXT: &str = "YienWhatsNew";
+
 actions!(
     yien,
     [
@@ -277,6 +280,20 @@ actions!(
         FileTreeOpen,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,
+        /// Shows the notes of the newer YIEN the update check found.
+        ShowWhatsNew,
+        /// Downloads the newer YIEN, checks it, quits and installs it.
+        InstallUpdate,
+        /// Closes the release notes.
+        WhatsNewClose,
+        /// Scrolls the release notes up a little.
+        WhatsNewUp,
+        /// Scrolls the release notes down a little.
+        WhatsNewDown,
+        /// Scrolls the release notes up a page.
+        WhatsNewPageUp,
+        /// Scrolls the release notes down a page.
+        WhatsNewPageDown,
     ]
 );
 
@@ -323,6 +340,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let tray = Some(TRAY_CONTEXT);
     let menu = Some(MENU_CONTEXT);
     let divider = Some(DIVIDER_CONTEXT);
+    let whats_new = Some(WHATS_NEW_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -370,6 +388,11 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("tab", DividerNext, divider),
         KeyBinding::new("shift-tab", DividerPrevious, divider),
         KeyBinding::new("escape", DividerLeave, divider),
+        KeyBinding::new("escape", WhatsNewClose, whats_new),
+        KeyBinding::new("up", WhatsNewUp, whats_new),
+        KeyBinding::new("down", WhatsNewDown, whats_new),
+        KeyBinding::new("pageup", WhatsNewPageUp, whats_new),
+        KeyBinding::new("pagedown", WhatsNewPageDown, whats_new),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -450,6 +473,11 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(DividerNext),
         Box::new(DividerPrevious),
         Box::new(DividerLeave),
+        Box::new(WhatsNewClose),
+        Box::new(WhatsNewUp),
+        Box::new(WhatsNewDown),
+        Box::new(WhatsNewPageUp),
+        Box::new(WhatsNewPageDown),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))

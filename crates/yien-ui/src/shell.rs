@@ -46,6 +46,7 @@ use crate::terminal::{TerminalEvent, TerminalPane};
 use crate::theme::{Theme, ThemeKind};
 use crate::title_bar::{PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
 use crate::tray::{CloseRequest, close_request, quit_detail};
+use crate::update::Updates;
 
 mod bars;
 mod dividers;
@@ -56,6 +57,7 @@ mod settings;
 mod status;
 mod tab_drag;
 mod tray;
+mod update;
 mod worktrees;
 
 use dividers::{DividerGrab, PaneArea};
@@ -134,6 +136,8 @@ pub(crate) struct Shell {
     keyboard_on: Option<PaneId>,
     /// What the status bar shows in place of the key hints, if anything.
     notice: Option<Notice>,
+    /// A standing notice a passing one covers, shown again when it goes.
+    behind: Option<Notice>,
     /// Counts the notices shown, so a stale timer cannot clear a newer one.
     notice_generation: u64,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
@@ -171,6 +175,8 @@ pub(crate) struct Shell {
     worktree_close: Option<worktrees::Closing>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
+    /// A newer YIEN: its notice, notes and install.
+    updates: update::UpdatePanel,
     /// The tab bar and the context bar as places the keyboard can be
     /// (RF-NAV-08); the pane area is the terminals' own focus.
     tab_bar_focus: FocusHandle,
@@ -243,6 +249,7 @@ impl Shell {
         os: Rc<dyn OsAttention>,
         settings: Settings,
         files: Files,
+        updates: Updates,
         base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -303,6 +310,7 @@ impl Shell {
         })
         .detach();
         Self::listen_to_settings(settings.updates, window, cx);
+        let updates = Self::update_panel(updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
         });
@@ -356,6 +364,7 @@ impl Shell {
             terminal_events: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            behind: None,
             notice_generation: 0,
             split_menu: None,
             menu_closed: None,
@@ -373,6 +382,7 @@ impl Shell {
             worktree_prompt: None,
             worktree_close: None,
             alerts: Alerts::new(os),
+            updates,
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
             tab_cursor: None,
@@ -649,6 +659,7 @@ impl Shell {
             || self.renaming.is_some()
             || self.worktree_prompt.is_some()
             || self.worktree_close.is_some()
+            || self.updates.notes_open()
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that
@@ -824,14 +835,14 @@ impl Shell {
     pub(super) fn show(&mut self, notice: Notice, cx: &mut Context<Self>) {
         self.notice_generation += 1;
         let shown = self.notice_generation;
-        let lifetime = status::lifetime(notice.kind);
+        let lifetime = notice.lifetime();
+        self.behind = status::behind(self.notice.take(), self.behind.take(), &notice);
         self.notice = Some(notice);
         if let Some(lifetime) = lifetime {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(lifetime).await;
                 let _ = this.update(cx, |shell, cx| {
-                    let kind = shell.notice.as_ref().map(|n| n.kind);
-                    if status::timer_clears(kind, shown, shell.notice_generation) {
+                    if status::timer_clears(shell.notice.as_ref(), shown, shell.notice_generation) {
                         shell.clear_notice(cx);
                     }
                 });
@@ -847,12 +858,19 @@ impl Shell {
         }
     }
 
-    /// Takes the notice down; whether there was one.
+    /// Takes the notice down; whether there was one. A standing notice it
+    /// covered, or else the update notice, comes back.
     pub(super) fn clear_notice(&mut self, cx: &mut Context<Self>) -> bool {
-        let was_up = self.notice.take().is_some();
+        let taken = self.notice.take();
         self.notice_generation += 1;
+        if let Some(taken) = &taken {
+            self.update_notice_cleared(taken);
+        }
+        if let Some(next) = self.behind.take().or_else(|| self.update_standing_notice()) {
+            self.show(next, cx);
+        }
         cx.notify();
-        was_up
+        taken.is_some()
     }
 
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
@@ -1190,6 +1208,10 @@ impl Shell {
                 self.workspace.profiles(),
             )
         };
+        let commands: Vec<Entry> = commands
+            .into_iter()
+            .filter(|entry| self.update_lists(entry))
+            .collect();
         let places = switcher_entries(&self.workspace);
         let placeholder = match mode {
             Mode::Commands => "Execute a command…",
@@ -1526,7 +1548,10 @@ impl Shell {
     }
 
     fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.take().is_some() {
+        if let Some(confirm) = self.confirm.take() {
+            if matches!(confirm.asked, Asked::Quit) {
+                self.quit_cancelled(cx);
+            }
             self.give_back_keyboard(window, cx);
         }
     }
@@ -3495,6 +3520,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::show_whats_new))
+            .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
@@ -3529,6 +3556,7 @@ impl Render for Shell {
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
             .children(self.render_menu(cx))
+            .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
     }
 }
