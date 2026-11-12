@@ -143,6 +143,38 @@ fn rf_nav_10_a_bad_width_reads_as_the_default_and_keeps_the_session() {
 }
 
 #[test]
+fn rf_cfg_02_a_schema_1_file_loads_with_and_without_the_terminal_zoom() {
+    assert_eq!(SCHEMA_VERSION, 1, "the zoom needs no new schema");
+    assert_eq!(deserialize(V1).unwrap().terminal_zoom, 0);
+
+    let mut zoomed = sample(1_000);
+    zoomed.terminal_zoom = -4;
+    let bytes = serialize(&zoomed).unwrap();
+    let doc: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["terminal_zoom"], -4);
+    assert_eq!(deserialize(&bytes).unwrap(), zoomed);
+}
+
+#[test]
+fn rf_cfg_02_a_bad_terminal_zoom_reads_as_none_and_keeps_the_session() {
+    for bad in [
+        json!("big"),
+        json!(2.5),
+        json!(1e12),
+        json!(null),
+        json!([3]),
+    ] {
+        let mut doc: Value = serde_json::from_slice(V1).unwrap();
+        doc["terminal_zoom"] = bad.clone();
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        let snapshot = deserialize(&bytes).unwrap();
+        assert_eq!(snapshot.terminal_zoom, 0, "{bad}");
+        assert_eq!(snapshot.projects, sample(1_000).projects);
+    }
+}
+
+#[test]
 fn rf_ses_02_a_v0_file_migrates_to_the_current_model() {
     let snapshot = deserialize_with(V0, FAKE_TABLE).unwrap();
     assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
