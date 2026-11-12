@@ -11,6 +11,7 @@
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
 //!     profile: None,
+//!     before: false,
 //! });
 //! assert!(matches!(split, ClientMsg::Command(_)));
 //! ```

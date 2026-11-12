@@ -140,6 +140,7 @@ impl Harness {
             pane,
             orientation: Orientation::Horizontal,
             profile: profile.map(ProfileId::new),
+            before: false,
         });
         let new = self.wait_for(|m| match m {
             CoreMsg::PaneUpdated(p) if p.id != pane => Some(p.id),
@@ -593,6 +594,7 @@ fn a_failed_spawn_is_reported_on_the_pane() {
         pane: first,
         orientation: Orientation::Vertical,
         profile: None,
+        before: false,
     });
     let (pane, message) = h.wait_for(|m| match m {
         CoreMsg::Error {
@@ -727,6 +729,7 @@ fn rf_age_04_a_broken_override_never_starts_the_builtin_in_its_place() {
         pane: first,
         orientation: Orientation::Horizontal,
         profile: Some(ProfileId::new("claude")),
+        before: false,
     });
     let message = h.wait_for(|m| match m {
         CoreMsg::Error { message, .. } => Some(message.clone()),
@@ -1111,6 +1114,7 @@ fn a_split_pane_starts_at_the_first_size_the_ui_sends() {
         pane: first,
         orientation: Orientation::Horizontal,
         profile: None,
+        before: false,
     });
     let new = h.wait_for(|m| match m {
         CoreMsg::PaneUpdated(p) if p.id != first => Some(p.id),

@@ -1,6 +1,7 @@
 //! The main window: title bar, tab bar, pane area, context bar and status bar,
 //! laid out as in the prototype, kept in step with the core's events.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
@@ -31,22 +32,27 @@ use crate::git::{ContextGit, FileMark};
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, frames_to_take,
-    typed_tab_name,
+    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, folder_label,
+    frames_to_take, typed_tab_name,
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
+    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
 use crate::region::{self, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
-use crate::terminal::TerminalPane;
+use crate::terminal::{TerminalEvent, TerminalPane};
 use crate::theme::{Theme, ThemeKind};
+use crate::title_bar::{
+    PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
 mod files;
+mod menu;
+mod pane_menu;
 mod settings;
 mod status;
 mod tab_controls;
@@ -55,6 +61,7 @@ mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
+use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use status::{Line, Notice};
 use tab_drag::{RowMark, TabDragState};
 use tray::Tray;
@@ -63,6 +70,8 @@ use tray::Tray;
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+/// The left padding of a pane row under its tab in the switcher's tree.
+const PALETTE_INDENT: f32 = 20.0;
 const CONFIRM_WIDTH: f32 = 440.0;
 /// Test-only: when set, the window opens with the attention tray open, so a
 /// window check can capture it without sending keys.
@@ -77,6 +86,8 @@ const RESIZE_STEP: f32 = 0.05;
 const MAX_BATCH: usize = 1024;
 /// The profile the Claude shortcuts start.
 const CLAUDE_PROFILE: &str = "claude";
+/// The longest folder a pane head shows before cutting its first names.
+const PANE_FOLDER_CHARS: usize = 48;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -118,6 +129,8 @@ pub(crate) struct Shell {
     title: String,
     link: Rc<Link>,
     terminals: HashMap<PaneId, Entity<TerminalPane>>,
+    /// The window's subscription to each terminal's right clicks.
+    terminal_events: HashMap<PaneId, Subscription>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
     /// What the status bar shows in place of the key hints, if anything.
@@ -129,6 +142,14 @@ pub(crate) struct Shell {
     /// The chooser a mouse-down outside it just closed, and when. The click
     /// that follows on its own button must not open it again.
     menu_closed: Option<((PaneId, Orientation), std::time::Instant)>,
+    /// The pane or terminal menu, while open (RF-PAN-20).
+    menu: Option<PaneMenu>,
+    /// The menu a mouse-down outside it just closed, and when.
+    menu_closed_at: Option<(PaneMenuKey, Instant)>,
+    /// Where each pane head was painted, for the menu opened by keyboard.
+    pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
+    /// The user's home folder, which pane heads show as `~`.
+    home: Option<String>,
     /// The command palette or the switcher, while open.
     palette: Option<OpenPalette>,
     /// The last past-sessions request sent; each list waits for its own.
@@ -323,11 +344,16 @@ impl Shell {
             title: String::new(),
             link,
             terminals: HashMap::new(),
+            terminal_events: HashMap::new(),
             keyboard_on: None,
             notice: None,
             notice_generation: 0,
             split_menu: None,
             menu_closed: None,
+            menu: None,
+            menu_closed_at: None,
+            pane_heads: Rc::default(),
+            home: home_folder(),
             palette: None,
             session_requests: 0,
             confirm: None,
@@ -537,6 +563,10 @@ impl Shell {
     fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panes = self.workspace.all_panes();
         self.terminals.retain(|id, _| panes.contains(id));
+        self.terminal_events.retain(|id, _| panes.contains(id));
+        self.pane_heads
+            .borrow_mut()
+            .retain(|id, _| panes.contains(id));
         for pane in panes {
             if self.terminals.contains_key(&pane) {
                 continue;
@@ -546,6 +576,11 @@ impl Shell {
             let size = self.terminal_size;
             let theme = self.theme;
             let view = cx.new(|cx| TerminalPane::new(pane, link, family, size, theme, window, cx));
+            let events = cx.subscribe_in(&view, window, move |this, _, event, window, cx| {
+                let TerminalEvent::ContextMenu { at, has_selection } = *event;
+                this.open_menu(pane, MenuKind::Terminal, at, has_selection, window, cx);
+            });
+            self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
         }
     }
@@ -571,11 +606,13 @@ impl Shell {
             self.give_back_keyboard(window, cx);
         }
         self.drop_stale_worktree_question(window, cx);
+        self.drop_stale_menu(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
         self.palette.is_some()
+            || self.menu.is_some()
             || self.tray.is_some()
             || self.confirm.is_some()
             || self.renaming.is_some()
@@ -840,18 +877,19 @@ impl Shell {
         }
     }
 
-    fn split(&mut self, orientation: Orientation, cx: &mut Context<Self>) {
+    fn split(&mut self, orientation: Orientation, before: bool, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
-            self.split_pane(pane, orientation, None, cx);
+            self.split_pane(pane, orientation, before, None, cx);
         }
     }
 
-    /// Splits `pane` and starts `profile` in the new one, the shell when
-    /// `None` (RF-PAN-18).
+    /// Starts `profile` in the new pane, the shell when `None` (RF-PAN-18);
+    /// `before` puts it left of or above `pane`.
     fn split_pane(
         &mut self,
         pane: PaneId,
         orientation: Orientation,
+        before: bool,
         profile: Option<ProfileId>,
         cx: &mut Context<Self>,
     ) {
@@ -861,6 +899,7 @@ impl Shell {
                 pane,
                 orientation,
                 profile,
+                before,
             },
             cx,
         );
@@ -870,7 +909,7 @@ impl Shell {
     fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
             let claude = Some(ProfileId::new(CLAUDE_PROFILE));
-            self.split_pane(pane, Orientation::Horizontal, claude, cx);
+            self.split_pane(pane, Orientation::Horizontal, false, claude, cx);
         }
     }
 
@@ -934,11 +973,19 @@ impl Shell {
     }
 
     fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Horizontal, cx);
+        self.split(Orientation::Horizontal, false, cx);
     }
 
     fn split_down(&mut self, _: &SplitDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Vertical, cx);
+        self.split(Orientation::Vertical, false, cx);
+    }
+
+    fn split_left(&mut self, _: &SplitLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Horizontal, true, cx);
+    }
+
+    fn split_up(&mut self, _: &SplitUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Vertical, true, cx);
     }
 
     /// Closes the focused pane; closing the last tab on a worktree asks
@@ -1124,13 +1171,25 @@ impl Shell {
                 self.command(Command::ListAgentSessions { project, request }, cx);
                 Palette::sessions(project, request)
             }
-            None => Palette::new(mode, commands, places),
+            None => Palette::new(mode, commands, places).with_home(switcher_home(&self.workspace)),
         };
         self.palette = Some(OpenPalette {
             model,
             input,
             scroll: ScrollHandle::new(),
             _input_events: input_events,
+        });
+        // A new list's first prepaint drops a scroll request (gpui learns the
+        // overflow after it), and next-frame callbacks run before that
+        // frame's draw: ask two frames on, once the list has been drawn.
+        cx.on_next_frame(window, |_, window, cx| {
+            cx.on_next_frame(window, |this, _, cx| {
+                if let Some(open) = &this.palette {
+                    open.scroll
+                        .scroll_to_item(open.model.selected().unwrap_or(0));
+                    cx.notify();
+                }
+            });
         });
         cx.notify();
     }
@@ -1148,7 +1207,8 @@ impl Shell {
         let query = input.read(cx).value();
         if let Some(open) = self.palette.as_mut() {
             open.model.set_query(&query);
-            open.scroll.scroll_to_item(0);
+            open.scroll
+                .scroll_to_item(open.model.selected().unwrap_or(0));
             cx.notify();
         }
     }
@@ -1220,7 +1280,7 @@ impl Shell {
             Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
             Target::Split(profile, orientation) => {
                 if let Some(pane) = self.focused_pane() {
-                    self.split_pane(pane, orientation, Some(profile), cx);
+                    self.split_pane(pane, orientation, false, Some(profile), cx);
                 }
             }
             Target::NewTab(profile) => self.new_tab_with(Some(profile.as_str()), cx),
@@ -1725,8 +1785,9 @@ impl Shell {
         }
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -1740,10 +1801,19 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(project)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(project),
+                )
                 .child("/")
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.text)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tab.name.clone()),
@@ -1760,53 +1830,85 @@ impl Shell {
             .border_color(t.line)
             .child(
                 h_flex()
-                    .size_full()
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .h_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pr(px(10.0))
+                    .pr(px(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
-                            .flex_none()
+                            .flex_1()
+                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
                             .items_center()
-                            .gap(px(8.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(img(assets::MARK).size(px(20.0)))
-                            .child("YIEN"),
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child("YIEN"),
+                            )
+                            .child(div().flex_1().w_0().min_w_0().children(crumbs)),
                     )
-                    .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_palette_pill(cx))
-                    .child(div().flex_1())
-                    .child(self.render_need_count(cx))
+                    .child(self.render_palette_pill(&layout, cx))
                     .child(
-                        icon_button("toggle-theme", assets::THEME, &t)
-                            .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_theme(&ToggleTheme, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                            .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                            .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_bar(&ToggleContextBar, window, cx)
-                            })),
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.0))
+                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
+                            .child(self.render_need_count(cx))
+                            .when(layout.theme_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-theme", assets::THEME, &t)
+                                        .aria_label(format!(
+                                            "Toggle sumi and washi theme ({THEME_KEYS})"
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_theme(&ToggleTheme, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.tab_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                        .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                        .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.context_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                        .aria_label(format!(
+                                            "Toggle context bar ({CONTEXT_BAR_KEYS})"
+                                        ))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                        .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                        })),
+                                )
+                            }),
                     ),
             )
     }
 
     /// The title bar button that opens the palette, as the prototype's.
-    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_pill(
+        &self,
+        layout: &TitleLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         h_flex()
             .id("palette-pill")
@@ -1814,8 +1916,9 @@ impl Shell {
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
             .flex_none()
-            .w(px(420.0))
-            .max_w(relative(0.4))
+            .w(px(PILL_WIDTH))
+            .max_w(relative(PILL_SHARE))
+            .min_w(px(PILL_LEAST))
             .items_center()
             .gap(px(10.0))
             .px(px(10.0))
@@ -1832,14 +1935,23 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_palette(Mode::Commands, window, cx);
             }))
-            .child(div().flex_1().min_w_0().child("Execute a command"))
             .child(
                 div()
-                    .flex_none()
-                    .text_size(t.text(11.0))
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(PALETTE_KEYS),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child("Execute a command"),
             )
+            .when(layout.pill_keys, |pill| {
+                pill.child(
+                    div()
+                        .flex_none()
+                        .text_size(t.text(11.0))
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(PALETTE_KEYS),
+                )
+            })
     }
 
     /// The command palette or the switcher over the window (RF-NAV-01,
@@ -1849,13 +1961,14 @@ impl Shell {
         let t = self.theme;
         let model = &open.model;
         let selected = model.selected();
+        let tree = model.shows_tree();
         let rows: Vec<AnyElement> = model
             .rows()
             .iter()
             .enumerate()
             .filter_map(|(at, row)| {
                 let entry = model.entry(row)?;
-                Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
+                Some(self.render_palette_row(at, row, entry, selected == Some(at), tree, cx))
             })
             .collect();
         let label = match model.listing() {
@@ -1935,25 +2048,28 @@ impl Shell {
         row: &Row,
         entry: &Entry,
         selected: bool,
+        tree: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme;
+        let (shown, dim) = entry.drawn(tree);
+        let nested = shown.len() < entry.text.len();
+        // Hits are offsets into the whole text, so a shortened text drops them.
+        let hits: &[usize] = if nested { &[] } else { &row.hits };
         let style = |color: Rgba, weight: FontWeight| HighlightStyle {
             color: Some(color.into()),
             font_weight: Some(weight),
             ..HighlightStyle::default()
         };
-        let runs = ink_runs(&entry.text, entry.dim, &row.hits)
-            .into_iter()
-            .map(|(range, ink)| {
-                let look = match ink {
-                    Ink::Text => style(t.text, FontWeight::NORMAL),
-                    Ink::Dim => style(t.muted, FontWeight::NORMAL),
-                    Ink::Hit => style(t.ai, FontWeight::BOLD),
-                };
-                (range, look)
-            });
-        let text = StyledText::new(entry.text.clone()).with_highlights(runs);
+        let runs = ink_runs(shown, dim, hits).into_iter().map(|(range, ink)| {
+            let look = match ink {
+                Ink::Text => style(t.text, FontWeight::NORMAL),
+                Ink::Dim => style(t.muted, FontWeight::NORMAL),
+                Ink::Hit => style(t.ai, FontWeight::BOLD),
+            };
+            (range, look)
+        });
+        let text = StyledText::new(shown.to_owned()).with_highlights(runs);
         let hint_color = match entry.state {
             Some(AgentState::NeedsYou) => t.shu,
             Some(AgentState::Error) => t.ochre,
@@ -1979,6 +2095,10 @@ impl Shell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.run_palette(Some(at), window, cx);
             }))
+            .when(nested, |r| {
+                r.pl(px(PALETTE_INDENT))
+                    .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
+            })
             .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
             .child(
                 div()
@@ -2465,7 +2585,6 @@ impl Shell {
                 .child("No tab is open");
         };
         let rects = tab.rects();
-        let single = rects.len() == 1;
         let cells: Vec<AnyElement> = rects
             .into_iter()
             .map(|(id, rect)| {
@@ -2477,7 +2596,7 @@ impl Shell {
                     .w(relative(rect.w))
                     .h(relative(rect.h))
                     .p(px(HALF_GUTTER))
-                    .child(self.render_pane(tab, &pane, single, cx))
+                    .child(self.render_pane(tab, &pane, cx))
                     .into_any_element()
             })
             .collect();
@@ -2544,7 +2663,6 @@ impl Shell {
         &self,
         tab: &TabView,
         pane: &PaneView,
-        single: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = self.theme;
@@ -2555,7 +2673,17 @@ impl Shell {
             AgentState::Error => t.ochre,
             _ => t.term_muted,
         };
+        let id = pane.id;
+        let folder = pane.cwd.as_deref().unwrap_or(&tab.dir);
+        let folder_shown = folder_label(
+            folder,
+            self.home.as_deref(),
+            cfg!(windows),
+            PANE_FOLDER_CHARS,
+        );
+        let heads = Rc::clone(&self.pane_heads);
         let head = h_flex()
+            .relative()
             .flex_none()
             .items_center()
             .gap(px(8.0))
@@ -2577,17 +2705,26 @@ impl Shell {
                     .child(pane.name.clone()),
             )
             .child(div().flex_none().child(pane.profile.clone()))
-            .when(single, |h| {
-                h.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(t.text(12.0))
-                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                        .child(tab.dir.clone()),
-                )
-            })
+            .child(
+                // Only the lead shrinks, so a narrow head still shows the
+                // last folder.
+                h_flex()
+                    .id(("pane-folder", id.get()))
+                    .aria_label(format!("Folder {folder}"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(t.text(12.0))
+                    .text_color(t.term_faint)
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(folder_shown.lead),
+                    )
+                    .child(div().flex_none().child(folder_shown.last)),
+            )
             .child(
                 div()
                     .ml_auto()
@@ -2607,7 +2744,35 @@ impl Shell {
                 )
             })
             .child(self.split_button(pane, Orientation::Horizontal, cx))
-            .child(self.split_button(pane, Orientation::Vertical, cx));
+            .child(self.split_button(pane, Orientation::Vertical, cx))
+            .child(self.pane_menu_button(pane, cx))
+            .child(self.pane_close_button(pane, cx))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Or the root, which tracks focus, takes the keyboard
+                    // back from the menu as this mouse-down bubbles up.
+                    window.prevent_default();
+                    this.open_menu(id, MenuKind::Pane, event.position, false, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.focus_pane_from_head(id, window, cx);
+                }),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        heads.borrow_mut().insert(id, bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
         let menu = self
             .split_menu
             .filter(|(p, _)| *p == pane.id)
@@ -2722,6 +2887,78 @@ impl Shell {
             .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
     }
 
+    /// A click on a pane head gives that pane the focus and the keyboard,
+    /// not the window root.
+    fn focus_pane_from_head(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminals.get(&pane) {
+            let handle = terminal.read(cx).handle().clone();
+            window.focus(&handle, cx);
+            self.keyboard_on = Some(pane);
+            self.keyboard_in_bar = false;
+        }
+        self.command(Command::FocusPane { pane }, cx);
+    }
+
+    /// A 20 px pane head button, as the split buttons.
+    fn head_button(&self, key: &'static str, pane: PaneId, icon: &'static str) -> Stateful<Div> {
+        let t = self.theme;
+        let hover = t.term_raised;
+        div()
+            .id((key, pane.get()))
+            .occlude()
+            .role(Role::Button)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(20.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// Opens the pane's menu of actions (RF-PAN-20), as in the prototype.
+    fn pane_menu_button(&self, pane: &PaneView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = pane.id;
+        let open = self.menu_open_for(id);
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            shortcut(&keymap, &OpenPaneMenu)
+        };
+        let label = match keys {
+            Some(keys) => format!("Pane actions for {} ({keys})", pane.name),
+            None => format!("Pane actions for {}", pane.name),
+        };
+        self.head_button("pane-actions", id, assets::DOTS)
+            .aria_label(label)
+            .aria_expanded(open)
+            .when(open, |b| b.bg(self.theme.term_raised))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.pane_menu_clicked(id, event.position(), window, cx);
+            }))
+    }
+
+    /// Closes the pane, asking first on the last tab on a worktree.
+    fn pane_close_button(&self, pane: &PaneView, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = pane.id;
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            shortcut(&keymap, &ClosePane)
+        };
+        let label = match keys {
+            Some(keys) => format!("Close {} ({keys})", pane.name),
+            None => format!("Close {}", pane.name),
+        };
+        self.head_button("pane-close", id, assets::CLOSE)
+            .aria_label(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_pane_id(id, window, cx);
+            }))
+    }
+
     /// The profiles a split can start, under the pane head (RF-PAN-18).
     fn render_split_menu(
         &self,
@@ -2756,7 +2993,7 @@ impl Shell {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.split_pane(pane, orientation, Some(id.clone()), cx);
+                        this.split_pane(pane, orientation, false, Some(id.clone()), cx);
                     }))
                     .child(
                         div()
@@ -3156,6 +3393,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::split_left))
+            .on_action(cx.listener(Self::split_up))
             .on_action(cx.listener(Self::close_pane))
             .on_action(cx.listener(Self::focus_left))
             .on_action(cx.listener(Self::focus_right))
@@ -3185,6 +3424,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::worktree_cancel))
             .on_action(cx.listener(Self::split_right_claude))
             .on_action(cx.listener(Self::relaunch_pane))
+            .on_action(cx.listener(Self::open_pane_menu))
+            .on_action(cx.listener(Self::terminate_pane))
+            .on_action(cx.listener(Self::copy_session_id))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::toggle_notifications_muted))
             .on_action(cx.listener(Self::toggle_tab_muted))
@@ -3236,7 +3478,7 @@ impl Render for Shell {
             .text_color(t.text)
             .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -3254,6 +3496,7 @@ impl Render for Shell {
             .children(self.render_palette(cx))
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
+            .children(self.render_menu(cx))
             .children(self.render_confirm(cx))
     }
 }
@@ -3330,6 +3573,12 @@ fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
         )
 }
 
+/// The user's home folder from the environment, if set.
+fn home_folder() -> Option<String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(var).ok().filter(|home| !home.is_empty())
+}
+
 fn toggled(on: bool) -> Toggled {
     if on { Toggled::True } else { Toggled::False }
 }
@@ -3345,7 +3594,8 @@ fn now_ms() -> u64 {
 /// The catalog command behind each mouse control above, so every one has a
 /// palette row (RF-NAV-02). A new clickable control adds its command here.
 /// Tab rows are reached through the switcher; the split menu's profiles
-/// through `profile_splits`.
+/// through `profile_splits`; the pane and terminal menus' items each name
+/// their command in `PaneAction::command`.
 #[cfg(test)]
 const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("theme button", "theme.toggle"),
@@ -3364,6 +3614,9 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("close tab dialog buttons", "tab.close"),
     ("close pane dialog buttons", "pane.close"),
     ("relaunch button", "pane.relaunch"),
+    ("pane head close button", "pane.close"),
+    ("pane actions button", "pane.actions"),
+    ("pane head right click", "pane.actions"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
     ("tab row drag", "tab.move_up"),

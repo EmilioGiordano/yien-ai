@@ -84,6 +84,7 @@ fn claude_pane(settings_dir: PathBuf) -> (yien_core::CoreHandle, Pane) {
         pane: shell,
         orientation: Orientation::Horizontal,
         profile: Some(ProfileId::new("claude")),
+        before: false,
     });
     let pane = events.wait_for(|m| match m {
         CoreMsg::TabUpdated(t) if t.focused != shell => Some(t.focused),

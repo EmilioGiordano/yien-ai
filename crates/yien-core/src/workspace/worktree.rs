@@ -206,6 +206,7 @@ mod tests {
             pane,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let fx = ws.apply(split, &resolve).unwrap();
         assert!(
@@ -255,6 +256,7 @@ mod tests {
             pane: ws.tab(tab).unwrap().panes()[0],
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         ws.apply(split, &resolve).unwrap();
         let panes = ws.tab(tab).unwrap().panes();

@@ -407,6 +407,34 @@ pub(crate) fn pointer(modes: &Modes, shift: bool) -> Pointer {
     }
 }
 
+/// What a right click in the terminal does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RightClick {
+    /// The program asked for the mouse: it gets the press.
+    Program,
+    /// The terminal menu opens at the pointer.
+    Menu,
+}
+
+/// A right click goes to a program that asked for the mouse, as a left one
+/// does; otherwise, or with Shift held, it opens the terminal menu.
+pub(crate) fn right_click(modes: &Modes, shift: bool) -> RightClick {
+    match pointer(modes, shift) {
+        Pointer::Program => RightClick::Program,
+        Pointer::Terminal => RightClick::Menu,
+    }
+}
+
+/// Whether any cell on screen is selected. A selection scrolled out of view
+/// does not count.
+pub(crate) fn has_selection(frame: &Frame) -> bool {
+    frame
+        .lines
+        .iter()
+        .flatten()
+        .any(|cell| cell.flags.contains(CellFlags::SELECTED))
+}
+
 /// How a left press selects: cells, words from a double click, lines from a
 /// triple one, a rectangle with Alt.
 pub(crate) fn selection_kind(click_count: usize, alt: bool) -> SelectionKind {
@@ -876,6 +904,33 @@ mod tests {
             assert_eq!(pointer(&m, false), Pointer::Program, "{mouse:?}");
             assert_eq!(pointer(&m, true), Pointer::Terminal, "{mouse:?}");
         }
+    }
+
+    #[test]
+    fn rf_pan_14_a_right_click_opens_the_menu_when_the_program_did_not_ask_for_the_mouse() {
+        assert_eq!(right_click(&modes(), false), RightClick::Menu);
+        assert_eq!(right_click(&modes(), true), RightClick::Menu);
+    }
+
+    #[test]
+    fn rf_pan_14_a_right_click_goes_to_a_program_that_asked_for_the_mouse_unless_shift() {
+        for mouse in [
+            MouseTracking::Click,
+            MouseTracking::Drag,
+            MouseTracking::Motion,
+        ] {
+            let m = Modes { mouse, ..modes() };
+            assert_eq!(right_click(&m, false), RightClick::Program, "{mouse:?}");
+            assert_eq!(right_click(&m, true), RightClick::Menu, "{mouse:?}");
+        }
+    }
+
+    #[test]
+    fn rf_pan_09_a_selected_cell_on_screen_is_a_selection() {
+        let mut line = vec![cell('a'), cell('b')];
+        assert!(!has_selection(&frame_with(line.clone())));
+        line[1].flags = CellFlags::SELECTED;
+        assert!(has_selection(&frame_with(line)));
     }
 
     #[test]
