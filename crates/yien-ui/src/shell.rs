@@ -898,14 +898,7 @@ impl Shell {
     /// With every tab closed it falls back to the project selected last.
     fn new_tab_with(&mut self, profile: Option<&str>, cx: &mut Context<Self>) {
         match self.workspace.project_for_new_tab() {
-            Some(project) => self.command(
-                Command::NewTab {
-                    project,
-                    name: None,
-                    profile: profile.map(ProfileId::new),
-                },
-                cx,
-            ),
+            Some(project) => self.new_tab_in(project, profile, cx),
             None => {
                 self.say("There is no project to open a tab in.".to_owned(), cx);
             }
@@ -2247,12 +2240,12 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
+            .child(self.new_tab_button(project, cx).ml_auto())
             .child(
                 div()
                     .id(("close-project", id.get()))
                     .role(Role::Button)
                     .aria_label(format!("Close project {}", project.name))
-                    .ml_auto()
                     .flex()
                     .flex_none()
                     .items_center()
@@ -3355,6 +3348,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("add project button", "project.add"),
     ("empty state's add project button", "project.add"),
     ("project head close button", "project.close"),
+    ("project head new tab button", "tab.new"),
     ("close project dialog buttons", "project.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),

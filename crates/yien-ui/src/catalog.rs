@@ -558,6 +558,7 @@ mod tests {
             ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),
             ("palette.open", PALETTE_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
+            ("tab.new", NEW_TAB_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

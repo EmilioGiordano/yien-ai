@@ -1,14 +1,20 @@
-//! The buttons on the tab bar's rows (RF-ESP-02, RF-ESP-03): × on a tab's
-//! row closes it.
+//! The buttons on the tab bar's rows (RF-ESP-02, RF-ESP-03): "+" on a
+//! project's head opens a tab in that project, × on a tab's row closes it.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_proto::TabId;
+use yien_proto::{Command, ProfileId, ProjectId, TabId};
 
 use super::Shell;
 use crate::actions::*;
 use crate::assets;
+use crate::model::ProjectView;
 use crate::theme::Theme;
+
+/// The accessible name of a project head's "+".
+pub(crate) fn new_tab_label(project: &str) -> String {
+    format!("New tab in {project} ({NEW_TAB_KEYS})")
+}
 
 /// The accessible name of a tab row's ×.
 pub(crate) fn close_tab_label(tab: &str) -> String {
@@ -43,6 +49,42 @@ fn small_button(id: ElementId, icon: &'static str, t: &Theme) -> Stateful<Div> {
 }
 
 impl Shell {
+    /// Opens a shell tab in `project`; the core selects it.
+    pub(super) fn new_tab_in(
+        &mut self,
+        project: ProjectId,
+        profile: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(
+            Command::NewTab {
+                project,
+                name: None,
+                profile: profile.map(ProfileId::new),
+            },
+            cx,
+        );
+    }
+
+    /// The "+" on a project's head. It unfolds a folded project, or the new
+    /// tab would be selected out of sight.
+    pub(super) fn new_tab_button(
+        &self,
+        project: &ProjectView,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = project.id;
+        small_button(("new-tab-in", id.get()).into(), assets::PLUS, &self.theme)
+            .aria_label(new_tab_label(&project.name))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if this.workspace.is_folded(id) {
+                    this.toggle_fold(id, cx);
+                }
+                this.new_tab_in(id, None, cx);
+            }))
+    }
+
     /// The × on a tab's row. Always laid out, so showing it never moves the
     /// row a drag is measuring; the press stops here, or the row would
     /// start a drag, select or rename the tab.
@@ -80,7 +122,16 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_always_shown, close_tab_label};
+    use super::{close_always_shown, close_tab_label, new_tab_label};
+    use crate::catalog::default_keys;
+
+    #[test]
+    fn rf_esp_03_the_new_tab_button_names_its_project_and_keys() {
+        let label = new_tab_label("yien");
+        assert_eq!(label, "New tab in yien (Ctrl+Shift+T)");
+        let keys = default_keys("tab.new").unwrap();
+        assert!(label.ends_with(&format!("({keys})")));
+    }
 
     #[test]
     fn rf_esp_03_the_close_button_names_its_tab() {

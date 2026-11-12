@@ -260,6 +260,7 @@ pub(crate) const TRAY_KEYS: &str = "Ctrl+Shift+M";
 pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
+pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
