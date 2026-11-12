@@ -66,6 +66,10 @@ actions!(
         SplitRight,
         /// Splits the focused pane, the new one below (RF-PAN-01).
         SplitDown,
+        /// Splits the focused pane, the new one on the left (RF-PAN-01).
+        SplitLeft,
+        /// Splits the focused pane, the new one above (RF-PAN-01).
+        SplitUp,
         /// Closes the focused pane.
         ClosePane,
         /// Moves the focus to the pane on the left (RF-PAN-03).

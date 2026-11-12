@@ -190,6 +190,8 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["alt-+"]
     ),
     command!("pane.split_down", "pane: split down", SplitDown, ["alt-_"]),
+    command!("pane.split_left", "pane: split left", SplitLeft, []),
+    command!("pane.split_up", "pane: split up", SplitUp, []),
     command!(
         "pane.split_right_claude",
         "pane: split right with Claude Code",

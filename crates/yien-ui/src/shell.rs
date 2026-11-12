@@ -843,9 +843,11 @@ impl Shell {
         }
     }
 
-    fn split(&mut self, orientation: Orientation, cx: &mut Context<Self>) {
+    /// Splits the focused pane with the shell; `before` puts the new pane on
+    /// the left or above.
+    fn split(&mut self, orientation: Orientation, before: bool, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
-            self.split_pane(pane, orientation, None, cx);
+            self.split_pane_on(pane, orientation, before, None, cx);
         }
     }
 
@@ -858,13 +860,25 @@ impl Shell {
         profile: Option<ProfileId>,
         cx: &mut Context<Self>,
     ) {
+        self.split_pane_on(pane, orientation, false, profile, cx);
+    }
+
+    /// Splits `pane`, the new pane before it when `before` (left or above).
+    fn split_pane_on(
+        &mut self,
+        pane: PaneId,
+        orientation: Orientation,
+        before: bool,
+        profile: Option<ProfileId>,
+        cx: &mut Context<Self>,
+    ) {
         self.split_menu = None;
         self.command(
             Command::SplitPane {
                 pane,
                 orientation,
                 profile,
-                before: false,
+                before,
             },
             cx,
         );
@@ -945,11 +959,19 @@ impl Shell {
     }
 
     fn split_right(&mut self, _: &SplitRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Horizontal, cx);
+        self.split(Orientation::Horizontal, false, cx);
     }
 
     fn split_down(&mut self, _: &SplitDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.split(Orientation::Vertical, cx);
+        self.split(Orientation::Vertical, false, cx);
+    }
+
+    fn split_left(&mut self, _: &SplitLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Horizontal, true, cx);
+    }
+
+    fn split_up(&mut self, _: &SplitUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.split(Orientation::Vertical, true, cx);
     }
 
     /// Closes the focused pane; closing the last tab on a worktree asks
@@ -3272,6 +3294,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::split_left))
+            .on_action(cx.listener(Self::split_up))
             .on_action(cx.listener(Self::close_pane))
             .on_action(cx.listener(Self::focus_left))
             .on_action(cx.listener(Self::focus_right))
