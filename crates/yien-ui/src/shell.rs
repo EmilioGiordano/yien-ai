@@ -2628,7 +2628,17 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Or the root, which tracks focus, takes the keyboard
+                    // back from the menu as this mouse-down bubbles up.
+                    window.prevent_default();
                     this.open_menu(id, MenuKind::Pane, event.position, false, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.focus_pane_from_head(id, window, cx);
                 }),
             )
             .child(
@@ -2753,6 +2763,18 @@ impl Shell {
                 this.toggle_split_menu(id, orientation, cx);
             }))
             .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// A click on a pane head gives that pane the focus and the keyboard,
+    /// not the window root.
+    fn focus_pane_from_head(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminals.get(&pane) {
+            let handle = terminal.read(cx).handle().clone();
+            window.focus(&handle, cx);
+            self.keyboard_on = Some(pane);
+            self.keyboard_in_bar = false;
+        }
+        self.command(Command::FocusPane { pane }, cx);
     }
 
     /// A 20 px pane head button, as the split buttons.
