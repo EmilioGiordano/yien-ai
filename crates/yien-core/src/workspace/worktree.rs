@@ -206,6 +206,7 @@ mod tests {
             pane,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let fx = ws.apply(split, &resolve).unwrap();
         assert!(

@@ -864,6 +864,7 @@ impl Shell {
                 pane,
                 orientation,
                 profile,
+                before: false,
             },
             cx,
         );

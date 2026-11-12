@@ -260,6 +260,7 @@ impl Run {
             pane,
             orientation: Orientation::Horizontal,
             profile: profile.map(ProfileId::new),
+            before: false,
         });
         self.wait_for(|m| match m {
             CoreMsg::TabUpdated(t) if t.focused != pane && t.layout.panes().contains(&pane) => {

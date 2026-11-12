@@ -356,12 +356,16 @@ pub enum Command {
     /// Splits a pane and starts a program in the new one (RF-PAN-01,
     /// RF-PAN-18).
     SplitPane {
-        /// The pane to split; the new pane goes after it.
+        /// The pane to split.
         pane: PaneId,
         /// Side by side or stacked.
         orientation: Orientation,
         /// The profile to launch; the user's shell when `None`.
         profile: Option<ProfileId>,
+        /// Puts the new pane before the split one (left of it or above it)
+        /// instead of after it.
+        #[serde(default)]
+        before: bool,
     },
     /// Closes a pane and terminates its program. Closing the last pane of a
     /// tab closes the tab.
@@ -1109,6 +1113,7 @@ mod tests {
                 pane: PaneId::new(3),
                 orientation: Orientation::Vertical,
                 profile: Some(ProfileId::new("claude")),
+                before: false,
             },
             Command::ResizeSplit {
                 pane: PaneId::new(3),

@@ -820,6 +820,7 @@ mod tests {
             pane,
             orientation: Orientation::Vertical,
             profile: None,
+            before: false,
         };
         let below = first_spawn(&ws.apply(split, &resolve).unwrap());
         ws.apply(Command::ResizeSplit { pane, delta: 0.2 }, &resolve)
@@ -842,6 +843,7 @@ mod tests {
             pane: below,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let new = first_spawn(&back.apply(split, &resolve).unwrap());
         let highest = ws.panes.keys().map(|p| p.get()).max().unwrap();
