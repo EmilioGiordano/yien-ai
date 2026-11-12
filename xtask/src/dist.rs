@@ -18,7 +18,7 @@ pub const BINARIES: [&str; 2] = ["yien", "yien-hook"];
 pub const THIRD_PARTY: &str = "THIRD-PARTY.md";
 /// The licence texts of every third-party package, written into the package folder.
 pub const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
-/// The ConPTY package licence, kept out of the repository root while TBD-04 is open.
+/// The ConPTY package licence, kept beside the package files rather than in the repository root.
 pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
 /// Package name consumed by the portable archive and installer.
 pub const CONPTY_LICENSE_DEST: &str = "LICENSE-MIT-ConPTY.txt";
@@ -66,8 +66,7 @@ pub fn target_directory(metadata: &Value) -> anyhow::Result<PathBuf> {
 }
 
 /// The licence files among the names of the files at the repository root,
-/// sorted: `LICENSE*` or `LICENCE*`, any case. None is fine while the licence
-/// is undecided.
+/// sorted: `LICENSE*` or `LICENCE*`, any case.
 pub fn licence_files(root_file_names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut found: Vec<String> = root_file_names
         .into_iter()

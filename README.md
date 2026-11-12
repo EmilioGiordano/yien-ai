@@ -88,4 +88,4 @@ YIEN is a Rust workspace in layers, where each layer depends only on the ones be
 
 ## Licence
 
-Licence: not decided yet (pre-release).
+YIEN is free software under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later). See [LICENSE](LICENSE). Third-party licences are listed in `THIRD-PARTY.md` and their texts are in `THIRD-PARTY-LICENSES.txt`, both shipped with the installer and the portable package.

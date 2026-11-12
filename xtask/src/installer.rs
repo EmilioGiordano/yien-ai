@@ -10,6 +10,34 @@ pub fn output_name(version: &str) -> String {
     format!("yien-{version}-x86_64-setup.exe")
 }
 
+const INSTALLER_LICENSE: &str = "INSTALLER-LICENSE.txt";
+
+const INSTALLER_LICENSE_HEADER: &str = "YIEN
+Copyright (C) 2026 Emilio Giordano
+
+YIEN is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version (GPL-3.0-or-later).
+
+YIEN is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the license below for details.
+
+The source code is available at https://github.com/EmilioGiordano/yien-ai
+Third-party licenses are in THIRD-PARTY-LICENSES.txt, installed beside YIEN.
+
+----------------------------------------------------------------------
+
+";
+
+/// The text of the installer's licence page: a notice, then the full licence.
+pub fn installer_license(licence_text: &str) -> String {
+    format!("{INSTALLER_LICENSE_HEADER}{licence_text}")
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n")
+}
+
 pub fn sha256_sidecar(exe_name: &str, hash: &str) -> String {
     format!("{hash}  {exe_name}\n")
 }
@@ -74,13 +102,13 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
         bail!("portable package missing; run cargo xtask dist first");
     }
     let out = target.join("dist");
-    let license = package.join("INSTALLER-LICENSE.txt");
-    if !license.exists() {
-        std::fs::write(
-            &license,
-            "YIEN's project licence has not been decided yet.\n",
-        )?;
-    }
+    let licence_text = std::fs::read_to_string(root.join("LICENSE"))
+        .context("reading LICENSE at the repository root")?;
+    std::fs::write(
+        package.join(INSTALLER_LICENSE),
+        installer_license(&licence_text),
+    )
+    .with_context(|| format!("writing {INSTALLER_LICENSE}"))?;
     let setup = out.join(output_name(&version));
     let script = root.join("installer/yien.iss");
     let status = Command::new(iscc)
@@ -134,6 +162,25 @@ mod tests {
     #[test]
     fn rnf_21_setup_filename_uses_version() {
         assert_eq!(output_name("0.1.2"), "yien-0.1.2-x86_64-setup.exe");
+    }
+    #[test]
+    fn installer_license_has_notice_then_full_licence() {
+        let body = "GNU GENERAL PUBLIC LICENSE\nbody\n";
+        let text = installer_license(body);
+        assert!(text.starts_with("YIEN\r\nCopyright (C) 2026 Emilio Giordano"));
+        assert!(text.contains("GPL-3.0-or-later"));
+        assert!(text.contains("WITHOUT ANY\r\nWARRANTY"));
+        assert!(text.contains("https://github.com/EmilioGiordano/yien-ai"));
+        assert!(text.ends_with("GNU GENERAL PUBLIC LICENSE\r\nbody\r\n"));
+        assert!(!text.contains("\r\r"));
+    }
+    #[test]
+    fn installer_license_wraps_the_repository_license() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let licence = std::fs::read_to_string(root.join("LICENSE")).unwrap();
+        assert!(licence.starts_with("                    GNU GENERAL PUBLIC LICENSE"));
+        let crlf = licence.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert!(installer_license(&licence).ends_with(&crlf));
     }
     #[test]
     fn checksum_sidecar_is_sha256sum_compatible() {
