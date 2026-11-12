@@ -19,11 +19,13 @@
 #![forbid(unsafe_code)]
 
 mod command;
+mod dir;
 mod parse;
 mod reload;
 mod schema;
 
 pub use command::split_command;
+pub use dir::expand_dir;
 pub use parse::parse;
 pub use reload::{Reload, ReloadGate};
 pub use schema::{SCHEMA, Setting, default_file};
@@ -120,6 +122,7 @@ pub struct Config {
     pub tab_grouping: TabGrouping,
     /// `ui.tabs.default_dir`: the folder the tab bar's "new tab" button
     /// opens a shell in, as written; `None` for the user's home folder.
+    /// [`expand_dir`] turns it into a path.
     pub default_tab_dir: Option<String>,
     /// `terminal.shell_integration`: PowerShell and cmd report their folder
     /// at each prompt, so a restored pane opens where the user left it
