@@ -467,7 +467,8 @@ pub(crate) fn clipboard_text(text: &str, crlf: bool) -> String {
 
 /// `lines` positive means away from the user. Shift keeps the wheel for the
 /// terminal even when the program asked for the mouse. Ctrl zooms, one step
-/// per turn whatever its length, unless the program asked for the mouse.
+/// per turn whatever its length, unless Shift is held too or the program
+/// asked for the mouse.
 pub(crate) fn wheel_action(
     lines: i32,
     modes: &Modes,
@@ -477,7 +478,7 @@ pub(crate) fn wheel_action(
     if lines == 0 {
         return None;
     }
-    if mods.ctrl && modes.mouse == MouseTracking::Off {
+    if mods.ctrl && !mods.shift && modes.mouse == MouseTracking::Off {
         return Some(WheelAction::Zoom(lines.signum()));
     }
     let count = lines.unsigned_abs().min(100) as usize;
@@ -987,6 +988,15 @@ mod tests {
             Some(WheelAction::Zoom(-1))
         );
         assert_eq!(wheel_action(0, &modes(), at, ctrl), None);
+        let ctrl_shift = Mods {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            wheel_action(2, &modes(), at, ctrl_shift),
+            Some(WheelAction::Scroll(2)),
+            "Ctrl+Shift keeps scrolling the history"
+        );
         let full_screen = Modes {
             alt_screen: true,
             alternate_scroll: true,
