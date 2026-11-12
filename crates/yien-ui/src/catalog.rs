@@ -377,7 +377,6 @@ pub(crate) fn profile_tabs(profiles: &[ProfileInfo]) -> Vec<ProfileTab> {
 }
 
 /// The catalog entry with this id.
-#[cfg(test)]
 pub(crate) fn spec(id: &str) -> Option<&'static CommandSpec> {
     CATALOG.iter().find(|spec| spec.id == id)
 }
@@ -532,27 +531,20 @@ mod tests {
     }
 
     #[test]
-    fn the_status_bar_labels_match_the_catalog() {
+    fn the_key_labels_drawn_in_the_interface_match_the_catalog() {
         for (id, label) in [
             ("tab_bar.toggle", TAB_BAR_KEYS),
             ("context_bar.toggle", CONTEXT_BAR_KEYS),
             ("context_bar.review", REVIEW_KEYS),
             ("theme.toggle", THEME_KEYS),
-            ("tab.next", NEXT_TAB_KEYS),
-            ("region.next", REGION_KEYS),
             ("pane.split_right", SPLIT_RIGHT_KEYS),
             ("pane.split_down", SPLIT_DOWN_KEYS),
-            ("pane.close", CLOSE_PANE_KEYS),
             ("agent.next_needs_you", JUMP_KEYS),
             ("agent.next_done", JUMP_DONE_KEYS),
             ("agent.tray", TRAY_KEYS),
-            ("tab.new", NEW_TAB_KEYS),
-            ("tab.new_claude", NEW_CLAUDE_TAB_KEYS),
             ("pane.split_right_claude", SPLIT_CLAUDE_KEYS),
             ("palette.open", PALETTE_KEYS),
-            ("switcher.open", SWITCHER_KEYS),
             ("project.add", ADD_PROJECT_KEYS),
-            ("tab.new_worktree", NEW_WORKTREE_TAB_KEYS),
         ] {
             assert_eq!(default_keys(id).as_deref(), Some(label), "{id}");
         }

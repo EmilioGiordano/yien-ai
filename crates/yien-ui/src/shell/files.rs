@@ -280,8 +280,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             if let Ok(Some(error)) = outcome.await {
                 let _ = this.update(cx, |shell, cx| {
-                    shell.notice = Some(error);
-                    cx.notify();
+                    shell.fail(error, cx);
                 });
             }
         })
