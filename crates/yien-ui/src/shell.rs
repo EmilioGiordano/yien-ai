@@ -1522,15 +1522,7 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(label)
-                .when(!keys.is_empty(), |b| {
-                    b.child(
-                        div()
-                            .text_size(t.text(11.5))
-                            .text_color(t.faint)
-                            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                            .child(keys),
-                    )
-                })
+                .when(!keys.is_empty(), |b| b.child(key_hint(keys, &t)))
         };
         Some(
             div()
@@ -3330,6 +3322,16 @@ fn icon_button(id: &'static str, icon: &'static str, t: &Theme) -> Stateful<Div>
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(svg().path(icon).size(px(16.0)).text_color(t.muted))
+}
+
+/// The key beside a dialog button's label. In the label's family: the mono
+/// family's metrics drew it below the label's line.
+fn key_hint(keys: &'static str, t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .text_size(t.text(11.5))
+        .text_color(t.faint)
+        .child(keys)
 }
 
 /// The state glyph in its 14 px slot. The shape tells the state, the colour

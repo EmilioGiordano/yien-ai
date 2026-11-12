@@ -8,7 +8,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::{Command, PaneId, ProjectId, TabId, WorktreeCheck};
 
-use super::{Asked, CONFIRM_WIDTH, PALETTE_TOP, Shell};
+use super::{Asked, CONFIRM_WIDTH, PALETTE_TOP, Shell, key_hint};
 use crate::actions::*;
 use crate::catalog::{CATALOG, Scope};
 use crate::model::CloseStep;
@@ -515,13 +515,7 @@ impl Shell {
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .child(label)
-            .child(
-                div()
-                    .text_size(t.text(11.5))
-                    .text_color(t.faint)
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(keys),
-            )
+            .child(key_hint(keys, &t))
     }
 }
 
