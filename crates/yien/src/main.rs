@@ -79,7 +79,7 @@ fn main() -> ExitCode {
     let user_profiles = profiles::load();
     let (settings, settings_watcher) = settings::start(user_profiles.notices);
     let config = CoreConfig {
-        shell: yien_core::default_shell(settings::shell_integration(&settings.initial)),
+        shell_integration: settings::shell_integration(&settings.initial),
         profiles: user_profiles.profiles,
         broken_profiles: user_profiles.broken,
         hooks,

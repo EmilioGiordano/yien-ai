@@ -63,6 +63,7 @@ use yien_vt::VtConfig;
 use crate::consoles::Consoles;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
+use crate::shell::ShellChoice;
 
 pub use git::GitConfig;
 pub use hooks::HookConfig;
@@ -139,8 +140,14 @@ impl Clock for MonotonicClock {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
-    /// What a pane runs when no profile is asked for.
+    /// What a pane runs when no profile is asked for, as configured; with
+    /// `shell_integration` the core adds the folder report to it.
     pub shell: ShellCommand,
+    /// PowerShell and cmd panes report their folder at each prompt
+    /// ([`ShellCommand::reporting_cwd`], RF-SES-01), so a restored pane opens
+    /// where the user left it. [`ClientMsg::SetShellIntegration`] changes it
+    /// for panes started afterwards. On by default.
+    pub shell_integration: bool,
     /// The agent profiles panes can be split with (RF-PAN-18).
     pub profiles: Vec<Profile>,
     /// How each pane's terminal engine is set up.
@@ -196,7 +203,8 @@ impl Default for CoreConfig {
     /// The user's shell, the built-in profiles and the real clock.
     fn default() -> Self {
         Self {
-            shell: default_shell(true),
+            shell: default_shell(),
+            shell_integration: true,
             profiles: yien_agent::builtin_profiles().unwrap_or_default(),
             vt: VtConfig::default(),
             clock: Arc::new(MonotonicClock::new()),
@@ -346,9 +354,11 @@ impl Core {
     /// faults.
     pub(crate) fn start_with(
         backend: Arc<dyn PtyBackend>,
-        config: CoreConfig,
+        mut config: CoreConfig,
         engine: EngineFactory,
     ) -> Result<(CoreHandle, mpsc::Receiver<CoreMsg>), CoreError> {
+        let shells = ShellChoice::new(&config.shell, std::env::var("PROMPT").ok().as_deref());
+        config.shell = shells.pick(config.shell_integration).clone();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.worker_threads.max(1))
             .thread_name("yien-core")
@@ -394,6 +404,7 @@ impl Core {
             hooks_error,
             writer.clone(),
             screens.clone(),
+            shells,
         ));
         let handle = CoreHandle {
             commands,

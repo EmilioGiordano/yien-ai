@@ -21,18 +21,24 @@ pub struct ShellCommand {
 
 /// Wraps the `prompt` the user's profile left so it also reports FileSystem
 /// folders as `OSC 9;9`. No `"` (PowerShell re-joins quoted arguments its own
-/// way); the user's prompt runs first so it still sees `$?`, and `try` keeps
-/// it when constrained language mode refuses the host call.
+/// way). The user's prompt runs first so it still sees `$?`. Constrained
+/// language mode refuses method calls, so it gets no report; any other
+/// failure keeps the prompt and takes its error back out of `$Error`.
 const POWERSHELL_CWD_HOOK: &str = "if ($function:prompt) { \
     $global:__YienPrompt = $function:prompt; \
     function global:prompt { \
         $p = & $global:__YienPrompt; \
         try { \
             $l = $executionContext.SessionState.Path.CurrentLocation; \
-            if ($l.Provider.Name -eq 'FileSystem') { \
+            if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage' \
+                -and $l.Provider.Name -eq 'FileSystem') { \
                 $Host.UI.Write([char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + '\\') \
             } \
-        } catch {}; \
+        } catch { \
+            if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                $global:Error.RemoveAt(0) \
+            } \
+        }; \
         $p \
     } \
 }";
@@ -92,8 +98,13 @@ impl ShellCommand {
                 let own = inherited_prompt
                     .filter(|p| !p.is_empty())
                     .unwrap_or(CMD_DEFAULT_PROMPT);
-                self.env
-                    .push(("PROMPT".to_owned(), format!("{CMD_CWD_PROMPT}{own}")));
+                // A YIEN started from a YIEN pane inherits the report already.
+                let prompt = if own.starts_with(CMD_CWD_PROMPT) {
+                    own.to_owned()
+                } else {
+                    format!("{CMD_CWD_PROMPT}{own}")
+                };
+                self.env.push(("PROMPT".to_owned(), prompt));
             }
             _ => {}
         }
@@ -102,25 +113,46 @@ impl ShellCommand {
 }
 
 /// The user's shell: `pwsh` when it is on `PATH`, else `powershell`, else
-/// `cmd` on Windows; `$SHELL`, else `sh`, elsewhere. With `report_cwd` it
-/// reports its folder at each prompt ([`ShellCommand::reporting_cwd`]).
-/// Reads the environment and the file system, so call it once, outside the
-/// async runtime.
+/// `cmd` on Windows; `$SHELL`, else `sh`, elsewhere. Reads the environment
+/// and the file system, so call it once, outside the async runtime.
 ///
 /// ```
-/// let shell = yien_core::default_shell(false);
+/// let shell = yien_core::default_shell();
 /// assert!(!shell.program.is_empty());
 /// ```
-pub fn default_shell(report_cwd: bool) -> ShellCommand {
-    let shell = pick_shell(
+pub fn default_shell() -> ShellCommand {
+    pick_shell(
         cfg!(windows),
         on_path,
         std::env::var("SHELL").ok().as_deref(),
-    );
-    if report_cwd {
-        shell.reporting_cwd(std::env::var("PROMPT").ok().as_deref())
-    } else {
-        shell
+    )
+}
+
+/// The shell as configured and the same shell reporting its folder, so the
+/// report can be switched for panes started later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellChoice {
+    plain: ShellCommand,
+    reporting: ShellCommand,
+}
+
+impl ShellChoice {
+    /// Both forms of `shell`; cmd's report goes in front of
+    /// `inherited_prompt`.
+    pub fn new(shell: &ShellCommand, inherited_prompt: Option<&str>) -> Self {
+        Self {
+            plain: shell.clone(),
+            reporting: shell.clone().reporting_cwd(inherited_prompt),
+        }
+    }
+
+    /// The shell new panes run.
+    pub fn pick(&self, report_cwd: bool) -> &ShellCommand {
+        if report_cwd {
+            &self.reporting
+        } else {
+            &self.plain
+        }
     }
 }
 
@@ -232,6 +264,24 @@ mod tests {
     }
 
     #[test]
+    fn rf_ses_01_a_nested_cmd_gets_the_report_once() {
+        let outer = ShellCommand::new("cmd.exe").reporting_cwd(Some("$T$G"));
+        let inherited = outer.env[0].1.clone();
+        let inner = ShellCommand::new("cmd.exe").reporting_cwd(Some(&inherited));
+        assert_eq!(inner.env[0].1, inherited);
+        assert_eq!(inherited.matches("]9;9;").count(), 1);
+    }
+
+    #[test]
+    fn rf_ses_01_the_choice_switches_between_plain_and_reporting() {
+        let choice = ShellChoice::new(&ShellCommand::new("pwsh.exe"), None);
+        assert!(choice.pick(false).args.is_empty());
+        assert_eq!(choice.pick(true).args[2], "-Command");
+        let other = ShellChoice::new(&ShellCommand::new("sh"), None);
+        assert_eq!(other.pick(true), other.pick(false));
+    }
+
+    #[test]
     fn a_shell_with_its_own_arguments_or_another_shell_is_unchanged() {
         let mut own = ShellCommand::new("pwsh.exe");
         own.args = vec!["-NoProfile".into()];
@@ -259,8 +309,22 @@ mod live {
 
     use super::POWERSHELL_CWD_HOOK;
 
-    /// A prompt that shows the last command's `$?` and `$LASTEXITCODE`.
-    const FIXED_PROMPT: &str = "function global:prompt { 'P[' + $? + '|' + $LASTEXITCODE + ']> ' }";
+    /// Keeps the typed test commands out of the developer's own history file.
+    const NO_HISTORY: &str =
+        "try { Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction Stop } catch {}";
+
+    /// A prompt that returns the last command's `$?`, `$LASTEXITCODE` and the
+    /// number of errors in `$Error`.
+    const FIXED_PROMPT: &str = "function global:prompt { \
+        'P[' + $? + '|' + $LASTEXITCODE + ']E' + $global:Error.Count + '> ' }";
+
+    /// A prompt written as profiles often do: it reads `$?` and
+    /// `$LASTEXITCODE` first, draws with `Write-Host` and returns a space.
+    const HOST_PROMPT: &str = "function global:prompt { \
+        $ok = $?; $code = $LASTEXITCODE; \
+        Write-Host ('S[' + $ok + '|' + $code + ']E' + $global:Error.Count + '>') \
+            -NoNewline -ForegroundColor Green; \
+        ' ' }";
 
     struct Run {
         raw: Vec<u8>,
@@ -271,11 +335,16 @@ mod live {
         String::from_utf8_lossy(raw).matches(needle).count()
     }
 
-    /// Runs each command once the one before it has drawn its prompt, waits
-    /// for the output to settle, and returns the bytes and the screen.
-    fn run(script: &str, commands: &[(&str, &str)]) -> Run {
+    /// Runs `prompt`, with the hook when `hooked`, then each command once the
+    /// one before it has drawn `first` or its own prompt; waits for the output
+    /// to settle and returns the bytes and the screen.
+    fn run(prompt: &str, hooked: bool, first: &str, commands: &[(&str, &str)]) -> Run {
+        let mut script = format!("{NO_HISTORY}; {prompt}");
+        if hooked {
+            script = format!("{script}; {POWERSHELL_CWD_HOOK}");
+        }
         let spec = SpawnSpec::new("powershell.exe")
-            .args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", script])
+            .args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &script])
             .cwd(r"C:\Windows")
             .size(100, 30);
         let session = PortablePty::new().spawn(spec).unwrap();
@@ -305,7 +374,7 @@ mod live {
                 assert!(Instant::now() < deadline, "timed out; output: {seen:?}");
             }
         };
-        pump(&mut raw, &|raw| count(raw, "P[True|]> ") > 0, false);
+        pump(&mut raw, &|raw| count(raw, first) > 0, false);
         for (command, prompt) in commands {
             let before = count(&raw, prompt);
             session.write(format!("{command}\r").into_bytes()).unwrap();
@@ -325,26 +394,35 @@ mod live {
         Run { raw, screen }
     }
 
-    #[test]
-    fn rf_ses_01_the_hook_leaves_the_users_prompt_as_it_was() {
-        let commands = [
-            ("Get-Item nope-yien-missing", "P[False|]> "),
-            ("cmd /c exit 3", "P[False|3]> "),
-            ("cd HKLM:\\", "P[True|3]> "),
-            ("cd C:\\", "P[True|3]> "),
-        ];
-        let plain = run(FIXED_PROMPT, &commands);
-        let hooked = run(&format!("{FIXED_PROMPT}; {POWERSHELL_CWD_HOOK}"), &commands);
+    fn reports(raw: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(raw).into_owned();
+        text.split("\x1b]9;9;")
+            .skip(1)
+            .map(|s| s.split("\x1b\\").next().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    /// Both prompts' runs: a failing cmdlet, a native exit code, the registry
+    /// and back to a folder.
+    fn commands(tag: &'static str) -> [(&'static str, String); 4] {
+        [
+            ("Get-Item nope-yien-missing", format!("{tag}[False|]")),
+            ("cmd /c exit 3", format!("{tag}[False|3]")),
+            ("cd HKLM:\\", format!("{tag}[True|3]")),
+            ("cd C:\\", format!("{tag}[True|3]")),
+        ]
+    }
+
+    /// The same screen with and without the hook, and one report per prompt
+    /// except in the registry.
+    fn same_prompt_with_the_hook(prompt: &str, tag: &'static str) {
+        let commands = commands(tag);
+        let commands: Vec<(&str, &str)> = commands.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let first = format!("{tag}[True|]");
+        let plain = run(prompt, false, &first, &commands);
+        let hooked = run(prompt, true, &first, &commands);
         assert_eq!(hooked.screen, plain.screen);
-        let reports = |raw: &[u8]| -> Vec<String> {
-            let text = String::from_utf8_lossy(raw).into_owned();
-            text.split("\x1b]9;9;")
-                .skip(1)
-                .map(|s| s.split("\x1b\\").next().unwrap_or("").to_owned())
-                .collect()
-        };
         assert!(reports(&plain.raw).is_empty());
-        // One per prompt, none while the location is in the registry.
         assert_eq!(
             reports(&hooked.raw),
             [
@@ -354,5 +432,15 @@ mod live {
                 r#""C:\""#
             ]
         );
+    }
+
+    #[test]
+    fn rf_ses_01_the_hook_leaves_the_users_prompt_as_it_was() {
+        same_prompt_with_the_hook(FIXED_PROMPT, "P");
+    }
+
+    #[test]
+    fn rf_ses_01_the_hook_keeps_a_write_host_prompt_and_its_status() {
+        same_prompt_with_the_hook(HOST_PROMPT, "S");
     }
 }
