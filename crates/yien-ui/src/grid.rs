@@ -850,12 +850,21 @@ mod tests {
         );
         let kitty = Modes {
             kitty_keyboard: 1,
-            ..conpty
+            ..modes()
         };
         assert_eq!(key_bytes(&shift_enter, &kitty).unwrap(), b"\x1b[13;2u");
+        // Under ConPTY the Win32 event wins, so leftover flags never reach PSReadLine.
+        let both = Modes {
+            kitty_keyboard: 1,
+            ..conpty
+        };
+        assert_eq!(
+            key_bytes(&shift_enter, &both),
+            key_bytes(&shift_enter, &conpty)
+        );
         // Plain Enter is unchanged in every mode.
         let enter = press("enter", None, Mods::NONE);
-        for m in [modes(), conpty, kitty] {
+        for m in [modes(), conpty, kitty, both] {
             assert_eq!(key_bytes(&enter, &m).unwrap(), b"\r");
             assert_eq!(key_bytes(&press("enter", None, ALT), &m).unwrap(), b"\r");
             assert_eq!(

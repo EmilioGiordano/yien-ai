@@ -230,8 +230,8 @@ pub struct KeyModes {
 }
 
 /// Like [`encode_in`], but Shift+Enter keeps its Shift where the program can
-/// see it: `CSI 13;2u` when the kitty protocol asks to disambiguate, else a
-/// Win32 Shift+Enter key event when win32-input-mode is on, else a plain `\r`.
+/// see it: a Win32 Shift+Enter key event when win32-input-mode is on, else
+/// `CSI 13;2u` when the kitty protocol asks to disambiguate, else a plain `\r`.
 /// Every other key is encoded exactly as [`encode_in`] does.
 ///
 /// ```
@@ -244,9 +244,9 @@ pub struct KeyModes {
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
     if *key == Key::Enter && mods == Mods::SHIFT {
-        if modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
-            return Some(b"\x1b[13;2u".to_vec());
-        }
+        // ConPTY is the peer under 9001: it turns this event into CSI u for a
+        // client that asked for kitty, as for Windows Terminal. Checked first
+        // so flags left by a killed CLI never reach PSReadLine as CSI u.
         if modes.win32_input {
             // What Windows Terminal sends. PSReadLine binds Shift+Enter to
             // AddLine but inserts a literal CR for ESC CR (Alt+Enter, unbound).
@@ -255,6 +255,9 @@ pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
                 ..win32::KeyEvent::down(win32::vk::RETURN, u16::from(b'\r'), Mods::SHIFT)
             };
             return Some(win32::press(&event));
+        }
+        if modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
+            return Some(b"\x1b[13;2u".to_vec());
         }
     }
     encode_in(key, mods, modes.app_cursor)
@@ -433,16 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn rf_age_02_kitty_disambiguation_wins_over_win32_input_mode() {
+    fn rf_age_02_win32_input_mode_wins_over_kitty_flags() {
         let both = KeyModes {
             win32_input: true,
             ..KITTY
         };
         assert_eq!(
-            encode_with(&Key::Enter, Mods::SHIFT, both).unwrap(),
-            b"\x1b[13;2u"
+            encode_with(&Key::Enter, Mods::SHIFT, both),
+            encode_with(&Key::Enter, Mods::SHIFT, WIN32)
         );
-        // Flags without disambiguation leave it to win32-input-mode.
         let other_flags = KeyModes {
             kitty_flags: 0b0_1010,
             ..WIN32
