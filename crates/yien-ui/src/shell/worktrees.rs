@@ -135,6 +135,31 @@ impl Shell {
         let Some(question) = self.workspace.worktree_question(pane) else {
             return false;
         };
+        self.ask_about_worktree(question, window, cx);
+        true
+    }
+
+    /// Asks before closing the whole tab `tab` when it is the last tab on a
+    /// worktree. `false` when there is nothing to ask.
+    pub(super) fn ask_before_closing_tab(
+        &mut self,
+        tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(question) = self.workspace.tab_worktree_question(tab) else {
+            return false;
+        };
+        self.ask_about_worktree(question, window, cx);
+        true
+    }
+
+    fn ask_about_worktree(
+        &mut self,
+        question: Question,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = question.tab;
         self.split_menu = None;
         self.finish_rename(true, window, cx);
@@ -143,7 +168,6 @@ impl Shell {
         self.worktree_close = Some(Closing { question, focus });
         self.command(Command::CheckWorktree { tab }, cx);
         cx.notify();
-        true
     }
 
     /// The core's answer to the check, for the open question. An answer
