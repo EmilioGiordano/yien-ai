@@ -863,7 +863,10 @@ mod tests {
             &ws.apply(split(pane, Orientation::Horizontal), &resolve)
                 .unwrap(),
         );
-        let above = first_spawn(&ws.apply(split(pane, Orientation::Vertical), &resolve).unwrap());
+        let above = first_spawn(
+            &ws.apply(split(pane, Orientation::Vertical), &resolve)
+                .unwrap(),
+        );
         let tab = ws.tab_of(pane).unwrap();
         let layout = ws.tab_info(ws.tab(tab).unwrap()).layout;
         assert_eq!(layout.panes(), [left, above, pane]);
