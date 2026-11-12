@@ -54,15 +54,22 @@ impl PaneAction {
         }
     }
 
-    /// For a split, its axis and whether the new pane goes before (left of
-    /// or above) the pane.
+    /// `true` puts the new pane left of or above the pane.
     pub(super) fn split(self) -> Option<(Orientation, bool)> {
         match self {
             PaneAction::SplitRight => Some((Orientation::Horizontal, false)),
             PaneAction::SplitLeft => Some((Orientation::Horizontal, true)),
             PaneAction::SplitDown => Some((Orientation::Vertical, false)),
             PaneAction::SplitUp => Some((Orientation::Vertical, true)),
-            _ => None,
+            PaneAction::Copy
+            | PaneAction::Paste
+            | PaneAction::ToggleMaximize
+            | PaneAction::Relaunch
+            | PaneAction::Terminate
+            | PaneAction::CopySessionId
+            | PaneAction::NewTab
+            | PaneAction::CloseTab
+            | PaneAction::ClosePane => None,
         }
     }
 }
@@ -327,6 +334,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((orientation, before)) = action.split() {
+            self.split_pane(pane, orientation, before, None, cx);
+            return;
+        }
         match action {
             PaneAction::Copy => {
                 if let Some(terminal) = self.terminals.get(&pane) {
@@ -338,14 +349,11 @@ impl Shell {
                     terminal.update(cx, |t, cx| t.paste_clipboard(cx));
                 }
             }
+            // Run by `split()` above.
             PaneAction::SplitRight
             | PaneAction::SplitLeft
             | PaneAction::SplitDown
-            | PaneAction::SplitUp => {
-                if let Some((orientation, before)) = action.split() {
-                    self.split_pane_on(pane, orientation, before, None, cx);
-                }
-            }
+            | PaneAction::SplitUp => {}
             PaneAction::ToggleMaximize => self.command(Command::ToggleMaximize { pane }, cx),
             PaneAction::Relaunch => self.command(Command::RelaunchPane { pane }, cx),
             PaneAction::Terminate => self.terminate(pane, cx),

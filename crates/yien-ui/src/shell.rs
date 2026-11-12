@@ -843,28 +843,15 @@ impl Shell {
         }
     }
 
-    /// Splits the focused pane with the shell; `before` puts the new pane on
-    /// the left or above.
     fn split(&mut self, orientation: Orientation, before: bool, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
-            self.split_pane_on(pane, orientation, before, None, cx);
+            self.split_pane(pane, orientation, before, None, cx);
         }
     }
 
-    /// Splits `pane` and starts `profile` in the new one, the shell when
-    /// `None` (RF-PAN-18).
+    /// Starts `profile` in the new pane, the shell when `None` (RF-PAN-18);
+    /// `before` puts it left of or above `pane`.
     fn split_pane(
-        &mut self,
-        pane: PaneId,
-        orientation: Orientation,
-        profile: Option<ProfileId>,
-        cx: &mut Context<Self>,
-    ) {
-        self.split_pane_on(pane, orientation, false, profile, cx);
-    }
-
-    /// Splits `pane`, the new pane before it when `before` (left or above).
-    fn split_pane_on(
         &mut self,
         pane: PaneId,
         orientation: Orientation,
@@ -888,7 +875,7 @@ impl Shell {
     fn split_right_claude(&mut self, _: &SplitRightClaude, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.focused_pane() {
             let claude = Some(ProfileId::new(CLAUDE_PROFILE));
-            self.split_pane(pane, Orientation::Horizontal, claude, cx);
+            self.split_pane(pane, Orientation::Horizontal, false, claude, cx);
         }
     }
 
@@ -1255,7 +1242,7 @@ impl Shell {
             Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
             Target::Split(profile, orientation) => {
                 if let Some(pane) = self.focused_pane() {
-                    self.split_pane(pane, orientation, Some(profile), cx);
+                    self.split_pane(pane, orientation, false, Some(profile), cx);
                 }
             }
             Target::NewTab(profile) => self.new_tab_with(Some(profile.as_str()), cx),
@@ -2895,7 +2882,7 @@ impl Shell {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.split_pane(pane, orientation, Some(id.clone()), cx);
+                        this.split_pane(pane, orientation, false, Some(id.clone()), cx);
                     }))
                     .child(
                         div()
