@@ -132,11 +132,7 @@ impl KeyModeTracker {
 
     fn step(&mut self, byte: u8) -> Option<Vec<u8>> {
         match self.state {
-            State::Ground => {
-                if byte == ESC {
-                    self.state = State::Escape;
-                }
-            }
+            State::Ground => {}
             State::Escape => match byte {
                 b'[' => {
                     self.params.clear();
@@ -193,7 +189,7 @@ impl KeyModeTracker {
                 for value in values.into_iter().flatten() {
                     match value {
                         9001 => self.win32_input = on,
-                        47 | 1047 | 1049 => self.set_alt_screen(on),
+                        1049 => self.set_alt_screen(on),
                         _ => {}
                     }
                 }
@@ -417,6 +413,18 @@ mod tests {
         // Leaving the alternate screen cleared its stack.
         t.scan(b"\x1b[?1049h");
         assert_eq!(t.kitty_flags(), 0);
+    }
+
+    #[test]
+    fn only_mode_1049_switches_the_kitty_stack() {
+        // The emulator switches screens on 1049 alone; 47 and 1047 are unknown to it.
+        for mode in [&b"47"[..], b"1047"] {
+            let mut t = tracked(b"\x1b[>1u");
+            t.scan(&[&b"\x1b[?"[..], mode, b"h"].concat());
+            assert_eq!(t.kitty_flags(), 1, "{mode:?}");
+            t.scan(&[&b"\x1b[?"[..], mode, b"l"].concat());
+            assert_eq!(t.kitty_flags(), 1, "{mode:?}");
+        }
     }
 
     #[test]
