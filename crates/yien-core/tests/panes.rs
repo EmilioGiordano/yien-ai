@@ -1367,3 +1367,85 @@ fn rf_ses_01_a_core_started_without_the_report_runs_the_plain_shell() {
     let (_, _, child) = h.project();
     assert!(child.spec().env.iter().all(|(k, _)| k != "PROMPT"));
 }
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn osc52_write(text: &[u8]) -> Vec<u8> {
+    format!("\x1b]52;c;{}\x07", base64(text)).into_bytes()
+}
+
+fn clipboard_writes(h: &mut Harness, pane: PaneId, until: &str) -> Vec<String> {
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match h.events.try_recv() {
+            Ok(CoreMsg::ClipboardWrite { pane: p, text }) if p == pane => seen.push(text),
+            Ok(_) => {}
+            Err(TryRecvError::Empty) => {
+                if h.core
+                    .take_frame(pane)
+                    .is_some_and(|f| f.text().contains(until))
+                {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "the pane never showed {until}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryRecvError::Disconnected) => panic!("the core stopped"),
+        }
+    }
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_reaches_the_ui_decoded() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(&osc52_write("héllo\nworld".as_bytes()));
+    let text = h.wait_for(|m| match m {
+        CoreMsg::ClipboardWrite { pane: p, text } if *p == pane => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(text, "héllo\nworld");
+}
+
+#[test]
+fn rf_pan_09_an_osc52_read_gets_no_reply_and_no_message() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"\x1b]52;c;?\x07\x1b[6n");
+    let reply = next_bytes(&child);
+    assert!(
+        reply.starts_with(b"\x1b[")
+            && reply.ends_with(b"R")
+            && !reply.windows(2).any(|w| w == b"52"),
+        "only the cursor report answers: {reply:?}"
+    );
+    child.output(b"after the read");
+    assert!(clipboard_writes(&mut h, pane, "after the read").is_empty());
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_over_one_mebibyte_is_dropped() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(&osc52_write(&vec![b'a'; (1 << 20) + 1]));
+    child.output(b"after the big one");
+    assert!(clipboard_writes(&mut h, pane, "after the big one").is_empty());
+}
