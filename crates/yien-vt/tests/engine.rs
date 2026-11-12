@@ -412,6 +412,33 @@ fn rf_pan_09_powershell_on_the_bundled_conpty_leaves_the_mouse_to_the_terminal()
     assert_eq!(e.selection_text().as_deref(), Some("hello"));
 }
 
+/// A program that enters the alternate screen, asks for mouse reports and
+/// writes "hello" to the clipboard with OSC 52, as each pseudo console hands
+/// it on. Recorded from real ones, 100 by 30; the in-box one (Windows 10
+/// 19045) less its title and its erases of the empty rows.
+const CONPTY_1_24_FULL_SCREEN: &[u8] = b"\x1b[1t\x1b[6n\x1b[c\x1b[?1004h\x1b[?9001h\x1b[1;1H\
+    \x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[Hfull screen app\x1b]52;c;aGVsbG8=\x07";
+const IN_BOX_CONPTY_FULL_SCREEN: &[u8] = b"\x1b[6n\x1b[m\x1b[?25h\x1b[25lfull screen app\x1b[K\
+    \x1b[1;16H\x1b[?25h\x1b[25l\x1b]52;c;aGVsbG8=\x07\x1b[H\x1b[K";
+
+#[test]
+fn rf_pan_14_the_bundled_conpty_hands_on_the_mouse_modes_the_in_box_one_kept() {
+    let mut e = engine(100, 30);
+    let out = e.feed(CONPTY_1_24_FULL_SCREEN);
+    let modes = e.modes();
+    assert_eq!(modes.mouse, MouseTracking::Drag);
+    assert_eq!(modes.mouse_encoding, MouseEncoding::Sgr);
+    assert!(modes.alt_screen);
+    assert_eq!(out.clipboard.as_deref(), Some("hello"));
+
+    let mut e = engine(100, 30);
+    let out = e.feed(IN_BOX_CONPTY_FULL_SCREEN);
+    let modes = e.modes();
+    assert_eq!(modes.mouse, MouseTracking::Off);
+    assert!(!modes.alt_screen);
+    assert_eq!(out.clipboard.as_deref(), Some("hello"));
+}
+
 #[test]
 fn rf_pan_09_bracketed_paste_mode_is_reported() {
     let mut e = engine(10, 3);
