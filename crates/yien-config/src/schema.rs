@@ -55,8 +55,8 @@ pub const SCHEMA: &[Setting] = &[
         default: "true",
         doc: "true: PowerShell and cmd report their folder at each prompt, so a pane \
               reopens where you left it; your profile and prompt stay as they are. \
-              false: panes reopen in the folder they started in. Read when YIEN \
-              starts: a change applies after a restart.",
+              false: panes reopen in the folder they started in. A change applies to \
+              panes started after it; running panes keep theirs.",
     },
     Setting {
         key: "editor",

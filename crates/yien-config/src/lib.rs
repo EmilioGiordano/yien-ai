@@ -120,7 +120,7 @@ pub struct Config {
     pub tab_grouping: TabGrouping,
     /// `terminal.shell_integration`: PowerShell and cmd report their folder
     /// at each prompt, so a restored pane opens where the user left it
-    /// (RF-SES-01). Read when YIEN starts.
+    /// (RF-SES-01). Applies to panes started after a change.
     pub shell_integration: bool,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
