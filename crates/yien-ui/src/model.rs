@@ -905,12 +905,12 @@ impl WorkspaceView {
     /// already, compared as [`same_folder`] does, goes to its most recently
     /// selected tab (RF-ESP-01).
     pub fn folder_target(&self, root: &str) -> FolderTarget {
-        let Some(project) = self.projects.iter().find(|p| same_folder(&p.root, root)) else {
+        let Some(project) = self.project_at(root) else {
             return FolderTarget::NewProject;
         };
         self.tabs_by_recent()
             .iter()
-            .find(|t| t.project == project.id)
+            .find(|t| t.project == project)
             .map_or(FolderTarget::NewProject, |t| FolderTarget::Tab(t.id))
     }
 
