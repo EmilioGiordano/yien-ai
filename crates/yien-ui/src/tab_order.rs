@@ -100,11 +100,22 @@ pub(crate) fn step(from: usize, len: usize, down: bool) -> Option<usize> {
     }
 }
 
-/// How much a drag at height `y` scrolls a list drawn from `top` to
-/// `bottom`: positive towards its start, negative towards its end, faster
-/// deeper into the band at each end, nothing in between.
-pub(crate) fn scroll_step(y: f32, top: f32, bottom: f32) -> f32 {
-    if !(y.is_finite() && top.is_finite() && bottom.is_finite()) || bottom <= top {
+/// How much a drag at `(x, y)` scrolls `list`, the tab list as drawn:
+/// positive towards its start, negative towards its end, faster deeper into
+/// the band at each end, nothing in between. Nothing either while the
+/// pointer is beside the list, over the panes.
+pub(crate) fn scroll_step((x, y): (f32, f32), list: Span) -> f32 {
+    let Span {
+        left,
+        right,
+        top,
+        bottom,
+    } = list;
+    if !(x.is_finite() && y.is_finite() && top.is_finite() && bottom.is_finite())
+        || bottom <= top
+        || x < left
+        || x > right
+    {
         return 0.0;
     }
     let speed = |depth: f32| SCROLL_STEP * (depth / SCROLL_EDGE).clamp(0.0, 1.0);
@@ -219,16 +230,41 @@ mod tests {
     #[test]
     fn rf_esp_16_a_drag_near_an_end_of_the_list_scrolls_it() {
         let (top, bottom) = (100.0, 500.0);
-        assert_eq!(scroll_step(300.0, top, bottom), 0.0);
-        assert_eq!(scroll_step(top + SCROLL_EDGE, top, bottom), 0.0);
-        let near_top = scroll_step(top + 10.0, top, bottom);
+        let list = Span {
+            left: 0.0,
+            right: 264.0,
+            top,
+            bottom,
+        };
+        let at = |y: f32| scroll_step((100.0, y), list);
+        assert_eq!(at(300.0), 0.0);
+        assert_eq!(at(top + SCROLL_EDGE), 0.0);
+        let near_top = at(top + 10.0);
         assert!(near_top > 0.0 && near_top < SCROLL_STEP);
-        assert_eq!(scroll_step(top, top, bottom), SCROLL_STEP);
-        assert_eq!(scroll_step(top - 50.0, top, bottom), SCROLL_STEP);
-        assert_eq!(scroll_step(bottom, top, bottom), -SCROLL_STEP);
-        assert!(scroll_step(bottom - 10.0, top, bottom) < 0.0);
-        assert_eq!(scroll_step(f32::NAN, top, bottom), 0.0);
-        assert_eq!(scroll_step(120.0, 100.0, 100.0), 0.0);
+        assert_eq!(at(top), SCROLL_STEP);
+        assert_eq!(at(top - 50.0), SCROLL_STEP);
+        assert_eq!(at(bottom), -SCROLL_STEP);
+        assert!(at(bottom - 10.0) < 0.0);
+        assert_eq!(at(f32::NAN), 0.0);
+        let flat = Span {
+            bottom: top,
+            ..list
+        };
+        assert_eq!(scroll_step((100.0, 120.0), flat), 0.0);
+    }
+
+    #[test]
+    fn rf_esp_16_a_drag_over_the_panes_does_not_scroll_the_tab_list() {
+        let list = Span {
+            left: 0.0,
+            right: 264.0,
+            top: 100.0,
+            bottom: 500.0,
+        };
+        assert_eq!(scroll_step((600.0, 100.0), list), 0.0);
+        assert_eq!(scroll_step((600.0, 500.0), list), 0.0);
+        assert_eq!(scroll_step((-1.0, 100.0), list), 0.0);
+        assert_eq!(scroll_step((264.0, 100.0), list), SCROLL_STEP);
     }
 
     #[test]

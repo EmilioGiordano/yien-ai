@@ -307,11 +307,7 @@ impl Shell {
         let Some(live) = self.tab_drag.live.as_mut().filter(|l| l.armed) else {
             return;
         };
-        let by = tab_order::scroll_step(
-            live.pointer.1,
-            bounds.top().as_f32(),
-            bounds.bottom().as_f32(),
-        );
+        let by = tab_order::scroll_step(live.pointer, span(bounds));
         if live.scrolling || by == 0.0 {
             return;
         }
@@ -335,11 +331,7 @@ impl Shell {
             return false;
         };
         let bounds = scroll.bounds();
-        let by = tab_order::scroll_step(
-            live.pointer.1,
-            bounds.top().as_f32(),
-            bounds.bottom().as_f32(),
-        );
+        let by = tab_order::scroll_step(live.pointer, span(bounds));
         let offset = scroll.offset();
         let y = tab_order::scrolled(offset.y.as_f32(), by, scroll.max_offset().y.as_f32());
         let moved = y - offset.y.as_f32();
