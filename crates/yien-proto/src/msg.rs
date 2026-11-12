@@ -404,6 +404,20 @@ pub enum Command {
         /// The fraction to add; negative shrinks.
         delta: f32,
     },
+    /// Moves the divider between two neighbouring children of a split, so
+    /// the first takes `share` of the space the two hold together; the rest
+    /// of the split stays put (RF-PAN-02). Ignored when the panes are not on
+    /// the two sides of one divider, or `share` is not strictly between 0
+    /// and 1; a share closer than [`crate::MIN_DIVIDER_SHARE`] to either end
+    /// is clamped there.
+    SetDivider {
+        /// Any pane in the child before the divider.
+        before: PaneId,
+        /// Any pane in the child after it.
+        after: PaneId,
+        /// The first child's part of the pair's space.
+        share: f32,
+    },
     /// Exchanges two panes of the same tab; their programs keep running
     /// (RF-PAN-05).
     SwapPanes {
@@ -1142,6 +1156,11 @@ mod tests {
             Command::ResizeSplit {
                 pane: PaneId::new(3),
                 delta: -0.25,
+            },
+            Command::SetDivider {
+                before: PaneId::new(3),
+                after: PaneId::new(4),
+                share: 0.375,
             },
             Command::CloseProject {
                 project: ProjectId::new(1),
