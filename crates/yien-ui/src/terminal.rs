@@ -16,7 +16,9 @@ use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
 use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
 use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
-use crate::grid::{self, CursorPaint, PastePlan, Pointer, PromptKey, Underline, WheelAction};
+use crate::grid::{
+    self, CursorPaint, PastePlan, Pointer, PromptKey, RightClick, Underline, WheelAction,
+};
 use crate::theme::Theme;
 
 /// The terminal font size when the settings name none.
@@ -33,6 +35,18 @@ struct Metrics {
     cell_w: f32,
     cell_h: f32,
 }
+
+/// What a terminal view tells the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TerminalEvent {
+    /// A right click asks for the terminal menu at this window position.
+    ContextMenu {
+        at: Point<Pixels>,
+        has_selection: bool,
+    },
+}
+
+impl EventEmitter<TerminalEvent> for TerminalPane {}
 
 pub(crate) struct TerminalPane {
     id: PaneId,
@@ -99,6 +113,11 @@ impl TerminalPane {
 
     pub(crate) fn handle(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    /// The cell's width and height at the last paint; `None` before one.
+    pub(crate) fn cell(&self) -> Option<(f32, f32)> {
+        self.grid.map(|(_, m)| (m.cell_w, m.cell_h))
     }
 
     /// The single place frames enter the view, so a change in how the core
@@ -263,11 +282,21 @@ impl TerminalPane {
     }
 
     fn copy(&mut self, _: &CopySelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selection(cx);
+    }
+
+    pub(crate) fn copy_selection(&mut self, cx: &mut Context<Self>) {
         tracing::debug!(pane = self.id.get(), "copy asked");
         self.send(ClientMsg::CopySelection { pane: self.id }, cx);
     }
 
     fn paste(&mut self, _: &PasteClipboard, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(cx);
+    }
+
+    /// Pastes the clipboard as Ctrl+Shift+V does, asking first when the
+    /// text is risky (RF-PAN-09).
+    pub(crate) fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -338,6 +367,17 @@ impl TerminalPane {
     ) {
         window.focus(&self.focus, cx);
         self.send(ClientMsg::Command(Command::FocusPane { pane: self.id }), cx);
+        // Before the cell lookup, so the menu opens before the first frame too.
+        if event.button == MouseButton::Right
+            && grid::right_click(&self.modes(), event.modifiers.shift) == RightClick::Menu
+        {
+            let has_selection = self.frame.as_ref().is_some_and(grid::has_selection);
+            cx.emit(TerminalEvent::ContextMenu {
+                at: event.position,
+                has_selection,
+            });
+            return;
+        }
         let Some((at, side)) = self.cell_at(event.position) else {
             return;
         };

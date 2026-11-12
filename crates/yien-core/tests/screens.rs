@@ -213,6 +213,7 @@ impl Run {
             pane,
             orientation: Orientation::Horizontal,
             profile: profile.map(ProfileId::new),
+            before: false,
         });
         self.wait_for(|m| match m {
             CoreMsg::PaneUpdated(p) if p.id != pane => Some(p.id),

@@ -125,6 +125,7 @@ impl Harness {
             pane,
             orientation: Orientation::Horizontal,
             profile: Some(ProfileId::new(profile)),
+            before: false,
         });
         // A split focuses the new pane. Late updates of other panes may come
         // first, so the pane is not taken from them.

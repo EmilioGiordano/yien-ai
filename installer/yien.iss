@@ -51,12 +51,39 @@ Name: "{userdesktop}\YIEN"; Filename: "{app}\yien.exe"; Tasks: desktopicon
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
+[Run]
+Filename: "{app}\yien.exe"; Flags: nowait; Check: StartedByYien
+
 [Code]
+// YIEN's own update starts Setup with /YIENUPDATE=1 as it quits:
+// wait for it to exit, then start the new YIEN at the end.
+function StartedByYien(): Boolean;
+begin
+  Result := ExpandConstant('{param:YIENUPDATE|0}') = '1';
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Waited: Integer;
+  Started: Integer;
 begin
   Result := '';
-  if CheckForMutexes('Local\YIENRunning') then
+  if StartedByYien() then begin
+    Waited := 0;
+    while CheckForMutexes('Local\YIENRunning') and (Waited < 30000) do begin
+      Sleep(250);
+      Waited := Waited + 250;
+    end;
+  end;
+  if CheckForMutexes('Local\YIENRunning') then begin
     Result := 'Close YIEN before installing or upgrading, then run Setup again. YIEN was not closed.';
+    // The update gives up; the user must not be left without a YIEN.
+    if StartedByYien() then begin
+      Log('YIEN was still running after 30 seconds; the update was not installed and the installed YIEN is started again.');
+      if FileExists(ExpandConstant('{app}\yien.exe')) then
+        Exec(ExpandConstant('{app}\yien.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Started);
+    end;
+  end;
 end;
 
 function InitializeUninstall(): Boolean;

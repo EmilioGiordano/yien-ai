@@ -11,7 +11,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::color::COUNT as COLOR_COUNT;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
-use alacritty_terminal::term::{Config, Osc52, TermMode, point_to_viewport};
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode, point_to_viewport};
 use alacritty_terminal::vte::ansi::{
     self, Color, CursorShape as TermCursorShape, CursorStyle, Processor, Timeout,
 };
@@ -167,7 +167,12 @@ impl AlacrittyEngine {
                 Event::Title(title) => out.title = Some(TitleChange::Set(title)),
                 Event::ResetTitle => out.title = Some(TitleChange::Reset),
                 Event::Bell => out.bell = true,
-                Event::ClipboardStore(_, text) => out.clipboard = Some(text),
+                Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                    out.clipboard = Some(text);
+                }
+                Event::ClipboardStore(ClipboardType::Selection, text) => {
+                    out.selection_write_refused = Some(text.len());
+                }
                 // OSC 52 reads are disabled, and there is no pixel size to
                 // report for CSI 14 t; the rest only matter to alacritty's own UI.
                 Event::ClipboardLoad(..)

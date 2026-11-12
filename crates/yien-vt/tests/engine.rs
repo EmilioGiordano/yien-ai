@@ -841,6 +841,22 @@ fn feed_reports_clipboard_writes_only() {
 }
 
 #[test]
+fn rf_pan_09_only_the_clipboard_selection_is_written() {
+    for target in ["", "c", "cs"] {
+        let mut e = engine(20, 3);
+        let out = e.feed(format!("\x1b]52;{target};aGVsbG8=\x07").as_bytes());
+        assert_eq!(out.clipboard.as_deref(), Some("hello"), "target {target:?}");
+        assert_eq!(out.selection_write_refused, None);
+    }
+    for target in ["s", "p", "ps"] {
+        let mut e = engine(20, 3);
+        let out = e.feed(format!("\x1b]52;{target};aGVsbG8=\x07").as_bytes());
+        assert_eq!(out.clipboard, None, "target {target:?}");
+        assert_eq!(out.selection_write_refused, Some(5));
+    }
+}
+
+#[test]
 fn synchronized_update_shows_when_closed() {
     let mut e = engine(20, 3);
     e.feed(b"\x1b[?2026hheld");

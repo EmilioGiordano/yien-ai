@@ -140,6 +140,7 @@ impl Harness {
             pane,
             orientation: Orientation::Horizontal,
             profile: profile.map(ProfileId::new),
+            before: false,
         });
         let new = self.wait_for(|m| match m {
             CoreMsg::PaneUpdated(p) if p.id != pane => Some(p.id),
@@ -593,6 +594,7 @@ fn a_failed_spawn_is_reported_on_the_pane() {
         pane: first,
         orientation: Orientation::Vertical,
         profile: None,
+        before: false,
     });
     let (pane, message) = h.wait_for(|m| match m {
         CoreMsg::Error {
@@ -727,6 +729,7 @@ fn rf_age_04_a_broken_override_never_starts_the_builtin_in_its_place() {
         pane: first,
         orientation: Orientation::Horizontal,
         profile: Some(ProfileId::new("claude")),
+        before: false,
     });
     let message = h.wait_for(|m| match m {
         CoreMsg::Error { message, .. } => Some(message.clone()),
@@ -1111,6 +1114,7 @@ fn a_split_pane_starts_at_the_first_size_the_ui_sends() {
         pane: first,
         orientation: Orientation::Horizontal,
         profile: None,
+        before: false,
     });
     let new = h.wait_for(|m| match m {
         CoreMsg::PaneUpdated(p) if p.id != first => Some(p.id),
@@ -1366,4 +1370,144 @@ fn rf_ses_01_a_core_started_without_the_report_runs_the_plain_shell() {
     });
     let (_, _, child) = h.project();
     assert!(child.spec().env.iter().all(|(k, _)| k != "PROMPT"));
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn osc52_write(text: &[u8]) -> Vec<u8> {
+    format!("\x1b]52;c;{}\x07", base64(text)).into_bytes()
+}
+
+/// Reads events until the pane shows `until`, taking nothing from the
+/// clipboard slot. Returns how many clipboard notices came.
+fn clipboard_notices(h: &mut Harness, pane: PaneId, until: &str) -> usize {
+    let mut notices = 0;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match h.events.try_recv() {
+            Ok(CoreMsg::ClipboardReady { pane: p }) if p == pane => notices += 1,
+            Ok(_) => {}
+            Err(TryRecvError::Empty) => {
+                if h.core
+                    .take_frame(pane)
+                    .is_some_and(|f| f.text().contains(until))
+                {
+                    return notices;
+                }
+                assert!(Instant::now() < deadline, "the pane never showed {until}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(TryRecvError::Disconnected) => panic!("the core stopped"),
+        }
+    }
+}
+
+fn clipboard_ready(h: &mut Harness, pane: PaneId) -> Option<String> {
+    h.wait_for(|m| match m {
+        CoreMsg::ClipboardReady { pane: p } if *p == pane => Some(()),
+        _ => None,
+    });
+    h.core.take_clipboard(pane)
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_reaches_the_ui_decoded() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(&osc52_write("héllo\nworld".as_bytes()));
+    assert_eq!(
+        clipboard_ready(&mut h, pane).as_deref(),
+        Some("héllo\nworld")
+    );
+    assert_eq!(h.core.take_clipboard(pane), None, "taken once");
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_split_across_two_reads_arrives_whole() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    let whole = osc52_write(b"split in the middle");
+    let (first, second) = whole.split_at(whole.len() / 2);
+    child.output(first);
+    std::thread::sleep(Duration::from_millis(30));
+    child.output(second);
+    assert_eq!(
+        clipboard_ready(&mut h, pane).as_deref(),
+        Some("split in the middle")
+    );
+}
+
+#[test]
+fn rf_pan_09_an_osc52_read_gets_no_reply_and_no_message() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(b"\x1b]52;c;?\x07\x1b[6n");
+    let reply = next_bytes(&child);
+    assert!(
+        reply.starts_with(b"\x1b[")
+            && reply.ends_with(b"R")
+            && !reply.windows(2).any(|w| w == b"52"),
+        "only the cursor report answers: {reply:?}"
+    );
+    child.output(b"after the read");
+    assert_eq!(clipboard_notices(&mut h, pane, "after the read"), 0);
+    assert_eq!(h.core.take_clipboard(pane), None);
+}
+
+#[test]
+fn rf_pan_09_an_osc52_write_over_one_mebibyte_is_dropped() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    child.output(&osc52_write(&vec![b'a'; (1 << 20) + 1]));
+    child.output(b"after the big one");
+    assert_eq!(clipboard_notices(&mut h, pane, "after the big one"), 0);
+    assert_eq!(h.core.take_clipboard(pane), None);
+}
+
+#[test]
+fn rf_pan_09_primary_selection_writes_do_not_reach_the_ui_but_the_default_does() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for target in ["p", "s"] {
+        child.output(format!("\x1b]52;{target};{}\x07", base64(b"primary")).as_bytes());
+    }
+    child.output(b"after the primary writes");
+    assert_eq!(
+        clipboard_notices(&mut h, pane, "after the primary writes"),
+        0
+    );
+    assert_eq!(h.core.take_clipboard(pane), None);
+
+    child.output(format!("\x1b]52;;{}\x07", base64(b"default")).as_bytes());
+    assert_eq!(clipboard_ready(&mut h, pane).as_deref(), Some("default"));
+}
+
+#[test]
+fn rf_pan_09_a_burst_while_the_ui_does_not_take_leaves_one_notice_and_the_last_text() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    for i in 0..50 {
+        child.output(&osc52_write(format!("write {i}").as_bytes()));
+    }
+    child.output(b"burst done");
+    assert_eq!(clipboard_notices(&mut h, pane, "burst done"), 1);
+    assert_eq!(h.core.take_clipboard(pane).as_deref(), Some("write 49"));
+    assert_eq!(h.core.take_clipboard(pane), None);
 }
