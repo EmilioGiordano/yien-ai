@@ -178,6 +178,28 @@ impl SettingsModel {
     }
 }
 
+/// What a program's clipboard write (OSC 52) does: the text for the system
+/// clipboard and the notice to show, or `None` when the setting is off or
+/// there is nothing to copy (RF-PAN-09). `take` always runs, so the core's
+/// slot is emptied whatever the setting says.
+pub(crate) fn osc52_copy(
+    take: impl FnOnce() -> Option<String>,
+    enabled: bool,
+    pane_name: &str,
+    crlf: bool,
+) -> Option<(String, String)> {
+    let text = take()?;
+    if !enabled || text.is_empty() {
+        return None;
+    }
+    let name = pane_name.trim();
+    let name = if name.is_empty() { "pane" } else { name };
+    Some((
+        crate::grid::clipboard_text(&text, crlf),
+        format!("Copied from {name}"),
+    ))
+}
+
 const FILE: &str = yien_config::FILE_NAME;
 
 fn file_theme(setting: ThemeSetting, system_dark: bool) -> ThemeKind {
@@ -199,6 +221,40 @@ mod tests {
 
     fn invalid(text: &str) -> ConfigUpdate {
         ConfigUpdate::Invalid(yien_config::parse(text).unwrap_err())
+    }
+
+    #[test]
+    fn rf_pan_09_a_program_copy_follows_the_setting() {
+        let said = |text: &'static str| move || Some(text.to_owned());
+        let on = osc52_copy(said("a\nb"), true, "claude", true).unwrap();
+        assert_eq!(on, ("a\r\nb".to_owned(), "Copied from claude".to_owned()));
+        assert_eq!(
+            osc52_copy(said("x"), true, "  ", false),
+            Some(("x".into(), "Copied from pane".into()))
+        );
+        assert_eq!(osc52_copy(said("secret"), false, "claude", true), None);
+        assert_eq!(osc52_copy(said(""), true, "claude", true), None);
+        assert_eq!(osc52_copy(|| None, true, "claude", true), None);
+    }
+
+    #[test]
+    fn rf_pan_09_a_write_is_taken_even_with_the_setting_off() {
+        let mut slot = Some("left in the slot".to_owned());
+        let out = osc52_copy(|| slot.take(), false, "claude", true);
+        assert_eq!(out, None);
+        assert_eq!(slot, None, "the core's slot is emptied");
+    }
+
+    #[test]
+    fn rf_cfg_01_osc52_copy_applies_live_and_an_invalid_file_keeps_it() {
+        let mut m = SettingsModel::default();
+        assert!(m.config().osc52_copy);
+        m.apply(loaded("terminal.osc52_copy = false"));
+        assert!(!m.config().osc52_copy);
+        m.apply(invalid("terminal.osc52_copy = 3"));
+        assert!(!m.config().osc52_copy);
+        m.apply(loaded(""));
+        assert!(m.config().osc52_copy);
     }
 
     #[test]
