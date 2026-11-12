@@ -426,7 +426,23 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
-                CoreMsg::ClipboardWrite { .. } => continue,
+                CoreMsg::ClipboardWrite { pane, text } => {
+                    let name = self.workspace.pane(pane).name;
+                    let config = self.settings.config();
+                    tracing::debug!(
+                        pane = pane.get(),
+                        len = text.len(),
+                        enabled = config.osc52_copy,
+                        "program clipboard write"
+                    );
+                    if let Some((text, notice)) =
+                        crate::settings::osc52_copy(config.osc52_copy, &name, &text, cfg!(windows))
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        self.say(notice, cx);
+                    }
+                    continue;
+                }
                 CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {
