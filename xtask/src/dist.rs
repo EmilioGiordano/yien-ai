@@ -18,7 +18,7 @@ pub const BINARIES: [&str; 2] = ["yien", "yien-hook"];
 pub const THIRD_PARTY: &str = "THIRD-PARTY.md";
 /// The licence texts of every third-party package, written into the package folder.
 pub const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
-/// The ConPTY package licence, kept out of the repository root while TBD-04 is open.
+/// The ConPTY package licence, kept beside the package files rather than in the repository root.
 pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
 /// Package name consumed by the portable archive and installer.
 pub const CONPTY_LICENSE_DEST: &str = "LICENSE-MIT-ConPTY.txt";
