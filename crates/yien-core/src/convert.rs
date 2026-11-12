@@ -11,10 +11,12 @@ pub(crate) fn palette(p: proto::TerminalPalette) -> yien_vt::Palette {
     }
 }
 
-pub(crate) fn orientation(o: proto::Orientation) -> yien_layout::Orientation {
-    match o {
-        proto::Orientation::Horizontal => yien_layout::Orientation::Horizontal,
-        proto::Orientation::Vertical => yien_layout::Orientation::Vertical,
+pub(crate) fn split_zone(o: proto::Orientation, before: bool) -> yien_layout::DropZone {
+    match (o, before) {
+        (proto::Orientation::Horizontal, false) => yien_layout::DropZone::Right,
+        (proto::Orientation::Horizontal, true) => yien_layout::DropZone::Left,
+        (proto::Orientation::Vertical, false) => yien_layout::DropZone::Bottom,
+        (proto::Orientation::Vertical, true) => yien_layout::DropZone::Top,
     }
 }
 

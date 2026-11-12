@@ -495,6 +495,7 @@ impl Workspace {
                 pane,
                 orientation,
                 profile,
+                before,
             } => {
                 let tab_id = self.tab_of(pane)?;
                 let plan = resolve(profile.as_ref())?;
@@ -503,7 +504,7 @@ impl Workspace {
                 let leaf = tab.leaf_of(pane).ok_or(CoreError::UnknownPane(pane))?;
                 let new_leaf = tab
                     .tree
-                    .split(leaf, convert::orientation(orientation))
+                    .split_towards(leaf, convert::split_zone(orientation, before))
                     .ok_or(CoreError::UnknownPane(pane))?;
                 tab.leaves.insert(new_leaf, new);
                 tab.maximized = None;
@@ -1322,12 +1323,85 @@ mod tests {
                 pane: first,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let new = spawned(&fx)[0];
         let info = ws.tab_info(ws.tab(tab).unwrap());
         assert_eq!(info.layout.panes(), [first, new]);
         assert_eq!(info.focused, new);
+    }
+
+    fn split_before(ws: &mut Workspace, pane: PaneId, orientation: Orientation) -> PaneId {
+        let fx = run(
+            ws,
+            Command::SplitPane {
+                pane,
+                orientation,
+                profile: None,
+                before: true,
+            },
+        );
+        spawned(&fx)[0]
+    }
+
+    fn root_flex(layout: &LayoutNode, orientation: Orientation) -> Vec<f32> {
+        let LayoutNode::Split {
+            orientation: o,
+            children,
+        } = layout
+        else {
+            panic!("expected a split, got {layout:?}");
+        };
+        assert_eq!(*o, orientation);
+        children.iter().map(|c| c.flex).collect()
+    }
+
+    #[test]
+    fn rf_pan_01_split_left_puts_a_focused_pane_before_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, first) = project(&mut ws);
+        let new = split_before(&mut ws, first, Orientation::Horizontal);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [new, first]);
+        assert_eq!(info.focused, new);
+        assert_eq!(root_flex(&info.layout, Orientation::Horizontal), [0.5, 0.5]);
+        ws.check().unwrap();
+    }
+
+    #[test]
+    fn rf_pan_01_split_up_puts_a_focused_pane_above_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, first) = project(&mut ws);
+        let new = split_before(&mut ws, first, Orientation::Vertical);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [new, first]);
+        assert_eq!(info.focused, new);
+        assert_eq!(root_flex(&info.layout, Orientation::Vertical), [0.5, 0.5]);
+        ws.check().unwrap();
+    }
+
+    #[test]
+    fn rf_pan_01_split_left_inside_a_row_halves_only_the_target() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let fx = run(
+            &mut ws,
+            Command::SplitPane {
+                pane: a,
+                orientation: Orientation::Horizontal,
+                profile: None,
+                before: false,
+            },
+        );
+        let b = spawned(&fx)[0];
+        let new = split_before(&mut ws, b, Orientation::Horizontal);
+        let info = ws.tab_info(ws.tab(tab).unwrap());
+        assert_eq!(info.layout.panes(), [a, new, b]);
+        let flex = root_flex(&info.layout, Orientation::Horizontal);
+        assert_eq!(flex, [0.5, 0.25, 0.25]);
+        assert!((flex.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        ws.check().unwrap();
     }
 
     #[test]
@@ -1350,6 +1424,7 @@ mod tests {
                 pane: left,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let right = spawned(&fx)[0];
@@ -1382,6 +1457,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Vertical,
                 profile: None,
+                before: false,
             },
         );
         let b = spawned(&fx)[0];
@@ -1405,6 +1481,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let b = spawned(&fx)[0];
@@ -1423,6 +1500,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let b = spawned(&fx)[0];
@@ -1455,6 +1533,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let fx = run(
@@ -1516,6 +1595,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Vertical,
                 profile: Some(ProfileId::new("missing")),
+                before: false,
             },
             Command::SwapPanes { a, b: unknown },
             Command::SelectTab {
@@ -1634,6 +1714,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let spawn = fx.iter().position(|e| matches!(e, Effect::Spawn { .. }));
@@ -1657,6 +1738,7 @@ mod tests {
                     pane,
                     orientation: Orientation::Horizontal,
                     profile: None,
+                    before: false,
                 },
             );
             spawned(&fx)[0]
@@ -1743,6 +1825,7 @@ mod tests {
             pane: a,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         assert!(matches!(
             ws.apply(split, &resolve),
@@ -1836,6 +1919,7 @@ mod tests {
                 pane: a,
                 orientation: Orientation::Horizontal,
                 profile: None,
+                before: false,
             },
         );
         let b = spawned(&fx)[0];
@@ -2267,7 +2351,7 @@ mod tests {
         NewTab(usize),
         CloseTab(usize),
         SelectTab(usize),
-        Split(usize, bool),
+        Split(usize, bool, bool),
         Close(usize),
         Focus(usize),
         FocusDir(u8),
@@ -2289,8 +2373,8 @@ mod tests {
             i.clone().prop_map(Op::NewTab),
             i.clone().prop_map(Op::CloseTab),
             i.clone().prop_map(Op::SelectTab),
-            (i.clone(), any::<bool>()).prop_map(|(a, b)| Op::Split(a, b)),
-            (i.clone(), any::<bool>()).prop_map(|(a, b)| Op::Split(a, b)),
+            (i.clone(), any::<bool>(), any::<bool>()).prop_map(|(a, b, c)| Op::Split(a, b, c)),
+            (i.clone(), any::<bool>(), any::<bool>()).prop_map(|(a, b, c)| Op::Split(a, b, c)),
             i.clone().prop_map(Op::Close),
             i.clone().prop_map(Op::Focus),
             (0..4u8).prop_map(Op::FocusDir),
@@ -2350,7 +2434,7 @@ mod tests {
             Op::SelectTab(i) => Command::SelectTab {
                 tab: pick(&tabs, *i)?,
             },
-            Op::Split(i, h) => Command::SplitPane {
+            Op::Split(i, h, before) => Command::SplitPane {
                 pane: pick(&panes, *i)?,
                 orientation: if *h {
                     Orientation::Horizontal
@@ -2358,6 +2442,7 @@ mod tests {
                     Orientation::Vertical
                 },
                 profile: None,
+                before: *before,
             },
             Op::Close(i) => Command::ClosePane {
                 pane: pick(&panes, *i)?,

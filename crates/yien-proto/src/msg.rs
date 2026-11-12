@@ -356,12 +356,16 @@ pub enum Command {
     /// Splits a pane and starts a program in the new one (RF-PAN-01,
     /// RF-PAN-18).
     SplitPane {
-        /// The pane to split; the new pane goes after it.
+        /// The pane to split.
         pane: PaneId,
         /// Side by side or stacked.
         orientation: Orientation,
         /// The profile to launch; the user's shell when `None`.
         profile: Option<ProfileId>,
+        /// Puts the new pane before the split one (left of it or above it)
+        /// instead of after it.
+        #[serde(default)]
+        before: bool,
     },
     /// Closes a pane and terminates its program. Closing the last pane of a
     /// tab closes the tab.
@@ -1115,6 +1119,13 @@ mod tests {
                 pane: PaneId::new(3),
                 orientation: Orientation::Vertical,
                 profile: Some(ProfileId::new("claude")),
+                before: false,
+            },
+            Command::SplitPane {
+                pane: PaneId::new(3),
+                orientation: Orientation::Horizontal,
+                profile: None,
+                before: true,
             },
             Command::ResizeSplit {
                 pane: PaneId::new(3),
@@ -1189,6 +1200,20 @@ mod tests {
         for command in commands {
             assert_eq!(round_trip(&command), command);
         }
+    }
+
+    #[test]
+    fn a_split_without_a_side_puts_the_new_pane_after() {
+        let split = Command::SplitPane {
+            pane: PaneId::new(3),
+            orientation: Orientation::Vertical,
+            profile: None,
+            before: false,
+        };
+        let json = serde_json::to_string(&split).unwrap();
+        let older = json.replace(",\"before\":false", "");
+        assert_ne!(older, json);
+        assert_eq!(serde_json::from_str::<Command>(&older).unwrap(), split);
     }
 
     #[test]
