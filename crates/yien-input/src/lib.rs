@@ -149,7 +149,8 @@ pub fn encode(key: &Key, mods: Mods) -> Option<Vec<u8>> {
         // Ctrl+Backspace cannot be expressed in the legacy protocol. 0x17 (Ctrl+W)
         // was tried and is worse than useless: PSReadLine has no Ctrl+W binding, so
         // it inserts a literal ^W into the line. Falling back to DEL at least
-        // deletes one character. Word deletion needs win32-input-mode.
+        // deletes one character. Under win32-input-mode `encode_with` sends a
+        // real Ctrl+Backspace event instead, which deletes a word.
         Key::Backspace if mods.ctrl => vec![0x7f],
         Key::Backspace if mods.alt => vec![0x1b, 0x7f],
         Key::Backspace => vec![0x7f],
@@ -229,10 +230,12 @@ pub struct KeyModes {
     pub kitty_flags: u8,
 }
 
-/// Like [`encode_in`], but Shift+Enter keeps its Shift where the program can
-/// see it: a Win32 Shift+Enter key event when win32-input-mode is on, else
-/// `CSI 13;2u` when the kitty protocol asks to disambiguate, else a plain `\r`.
-/// Every other key is encoded exactly as [`encode_in`] does.
+/// Like [`encode_in`], but the keys the legacy bytes lose keep their
+/// modifiers where the program can see them. With win32-input-mode on,
+/// Shift+Enter, Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as
+/// Windows Terminal sends them. Otherwise Shift+Enter is `CSI 13;2u` when the
+/// kitty protocol asks to disambiguate. Every other key, and these keys in
+/// any other case, are encoded exactly as [`encode_in`] does.
 ///
 /// ```
 /// use yien_input::{encode_with, Key, KeyModes, Mods};
@@ -243,24 +246,36 @@ pub struct KeyModes {
 /// assert_eq!(encode_with(&Key::Enter, Mods::NONE, kitty), Some(b"\r".to_vec()));
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
-    if *key == Key::Enter && mods == Mods::SHIFT {
-        // ConPTY is the peer under 9001: it turns this event into CSI u for a
-        // client that asked for kitty, as for Windows Terminal. Checked first
-        // so flags left by a killed CLI never reach PSReadLine as CSI u.
-        if modes.win32_input {
-            // What Windows Terminal sends. PSReadLine binds Shift+Enter to
-            // AddLine but inserts a literal CR for ESC CR (Alt+Enter, unbound).
-            let event = win32::KeyEvent {
-                scan_code: win32::scan::RETURN,
-                ..win32::KeyEvent::down(win32::vk::RETURN, u16::from(b'\r'), Mods::SHIFT)
-            };
-            return Some(win32::press(&event));
-        }
-        if modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
-            return Some(b"\x1b[13;2u".to_vec());
-        }
+    // ConPTY is the peer under 9001: it turns these events into CSI u for a
+    // client that asked for kitty, as for Windows Terminal. Checked first so
+    // flags left by a killed CLI never reach PSReadLine as CSI u.
+    if modes.win32_input
+        && let Some(event) = win32_event(key, mods)
+    {
+        return Some(win32::press(&event));
+    }
+    if *key == Key::Enter && mods == Mods::SHIFT && modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
+        return Some(b"\x1b[13;2u".to_vec());
     }
     encode_in(key, mods, modes.app_cursor)
+}
+
+/// The Win32 event for a key the legacy bytes cannot carry, as Windows
+/// Terminal fills it: PSReadLine binds Shift+Enter to AddLine (it inserts a
+/// literal CR for ESC CR), Ctrl+Backspace to BackwardKillWord and Ctrl+Delete
+/// to KillWord.
+fn win32_event(key: &Key, mods: Mods) -> Option<win32::KeyEvent> {
+    use win32::{KeyEvent, control_key_state, scan, vk};
+    let (virtual_key, scan_code, unicode, extra) = match (key, mods) {
+        (Key::Enter, Mods::SHIFT) => (vk::RETURN, scan::RETURN, u16::from(b'\r'), 0),
+        (Key::Backspace, Mods::CTRL) => (vk::BACK, scan::BACK, 0x7f, 0),
+        (Key::Delete, Mods::CTRL) => (vk::DELETE, scan::DELETE, 0, control_key_state::ENHANCED_KEY),
+        _ => return None,
+    };
+    let mut event = KeyEvent::down(virtual_key, unicode, mods);
+    event.scan_code = scan_code;
+    event.control_key_state |= extra;
+    Some(event)
 }
 
 /// What a terminal program asked to hear when its pane gains or loses the
@@ -523,9 +538,81 @@ mod tests {
         for modes in all_modes() {
             for key in &keys {
                 for mods in combos {
+                    let word_key = matches!(key, Key::Backspace | Key::Delete);
+                    if modes.win32_input && word_key && mods == Mods::CTRL {
+                        continue;
+                    }
                     assert_eq!(
                         encode_with(key, mods, modes),
                         encode_in(key, mods, modes.app_cursor),
+                        "{key:?} {mods:?} in {modes:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_backspace_is_a_win32_event_when_conpty_asked_for_them() {
+        // VK_BACK, scan code 0x0E, DEL as its character, LEFT_CTRL_PRESSED.
+        for modes in all_modes().into_iter().filter(|m| m.win32_input) {
+            assert_eq!(
+                encode_with(&Key::Backspace, Mods::CTRL, modes).unwrap(),
+                b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_",
+                "{modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_delete_is_a_win32_event_when_conpty_asked_for_them() {
+        // VK_DELETE, scan code 0x53, no character, LEFT_CTRL_PRESSED | ENHANCED_KEY
+        // (without that bit it would be the keypad Delete).
+        for modes in all_modes().into_iter().filter(|m| m.win32_input) {
+            assert_eq!(
+                encode_with(&Key::Delete, Mods::CTRL, modes).unwrap(),
+                b"\x1b[46;83;0;1;264;1_\x1b[46;83;0;0;264;1_",
+                "{modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_word_deletion_keys_keep_their_bytes_without_win32_input_mode() {
+        for modes in all_modes().into_iter().filter(|m| !m.win32_input) {
+            assert_eq!(
+                encode_with(&Key::Backspace, Mods::CTRL, modes).unwrap(),
+                vec![0x7f]
+            );
+            assert_eq!(
+                encode_with(&Key::Delete, Mods::CTRL, modes).unwrap(),
+                b"\x1b[3;5~"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_other_backspace_and_delete_combinations_are_unchanged() {
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        let ctrl_shift = Mods {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        let ctrl_alt = Mods {
+            ctrl: true,
+            alt: true,
+            shift: false,
+        };
+        for modes in all_modes() {
+            for key in [Key::Backspace, Key::Delete] {
+                for mods in [Mods::NONE, Mods::SHIFT, alt, ctrl_shift, ctrl_alt] {
+                    assert_eq!(
+                        encode_with(&key, mods, modes),
+                        encode_in(&key, mods, modes.app_cursor),
                         "{key:?} {mods:?} in {modes:?}"
                     );
                 }
