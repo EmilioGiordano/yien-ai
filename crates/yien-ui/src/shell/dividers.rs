@@ -8,13 +8,13 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_proto::{Command, LayoutNode, Orientation, PaneId, TabId};
+use yien_proto::{Command, LayoutNode, Orientation, TabId};
 
 use super::{HALF_GUTTER, Shell};
 use crate::actions::*;
 use crate::layout::{self, Divider};
 use crate::model::TabView;
-use crate::region::{self, Region};
+use crate::region::{self, DividerKey, Region};
 
 /// The least terminal a drag or an arrow leaves a pane.
 const MIN_COLS: f32 = 10.0;
@@ -25,9 +25,6 @@ const PANE_CHROME_W: f32 = 2.0 * HALF_GUTTER + 2.0 + 20.0;
 const PANE_CHROME_H: f32 = 2.0 * HALF_GUTTER + 2.0 + 16.0 + 28.0;
 /// The hit strip over the gutter between two panes.
 const STRIP: f32 = 2.0 * HALF_GUTTER;
-
-/// A divider by the first pane on each of its sides.
-pub(super) type DividerKey = (PaneId, PaneId);
 
 /// What a drag of a divider carries.
 pub(super) struct DividerDrag;

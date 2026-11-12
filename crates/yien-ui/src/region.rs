@@ -3,7 +3,7 @@
 //! tab bar and the dividers. Decided here without drawing; the shell moves
 //! the gpui focus.
 
-use yien_proto::TabId;
+use yien_proto::{PaneId, TabId};
 
 /// A part of the window that can hold the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,14 +92,17 @@ pub(crate) fn cursor_on_entry(
     move_cursor(rows, at, selected, 0)
 }
 
+/// A pane divider by the first pane on each of its sides.
+pub(crate) type DividerKey = (PaneId, PaneId);
+
 /// The divider Tab (`forward`) or Shift+Tab moves to among those drawn
 /// (`all`, in reading order), wrapping. One that is not drawn any more
 /// starts over at the first, or the last going back.
-pub(crate) fn next_divider<T: Copy + PartialEq>(
-    all: &[T],
-    at: Option<T>,
+pub(crate) fn next_divider(
+    all: &[DividerKey],
+    at: Option<DividerKey>,
     forward: bool,
-) -> Option<T> {
+) -> Option<DividerKey> {
     let len = all.len();
     let next = match at.and_then(|at| all.iter().position(|d| *d == at)) {
         Some(i) if forward => (i + 1) % len,
@@ -113,11 +116,11 @@ pub(crate) fn next_divider<T: Copy + PartialEq>(
 /// Where the divider cursor lands when the dividers take the keyboard: where
 /// it was if that divider is still drawn, else the first coming forward
 /// (F6) or the last coming back (Shift+F6).
-pub(crate) fn divider_on_entry<T: Copy + PartialEq>(
-    all: &[T],
-    at: Option<T>,
+pub(crate) fn divider_on_entry(
+    all: &[DividerKey],
+    at: Option<DividerKey>,
     forward: bool,
-) -> Option<T> {
+) -> Option<DividerKey> {
     match at.filter(|at| all.contains(at)) {
         Some(at) => Some(at),
         None => next_divider(all, None, forward),
@@ -249,17 +252,19 @@ mod tests {
 
     #[test]
     fn rf_pan_02_tab_cycles_the_dividers_and_entry_keeps_the_last_one() {
-        let all = [1, 2, 3];
-        assert_eq!(next_divider(&all, Some(1), true), Some(2));
-        assert_eq!(next_divider(&all, Some(3), true), Some(1));
-        assert_eq!(next_divider(&all, Some(1), false), Some(3));
-        assert_eq!(next_divider(&all, Some(9), true), Some(1));
-        assert_eq!(next_divider(&all, None, false), Some(3));
-        assert_eq!(next_divider(&[] as &[i32], None, true), None);
-        assert_eq!(next_divider(&[] as &[i32], None, false), None);
-        assert_eq!(divider_on_entry(&all, Some(2), true), Some(2));
-        assert_eq!(divider_on_entry(&all, Some(9), true), Some(1));
-        assert_eq!(divider_on_entry(&all, None, false), Some(3));
+        let key = |a, b| (PaneId::new(a), PaneId::new(b));
+        let all = [key(1, 2), key(2, 3), key(1, 4)];
+        let gone = key(7, 8);
+        assert_eq!(next_divider(&all, Some(all[0]), true), Some(all[1]));
+        assert_eq!(next_divider(&all, Some(all[2]), true), Some(all[0]));
+        assert_eq!(next_divider(&all, Some(all[0]), false), Some(all[2]));
+        assert_eq!(next_divider(&all, Some(gone), true), Some(all[0]));
+        assert_eq!(next_divider(&all, None, false), Some(all[2]));
+        assert_eq!(next_divider(&[], None, true), None);
+        assert_eq!(next_divider(&[], None, false), None);
+        assert_eq!(divider_on_entry(&all, Some(all[1]), true), Some(all[1]));
+        assert_eq!(divider_on_entry(&all, Some(gone), true), Some(all[0]));
+        assert_eq!(divider_on_entry(&all, None, false), Some(all[2]));
     }
 
     #[test]

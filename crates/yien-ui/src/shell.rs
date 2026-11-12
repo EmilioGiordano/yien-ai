@@ -38,7 +38,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
 };
-use crate::region::{self, Modality, Region};
+use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
@@ -53,7 +53,7 @@ mod status;
 mod tray;
 mod worktrees;
 
-use dividers::{DividerGrab, DividerKey, PaneArea};
+use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
 use status::{Line, Notice};
 use tray::Tray;
