@@ -24,6 +24,7 @@ ignore = { workspace = true }
 yien-which = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
