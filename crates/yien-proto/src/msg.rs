@@ -1115,6 +1115,12 @@ mod tests {
                 profile: Some(ProfileId::new("claude")),
                 before: false,
             },
+            Command::SplitPane {
+                pane: PaneId::new(3),
+                orientation: Orientation::Horizontal,
+                profile: None,
+                before: true,
+            },
             Command::ResizeSplit {
                 pane: PaneId::new(3),
                 delta: -0.25,
@@ -1188,6 +1194,20 @@ mod tests {
         for command in commands {
             assert_eq!(round_trip(&command), command);
         }
+    }
+
+    #[test]
+    fn a_split_without_a_side_puts_the_new_pane_after() {
+        let split = Command::SplitPane {
+            pane: PaneId::new(3),
+            orientation: Orientation::Vertical,
+            profile: None,
+            before: false,
+        };
+        let json = serde_json::to_string(&split).unwrap();
+        let older = json.replace(",\"before\":false", "");
+        assert_ne!(older, json);
+        assert_eq!(serde_json::from_str::<Command>(&older).unwrap(), split);
     }
 
     #[test]
