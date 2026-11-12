@@ -216,6 +216,7 @@ pub(super) struct OpenMenu {
     kind: MenuKind,
     at: Point<Pixels>,
     focus: FocusHandle,
+    _blur: Subscription,
 }
 
 impl Shell {
@@ -234,6 +235,8 @@ impl Shell {
         let Some(tab) = self.workspace.tab_of(pane) else {
             return;
         };
+        // Dropped first, so its blur cannot close the menu opened now.
+        self.menu = None;
         let maximized = tab.maximized == Some(pane);
         let alone = tab.layout.panes().len() == 1;
         let focused = tab.focused == pane;
@@ -255,12 +258,23 @@ impl Shell {
         };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // A window key (the palette, F6, the tray) takes the keyboard without
+        // closing the menu; left open, it would keep `sync_focus` from moving
+        // the keyboard. Whatever took the focus keeps it.
+        let blurred = focus.clone();
+        let blur = cx.on_blur(&focus, window, move |this, _, cx| {
+            if this.menu.as_ref().is_some_and(|m| m.focus == blurred) {
+                this.menu = None;
+                cx.notify();
+            }
+        });
         self.menu = Some(OpenMenu {
             model,
             pane,
             kind,
             at,
             focus,
+            _blur: blur,
         });
         cx.notify();
     }

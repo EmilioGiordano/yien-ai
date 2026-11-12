@@ -2770,8 +2770,17 @@ impl Shell {
     fn pane_menu_button(&self, pane: &PaneView, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = pane.id;
         let open = self.menu_open_for(id);
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            shortcut(&keymap, &OpenPaneMenu)
+        };
+        let label = match keys {
+            Some(keys) => format!("Pane actions for {} ({keys})", pane.name),
+            None => format!("Pane actions for {}", pane.name),
+        };
         self.head_button("pane-actions", id, assets::DOTS)
-            .aria_label(format!("{} actions", pane.name))
+            .aria_label(label)
             .aria_expanded(open)
             .when(open, |b| b.bg(self.theme.term_raised))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
