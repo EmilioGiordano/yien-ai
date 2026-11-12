@@ -3384,7 +3384,7 @@ mod tests {
     use super::{Asked, MOUSE_COMMANDS, no_tab_label};
     use crate::catalog::CATALOG;
     use crate::model::WorkspaceView;
-    use yien_proto::{ProjectId, ProjectInfo, WorkspaceSnapshot};
+    use yien_proto::{ProjectId, ProjectInfo, TabId, WorkspaceSnapshot};
 
     #[test]
     fn the_context_bar_says_no_project_only_when_there_is_none() {
@@ -3410,6 +3410,13 @@ mod tests {
             name: "yien".to_owned(),
         };
         assert!(close.enter_accepts());
+        assert!(
+            Asked::CloseTab {
+                tab: TabId::new(1),
+                name: "Tab 1".to_owned(),
+            }
+            .enter_accepts()
+        );
     }
 
     #[test]
