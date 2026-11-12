@@ -375,6 +375,8 @@ pub(crate) enum WheelAction {
     Report(Vec<u8>),
     /// Scroll the viewport; positive goes back into the history.
     Scroll(i32),
+    /// Zoom every terminal one step: bigger when positive (RF-CFG-02).
+    Zoom(i32),
 }
 
 pub(crate) fn tracking(modes: &Modes) -> mouse::Tracking {
@@ -464,7 +466,8 @@ pub(crate) fn clipboard_text(text: &str, crlf: bool) -> String {
 }
 
 /// `lines` positive means away from the user. Shift keeps the wheel for the
-/// terminal even when the program asked for the mouse.
+/// terminal even when the program asked for the mouse. Ctrl zooms, one step
+/// per turn whatever its length, unless the program asked for the mouse.
 pub(crate) fn wheel_action(
     lines: i32,
     modes: &Modes,
@@ -473,6 +476,9 @@ pub(crate) fn wheel_action(
 ) -> Option<WheelAction> {
     if lines == 0 {
         return None;
+    }
+    if mods.ctrl && modes.mouse == MouseTracking::Off {
+        return Some(WheelAction::Zoom(lines.signum()));
     }
     let count = lines.unsigned_abs().min(100) as usize;
     if pointer(modes, mods.shift) == Pointer::Program {
@@ -963,6 +969,59 @@ mod tests {
             Some(WheelAction::Report(b"\x1b[<64;3;2M\x1b[<64;3;2M".to_vec()))
         );
         assert_eq!(wheel_action(2, &m, at, SHIFT), Some(WheelAction::Scroll(2)));
+    }
+
+    #[test]
+    fn rf_cfg_02_ctrl_and_the_wheel_zoom_one_step_per_turn() {
+        let at = ViewportPoint::new(0, 0);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            wheel_action(3, &modes(), at, ctrl),
+            Some(WheelAction::Zoom(1))
+        );
+        assert_eq!(
+            wheel_action(-7, &modes(), at, ctrl),
+            Some(WheelAction::Zoom(-1))
+        );
+        assert_eq!(wheel_action(0, &modes(), at, ctrl), None);
+        let full_screen = Modes {
+            alt_screen: true,
+            alternate_scroll: true,
+            ..modes()
+        };
+        assert_eq!(
+            wheel_action(1, &full_screen, at, ctrl),
+            Some(WheelAction::Zoom(1))
+        );
+    }
+
+    #[test]
+    fn rf_cfg_02_the_wheel_stays_with_a_program_that_asked_for_the_mouse() {
+        let m = Modes {
+            mouse: MouseTracking::Click,
+            mouse_encoding: MouseEncoding::Sgr,
+            ..modes()
+        };
+        let at = ViewportPoint::new(1, 2);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert!(matches!(
+            wheel_action(1, &m, at, ctrl),
+            Some(WheelAction::Report(_))
+        ));
+        let ctrl_shift = Mods {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            wheel_action(1, &m, at, ctrl_shift),
+            Some(WheelAction::Scroll(1))
+        );
     }
 
     #[test]

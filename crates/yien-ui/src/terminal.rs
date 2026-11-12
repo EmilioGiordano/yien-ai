@@ -14,7 +14,7 @@ use yien_input::mouse::{self, Action, Button};
 use yien_proto::frame::{Frame, Modes, Rgb, ViewportPoint};
 use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
-use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
+use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT, ZoomIn, ZoomOut};
 use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
 use crate::grid::{
     self, CursorPaint, PastePlan, Pointer, PromptKey, RightClick, Underline, WheelAction,
@@ -466,7 +466,7 @@ impl TerminalPane {
         }
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, m)) = self.grid else {
             return;
         };
@@ -491,6 +491,14 @@ impl TerminalPane {
                     },
                     cx,
                 );
+            }
+            Some(WheelAction::Zoom(step)) => {
+                self.wheel_rest = 0.0;
+                if step > 0 {
+                    window.dispatch_action(Box::new(ZoomIn), cx);
+                } else {
+                    window.dispatch_action(Box::new(ZoomOut), cx);
+                }
             }
             None => {}
         }
