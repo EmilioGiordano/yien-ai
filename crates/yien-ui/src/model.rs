@@ -743,10 +743,17 @@ impl WorkspaceView {
     /// at once.
     pub(crate) fn worktree_question(&self, pane: PaneId) -> Option<Question> {
         let tab = self.tab_of(pane)?;
-        let worktree = tab.worktree.as_deref()?;
         if tab.layout.panes().len() > 1 {
             return None;
         }
+        self.tab_worktree_question(tab.id)
+    }
+
+    /// The question to ask before closing the whole tab `tab`, when it is the
+    /// last tab on a worktree (RF-ESP-07), however many panes it has.
+    pub(crate) fn tab_worktree_question(&self, tab: TabId) -> Option<Question> {
+        let tab = self.tab(tab)?;
+        let worktree = tab.worktree.as_deref()?;
         let shared = self.tabs.values().any(|t| {
             t.id != tab.id
                 && (same_folder(&t.dir, worktree)
@@ -1011,6 +1018,72 @@ pub(crate) fn frames_to_take(
     panes.into_iter().filter(|p| has_view(*p)).collect()
 }
 
+/// A folder as a pane head shows it (RF-ESP-04): under `home` it starts with
+/// `~`, and past `max_chars` its first folders give way to `…` so the last
+/// one stays readable. With `windows`, either slash separates and names
+/// compare without case.
+pub(crate) fn folder_label(
+    dir: &str,
+    home: Option<&str>,
+    windows: bool,
+    max_chars: usize,
+) -> String {
+    let is_sep = |c: char| c == '/' || (windows && c == '\\');
+    let sep = if windows && dir.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    };
+    let parts = |path: &str| -> Vec<String> {
+        path.split(is_sep)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let same = |a: &str, b: &str| {
+        if windows {
+            a.to_lowercase() == b.to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    let dir_parts = parts(dir);
+    let home_parts = home.map(parts).unwrap_or_default();
+    let under_home = !home_parts.is_empty()
+        && dir_parts.len() >= home_parts.len()
+        && home_parts.iter().zip(&dir_parts).all(|(h, d)| same(h, d));
+    let full = if under_home {
+        std::iter::once("~")
+            .chain(dir_parts[home_parts.len()..].iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(&sep.to_string())
+    } else {
+        let trimmed = dir.trim_end_matches(is_sep);
+        if trimmed.is_empty() || trimmed.ends_with(':') {
+            dir.to_owned()
+        } else {
+            trimmed.to_owned()
+        }
+    };
+    if full.chars().count() <= max_chars {
+        return full;
+    }
+    let names = parts(&full);
+    let mut kept: Vec<&str> = Vec::new();
+    // "…" and a separator come before the names kept.
+    let mut len = 2;
+    for name in names.iter().rev() {
+        let more = name.chars().count() + usize::from(!kept.is_empty());
+        if !kept.is_empty() && len + more > max_chars {
+            break;
+        }
+        len += more;
+        kept.push(name);
+    }
+    kept.reverse();
+    format!("…{sep}{}", kept.join(&sep.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use yien_proto::{AgentState as P, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot};
@@ -1156,6 +1229,73 @@ mod tests {
         .into();
         view.tab_updated(&other);
         assert!(view.worktree_question(PaneId::new(300)).is_none());
+    }
+
+    #[test]
+    fn rf_esp_07_closing_a_whole_worktree_tab_asks_however_many_panes_it_has() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300, 301]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&wt);
+        assert!(view.worktree_question(PaneId::new(300)).is_none());
+        let q = view.tab_worktree_question(TabId::new(30)).unwrap();
+        assert_eq!(q.tab, TabId::new(30));
+        assert!(view.tab_worktree_question(TabId::new(10)).is_none());
+        assert!(view.tab_worktree_question(TabId::new(99)).is_none());
+
+        let mut other = tab(31, 1, &[310]);
+        other.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&other);
+        assert!(view.tab_worktree_question(TabId::new(30)).is_none());
+    }
+
+    #[test]
+    fn rf_esp_04_a_folder_under_home_starts_with_a_tilde() {
+        let home = Some(r"C:\Users\me");
+        assert_eq!(
+            folder_label(r"c:\users\ME\Code\yien", home, true, 60),
+            r"~\Code\yien"
+        );
+        assert_eq!(folder_label("C:/Users/me/Code", home, true, 60), "~/Code");
+        assert_eq!(folder_label(r"C:\Users\me\", home, true, 60), "~");
+        // Only a whole folder name matches home.
+        assert_eq!(
+            folder_label("C:/Users/meadow/x", home, true, 60),
+            "C:/Users/meadow/x"
+        );
+        // Names keep their case off Windows.
+        assert_eq!(
+            folder_label("/home/Me/x", Some("/home/me"), false, 60),
+            "/home/Me/x"
+        );
+        assert_eq!(
+            folder_label("/home/me/x", Some("/home/me"), false, 60),
+            "~/x"
+        );
+        assert_eq!(
+            folder_label("C:/Code/yien/", None, true, 60),
+            "C:/Code/yien"
+        );
+        assert_eq!(folder_label(r"C:\", None, true, 60), r"C:\");
+        assert_eq!(folder_label("/", None, false, 60), "/");
+    }
+
+    #[test]
+    fn rf_esp_04_a_long_folder_keeps_its_last_names() {
+        let label = folder_label(
+            r"D:\More-Code-Projects\some-client\deep\nested\yien-ai",
+            None,
+            true,
+            24,
+        );
+        assert_eq!(label, r"…\deep\nested\yien-ai");
+        assert!(label.chars().count() <= 24);
+        // The last name stays whole even when it alone is too long.
+        assert_eq!(
+            folder_label("/a/a-very-long-folder-name", None, false, 8),
+            "…/a-very-long-folder-name"
+        );
     }
 
     #[test]
