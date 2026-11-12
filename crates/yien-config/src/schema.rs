@@ -59,6 +59,15 @@ pub const SCHEMA: &[Setting] = &[
               panes started after it; running panes keep theirs.",
     },
     Setting {
+        key: "terminal.osc52_copy",
+        default: "true",
+        doc: "true: a program in a pane may write the system clipboard with the OSC 52 \
+              sequence, which is how Claude Code, opencode, vim and tmux copy a selection \
+              they made themselves; YIEN shows \"Copied from <pane>\". Only writes to the \
+              clipboard are honoured, up to 1 MiB; a program can never read it. false: \
+              such copies are ignored. Applies at once.",
+    },
+    Setting {
         key: "editor",
         default: "\"\"",
         doc: "The command that opens files, such as \"code\" or \"notepad\". Empty: the \
