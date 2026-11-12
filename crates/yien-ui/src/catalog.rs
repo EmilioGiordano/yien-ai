@@ -128,6 +128,24 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleTabGrouping,
         []
     ),
+    command!(
+        "view.zoom_in",
+        "view: zoom terminal text in",
+        ZoomIn,
+        ["ctrl-+", "ctrl-="]
+    ),
+    command!(
+        "view.zoom_out",
+        "view: zoom terminal text out",
+        ZoomOut,
+        ["ctrl--"]
+    ),
+    command!(
+        "view.zoom_reset",
+        "view: reset terminal zoom",
+        ResetZoom,
+        ["ctrl-0"]
+    ),
     command!("app.quit", "app: quit YIEN", Quit, ["ctrl-shift-q"]),
     command!(
         "agent.resume_session",
@@ -650,6 +668,28 @@ mod tests {
             .collect();
         assert!(splits.contains(&"pane: split right with My tool".to_owned()));
         assert!(splits.contains(&"pane: split down with My tool".to_owned()));
+    }
+
+    #[test]
+    fn rf_cfg_02_the_zoom_commands_have_the_usual_keys() {
+        assert_eq!(default_keys("view.zoom_in").as_deref(), Some("Ctrl+="));
+        assert_eq!(default_keys("view.zoom_out").as_deref(), Some("Ctrl+-"));
+        assert_eq!(default_keys("view.zoom_reset").as_deref(), Some("Ctrl+0"));
+        // Ctrl+Shift+=, the numpad's + and the + key of layouts that have one.
+        assert!(spec("view.zoom_in").unwrap().keys.contains(&"ctrl-+"));
+    }
+
+    #[test]
+    fn rn_10_no_default_key_takes_ctrl_shift_minus() {
+        // Ctrl+_ is undo in readline and in Claude Code's prompt.
+        for spec in CATALOG {
+            for keys in spec.keys {
+                for step in keys.split_whitespace() {
+                    let k = Keystroke::parse(step).unwrap();
+                    assert!(!(k.modifiers.control && k.key == "_"), "{}", spec.id);
+                }
+            }
+        }
     }
 
     #[test]

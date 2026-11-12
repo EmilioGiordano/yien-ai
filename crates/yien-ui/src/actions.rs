@@ -138,6 +138,13 @@ actions!(
         /// Lists tabs in sections by agent state, or under their projects
         /// again, for this session (RF-ATN-07).
         ToggleTabGrouping,
+        /// Makes every terminal's text one pixel bigger (RF-CFG-02).
+        ZoomIn,
+        /// Makes every terminal's text one pixel smaller (RF-CFG-02).
+        ZoomOut,
+        /// Puts every terminal's text back to `terminal.font.size`
+        /// (RF-CFG-02).
+        ResetZoom,
         /// Quits YIEN, asking first while agents are working (RF-SES-13).
         Quit,
         /// Lists the selected project's past agent sessions to resume one
@@ -622,7 +629,17 @@ mod tests {
                 "{n}"
             );
         }
-        assert_eq!(matches("ctrl-0", &TERMINAL_STACK), 0);
+        // There is no tab 0: Ctrl+0 resets the terminals' zoom (RF-CFG-02).
+        assert_eq!(matches("ctrl-0", &TERMINAL_STACK), 1);
+        assert!(first_is("ctrl-0", &TERMINAL_STACK, &ResetZoom));
+    }
+
+    #[test]
+    fn rf_cfg_02_the_zoom_keys_work_from_a_terminal() {
+        assert!(first_is("ctrl-=", &TERMINAL_STACK, &ZoomIn));
+        assert!(first_is("ctrl-+", &TERMINAL_STACK, &ZoomIn));
+        assert!(first_is("ctrl--", &TERMINAL_STACK, &ZoomOut));
+        assert_eq!(matches("ctrl-_", &TERMINAL_STACK), 0, "undo in the CLIs");
     }
 
     #[test]
