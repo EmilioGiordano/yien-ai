@@ -1,5 +1,6 @@
 //! Real PowerShell panes through ConPTY report their folder with the prompt
 //! hook: the core follows `cd`, saves the folder and restores the pane there.
+//! The same hook marks each command, so the pane works while one runs.
 
 #![cfg(windows)]
 #![allow(
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use yien_core::{Core, CoreConfig, CoreHandle, SendError, SessionStore, ShellCommand};
-use yien_proto::{ClientMsg, Command, CoreMsg, InputBytes, PaneId, same_folder};
+use yien_proto::{AgentState, ClientMsg, Command, CoreMsg, InputBytes, PaneId, same_folder};
 use yien_pty::PortablePty;
 use yien_session::{MemStore, SessionSnapshot, Store, StoreError, load};
 
@@ -200,6 +201,81 @@ fn rf_ses_01_pwsh_pane_follows_cd_and_reopens_there() {
         return;
     }
     follows_cd_and_restores_there("pwsh.exe");
+}
+
+/// The states the pane reports until `until` accepts a message.
+fn states_until(
+    h: &mut Harness,
+    pane: PaneId,
+    until: impl Fn(&CoreMsg) -> bool,
+) -> Vec<AgentState> {
+    let mut states = Vec::new();
+    h.wait_for(|m| {
+        if let CoreMsg::PaneState { pane: p, state } = m
+            && *p == pane
+        {
+            states.push(*state);
+        }
+        until(m).then_some(())
+    });
+    states
+}
+
+/// A command keeps the pane working until its prompt comes back; `exit`
+/// ends the shell without an error.
+fn works_while_a_command_runs(program: &str) {
+    let shell = test_powershell(program);
+    let store = Shared::default();
+    let mut h = Harness::start(&shell, &store);
+    h.core
+        .try_send(ClientMsg::Command(Command::NewProject {
+            root: env!("CARGO_MANIFEST_DIR").into(),
+            name: None,
+        }))
+        .unwrap();
+    let pane = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.focused),
+        _ => None,
+    });
+    h.next_cwd(pane, None);
+
+    h.type_line(pane, "Start-Sleep -Milliseconds 1500");
+    let started = Instant::now();
+    let states = states_until(
+        &mut h,
+        pane,
+        |m| matches!(m, CoreMsg::PaneState { pane: p, state } if *p == pane && *state != AgentState::Working),
+    );
+    assert_eq!(
+        states,
+        [AgentState::Working, AgentState::Done],
+        "{states:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+
+    h.type_line(pane, "exit");
+    let states = states_until(&mut h, pane, |m| matches!(m, CoreMsg::PaneExited { .. }));
+    assert!(
+        states
+            .iter()
+            .all(|s| matches!(s, AgentState::Idle | AgentState::Done)),
+        "{states:?}"
+    );
+    let _ = h.core.shutdown(Duration::from_secs(5));
+}
+
+#[test]
+fn rf_age_05_windows_powershell_pane_works_while_a_command_runs() {
+    works_while_a_command_runs("powershell.exe");
+}
+
+#[test]
+fn rf_age_05_pwsh_pane_works_while_a_command_runs() {
+    if !on_path("pwsh.exe") {
+        eprintln!("pwsh.exe is not on PATH; skipped");
+        return;
+    }
+    works_while_a_command_runs("pwsh.exe");
 }
 
 #[test]

@@ -20,23 +20,68 @@ pub struct ShellCommand {
 }
 
 /// Wraps the `prompt` the user's profile left so it also reports FileSystem
-/// folders as `OSC 9;9`. No `"` (PowerShell re-joins quoted arguments its own
-/// way). The user's prompt runs first so it still sees `$?`. Constrained
-/// language mode refuses method calls, so it gets no report; any other
-/// failure keeps the prompt and takes its error back out of `$Error`.
-const POWERSHELL_CWD_HOOK: &str = "if ($function:prompt) { \
+/// folders as `OSC 9;9`, and PSReadLine's line reader, for OSC 133 marks.
+/// No `"` (PowerShell re-joins quoted arguments its own way). The user's
+/// prompt and PSReadLine run first: any statement before them resets `$?`.
+/// Constrained language mode refuses method calls, so it gets nothing; any
+/// other failure takes its error back out of `$Error`. Wrapping a wrapper
+/// of PSReadLine could call itself. Only a line read after YIEN's prompt
+/// gets a `C`: a prompt replaced later would never write the `D` that ends
+/// it. `exit` with a `C` would show an error.
+const POWERSHELL_HOOK: &str = "if ($function:prompt) { \
     $global:__YienPrompt = $function:prompt; \
+    $global:__YienRan = $false; \
+    $global:__YienArmed = $false; \
     function global:prompt { \
-        $p = & $global:__YienPrompt; \
         try { \
-            $l = $executionContext.SessionState.Path.CurrentLocation; \
-            if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage' \
-                -and $l.Provider.Name -eq 'FileSystem') { \
-                $Host.UI.Write([char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + '\\') \
-            } \
-        } catch { \
-            if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
-                $global:Error.RemoveAt(0) \
+            $s, $p = $?, (& $global:__YienPrompt); \
+            $global:__YienArmed = $true \
+        } finally { \
+            try { \
+                if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage') { \
+                    $e = [char]27; \
+                    $o = ''; \
+                    $v = Get-Variable s -Scope 0 -ErrorAction Ignore; \
+                    if ($global:__YienRan) { \
+                        $global:__YienRan = $false; \
+                        $o = $e + ']133;D;' + [int](-not ($v -and $s)) + $e + '\\' \
+                    }; \
+                    $o += $e + ']133;A' + $e + '\\'; \
+                    $l = $executionContext.SessionState.Path.CurrentLocation; \
+                    if ($l.Provider.Name -eq 'FileSystem') { \
+                        $o += $e + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + $e + '\\' \
+                    }; \
+                    $Host.UI.Write($o); \
+                    if ($v -and $p -is [string]) { $p += $e + ']133;B' + $e + '\\' }; \
+                    $r = $function:PSConsoleHostReadLine; \
+                    if ($r -match 'PSConsoleReadLine\\]::ReadLine') { \
+                        $global:__YienReadLine = $r; \
+                        function global:PSConsoleHostReadLine { \
+                            $c = & $global:__YienReadLine; \
+                            try { \
+                                if ($global:__YienArmed) { \
+                                    $global:__YienArmed = $false; \
+                                    if ($c -match '\\S' -and $c -notmatch '^\\s*exit(\\s|;|\\(|$)') { \
+                                        $global:__YienRan = $true; \
+                                        $Host.UI.Write([char]27 + ']133;C' + [char]27 + '\\') \
+                                    } \
+                                } elseif ($global:__YienRan) { \
+                                    $global:__YienRan = $false; \
+                                    $Host.UI.Write([char]27 + ']133;D' + [char]27 + '\\') \
+                                } \
+                            } catch { \
+                                if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                                    $global:Error.RemoveAt(0) \
+                                } \
+                            }; \
+                            $c \
+                        } \
+                    } \
+                } \
+            } catch { \
+                if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                    $global:Error.RemoveAt(0) \
+                } \
             } \
         }; \
         $p \
@@ -70,8 +115,10 @@ impl ShellCommand {
     /// The same shell, set up to report its folder at every prompt, so a
     /// pane follows `cd` (RF-SES-01). PowerShell (5.1 and 7) starts with a
     /// command that wraps the prompt its profile left; the profile still
-    /// loads. cmd gets the report in front of `inherited_prompt`, the
-    /// `PROMPT` it would have used. A shell with arguments of its own, or
+    /// loads. PowerShell also marks each command's start and end with
+    /// OSC 133, so its pane is working while one runs (RF-AGE-05); cmd
+    /// cannot tell a command starts. cmd gets the report in front of
+    /// `inherited_prompt`, the `PROMPT` it would have used. A shell with arguments of its own, or
     /// any other shell, is returned unchanged. Nothing is written to disk.
     ///
     /// ```
@@ -90,7 +137,7 @@ impl ShellCommand {
         }
         match self.display_name().to_ascii_lowercase().as_str() {
             "powershell" | "pwsh" => {
-                self.args = ["-NoLogo", "-NoExit", "-Command", POWERSHELL_CWD_HOOK]
+                self.args = ["-NoLogo", "-NoExit", "-Command", POWERSHELL_HOOK]
                     .map(str::to_owned)
                     .to_vec();
             }
@@ -234,7 +281,7 @@ mod tests {
             assert_eq!(shell.program, program);
             assert_eq!(
                 shell.args,
-                ["-NoLogo", "-NoExit", "-Command", POWERSHELL_CWD_HOOK],
+                ["-NoLogo", "-NoExit", "-Command", POWERSHELL_HOOK],
                 "{program}"
             );
             assert!(shell.env.is_empty(), "{program}");
@@ -245,11 +292,27 @@ mod tests {
     fn rf_ses_01_the_hook_survives_windows_argument_quoting() {
         // A `"` would need escaping that PowerShell re-joins differently;
         // a line break or NUL cannot travel in one argument.
-        assert!(!POWERSHELL_CWD_HOOK.contains(['"', '\n', '\r', '\0']));
+        assert!(!POWERSHELL_HOOK.contains(['"', '\n', '\r', '\0']));
         // No trailing backslash, which would escape the closing quote.
-        assert!(!POWERSHELL_CWD_HOOK.ends_with('\\'));
-        assert!(POWERSHELL_CWD_HOOK.contains("'FileSystem'"));
-        assert!(POWERSHELL_CWD_HOOK.contains("']9;9;'"));
+        assert!(!POWERSHELL_HOOK.ends_with('\\'));
+        assert!(POWERSHELL_HOOK.contains("'FileSystem'"));
+        assert!(POWERSHELL_HOOK.contains("']9;9;'"));
+    }
+
+    #[test]
+    fn rf_age_05_the_powershell_hook_marks_prompts_and_commands() {
+        // `exit(3)` ends the shell as `exit 3` does.
+        assert!(POWERSHELL_HOOK.contains("'^\\s*exit(\\s|;|\\(|$)'"));
+        for mark in ["']133;D;'", "']133;A'", "']133;B'", "']133;C'"] {
+            assert_eq!(POWERSHELL_HOOK.matches(mark).count(), 1, "{mark}");
+        }
+        // It still wraps the prompt, calling it before anything resets `$?`.
+        assert!(POWERSHELL_HOOK.contains("function global:prompt"));
+        assert!(POWERSHELL_HOOK.contains("$s, $p = $?, (& $global:__YienPrompt);"));
+        // `C` comes from PSReadLine's own line reader, called first.
+        assert!(POWERSHELL_HOOK.contains("function global:PSConsoleHostReadLine"));
+        assert!(POWERSHELL_HOOK.contains("{ $c = & $global:__YienReadLine;"));
+        assert!(POWERSHELL_HOOK.contains("'PSConsoleReadLine\\]::ReadLine'"));
     }
 
     #[test]
@@ -308,10 +371,12 @@ mod live {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
 
+    use yien_agent::{AgentState, Effect, Machine, MachineConfig, Signal, Source};
     use yien_pty::{PortablePty, PtyBackend, PtyEvent, SpawnSpec};
+    use yien_vt::osc_scan::OscScanner;
     use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
 
-    use super::POWERSHELL_CWD_HOOK;
+    use super::POWERSHELL_HOOK;
 
     /// Keeps the typed test commands out of the developer's own history file.
     const NO_HISTORY: &str =
@@ -330,6 +395,14 @@ mod live {
             -NoNewline -ForegroundColor Green; \
         ' ' }";
 
+    /// A prompt with OSC 133 marks of its own, as oh-my-posh or Windows
+    /// Terminal's setup writes them: `D` and `A` before it, `B` after.
+    const MARKED_PROMPT: &str = "function global:prompt { \
+        $ok = $?; $code = $LASTEXITCODE; \
+        [char]27 + ']133;D' + [char]7 + [char]27 + ']133;A' + [char]7 + \
+        'O[' + $ok + '|' + $code + ']E' + $global:Error.Count + '> ' + \
+        [char]27 + ']133;B' + [char]7 }";
+
     struct Run {
         raw: Vec<u8>,
         screen: Vec<String>,
@@ -341,11 +414,16 @@ mod live {
 
     /// Runs `prompt`, with the hook when `hooked`, then each command once the
     /// one before it has drawn `first` or its own prompt; waits for the output
-    /// to settle and returns the bytes and the screen.
+    /// to settle and returns the bytes and the screen. With no commands
+    /// nothing is typed, so PSReadLine is left to load as in a real pane.
     fn run(prompt: &str, hooked: bool, first: &str, commands: &[(&str, &str)]) -> Run {
-        let mut script = format!("{NO_HISTORY}; {prompt}");
+        let mut script = if commands.is_empty() {
+            prompt.to_owned()
+        } else {
+            format!("{NO_HISTORY}; {prompt}")
+        };
         if hooked {
-            script = format!("{script}; {POWERSHELL_CWD_HOOK}");
+            script = format!("{script}; {POWERSHELL_HOOK}");
         }
         let spec = SpawnSpec::new("powershell.exe")
             .args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &script])
@@ -406,23 +484,63 @@ mod live {
             .collect()
     }
 
-    /// Both prompts' runs: a failing cmdlet, a native exit code, the registry
-    /// and back to a folder.
-    fn commands(tag: &'static str) -> [(&'static str, String); 4] {
+    /// How many OSC 133 marks of `kind` (`A`, `B`, `C` or `D`) `raw` holds.
+    fn marks(raw: &[u8], kind: char) -> usize {
+        count(raw, &format!("\x1b]133;{kind}"))
+    }
+
+    /// The exit codes of the `D` marks that carry one, in order.
+    fn finished_codes(raw: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(raw).into_owned();
+        text.split("\x1b]133;D;")
+            .skip(1)
+            .map(|s| s.split(['\x1b', '\x07']).next().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    /// The states a seen shell pane goes through on `raw`, as the core reads
+    /// it: OSC scanner, signal mapping, the shell rule's state machine.
+    fn shell_states(raw: &[u8]) -> Vec<AgentState> {
+        let now = Duration::ZERO;
+        let mut machine = Machine::new(MachineConfig::new(&[Source::Osc133], None));
+        machine = machine.step(&Signal::Spawned, now).0;
+        machine = machine.step(&Signal::Seen(true), now).0;
+        let mut states = Vec::new();
+        for found in OscScanner::new().scan(raw) {
+            let Some(osc) = crate::convert::osc_signal(&found) else {
+                continue;
+            };
+            let (next, effects) = machine.step(&Signal::Osc(osc), now);
+            machine = next;
+            for effect in effects {
+                if let Effect::Transition { to, .. } = effect {
+                    states.push(to);
+                }
+            }
+        }
+        states
+    }
+
+    /// Every prompt's runs: a failing cmdlet, a native exit code, the
+    /// registry and back to a folder. `code` is `$LASTEXITCODE` before any
+    /// native command ran.
+    fn commands(tag: &'static str, code: &str) -> [(&'static str, String); 4] {
         [
-            ("Get-Item nope-yien-missing", format!("{tag}[False|]")),
+            ("Get-Item nope-yien-missing", format!("{tag}[False|{code}]")),
             ("cmd /c exit 3", format!("{tag}[False|3]")),
             ("cd HKLM:\\", format!("{tag}[True|3]")),
             ("cd C:\\", format!("{tag}[True|3]")),
         ]
     }
 
-    /// The same screen with and without the hook, and one report per prompt
-    /// except in the registry.
-    fn same_prompt_with_the_hook(prompt: &str, tag: &'static str) {
-        let commands = commands(tag);
+    /// The same screen with and without the hook, one report per prompt
+    /// except in the registry, and with the hook one more `A` and `B` per
+    /// prompt and one more `C` and `D` per command, so the pane is working
+    /// exactly while each command runs.
+    fn same_prompt_with_the_hook(prompt: &str, tag: &'static str, code: &str) {
+        let commands = commands(tag, code);
         let commands: Vec<(&str, &str)> = commands.iter().map(|(c, p)| (*c, p.as_str())).collect();
-        let first = format!("{tag}[True|]");
+        let first = format!("{tag}[True|{code}]");
         let plain = run(prompt, false, &first, &commands);
         let hooked = run(prompt, true, &first, &commands);
         assert_eq!(hooked.screen, plain.screen);
@@ -436,15 +554,100 @@ mod live {
                 r#""C:\""#
             ]
         );
+        let added = |kind| marks(&hooked.raw, kind) - marks(&plain.raw, kind);
+        assert_eq!(
+            ['A', 'B', 'C', 'D'].map(added),
+            [5, 5, 4, 4],
+            "{:?}",
+            String::from_utf8_lossy(&hooked.raw)
+        );
+        assert!(finished_codes(&plain.raw).is_empty());
+        assert_eq!(finished_codes(&hooked.raw), ["1", "1", "0", "0"]);
+        let working_then_idle = [AgentState::Working, AgentState::Idle];
+        assert_eq!(shell_states(&hooked.raw), working_then_idle.repeat(4));
     }
 
     #[test]
-    fn rf_ses_01_the_hook_leaves_the_users_prompt_as_it_was() {
-        same_prompt_with_the_hook(FIXED_PROMPT, "P");
+    fn rf_ses_01_rf_age_05_the_hook_leaves_the_users_prompt_as_it_was() {
+        same_prompt_with_the_hook(FIXED_PROMPT, "P", "");
     }
 
     #[test]
-    fn rf_ses_01_the_hook_keeps_a_write_host_prompt_and_its_status() {
-        same_prompt_with_the_hook(HOST_PROMPT, "S");
+    fn rf_ses_01_rf_age_05_the_hook_keeps_a_write_host_prompt_and_its_status() {
+        same_prompt_with_the_hook(HOST_PROMPT, "S", "");
+    }
+
+    #[test]
+    fn rf_age_05_marks_the_users_prompt_already_writes_keep_the_states_right() {
+        same_prompt_with_the_hook(MARKED_PROMPT, "O", "");
+    }
+
+    /// What YIEN's prompt writes at each prompt, whatever the user's prompt did.
+    const OUR_PROMPT_MARK: &str = "\x1b]133;A\x1b\\";
+
+    #[test]
+    fn rf_age_06_a_prompt_replaced_later_leaves_the_pane_idle() {
+        let commands = [
+            ("function global:prompt { 'X' + '> ' }", "X> "),
+            ("cmd /c exit 0", "X> "),
+            ("Get-Item nope-yien-missing", "X> "),
+        ];
+        let run = run(FIXED_PROMPT, true, "P[True|]", &commands);
+        // The command that replaced the prompt was marked; its end shows when
+        // the next line is read, and nothing after it is marked.
+        assert_eq!(marks(&run.raw, 'C'), 1);
+        assert_eq!(
+            shell_states(&run.raw),
+            [AgentState::Working, AgentState::Idle]
+        );
+    }
+
+    #[test]
+    fn rf_age_06_a_prompt_that_throws_still_ends_the_command() {
+        let prompt = "function global:prompt { if ($global:boom) { throw 'boom' }; 'T> ' }";
+        let commands = [
+            ("$global:boom = 1", OUR_PROMPT_MARK),
+            ("cmd /c exit 0", OUR_PROMPT_MARK),
+        ];
+        let run = run(prompt, true, "T> ", &commands);
+        assert_eq!(marks(&run.raw, 'C'), 1);
+        assert_eq!(finished_codes(&run.raw), ["1"]);
+        assert_eq!(
+            shell_states(&run.raw),
+            [AgentState::Working, AgentState::Idle]
+        );
+    }
+
+    #[test]
+    fn rf_age_06_a_line_reader_wrapped_by_another_integration_is_left_alone() {
+        let prompt = format!(
+            "$global:__Other = $function:PSConsoleHostReadLine; \
+             function global:PSConsoleHostReadLine {{ $global:__Other.Invoke() }}; {FIXED_PROMPT}"
+        );
+        let commands = commands("P", "");
+        let commands: Vec<(&str, &str)> = commands.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let run = run(&prompt, true, "P[True|]", &commands);
+        assert_eq!(marks(&run.raw, 'C'), 0);
+        assert_eq!(marks(&run.raw, 'D'), 0);
+        assert_eq!(marks(&run.raw, 'A'), 5);
+        assert!(shell_states(&run.raw).is_empty());
+    }
+
+    #[test]
+    fn rf_age_05_the_first_command_of_a_new_pane_is_marked() {
+        // The user's prompt runs right before the hook wraps the line reader,
+        // so PSReadLine must be there at the first prompt.
+        let prompt =
+            "function global:prompt { 'R[' + [bool]$function:PSConsoleHostReadLine + ']> ' }";
+        let first = run(prompt, true, "]> ", &[]);
+        let text = String::from_utf8_lossy(&first.raw).into_owned();
+        assert!(text.contains("R[True]> "), "{text:?}");
+    }
+
+    #[test]
+    fn rf_age_05_the_hook_works_under_strict_mode() {
+        let prompt =
+            format!("Set-StrictMode -Version Latest; $global:LASTEXITCODE = 0; {FIXED_PROMPT}");
+        same_prompt_with_the_hook(&prompt, "P", "0");
     }
 }

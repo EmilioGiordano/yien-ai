@@ -1087,6 +1087,16 @@ impl WorkspaceView {
         self.count_panes(AgentState::Working)
     }
 
+    /// Of the working panes, the shell panes: they run a command, not an
+    /// agent turn, and nothing brings it back after a quit.
+    pub fn working_programs(&self) -> usize {
+        self.all_panes()
+            .into_iter()
+            .map(|p| self.pane(p))
+            .filter(|p| p.state == AgentState::Working && p.profile_id.as_str() == SHELL_PROFILE)
+            .count()
+    }
+
     /// How many tabs there are.
     pub fn tab_count(&self) -> usize {
         self.tabs_in_order().count()
