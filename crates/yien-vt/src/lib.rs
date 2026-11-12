@@ -19,6 +19,7 @@
 
 mod alacritty;
 mod keep_selection;
+pub mod key_modes;
 pub mod osc_scan;
 mod palette;
 mod screen_dump;
@@ -91,6 +92,9 @@ pub struct VtOutput {
     pub bell: bool,
     /// Text the program asked to copy to the clipboard (OSC 52).
     pub clipboard: Option<String>,
+    /// Length in bytes of an OSC 52 write to the primary selection (`s` or
+    /// `p`), which is refused; the text is not kept.
+    pub selection_write_refused: Option<usize>,
     /// OSC signals found in the bytes, in order, for agent state detection.
     pub signals: Vec<OscSignal>,
 }

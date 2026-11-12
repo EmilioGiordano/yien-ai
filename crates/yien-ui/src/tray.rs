@@ -1,7 +1,7 @@
 //! The attention tray (RF-ATN-13) and the quit question (RF-SES-13), as
 //! plain functions of the view model; `shell` draws them.
 
-use yien_proto::{NeedsReason, PaneId, TabId};
+use yien_proto::{NeedsReason, PaneId, SHELL_PROFILE, TabId};
 
 use crate::model::{AgentState, WorkspaceView};
 
@@ -76,6 +76,7 @@ fn detail(pane: &crate::model::PaneView) -> String {
             Some(code) if pane.exited => format!("Stopped with exit code {code}"),
             _ => "The turn failed".to_owned(),
         },
+        _ if pane.profile_id.as_str() == SHELL_PROFILE => "Command finished".to_owned(),
         _ => "Turn finished".to_owned(),
     }
 }
@@ -141,17 +142,38 @@ pub(crate) fn close_request(working: usize, asking: bool, confirmed: bool) -> Cl
     }
 }
 
-/// What the quit question says about the working agents.
-pub(crate) fn quit_detail(working: usize) -> String {
-    match working {
-        0 => "No agent is working any more.".to_owned(),
-        1 => "1 agent is still working. Quitting stops it mid-turn; its session comes back \
-              when you open YIEN again."
-            .to_owned(),
-        n => format!(
+/// What the quit question says about the working agents and the shell
+/// panes running a program.
+pub(crate) fn quit_detail(workspace: &WorkspaceView) -> String {
+    let programs = workspace.working_programs();
+    let agents = workspace.working_panes().saturating_sub(programs);
+    let agents = match agents {
+        0 => None,
+        1 => Some(
+            "1 agent is still working. Quitting stops it mid-turn; its session comes back \
+             when you open YIEN again."
+                .to_owned(),
+        ),
+        n => Some(format!(
             "{n} agents are still working. Quitting stops them mid-turn; their sessions come \
              back when you open YIEN again."
+        )),
+    };
+    let programs = match programs {
+        0 => None,
+        1 => Some(
+            "1 pane is still running a program. Quitting stops it, and it does not come back."
+                .to_owned(),
         ),
+        n => Some(format!(
+            "{n} panes are still running a program. Quitting stops them, and they do not come \
+             back."
+        )),
+    };
+    match (agents, programs) {
+        (None, None) => "Nothing is working any more.".to_owned(),
+        (Some(text), None) | (None, Some(text)) => text,
+        (Some(agents), Some(programs)) => format!("{agents} {programs}"),
     }
 }
 
@@ -385,10 +407,77 @@ mod tests {
         assert_eq!(close_request(0, true, false), CloseRequest::Close);
     }
 
+    /// A view of one tab whose panes are agents (`claude`) or shells, in
+    /// the given states.
+    fn panes_view(panes: &[(bool, P)]) -> WorkspaceView {
+        let ids: Vec<u64> = (1..=panes.len() as u64).collect();
+        let panes = panes
+            .iter()
+            .zip(&ids)
+            .map(|((shell, state), id)| {
+                let mut info = pane(*id, 10, *state, 0);
+                if *shell {
+                    info.profile = "Shell".into();
+                    info.profile_id = ProfileId::new(SHELL_PROFILE);
+                }
+                info
+            })
+            .collect();
+        WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(1),
+                name: "api".into(),
+                root: "C:/api".into(),
+                tabs: vec![TabId::new(10)],
+                collapsed: false,
+            }],
+            tabs: vec![tab(10, 1, &ids)],
+            panes,
+            active_tab: Some(TabId::new(10)),
+            profiles: vec![],
+            notifications_muted: false,
+            side_bars: Default::default(),
+        })
+    }
+
     #[test]
     fn rf_ses_13_the_question_counts_the_working_agents() {
-        assert!(quit_detail(1).starts_with("1 agent is still working."));
-        assert!(quit_detail(3).starts_with("3 agents are still working."));
-        assert_eq!(quit_detail(0), "No agent is working any more.");
+        let one = panes_view(&[(false, P::Working), (true, P::Idle)]);
+        assert!(quit_detail(&one).starts_with("1 agent is still working."));
+        let three = panes_view(&[(false, P::Working); 3]);
+        assert!(quit_detail(&three).starts_with("3 agents are still working."));
+        let none = panes_view(&[(false, P::Done), (true, P::Idle)]);
+        assert_eq!(quit_detail(&none), "Nothing is working any more.");
+    }
+
+    #[test]
+    fn rf_ses_13_a_shell_command_is_a_program_that_does_not_come_back() {
+        let shell = panes_view(&[(true, P::Working), (false, P::Idle)]);
+        assert_eq!(
+            quit_detail(&shell),
+            "1 pane is still running a program. Quitting stops it, and it does not come back."
+        );
+        let both = panes_view(&[(false, P::Working), (true, P::Working), (true, P::Working)]);
+        let text = quit_detail(&both);
+        assert!(text.starts_with("1 agent is still working."), "{text}");
+        assert!(
+            text.ends_with("2 panes are still running a program. Quitting stops them, and they do not come back."),
+            "{text}"
+        );
+        assert!(!text.contains("their sessions"), "{text}");
+    }
+
+    #[test]
+    fn rf_atn_13_a_finished_shell_command_is_not_a_turn() {
+        let view = panes_view(&[(true, P::Done), (false, P::Done)]);
+        let rows = tray_rows(&view);
+        assert_eq!(rows.len(), 2);
+        let detail = |id: u64| {
+            rows.iter()
+                .find(|r| r.pane == PaneId::new(id))
+                .map(|r| r.detail.clone())
+        };
+        assert_eq!(detail(1).as_deref(), Some("Command finished"));
+        assert_eq!(detail(2).as_deref(), Some("Turn finished"));
     }
 }

@@ -747,6 +747,74 @@ impl Tree {
         true
     }
 
+    /// Moves the boundary between the branch child holding `before` and the
+    /// next child, which holds `after`, so the first takes `share` of the
+    /// space the two have together. The rest of the branch stays put.
+    ///
+    /// `false`, and nothing changes, when `share` is not strictly between 0
+    /// and 1, when either pane is unknown, or when the two children holding
+    /// them in their deepest common branch are not neighbours in that order.
+    ///
+    /// ```
+    /// use yien_layout::{Orientation, Rect, Tree};
+    /// let mut tree = Tree::new();
+    /// let b = tree.split(0, Orientation::Horizontal).unwrap();
+    /// let c = tree.split(b, Orientation::Horizontal).unwrap();
+    /// assert!(tree.set_divider(b, c, 0.25));
+    /// let rects = tree.layout(Rect::new(0.0, 0.0, 120.0, 10.0));
+    /// assert!((rects[&0].w - 60.0).abs() < 0.01);
+    /// assert!((rects[&b].w - 15.0).abs() < 0.01);
+    /// assert!(!tree.set_divider(0, c, 0.5));
+    /// ```
+    pub fn set_divider(&mut self, before: PaneId, after: PaneId, share: f32) -> bool {
+        if !(share.is_finite() && share > 0.0 && share < 1.0) {
+            return false;
+        }
+        let (Some(a), Some(b)) = (self.find(before), self.find(after)) else {
+            return false;
+        };
+        let Some((branch, ia, ib)) = self.common_branch(a, b) else {
+            return false;
+        };
+        if ib != ia + 1 {
+            return false;
+        }
+        let Kind::Branch { flex, .. } = &mut self.nodes[branch].kind else {
+            return false;
+        };
+        let pair = flex[ia] + flex[ib];
+        let first = pair * share;
+        if (flex[ia] - first).abs() < f32::EPSILON {
+            return false;
+        }
+        flex[ia] = first;
+        flex[ib] = pair - first;
+        true
+    }
+
+    /// The deepest branch holding both nodes, with the index of the child on
+    /// the way to each. `None` when they are the same node.
+    fn common_branch(&self, a: NodeId, b: NodeId) -> Option<(NodeId, usize, usize)> {
+        let path_of = |mut node: NodeId| {
+            let mut path = vec![node];
+            while let Some(parent) = self.nodes[node].parent {
+                path.push(parent);
+                node = parent;
+            }
+            path.reverse();
+            path
+        };
+        let (pa, pb) = (path_of(a), path_of(b));
+        let shared = pa.iter().zip(&pb).take_while(|(x, y)| x == y).count();
+        let branch = *pa.get(shared.checked_sub(1)?)?;
+        let (ca, cb) = (*pa.get(shared)?, *pb.get(shared)?);
+        let Kind::Branch { children, .. } = &self.nodes[branch].kind else {
+            return None;
+        };
+        let at = |c: NodeId| children.iter().position(|&x| x == c);
+        Some((branch, at(ca)?, at(cb)?))
+    }
+
     fn place(&self, node: NodeId, area: Rect, out: &mut HashMap<PaneId, Rect>) {
         match &self.nodes[node].kind {
             Kind::Leaf(pane) => {
@@ -1160,6 +1228,65 @@ mod tests {
         assert_close(l[&0].w, 70.0);
         assert_close(l[&b].w, 30.0);
         assert_close(l[&0].w + l[&b].w, 100.0);
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_moves_only_the_two_neighbours() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Horizontal).unwrap();
+        let before = t.layout(AREA);
+        assert!(t.set_divider(b, c, 0.75));
+        let l = t.layout(AREA);
+        assert_eq!(l[&0], before[&0]);
+        let pair = before[&b].w + before[&c].w;
+        assert_close(l[&b].w, pair * 0.75);
+        assert_close(l[&c].w, pair * 0.25);
+        assert_close(l[&c].right(), 100.0);
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_reaches_the_outer_branch_of_a_nested_split() {
+        // 0 | (b over c): the boundary between 0 and the column is the root's.
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Vertical).unwrap();
+        assert!(t.set_divider(0, c, 0.3));
+        let l = t.layout(AREA);
+        assert_close(l[&0].w, 30.0);
+        assert_close(l[&b].w, 70.0);
+        assert_close(l[&b].h, 50.0);
+        assert!(t.set_divider(b, c, 0.2));
+        let l = t.layout(AREA);
+        assert_close(l[&b].h, 20.0);
+        assert_close(l[&0].w, 30.0);
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_refuses_what_is_not_a_boundary() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Horizontal).unwrap();
+        let c = t.split(b, Orientation::Horizontal).unwrap();
+        let shape = t.shape();
+        // Not neighbours, the wrong order, the same pane, unknown panes.
+        assert!(!t.set_divider(0, c, 0.5));
+        assert!(!t.set_divider(b, 0, 0.5));
+        assert!(!t.set_divider(b, b, 0.5));
+        assert!(!t.set_divider(0, 99, 0.5));
+        for share in [0.0, 1.0, -0.2, 1.5, f32::NAN, f32::INFINITY] {
+            assert!(!t.set_divider(0, b, share), "{share}");
+        }
+        assert_eq!(t.shape(), shape);
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_twice_with_the_same_share_is_a_no_op() {
+        let mut t = Tree::new();
+        let b = t.split(0, Orientation::Vertical).unwrap();
+        assert!(t.set_divider(0, b, 0.6));
+        let once = t.shape();
+        assert!(!t.set_divider(0, b, 0.6));
+        assert_eq!(t.shape(), once);
     }
 
     #[test]

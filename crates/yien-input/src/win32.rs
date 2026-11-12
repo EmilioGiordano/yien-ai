@@ -72,6 +72,16 @@ pub mod vk {
     pub const DELETE: u16 = 0x2E;
 }
 
+/// Hardware scan codes (set 1) for the keys YIEN sends as Win32 events.
+pub mod scan {
+    /// The main Enter key; the keypad one is the same code with `ENHANCED_KEY`.
+    pub const RETURN: u16 = 0x1C;
+    /// Backspace.
+    pub const BACK: u16 = 0x0E;
+    /// Delete; the extended-block key carries `ENHANCED_KEY`, the keypad one does not.
+    pub const DELETE: u16 = 0x53;
+}
+
 /// One Win32 key event, the fields of `KEY_EVENT_RECORD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyEvent {

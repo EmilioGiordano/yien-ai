@@ -10,6 +10,7 @@ mod panic_log;
 mod profiles;
 mod settings;
 mod shell_switch;
+mod update;
 
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -42,6 +43,10 @@ impl CoreClient for Client {
 
     fn take_frame(&self, pane: PaneId) -> Option<Frame> {
         self.0.take_frame(pane)
+    }
+
+    fn take_clipboard(&self, pane: PaneId) -> Option<String> {
+        self.0.take_clipboard(pane)
     }
 }
 
@@ -78,7 +83,10 @@ fn main() -> ExitCode {
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let user_profiles = profiles::load();
-    let (settings, settings_watcher, shell_switch) = settings::start(user_profiles.notices);
+    let (update, updates) = update::Update::start();
+    let update = Arc::new(update);
+    let (settings, settings_watcher, shell_switch) =
+        settings::start(user_profiles.notices, Arc::clone(&update));
     let config = CoreConfig {
         shell_integration: settings::shell_integration(&settings.initial),
         profiles: user_profiles.profiles,
@@ -120,12 +128,14 @@ fn main() -> ExitCode {
         attention,
         settings,
         files,
+        updates,
         move || {
             tracing::info!("yien exiting");
             if let Some(watcher) = &settings_watcher {
                 watcher.stop();
             }
-            if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
+            let saved = quitting.save_session(QUIT_SAVE_TIMEOUT);
+            if let Err(error) = &saved {
                 tracing::warn!("the session was not saved on quit: {error}");
             }
             let started = Instant::now();
@@ -143,6 +153,9 @@ fn main() -> ExitCode {
             if let Some(file) = &settings_file {
                 let _ = std::fs::remove_file(file);
             }
+            // Last, after the session is saved and the panes are closed; the
+            // installer waits for this process to exit (RNF-21).
+            update.quit(saved.is_ok());
             drop(log);
         },
     );

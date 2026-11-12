@@ -8,9 +8,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::{Command, PaneId, ProjectId, TabId, WorktreeCheck};
 
-use super::{CONFIRM_WIDTH, PALETTE_TOP, Shell};
+use super::{Asked, CONFIRM_WIDTH, PALETTE_TOP, Shell, key_hint};
 use crate::actions::*;
 use crate::catalog::{CATALOG, Scope};
+use crate::model::CloseStep;
 use crate::theme::Theme;
 use crate::worktree::{Answer, Question, Step, parse_prompt, prompt_hint};
 
@@ -123,18 +124,72 @@ impl Shell {
         }
     }
 
-    /// Asks before closing `pane` when that closes the last tab on a
-    /// worktree, and has the core check the worktree meanwhile. `false` when
-    /// there is nothing to ask.
-    pub(super) fn ask_before_closing(
+    /// The next step of closing `pane`; `stop_confirmed` once the user
+    /// agreed to stop the work running in it. The worktree question has the
+    /// core check the worktree meanwhile.
+    pub(super) fn close_pane_step(
         &mut self,
         pane: PaneId,
+        stop_confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(question) = self.workspace.worktree_question(pane) else {
-            return false;
-        };
+    ) {
+        match self.workspace.close_pane_step(pane, stop_confirmed) {
+            CloseStep::AskBusy => {
+                let name = self.workspace.pane(pane).name;
+                self.ask(Asked::ClosePane { pane, name }, window, cx);
+            }
+            CloseStep::AskWorktree(question) => {
+                self.ask_worktree_question(*question, window, cx);
+            }
+            CloseStep::Close => self.command(Command::ClosePane { pane }, cx),
+        }
+    }
+
+    /// Closes the whole of `tab`, asking first while any of its panes
+    /// runs work, then when it is the last tab on its worktree (RF-ESP-03,
+    /// RF-ESP-07).
+    pub(super) fn close_tab_now(
+        &mut self,
+        tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming.as_ref().is_some_and(|r| r.tab == tab) {
+            self.finish_rename(false, window, cx);
+        }
+        self.close_tab_step(tab, false, window, cx);
+    }
+
+    /// The next step of closing `tab`; `stop_confirmed` once the user
+    /// agreed to stop the work running in it.
+    pub(super) fn close_tab_step(
+        &mut self,
+        tab: TabId,
+        stop_confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.workspace.close_tab_step(tab, stop_confirmed) {
+            CloseStep::AskBusy => {
+                let Some(name) = self.workspace.tab(tab).map(|t| t.name.clone()) else {
+                    return;
+                };
+                self.ask(Asked::CloseTab { tab, name }, window, cx);
+            }
+            CloseStep::AskWorktree(question) => {
+                self.ask_worktree_question(*question, window, cx);
+            }
+            CloseStep::Close => self.command(Command::CloseTab { tab }, cx),
+        }
+    }
+
+    fn ask_worktree_question(
+        &mut self,
+        question: Question,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = question.tab;
         self.split_menu = None;
         self.finish_rename(true, window, cx);
@@ -143,7 +198,6 @@ impl Shell {
         self.worktree_close = Some(Closing { question, focus });
         self.command(Command::CheckWorktree { tab }, cx);
         cx.notify();
-        true
     }
 
     /// The core's answer to the check, for the open question. An answer
@@ -461,13 +515,7 @@ impl Shell {
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .child(label)
-            .child(
-                div()
-                    .text_size(t.text(11.5))
-                    .text_color(t.faint)
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(keys),
-            )
+            .child(key_hint(keys, &t))
     }
 }
 

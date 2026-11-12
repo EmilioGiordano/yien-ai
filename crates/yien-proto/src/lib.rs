@@ -6,11 +6,12 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 13);
+//! assert_eq!(PROTO_VERSION, 14);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
 //!     profile: None,
+//!     before: false,
 //! });
 //! assert!(matches!(split, ClientMsg::Command(_)));
 //! ```
@@ -40,7 +41,16 @@ pub use path::{folder_key, same_folder};
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 13;
+pub const PROTO_VERSION: u32 = 14;
+
+/// The least part of a pair of neighbouring panes either one keeps when
+/// [`Command::SetDivider`] moves the divider between them: a share closer to
+/// 0 or 1 is clamped to this, so no pane shrinks to nothing.
+///
+/// ```
+/// assert!(yien_proto::MIN_DIVIDER_SHARE > 0.0 && yien_proto::MIN_DIVIDER_SHARE < 0.5);
+/// ```
+pub const MIN_DIVIDER_SHARE: f32 = 0.02;
 
 /// The id of the built-in profile that runs the user's shell; every other
 /// profile runs an agent.

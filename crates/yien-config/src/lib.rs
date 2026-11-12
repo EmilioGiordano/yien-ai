@@ -122,6 +122,12 @@ pub struct Config {
     /// at each prompt, so a restored pane opens where the user left it
     /// (RF-SES-01). Applies to panes started after a change.
     pub shell_integration: bool,
+    /// `terminal.osc52_copy`: programs may write the system clipboard with
+    /// OSC 52 (RF-PAN-09). Applies at once.
+    pub osc52_copy: bool,
+    /// `update.check`: whether YIEN asks GitHub once a day for a newer
+    /// release. Off means no network request for updates at all.
+    pub update_check: bool,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
 }
@@ -135,6 +141,8 @@ impl Default for Config {
             editor: None,
             tab_grouping: TabGrouping::default(),
             shell_integration: true,
+            osc52_copy: true,
+            update_check: true,
             keys: Vec::new(),
         }
     }
