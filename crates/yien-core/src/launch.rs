@@ -229,7 +229,7 @@ pub(crate) fn resolve(
                 program: shell.program.clone(),
                 args: shell.args.clone(),
                 resume_args: Vec::new(),
-                env: Vec::new(),
+                env: shell.env.clone(),
                 machine: MachineConfig::unprofiled(),
                 screen: Vec::new(),
                 profile_name: "Shell".to_owned(),
@@ -241,12 +241,11 @@ pub(crate) fn resolve(
     };
 
     let rule = found.select_rule(None).rule;
-    let env = found
-        .launch
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let profile_env = found.launch.env.iter().map(|(k, v)| (k.clone(), v.clone()));
+    let env = match &found.detect {
+        Some(_) => profile_env.collect(),
+        None => shell.env.iter().cloned().chain(profile_env).collect(),
+    };
     let (program, args, default_name) = match &found.detect {
         Some(detect) => (
             detect.command.clone(),
@@ -568,6 +567,30 @@ mod tests {
         let plan = resolve(None, &[], &shell()).unwrap();
         assert_eq!(plan.program, "pwsh.exe");
         assert!(!plan.machine.declares(Source::Osc133));
+    }
+
+    #[test]
+    fn rf_ses_01_the_shell_variables_reach_its_panes() {
+        let mut cmd = ShellCommand::new("cmd.exe");
+        cmd.env = vec![("PROMPT".into(), "$E]9;9;\"$P\"$E\\$P$G".into())];
+        let fill = Fill {
+            pane: PaneId::new(1),
+            session_id: None,
+            resume: None,
+            hooks: None,
+        };
+        for profiles in [Vec::new(), builtin_profiles().unwrap()] {
+            let plan = resolve(None, &profiles, &cmd).unwrap();
+            let spec = plan.spec(&fill, "C:/Code", 80, 24);
+            assert_eq!(env(&spec, "PROMPT"), Some("$E]9;9;\"$P\"$E\\$P$G"));
+        }
+        let claude = resolve(
+            Some(&ProfileId::new("claude")),
+            &builtin_profiles().unwrap(),
+            &cmd,
+        )
+        .unwrap();
+        assert!(env(&claude.spec(&fill, "C:/Code", 80, 24), "PROMPT").is_none());
     }
 
     #[test]
