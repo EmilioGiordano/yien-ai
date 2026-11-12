@@ -350,7 +350,7 @@ impl Shell {
                 let size = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
                 // Pane heads lay out from this size, read during render.
                 if area.replace(size) != size {
-                    window.request_animation_frame();
+                    window.on_next_frame(|window, _| window.refresh());
                 }
             },
             |_, (), _, _| {},
