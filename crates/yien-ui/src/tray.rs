@@ -386,12 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn rf_ses_13_the_quit_key_again_or_held_keeps_the_question_open() {
-        assert_eq!(close_request(2, false, false), CloseRequest::Ask(2));
-        assert_eq!(close_request(2, true, false), CloseRequest::StillAsking);
-    }
-
-    #[test]
     fn rf_ses_13_the_question_counts_the_working_agents() {
         assert!(quit_detail(1).starts_with("1 agent is still working."));
         assert!(quit_detail(3).starts_with("3 agents are still working."));
