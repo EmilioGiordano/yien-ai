@@ -115,6 +115,8 @@ pub struct PaneView {
     pub name: String,
     /// The profile it was started with: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The working directory its shell last reported, if any.
+    pub cwd: Option<String>,
     /// That profile's id: `claude`, `shell`; empty until the details arrive.
     pub profile_id: ProfileId,
     /// What its agent is doing.
@@ -152,6 +154,7 @@ impl PaneView {
             id,
             name: "terminal".to_owned(),
             profile: String::new(),
+            cwd: None,
             profile_id: ProfileId::new(""),
             state: AgentState::Idle,
             needs_reason: None,
@@ -172,6 +175,7 @@ impl PaneView {
             id: info.id,
             name: info.name.clone(),
             profile: info.profile.clone(),
+            cwd: info.cwd.clone(),
             profile_id: info.profile_id.clone(),
             state: info.state.into(),
             needs_reason: needs_reason(info.state),
@@ -200,6 +204,7 @@ impl PaneView {
     ///     id: yien_proto::PaneId::new(1),
     ///     name: "pwsh".into(),
     ///     profile: "Shell".into(),
+    ///     cwd: None,
     ///     profile_id: yien_proto::ProfileId::new("shell"),
     ///     state: AgentState::Idle,
     ///     needs_reason: None,
@@ -1450,6 +1455,19 @@ mod tests {
         assert!(!p.running);
         assert!(p.exited);
         assert_eq!(p.exit_code, Some(3));
+    }
+
+    #[test]
+    fn rf_nav_04_a_pane_keeps_the_folder_its_shell_reported_last() {
+        let mut view = demo();
+        assert_eq!(view.pane(PaneId::new(110)).cwd, None);
+        let mut moved = pane(110, 11, P::Idle);
+        moved.cwd = Some("C:/Code/yien/crates".into());
+        view.pane_updated(&moved);
+        assert_eq!(
+            view.pane(PaneId::new(110)).cwd.as_deref(),
+            Some("C:/Code/yien/crates")
+        );
     }
 
     #[test]

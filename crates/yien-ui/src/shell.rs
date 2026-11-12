@@ -36,7 +36,7 @@ use crate::model::{
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries,
+    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
 use crate::region::{self, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
@@ -61,6 +61,8 @@ use tray::Tray;
 const PALETTE_WIDTH: f32 = 620.0;
 const PALETTE_TOP: f32 = 56.0;
 const PALETTE_LIST_HEIGHT: f32 = 380.0;
+/// The left padding of a pane row under its tab in the switcher's tree.
+const PALETTE_INDENT: f32 = 20.0;
 const CONFIRM_WIDTH: f32 = 440.0;
 /// Test-only: when set, the window opens with the attention tray open, so a
 /// window check can capture it without sending keys.
@@ -1099,13 +1101,25 @@ impl Shell {
                 self.command(Command::ListAgentSessions { project, request }, cx);
                 Palette::sessions(project, request)
             }
-            None => Palette::new(mode, commands, places),
+            None => Palette::new(mode, commands, places).with_home(switcher_home(&self.workspace)),
         };
         self.palette = Some(OpenPalette {
             model,
             input,
             scroll: ScrollHandle::new(),
             _input_events: input_events,
+        });
+        // A new list's first prepaint drops a scroll request (gpui learns the
+        // overflow after it), and next-frame callbacks run before that
+        // frame's draw: ask two frames on, once the list has been drawn.
+        cx.on_next_frame(window, |_, window, cx| {
+            cx.on_next_frame(window, |this, _, cx| {
+                if let Some(open) = &this.palette {
+                    open.scroll
+                        .scroll_to_item(open.model.selected().unwrap_or(0));
+                    cx.notify();
+                }
+            });
         });
         cx.notify();
     }
@@ -1123,7 +1137,8 @@ impl Shell {
         let query = input.read(cx).value();
         if let Some(open) = self.palette.as_mut() {
             open.model.set_query(&query);
-            open.scroll.scroll_to_item(0);
+            open.scroll
+                .scroll_to_item(open.model.selected().unwrap_or(0));
             cx.notify();
         }
     }
@@ -1858,13 +1873,14 @@ impl Shell {
         let t = self.theme;
         let model = &open.model;
         let selected = model.selected();
+        let tree = model.shows_tree();
         let rows: Vec<AnyElement> = model
             .rows()
             .iter()
             .enumerate()
             .filter_map(|(at, row)| {
                 let entry = model.entry(row)?;
-                Some(self.render_palette_row(at, row, entry, selected == Some(at), cx))
+                Some(self.render_palette_row(at, row, entry, selected == Some(at), tree, cx))
             })
             .collect();
         let label = match model.listing() {
@@ -1944,25 +1960,28 @@ impl Shell {
         row: &Row,
         entry: &Entry,
         selected: bool,
+        tree: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme;
+        let (shown, dim) = entry.drawn(tree);
+        let nested = shown.len() < entry.text.len();
+        // Hits are offsets into the whole text, so a shortened text drops them.
+        let hits: &[usize] = if nested { &[] } else { &row.hits };
         let style = |color: Rgba, weight: FontWeight| HighlightStyle {
             color: Some(color.into()),
             font_weight: Some(weight),
             ..HighlightStyle::default()
         };
-        let runs = ink_runs(&entry.text, entry.dim, &row.hits)
-            .into_iter()
-            .map(|(range, ink)| {
-                let look = match ink {
-                    Ink::Text => style(t.text, FontWeight::NORMAL),
-                    Ink::Dim => style(t.muted, FontWeight::NORMAL),
-                    Ink::Hit => style(t.ai, FontWeight::BOLD),
-                };
-                (range, look)
-            });
-        let text = StyledText::new(entry.text.clone()).with_highlights(runs);
+        let runs = ink_runs(shown, dim, hits).into_iter().map(|(range, ink)| {
+            let look = match ink {
+                Ink::Text => style(t.text, FontWeight::NORMAL),
+                Ink::Dim => style(t.muted, FontWeight::NORMAL),
+                Ink::Hit => style(t.ai, FontWeight::BOLD),
+            };
+            (range, look)
+        });
+        let text = StyledText::new(shown.to_owned()).with_highlights(runs);
         let hint_color = match entry.state {
             Some(AgentState::NeedsYou) => t.shu,
             Some(AgentState::Error) => t.ochre,
@@ -1988,6 +2007,10 @@ impl Shell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.run_palette(Some(at), window, cx);
             }))
+            .when(nested, |r| {
+                r.pl(px(PALETTE_INDENT))
+                    .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
+            })
             .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
             .child(
                 div()
