@@ -8,9 +8,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::{Command, PaneId, ProjectId, TabId, WorktreeCheck};
 
-use super::{CONFIRM_WIDTH, PALETTE_TOP, Shell};
+use super::{Asked, CONFIRM_WIDTH, PALETTE_TOP, Shell};
 use crate::actions::*;
 use crate::catalog::{CATALOG, Scope};
+use crate::model::CloseTabStep;
 use crate::theme::Theme;
 use crate::worktree::{Answer, Question, Step, parse_prompt, prompt_hint};
 
@@ -139,8 +140,9 @@ impl Shell {
         true
     }
 
-    /// Closes the whole of `tab`, asking first when it is the last tab on
-    /// its worktree (RF-ESP-03, RF-ESP-07).
+    /// Closes the whole of `tab`, asking first while any of its panes
+    /// runs work, then when it is the last tab on its worktree (RF-ESP-03,
+    /// RF-ESP-07).
     pub(super) fn close_tab_now(
         &mut self,
         tab: TabId,
@@ -150,9 +152,29 @@ impl Shell {
         if self.renaming.as_ref().is_some_and(|r| r.tab == tab) {
             self.finish_rename(false, window, cx);
         }
-        match self.workspace.close_tab_question(tab) {
-            Some(question) => self.ask_worktree_question(question, window, cx),
-            None => self.command(Command::CloseTab { tab }, cx),
+        self.close_tab_step(tab, false, window, cx);
+    }
+
+    /// The next step of closing `tab`; `stop_confirmed` once the user
+    /// agreed to stop the work running in it.
+    pub(super) fn close_tab_step(
+        &mut self,
+        tab: TabId,
+        stop_confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.workspace.close_tab_step(tab, stop_confirmed) {
+            CloseTabStep::AskBusy(_) => {
+                let Some(name) = self.workspace.tab(tab).map(|t| t.name.clone()) else {
+                    return;
+                };
+                self.ask(Asked::CloseTab { tab, name }, window, cx);
+            }
+            CloseTabStep::AskWorktree(question) => {
+                self.ask_worktree_question(*question, window, cx);
+            }
+            CloseTabStep::Close => self.command(Command::CloseTab { tab }, cx),
         }
     }
 

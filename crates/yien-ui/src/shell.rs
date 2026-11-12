@@ -189,6 +189,8 @@ struct Confirm {
 enum Asked {
     /// Closing a project that has work running.
     CloseProject { project: ProjectId, name: String },
+    /// Closing a tab whose panes run work (RF-ESP-03).
+    CloseTab { tab: TabId, name: String },
     /// Quitting while agents work (RF-SES-13).
     Quit,
 }
@@ -558,6 +560,7 @@ impl Shell {
     fn drop_stale_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let gone = self.confirm.as_ref().is_some_and(|c| match &c.asked {
             Asked::CloseProject { project, .. } => self.workspace.project(*project).is_none(),
+            Asked::CloseTab { tab, .. } => self.workspace.tab(*tab).is_none(),
             Asked::Quit => false,
         });
         if gone {
@@ -1420,6 +1423,10 @@ impl Shell {
                 self.command(Command::CloseProject { project }, cx);
                 self.give_back_keyboard(window, cx);
             }
+            Asked::CloseTab { tab, .. } => {
+                self.give_back_keyboard(window, cx);
+                self.close_tab_step(tab, true, window, cx);
+            }
             Asked::Quit => {
                 tracing::info!("quit anyway while agents work");
                 self.quit_confirmed = true;
@@ -1466,6 +1473,12 @@ impl Shell {
                     "confirm-close-project",
                 )
             }
+            Asked::CloseTab { tab, name } => (
+                format!("Close {name}?"),
+                tab_controls::close_tab_detail(self.workspace.busy_panes_of_tab(*tab)),
+                "Close tab",
+                "confirm-close-tab",
+            ),
             Asked::Quit => (
                 "Quit YIEN?".to_owned(),
                 quit_detail(self.workspace.working_panes()),
@@ -3350,6 +3363,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("project head close button", "project.close"),
     ("project head new tab button", "tab.new"),
     ("close project dialog buttons", "project.close"),
+    ("close tab dialog buttons", "tab.close"),
     ("relaunch button", "pane.relaunch"),
     ("tab row", "switcher.open"),
     ("tab row double-click", "tab.rename"),
