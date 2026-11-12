@@ -820,6 +820,7 @@ mod tests {
             pane,
             orientation: Orientation::Vertical,
             profile: None,
+            before: false,
         };
         let below = first_spawn(&ws.apply(split, &resolve).unwrap());
         ws.apply(Command::ResizeSplit { pane, delta: 0.2 }, &resolve)
@@ -842,10 +843,39 @@ mod tests {
             pane: below,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let new = first_spawn(&back.apply(split, &resolve).unwrap());
         let highest = ws.panes.keys().map(|p| p.get()).max().unwrap();
         assert!(new.get() > highest, "a new pane reused an id");
+    }
+
+    #[test]
+    fn rf_ses_02_panes_split_left_and_up_come_back_in_place() {
+        let (mut ws, pane) = workspace("claude");
+        let split = |pane, orientation| Command::SplitPane {
+            pane,
+            orientation,
+            profile: None,
+            before: true,
+        };
+        let left = first_spawn(
+            &ws.apply(split(pane, Orientation::Horizontal), &resolve)
+                .unwrap(),
+        );
+        let above = first_spawn(
+            &ws.apply(split(pane, Orientation::Vertical), &resolve)
+                .unwrap(),
+        );
+        let tab = ws.tab_of(pane).unwrap();
+        let layout = ws.tab_info(ws.tab(tab).unwrap()).layout;
+        assert_eq!(layout.panes(), [left, above, pane]);
+
+        let saved = ws.to_session();
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot(), ws.snapshot());
+        assert_eq!(back.tab_info(back.tab(tab).unwrap()).layout, layout);
+        back.check().unwrap();
     }
 
     #[test]
@@ -855,12 +885,14 @@ mod tests {
             pane,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let right = first_spawn(&ws.apply(split(pane), &resolve).unwrap());
         let below = Command::SplitPane {
             pane: right,
             orientation: Orientation::Vertical,
             profile: None,
+            before: false,
         };
         let below = first_spawn(&ws.apply(below, &resolve).unwrap());
         let drag = |before, after, share| Command::SetDivider {
