@@ -38,7 +38,8 @@ impl Render for NoGhost {
     }
 }
 
-/// The divider the pointer took, from the mouse-down on.
+/// The divider the pointer took, from the mouse-down on, or the share an
+/// arrow or a double click sent, until the core's layout shows it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DividerGrab {
     tab: TabId,
@@ -48,10 +49,13 @@ pub(super) struct DividerGrab {
     from: f32,
     /// The share shown; `None` until the pointer moves.
     share: Option<f32>,
-    /// The drag ended and the core was told; the share stays shown until
-    /// the core's layout for the tab comes back.
+    /// The core was told; the share stays shown until the core's layout
+    /// for the tab has it.
     sent: bool,
 }
+
+/// Two shares the core and the window agree are the same divider position.
+const SAME_SHARE: f32 = 1e-4;
 
 /// The pane area's width and height in pixels at the last paint.
 pub(super) type PaneArea = Rc<Cell<(f32, f32)>>;
@@ -129,7 +133,30 @@ impl Shell {
         Some((tab.id, divider))
     }
 
-    fn set_divider(&self, key: DividerKey, share: f32, cx: &mut Context<Self>) {
+    /// The share the core's layout gives the divider, if it has it.
+    fn core_share(&self, tab: TabId, key: DividerKey) -> Option<f32> {
+        let tab = self.workspace.tab(tab)?;
+        layout::divider_share(&tab.layout, key.0, key.1)
+    }
+
+    /// Tells the core the divider's new share and shows it until the core's
+    /// layout has it. A share the core already holds is not sent: the core
+    /// would answer nothing and the preview would outlive it.
+    fn send_share(&mut self, tab: TabId, key: DividerKey, share: f32, cx: &mut Context<Self>) {
+        let held = self.core_share(tab, key);
+        if held.is_some_and(|held| (held - share).abs() < SAME_SHARE) {
+            self.divider_grab = None;
+            cx.notify();
+            return;
+        }
+        self.divider_grab = Some(DividerGrab {
+            tab,
+            key,
+            start: share,
+            from: 0.0,
+            share: Some(share),
+            sent: true,
+        });
         let (before, after) = key;
         self.command(
             Command::SetDivider {
@@ -139,6 +166,7 @@ impl Shell {
             },
             cx,
         );
+        cx.notify();
     }
 
     /// Follows a drag of a divider; the root gets every move of it, so the
@@ -192,14 +220,22 @@ impl Shell {
             self.divider_grab = None;
             return;
         }
-        self.divider_grab = Some(DividerGrab { sent: true, ..grab });
-        self.set_divider(grab.key, share, cx);
+        self.send_share(grab.tab, grab.key, share, cx);
     }
 
-    /// The core's layout for `tab` arrived: a drag already told to the
-    /// core stops overriding it.
+    /// The core's layout for `tab` arrived: a share already sent stops
+    /// overriding it once the core has it, or once the divider is gone. An
+    /// older share still on its way keeps the newest one shown.
     pub(super) fn divider_settled(&mut self, tab: TabId) {
-        if self.divider_grab.is_some_and(|g| g.sent && g.tab == tab) {
+        let Some(grab) = self.divider_grab.filter(|g| g.sent && g.tab == tab) else {
+            return;
+        };
+        let held = self.core_share(tab, grab.key);
+        let reached = match (held, grab.share) {
+            (Some(held), Some(sent)) => (held - sent).abs() < SAME_SHARE,
+            _ => true,
+        };
+        if reached {
             self.divider_grab = None;
         }
     }
@@ -240,7 +276,9 @@ impl Shell {
         let Some(key) = self.divider_cursor else {
             return;
         };
-        let Some((_, divider)) = self.find_divider(key, cx) else {
+        // The divider as shown, so a step held down builds on the share sent
+        // before rather than on what the core has answered so far.
+        let Some((tab, divider)) = self.find_divider(key, cx) else {
             return;
         };
         if divider.orientation != axis {
@@ -248,7 +286,7 @@ impl Shell {
         }
         let area = along(axis, self.pane_area.get());
         if let Some(share) = layout::stepped_share(&divider, forward, area) {
-            self.set_divider(key, share, cx);
+            self.send_share(tab, key, share, cx);
         }
     }
 
@@ -347,7 +385,7 @@ impl Shell {
                     ))
                     .role(Role::Splitter)
                     .aria_label(divider_label(&names.0.name, &names.1.name))
-                    .aria_numeric_value(f64::from((d.share * 100.0).round()))
+                    .aria_numeric_value(f64::from((d.position() * 100.0).round()))
                     .aria_min_numeric_value(0.0)
                     .aria_max_numeric_value(100.0)
                     .aria_numeric_value_step(f64::from(layout::DIVIDER_STEP * 100.0))
@@ -402,7 +440,7 @@ impl Shell {
                         }
                         let area = along(d.orientation, this.pane_area.get());
                         if let Some(share) = layout::dragged_share(&d, 0.5, 0.0, area) {
-                            this.set_divider(key, share, cx);
+                            this.send_share(tab_id, key, share, cx);
                         }
                     }))
                     .into_any_element()

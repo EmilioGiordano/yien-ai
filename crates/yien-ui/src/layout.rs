@@ -1,6 +1,6 @@
 //! Where each pane of a tab goes, from the layout tree the core sends.
 
-use yien_proto::{Direction, LayoutChild, LayoutNode, Orientation, PaneId};
+use yien_proto::{Direction, LayoutChild, LayoutNode, MIN_DIVIDER_SHARE, Orientation, PaneId};
 
 /// A rectangle as fractions of the pane area.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -206,10 +206,30 @@ pub(crate) fn dragged_share(divider: &Divider, start: f32, moved: f32, area: f32
     if lo.is_nan() || hi.is_nan() || lo > hi {
         return None;
     }
-    // max/min, not clamp: clamp panics when lo > hi.
-    let length = (start * pair + moved).max(lo).min(hi);
-    let share = length / pair;
-    (share > 0.0 && share < 1.0).then_some(share)
+    let share = (start * pair + moved).clamp(lo, hi) / pair;
+    // The core keeps the same floor; a preview past it would never settle.
+    Some(share.clamp(MIN_DIVIDER_SHARE, 1.0 - MIN_DIVIDER_SHARE))
+}
+
+impl Divider {
+    /// The first child's part of the whole split, which one arrow press
+    /// changes by [`DIVIDER_STEP`].
+    pub(crate) fn position(&self) -> f32 {
+        if self.split > 0.0 {
+            self.share * self.pair / self.split
+        } else {
+            0.0
+        }
+    }
+}
+
+/// The share the layout gives the first side of the divider between the
+/// children holding `before` and `after`, if there is one.
+pub(crate) fn divider_share(node: &LayoutNode, before: PaneId, after: PaneId) -> Option<f32> {
+    dividers(node, (0.0, 0.0))
+        .into_iter()
+        .find(|d| d.before == before && d.after == after)
+        .map(|d| d.share)
 }
 
 /// How far one arrow press moves a divider, as a fraction of its split, as
@@ -480,6 +500,39 @@ mod tests {
         let mut at_end = d;
         at_end.share = 0.96;
         assert!(close(stepped_share(&at_end, true, 1000.0).unwrap(), 0.96));
+    }
+
+    #[test]
+    fn rf_pan_02_a_drag_never_passes_the_cores_floor() {
+        let node = split(
+            Orientation::Horizontal,
+            vec![(0.5, pane(1)), (0.5, pane(2))],
+        );
+        let d = dividers(&node, (1.0, 1.0))[0];
+        let area = 10_000.0;
+        let low = dragged_share(&d, 0.5, -area, area).unwrap();
+        let high = dragged_share(&d, 0.5, area, area).unwrap();
+        assert!(close(low, MIN_DIVIDER_SHARE));
+        assert!(close(high, 1.0 - MIN_DIVIDER_SHARE));
+    }
+
+    #[test]
+    fn rf_pan_02_one_arrow_press_moves_the_announced_position_by_five() {
+        let node = split(
+            Orientation::Horizontal,
+            vec![(1.0, pane(1)), (1.0, pane(2)), (1.0, pane(3))],
+        );
+        let d = dividers(&node, MIN)[1];
+        assert!(close(d.position(), 1.0 / 3.0));
+        let share = stepped_share(&d, true, 1000.0).unwrap();
+        let moved = with_share(&node, d.before, d.after, share).unwrap();
+        let after = dividers(&moved, MIN)[1];
+        assert!(close(after.position() - d.position(), DIVIDER_STEP));
+        assert!(close(
+            divider_share(&moved, d.before, d.after).unwrap(),
+            share
+        ));
+        assert_eq!(divider_share(&moved, d.after, d.before), None);
     }
 
     #[test]
