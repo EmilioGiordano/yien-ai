@@ -42,6 +42,9 @@ pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
 /// Key context of the attention tray (RF-ATN-13).
 pub(crate) const TRAY_CONTEXT: &str = "YienTray";
 
+/// Key context of an open pane or terminal menu (RF-PAN-20).
+pub(crate) const MENU_CONTEXT: &str = "YienMenu";
+
 actions!(
     yien,
     [
@@ -108,6 +111,23 @@ actions!(
         TrayConfirm,
         /// Closes the tray.
         TrayClose,
+        /// Opens the focused pane's menu of actions (RF-PAN-20).
+        OpenPaneMenu,
+        /// Ends the focused pane's program and keeps the pane (RF-PAN-20).
+        TerminatePane,
+        /// Copies the focused pane's agent session id (RF-PAN-20).
+        CopySessionId,
+        /// Closes the selected tab; on a worktree it asks first whether to
+        /// keep the worktree (RF-ESP-03, RF-ESP-07).
+        CloseTab,
+        /// Moves the open menu's cursor one item up.
+        MenuUp,
+        /// Moves the open menu's cursor one item down.
+        MenuDown,
+        /// Runs the item under the open menu's cursor.
+        MenuConfirm,
+        /// Closes the open menu.
+        MenuClose,
         /// Lists tabs in sections by agent state, or under their projects
         /// again, for this session (RF-ATN-07).
         ToggleTabGrouping,
@@ -278,6 +298,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
     let file_tree = Some(file_tree.as_str());
     let tray = Some(TRAY_CONTEXT);
+    let menu = Some(MENU_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -314,6 +335,10 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("down", TrayDown, tray),
         KeyBinding::new("enter", TrayConfirm, tray),
         KeyBinding::new("escape", TrayClose, tray),
+        KeyBinding::new("up", MenuUp, menu),
+        KeyBinding::new("down", MenuDown, menu),
+        KeyBinding::new("enter", MenuConfirm, menu),
+        KeyBinding::new("escape", MenuClose, menu),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -383,6 +408,10 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TrayDown),
         Box::new(TrayConfirm),
         Box::new(TrayClose),
+        Box::new(MenuUp),
+        Box::new(MenuDown),
+        Box::new(MenuConfirm),
+        Box::new(MenuClose),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -599,6 +628,29 @@ mod tests {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
         assert!(first_is("f6", &files, &FocusNextRegion));
+    }
+
+    #[test]
+    fn rf_pan_20_the_menu_keys_drive_an_open_menu_and_stay_out_of_terminals() {
+        let menu = ["Root", CONTEXT, MENU_CONTEXT];
+        for (keys, action) in [
+            ("up", &MenuUp as &dyn Action),
+            ("down", &MenuDown),
+            ("enter", &MenuConfirm),
+            ("escape", &MenuClose),
+        ] {
+            assert!(first_is(keys, &menu, action), "{keys}");
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
+    }
+
+    #[test]
+    fn rnf_16_the_pane_menu_opens_from_a_terminal_by_keyboard() {
+        assert!(first_is("shift-f10", &TERMINAL_STACK, &OpenPaneMenu));
+        assert_eq!(
+            crate::catalog::default_keys("pane.actions").as_deref(),
+            Some("Shift+F10")
+        );
     }
 
     #[test]

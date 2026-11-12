@@ -166,6 +166,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-n"]
     ),
     command!("tab.rename", "tab: rename tab", RenameTab, []),
+    command!("tab.close", "tab: close tab", CloseTab, []),
     command!("tab.next", "tab: next tab", NextTab, ["ctrl-tab"]),
     command!(
         "tab.previous",
@@ -197,6 +198,14 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
     ),
     command!("pane.close", "pane: close", ClosePane, ["ctrl-shift-w"]),
     command!("pane.relaunch", "pane: relaunch", RelaunchPane, []),
+    command!("pane.terminate", "pane: terminate", TerminatePane, []),
+    command!(
+        "pane.copy_session_id",
+        "pane: copy session id",
+        CopySessionId,
+        []
+    ),
+    command!("pane.actions", "pane: actions", OpenPaneMenu, ["shift-f10"]),
     command!(
         "pane.maximize",
         "pane: maximize or restore",
