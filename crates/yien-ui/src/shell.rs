@@ -438,6 +438,9 @@ impl Shell {
                 }
                 CoreMsg::Error { pane, message } => {
                     self.fail(message, cx);
+                    if pane.is_none() {
+                        self.workspace.command_refused();
+                    }
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
                     if pane.is_none()

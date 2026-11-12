@@ -973,6 +973,13 @@ impl WorkspaceView {
         true
     }
 
+    /// The core refused a command that names no pane, which a tab move
+    /// may have been. Its answer will not come, so the next update of every
+    /// project is taken as the core sends it (RF-ESP-16).
+    pub fn command_refused(&mut self) {
+        self.moves_in_flight.clear();
+    }
+
     /// Whether a project's tabs are hidden in the tab bar.
     pub fn is_folded(&self, id: ProjectId) -> bool {
         self.folded.contains(&id)
@@ -1815,6 +1822,48 @@ mod tests {
         // Every move answered: the core's order is taken as it comes.
         view.project_updated(&project(1, &[5, 2, 3, 4, 1]));
         assert_eq!(ids(&view), [5, 2, 3, 4, 1]);
+    }
+
+    fn three_tabs_with_two_moves_in_flight() -> WorkspaceView {
+        let mut view = WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![project(1, &[1, 2, 3])],
+            tabs: vec![tab(1, 1, &[10]), tab(2, 1, &[20]), tab(3, 1, &[30])],
+            ..Default::default()
+        });
+        assert!(view.move_tab(TabId::new(3), 0));
+        assert!(view.move_tab(TabId::new(1), 2));
+        view
+    }
+
+    fn order(view: &WorkspaceView) -> Vec<u64> {
+        view.projects()[0].tabs.iter().map(|t| t.get()).collect()
+    }
+
+    #[test]
+    fn rf_esp_16_an_answer_equal_to_the_window_order_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        // The core found the second move a no-op and answers with the order
+        // the window already shows.
+        view.project_updated(&project(1, &[3, 2, 1]));
+        view.project_updated(&project(1, &[2, 3, 1]));
+        assert_eq!(order(&view), [2, 3, 1], "no answer is still awaited");
+    }
+
+    #[test]
+    fn rf_esp_16_a_refused_command_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        view.command_refused();
+        view.project_updated(&project(1, &[1, 2, 3]));
+        assert_eq!(order(&view), [1, 2, 3]);
+    }
+
+    #[test]
+    fn rf_esp_16_a_closed_project_ends_the_wait() {
+        let mut view = three_tabs_with_two_moves_in_flight();
+        view.project_closed(ProjectId::new(1));
+        assert!(view.moves_in_flight.is_empty());
+        view.project_updated(&project(1, &[1, 2, 3]));
+        assert_eq!(order(&view), [1, 2, 3]);
     }
 
     #[test]
