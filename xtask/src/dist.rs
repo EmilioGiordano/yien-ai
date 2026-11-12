@@ -66,8 +66,7 @@ pub fn target_directory(metadata: &Value) -> anyhow::Result<PathBuf> {
 }
 
 /// The licence files among the names of the files at the repository root,
-/// sorted: `LICENSE*` or `LICENCE*`, any case. None is fine while the licence
-/// is undecided.
+/// sorted: `LICENSE*` or `LICENCE*`, any case.
 pub fn licence_files(root_file_names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut found: Vec<String> = root_file_names
         .into_iter()
