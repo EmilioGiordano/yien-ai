@@ -33,7 +33,7 @@ impl Clipboards {
     }
 
     #[cfg(test)]
-    fn waiting(&self) -> usize {
+    pub fn waiting(&self) -> usize {
         self.slots().len()
     }
 }

@@ -653,6 +653,9 @@ impl Actor {
                 self.start_pending().await;
             }
         }
+        // The service forgets the slot when it stops the pane, but a write
+        // this actor absorbed after that would stay there for good.
+        self.ctx.clipboards.forget(self.id);
     }
 
     /// When a pane still waiting for its size starts anyway: soon after its
