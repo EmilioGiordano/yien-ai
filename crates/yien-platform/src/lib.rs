@@ -28,6 +28,7 @@ pub mod config_file;
 pub mod dll_search;
 pub mod file_tree;
 pub mod hook_pipe;
+pub mod http;
 mod logging;
 pub mod paths;
 pub mod single_instance;

@@ -125,6 +125,9 @@ pub struct Config {
     /// `terminal.osc52_copy`: programs may write the system clipboard with
     /// OSC 52 (RF-PAN-09). Applies at once.
     pub osc52_copy: bool,
+    /// `update.check`: whether YIEN asks GitHub once a day for a newer
+    /// release. Off means no network request for updates at all.
+    pub update_check: bool,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
 }
@@ -139,6 +142,7 @@ impl Default for Config {
             tab_grouping: TabGrouping::default(),
             shell_integration: true,
             osc52_copy: true,
+            update_check: true,
             keys: Vec::new(),
         }
     }
