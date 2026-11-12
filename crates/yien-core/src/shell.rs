@@ -25,49 +25,63 @@ pub struct ShellCommand {
 /// prompt and PSReadLine run first: any statement before them resets `$?`.
 /// Constrained language mode refuses method calls, so it gets nothing; any
 /// other failure takes its error back out of `$Error`. Wrapping a wrapper
-/// of PSReadLine could call itself. `exit` with a `C` would show an error.
+/// of PSReadLine could call itself. Only a line read after YIEN's prompt
+/// gets a `C`: a prompt replaced later would never write the `D` that ends
+/// it. `exit` with a `C` would show an error.
 const POWERSHELL_HOOK: &str = "if ($function:prompt) { \
     $global:__YienPrompt = $function:prompt; \
     $global:__YienRan = $false; \
+    $global:__YienArmed = $false; \
     function global:prompt { \
-        $s, $p = $?, (& $global:__YienPrompt); \
         try { \
-            if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage') { \
-                $e = [char]27; \
-                $o = ''; \
-                if ($global:__YienRan) { \
-                    $global:__YienRan = $false; \
-                    $o = $e + ']133;D;' + [int](-not $s) + $e + '\\' \
-                }; \
-                $o += $e + ']133;A' + $e + '\\'; \
-                $l = $executionContext.SessionState.Path.CurrentLocation; \
-                if ($l.Provider.Name -eq 'FileSystem') { \
-                    $o += $e + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + $e + '\\' \
-                }; \
-                $Host.UI.Write($o); \
-                if ($p -is [string]) { $p += $e + ']133;B' + $e + '\\' }; \
-                $r = $function:PSConsoleHostReadLine; \
-                if ($r -match 'PSConsoleReadLine\\]::ReadLine') { \
-                    $global:__YienReadLine = $r; \
-                    function global:PSConsoleHostReadLine { \
-                        $c = & $global:__YienReadLine; \
-                        try { \
-                            if ($c -match '\\S' -and $c -notmatch '^\\s*exit(\\s|;|$)') { \
-                                $global:__YienRan = $true; \
-                                $Host.UI.Write([char]27 + ']133;C' + [char]27 + '\\') \
-                            } \
-                        } catch { \
-                            if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
-                                $global:Error.RemoveAt(0) \
-                            } \
-                        }; \
-                        $c \
+            $s, $p = $?, (& $global:__YienPrompt); \
+            $global:__YienArmed = $true \
+        } finally { \
+            try { \
+                if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage') { \
+                    $e = [char]27; \
+                    $o = ''; \
+                    $v = Get-Variable s -Scope 0 -ErrorAction Ignore; \
+                    if ($global:__YienRan) { \
+                        $global:__YienRan = $false; \
+                        $o = $e + ']133;D;' + [int](-not ($v -and $s)) + $e + '\\' \
+                    }; \
+                    $o += $e + ']133;A' + $e + '\\'; \
+                    $l = $executionContext.SessionState.Path.CurrentLocation; \
+                    if ($l.Provider.Name -eq 'FileSystem') { \
+                        $o += $e + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + $e + '\\' \
+                    }; \
+                    $Host.UI.Write($o); \
+                    if ($v -and $p -is [string]) { $p += $e + ']133;B' + $e + '\\' }; \
+                    $r = $function:PSConsoleHostReadLine; \
+                    if ($r -match 'PSConsoleReadLine\\]::ReadLine') { \
+                        $global:__YienReadLine = $r; \
+                        function global:PSConsoleHostReadLine { \
+                            $c = & $global:__YienReadLine; \
+                            try { \
+                                if ($global:__YienArmed) { \
+                                    $global:__YienArmed = $false; \
+                                    if ($c -match '\\S' -and $c -notmatch '^\\s*exit(\\s|;|\\(|$)') { \
+                                        $global:__YienRan = $true; \
+                                        $Host.UI.Write([char]27 + ']133;C' + [char]27 + '\\') \
+                                    } \
+                                } elseif ($global:__YienRan) { \
+                                    $global:__YienRan = $false; \
+                                    $Host.UI.Write([char]27 + ']133;D' + [char]27 + '\\') \
+                                } \
+                            } catch { \
+                                if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                                    $global:Error.RemoveAt(0) \
+                                } \
+                            }; \
+                            $c \
+                        } \
                     } \
                 } \
-            } \
-        } catch { \
-            if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
-                $global:Error.RemoveAt(0) \
+            } catch { \
+                if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                    $global:Error.RemoveAt(0) \
+                } \
             } \
         }; \
         $p \
@@ -287,6 +301,8 @@ mod tests {
 
     #[test]
     fn rf_age_05_the_powershell_hook_marks_prompts_and_commands() {
+        // `exit(3)` ends the shell as `exit 3` does.
+        assert!(POWERSHELL_HOOK.contains("'^\\s*exit(\\s|;|\\(|$)'"));
         for mark in ["']133;D;'", "']133;A'", "']133;B'", "']133;C'"] {
             assert_eq!(POWERSHELL_HOOK.matches(mark).count(), 1, "{mark}");
         }
@@ -564,6 +580,57 @@ mod live {
     #[test]
     fn rf_age_05_marks_the_users_prompt_already_writes_keep_the_states_right() {
         same_prompt_with_the_hook(MARKED_PROMPT, "O", "");
+    }
+
+    /// What YIEN's prompt writes at each prompt, whatever the user's prompt did.
+    const OUR_PROMPT_MARK: &str = "\x1b]133;A\x1b\\";
+
+    #[test]
+    fn rf_age_06_a_prompt_replaced_later_leaves_the_pane_idle() {
+        let commands = [
+            ("function global:prompt { 'X' + '> ' }", "X> "),
+            ("cmd /c exit 0", "X> "),
+            ("Get-Item nope-yien-missing", "X> "),
+        ];
+        let run = run(FIXED_PROMPT, true, "P[True|]", &commands);
+        // The command that replaced the prompt was marked; its end shows when
+        // the next line is read, and nothing after it is marked.
+        assert_eq!(marks(&run.raw, 'C'), 1);
+        assert_eq!(
+            shell_states(&run.raw),
+            [AgentState::Working, AgentState::Idle]
+        );
+    }
+
+    #[test]
+    fn rf_age_06_a_prompt_that_throws_still_ends_the_command() {
+        let prompt = "function global:prompt { if ($global:boom) { throw 'boom' }; 'T> ' }";
+        let commands = [
+            ("$global:boom = 1", OUR_PROMPT_MARK),
+            ("cmd /c exit 0", OUR_PROMPT_MARK),
+        ];
+        let run = run(prompt, true, "T> ", &commands);
+        assert_eq!(marks(&run.raw, 'C'), 1);
+        assert_eq!(finished_codes(&run.raw), ["1"]);
+        assert_eq!(
+            shell_states(&run.raw),
+            [AgentState::Working, AgentState::Idle]
+        );
+    }
+
+    #[test]
+    fn rf_age_06_a_line_reader_wrapped_by_another_integration_is_left_alone() {
+        let prompt = format!(
+            "$global:__Other = $function:PSConsoleHostReadLine; \
+             function global:PSConsoleHostReadLine {{ $global:__Other.Invoke() }}; {FIXED_PROMPT}"
+        );
+        let commands = commands("P", "");
+        let commands: Vec<(&str, &str)> = commands.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let run = run(&prompt, true, "P[True|]", &commands);
+        assert_eq!(marks(&run.raw, 'C'), 0);
+        assert_eq!(marks(&run.raw, 'D'), 0);
+        assert_eq!(marks(&run.raw, 'A'), 5);
+        assert!(shell_states(&run.raw).is_empty());
     }
 
     #[test]
