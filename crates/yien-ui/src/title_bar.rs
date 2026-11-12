@@ -18,11 +18,21 @@ const PILL_TEXT: f32 = 130.0;
 const PILL_KEYS: f32 = 90.0;
 const PILL_CHROME: f32 = 40.0;
 const PILL_MARGIN: f32 = 1.1;
+/// How far the bar's centre sits from the window's: the bar starts after
+/// gpui-component's left padding and ends before its three 34 px window
+/// buttons. The right column's start margin cancels it.
+#[cfg(target_os = "macos")]
+pub(crate) const CENTRE_SHIFT: f32 = -80.0;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const CENTRE_SHIFT: f32 = 3.0 * 34.0 - 12.0;
 
 /// What the title bar draws at a given width.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TitleLayout {
     pub pill_keys: bool,
+    /// Whether the pill can sit on the window's centre; at narrow widths the
+    /// room goes to the pill and the buttons first.
+    pub centred: bool,
     pub tab_bar_button: bool,
     pub context_bar_button: bool,
     pub theme_button: bool,
@@ -47,7 +57,10 @@ impl TitleLayout {
             }
             buttons -= 1;
         };
+        let gaps = (3 + buttons) as f32 * GAP;
+        let slack = room - fixed - buttons as f32 * BUTTON - gaps - pill;
         Self {
+            centred: slack >= CENTRE_SHIFT.max(0.0),
             pill_keys: pill >= keys_need,
             tab_bar_button: buttons >= 1,
             context_bar_button: buttons >= 2,
@@ -105,5 +118,23 @@ mod tests {
     fn rf_nav_01_the_shortcut_hides_before_the_pill_text_can_be_cut() {
         assert!(!TitleLayout::at(960.0, BIGGEST).pill_keys);
         assert!(TitleLayout::at(960.0, 1.0).pill_keys);
+    }
+
+    #[test]
+    fn rf_nav_01_pill_is_centred_when_wide_and_centring_gives_way_once_for_good() {
+        assert!(TitleLayout::at(1600.0, 1.0).centred);
+        assert!(!TitleLayout::at(960.0, BIGGEST).centred);
+        for scale in [1.0, 1.25, 1.5, BIGGEST] {
+            let mut window = 2400.0;
+            let mut gave_way = false;
+            while window >= 300.0 {
+                let now = TitleLayout::at(window, scale);
+                assert!(!gave_way || !now.centred, "centring came back at {window}");
+                if !now.centred {
+                    gave_way = true;
+                }
+                window -= 5.0;
+            }
+        }
     }
 }
