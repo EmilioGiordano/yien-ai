@@ -426,6 +426,7 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
+                CoreMsg::ClipboardWrite { .. } => continue,
                 CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {

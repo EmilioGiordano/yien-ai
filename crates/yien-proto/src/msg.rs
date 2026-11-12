@@ -1016,6 +1016,14 @@ pub enum CoreMsg {
         /// The selected text, or `None` when nothing is selected.
         text: Option<String>,
     },
+    /// A program in the pane asked to write the system clipboard (OSC 52).
+    /// Reads are never offered. Never log `text`.
+    ClipboardWrite {
+        /// The pane.
+        pane: PaneId,
+        /// The text to copy, decoded; at most 1 MiB.
+        text: String,
+    },
     /// Something failed. The message says what happened and what to do.
     Error {
         /// The pane it concerns, if any.
@@ -1308,6 +1316,10 @@ mod tests {
             },
             CoreMsg::Notice {
                 message: "Removed the worktree.".into(),
+            },
+            CoreMsg::ClipboardWrite {
+                pane: PaneId::new(3),
+                text: "line one\nline two".into(),
             },
             CoreMsg::AgentSessions {
                 project: ProjectId::new(1),
