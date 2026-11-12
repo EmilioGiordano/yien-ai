@@ -23,7 +23,7 @@ use crate::actions::*;
 use crate::assets::{self, state_icon};
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
-use crate::catalog::{CATALOG, Scope, shortcut};
+use crate::catalog::{CATALOG, Scope, shortcut, spec};
 use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
@@ -48,10 +48,12 @@ use crate::tray::{CloseRequest, close_request, quit_detail};
 mod bars;
 mod files;
 mod settings;
+mod status;
 mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
+use status::Line;
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -117,6 +119,8 @@ pub(crate) struct Shell {
     keyboard_on: Option<PaneId>,
     /// The last error from the core, shown in the status bar.
     notice: Option<String>,
+    /// The text of the notice that reports a failure, drawn heavier.
+    error_notice: Option<String>,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
     split_menu: Option<(PaneId, Orientation)>,
     /// The chooser a mouse-down outside it just closed, and when. The click
@@ -232,7 +236,9 @@ impl Shell {
                 }
             }
             let _ = this.update(cx, |shell, cx| {
-                shell.notice = Some("The YIEN core stopped. Restart YIEN.".to_owned());
+                let stopped = "The YIEN core stopped. Restart YIEN.".to_owned();
+                shell.error_notice = Some(stopped.clone());
+                shell.notice = Some(stopped);
                 cx.notify();
             });
         })
@@ -306,6 +312,7 @@ impl Shell {
             terminals: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            error_notice: None,
             split_menu: None,
             menu_closed: None,
             palette: None,
@@ -404,6 +411,7 @@ impl Shell {
                     self.workspace.set_notifications_muted(muted);
                 }
                 CoreMsg::Error { pane, message } => {
+                    self.error_notice = Some(message.clone());
                     self.notice = Some(message);
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
@@ -1207,7 +1215,9 @@ impl Shell {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(error) => {
-                self.notice = Some(format!("The folder picker failed: {error}"));
+                let failed = format!("The folder picker failed: {error}");
+                self.error_notice = Some(failed.clone());
+                self.notice = Some(failed);
                 cx.notify();
                 return;
             }
@@ -2959,9 +2969,19 @@ impl Shell {
         }
     }
 
-    fn render_status_bar(&self) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let ws = &self.workspace;
+        let hints = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            status::hints(|id| shortcut(&keymap, (spec(id)?.action)().as_ref()))
+        };
+        let notice = self.notice.as_deref().map(|text| {
+            let error = self.error_notice.as_deref() == Some(text);
+            (text, error)
+        });
+        let right = status::line(notice, &hints);
         h_flex()
             .id("status-bar")
             .role(Role::ContentInfo)
@@ -2993,38 +3013,28 @@ impl Shell {
                         .child(text),
                 )
             })
-            .when_some(self.notice.clone(), |bar, notice| {
+            .when_some(right, |bar, line| {
                 bar.child(
-                    div()
-                        .id("notice")
-                        .role(Role::Status)
-                        .flex_shrink_0()
-                        .max_w(relative(0.5))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(t.ochre)
-                        .child(notice),
+                    h_flex().flex_1().min_w_0().justify_end().child(match line {
+                        Line::Hints(text) => div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(text)
+                            .into_any_element(),
+                        Line::Notice { text, error } => div()
+                            .id("notice")
+                            .role(Role::Status)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(t.ochre)
+                            .when(error, |d| d.font_weight(FontWeight::BOLD))
+                            .child(text)
+                            .into_any_element(),
+                    }),
                 )
             })
-            // The hint row gives way to the notice: without `min_w_0` its
-            // unwrapped width squeezed the notice to nothing.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .justify_end()
-                    .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
-                "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
-                 {JUMP_KEYS} next that needs you · {ADD_PROJECT_KEYS} add project · \
-                 {NEW_CLAUDE_TAB_KEYS} Claude tab · {NEW_WORKTREE_TAB_KEYS} worktree tab · \
-                 {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
-                 {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
-                 {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {REGION_KEYS} move focus · \
-                 {TAB_BAR_KEYS} tab bar · \
-                 {CONTEXT_BAR_KEYS} context bar · {TAB_NUMBER_KEYS} tab N · {NEXT_TAB_KEYS} next tab · \
-                 {THEME_KEYS} theme"
-                    ))),
-            )
     }
 }
 
@@ -3159,7 +3169,7 @@ impl Render for Shell {
                         row.child(self.render_context_bar(cx))
                     }),
             )
-            .child(self.render_status_bar())
+            .child(self.render_status_bar(cx))
             .children(self.render_tray(cx))
             .children(self.render_palette(cx))
             .children(self.render_worktree_prompt(cx))
