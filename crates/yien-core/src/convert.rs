@@ -11,7 +11,6 @@ pub(crate) fn palette(p: proto::TerminalPalette) -> yien_vt::Palette {
     }
 }
 
-/// The side a split puts its new pane on.
 pub(crate) fn split_zone(o: proto::Orientation, before: bool) -> yien_layout::DropZone {
     match (o, before) {
         (proto::Orientation::Horizontal, false) => yien_layout::DropZone::Right,

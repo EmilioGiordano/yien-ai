@@ -1343,8 +1343,6 @@ mod tests {
         spawned(&fx)[0]
     }
 
-    /// The flex of every child of the root split, which must be one along
-    /// `orientation`.
     fn root_flex(layout: &LayoutNode, orientation: Orientation) -> Vec<f32> {
         let LayoutNode::Split {
             orientation: o,
