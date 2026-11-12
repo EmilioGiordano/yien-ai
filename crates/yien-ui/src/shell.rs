@@ -1444,7 +1444,7 @@ impl Shell {
             }
             Asked::Quit => (
                 "Quit YIEN?".to_owned(),
-                quit_detail(self.workspace.working_panes()),
+                quit_detail(&self.workspace),
                 "Quit anyway",
                 "confirm-quit",
             ),
