@@ -94,7 +94,18 @@ impl Shell {
         .on_drag(TabDrag { tab: id, project }, |_, _, _, cx| {
             cx.new(|_| NoGhost)
         })
-        .on_drag_move(
+    }
+
+    /// Lets a tab row report where it is while another row is dragged; a
+    /// row being renamed reports too, or its project would have no gap.
+    pub(super) fn drop_target_row(
+        &self,
+        row: Stateful<Div>,
+        tab: &TabView,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (id, project) = (tab.id, tab.project);
+        row.on_drag_move(
             cx.listener(move |this, event: &DragMoveEvent<TabDrag>, _, cx| {
                 this.on_tab_row_drag(id, project, event, cx);
             }),

@@ -2289,6 +2289,7 @@ impl Shell {
         };
         // Grouped by state, rows of several projects mix, so none is dragged.
         let draggable = !with_project && !self.renaming.as_ref().is_some_and(|r| r.tab == id);
+        let drop_target = !with_project;
         let mark = self.row_mark(id);
         div()
             .id(("tab", id.get()))
@@ -2330,6 +2331,7 @@ impl Shell {
                 }
             }))
             .when(draggable, |row| self.draggable_row(row, tab, cx))
+            .when(drop_target, |row| self.drop_target_row(row, tab, cx))
             .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
             .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
                 row.child(drop_line(mark == RowMark::LineAbove, &t))
