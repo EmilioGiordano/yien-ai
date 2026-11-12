@@ -851,6 +851,31 @@ mod tests {
     }
 
     #[test]
+    fn rf_ses_02_panes_split_left_and_up_come_back_in_place() {
+        let (mut ws, pane) = workspace("claude");
+        let split = |pane, orientation| Command::SplitPane {
+            pane,
+            orientation,
+            profile: None,
+            before: true,
+        };
+        let left = first_spawn(
+            &ws.apply(split(pane, Orientation::Horizontal), &resolve)
+                .unwrap(),
+        );
+        let above = first_spawn(&ws.apply(split(pane, Orientation::Vertical), &resolve).unwrap());
+        let tab = ws.tab_of(pane).unwrap();
+        let layout = ws.tab_info(ws.tab(tab).unwrap()).layout;
+        assert_eq!(layout.panes(), [left, above, pane]);
+
+        let saved = ws.to_session();
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot(), ws.snapshot());
+        assert_eq!(back.tab_info(back.tab(tab).unwrap()).layout, layout);
+        back.check().unwrap();
+    }
+
+    #[test]
     fn an_unknown_profile_opens_the_shell_with_a_notice() {
         let (mut ws, pane) = workspace("claude");
         ws.on_pane_event(
