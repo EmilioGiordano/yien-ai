@@ -296,6 +296,7 @@ fn rn_04_a_crashed_pane_relaunched_reports_its_session_as_the_new_launch() {
         pane: shell,
         orientation: Orientation::Horizontal,
         profile: Some(ProfileId::new("claude")),
+        before: false,
     }));
     let pane = h.wait_for(|m| match m {
         CoreMsg::TabUpdated(t) if t.focused != shell => Some(t.focused),
@@ -347,6 +348,7 @@ fn a_crashed_pane_that_needed_you_drops_the_red_mark() {
         pane: shell,
         orientation: Orientation::Horizontal,
         profile: Some(ProfileId::new("claude")),
+        before: false,
     }));
     let pane = h.wait_for(|m| match m {
         CoreMsg::TabUpdated(t) if t.focused != shell => Some(t.focused),
@@ -399,6 +401,7 @@ fn rf_pan_09_closing_a_pane_leaves_no_clipboard_write_behind() {
             pane: first,
             orientation: yien_proto::Orientation::Horizontal,
             profile: None,
+            before: false,
         }));
         let pane = h.wait_for(|m| match m {
             CoreMsg::PaneUpdated(p) if p.id != first => Some(p.id),

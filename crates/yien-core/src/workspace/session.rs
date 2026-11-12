@@ -526,7 +526,7 @@ fn shape(layout: &LayoutRecord, order: &[PaneId]) -> Option<Shape> {
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{Command, Orientation, TabId};
+    use yien_proto::{Command, LayoutNode, Orientation, TabId};
 
     use super::*;
     use crate::launch;
@@ -820,6 +820,7 @@ mod tests {
             pane,
             orientation: Orientation::Vertical,
             profile: None,
+            before: false,
         };
         let below = first_spawn(&ws.apply(split, &resolve).unwrap());
         ws.apply(Command::ResizeSplit { pane, delta: 0.2 }, &resolve)
@@ -842,10 +843,82 @@ mod tests {
             pane: below,
             orientation: Orientation::Horizontal,
             profile: None,
+            before: false,
         };
         let new = first_spawn(&back.apply(split, &resolve).unwrap());
         let highest = ws.panes.keys().map(|p| p.get()).max().unwrap();
         assert!(new.get() > highest, "a new pane reused an id");
+    }
+
+    #[test]
+    fn rf_ses_02_panes_split_left_and_up_come_back_in_place() {
+        let (mut ws, pane) = workspace("claude");
+        let split = |pane, orientation| Command::SplitPane {
+            pane,
+            orientation,
+            profile: None,
+            before: true,
+        };
+        let left = first_spawn(
+            &ws.apply(split(pane, Orientation::Horizontal), &resolve)
+                .unwrap(),
+        );
+        let above = first_spawn(
+            &ws.apply(split(pane, Orientation::Vertical), &resolve)
+                .unwrap(),
+        );
+        let tab = ws.tab_of(pane).unwrap();
+        let layout = ws.tab_info(ws.tab(tab).unwrap()).layout;
+        assert_eq!(layout.panes(), [left, above, pane]);
+
+        let saved = ws.to_session();
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot(), ws.snapshot());
+        assert_eq!(back.tab_info(back.tab(tab).unwrap()).layout, layout);
+        back.check().unwrap();
+    }
+
+    #[test]
+    fn rnf_21_a_dragged_divider_comes_back_after_a_restart() {
+        let (mut ws, pane) = workspace("claude");
+        let split = |pane| Command::SplitPane {
+            pane,
+            orientation: Orientation::Horizontal,
+            profile: None,
+            before: false,
+        };
+        let right = first_spawn(&ws.apply(split(pane), &resolve).unwrap());
+        let below = Command::SplitPane {
+            pane: right,
+            orientation: Orientation::Vertical,
+            profile: None,
+            before: false,
+        };
+        let below = first_spawn(&ws.apply(below, &resolve).unwrap());
+        let drag = |before, after, share| Command::SetDivider {
+            before,
+            after,
+            share,
+        };
+        ws.apply(drag(pane, below, 0.3), &resolve).unwrap();
+        ws.apply(drag(right, below, 0.8), &resolve).unwrap();
+        let saved = ws.to_session();
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot(), ws.snapshot());
+        let snapshot = back.snapshot();
+        let tab = snapshot
+            .tabs
+            .iter()
+            .find(|t| t.layout.panes().contains(&pane))
+            .unwrap();
+        let LayoutNode::Split { children, .. } = &tab.layout else {
+            panic!("expected a split");
+        };
+        assert!((children[0].flex - 0.3).abs() < 1e-5);
+        let LayoutNode::Split { children, .. } = &children[1].node else {
+            panic!("expected a nested split");
+        };
+        assert!((children[0].flex - 0.8).abs() < 1e-5);
     }
 
     #[test]

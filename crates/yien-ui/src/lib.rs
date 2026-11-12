@@ -27,8 +27,10 @@ mod region;
 mod settings;
 mod shell;
 mod sidebars;
+mod tab_order;
 mod terminal;
 mod theme;
+mod title_bar;
 mod tray;
 mod worktree;
 
