@@ -227,8 +227,8 @@ impl PaneView {
 /// The next step of closing a whole tab (RF-ESP-03, RF-ESP-07).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CloseTabStep {
-    /// Ask first: this many panes would stop while they work.
-    AskBusy(usize),
+    /// Ask first: panes would stop while they work.
+    AskBusy,
     /// Ask whether to keep or remove the tab's worktree.
     AskWorktree(Box<Question>),
     /// Close it now.
@@ -822,9 +822,8 @@ impl WorkspaceView {
     /// would stop, unless `stop_confirmed`; then ask about its worktree
     /// (RF-ESP-07); else close.
     pub(crate) fn close_tab_step(&self, tab: TabId, stop_confirmed: bool) -> CloseTabStep {
-        let busy = self.busy_panes_of_tab(tab);
-        if busy > 0 && !stop_confirmed {
-            return CloseTabStep::AskBusy(busy);
+        if !stop_confirmed && self.busy_panes_of_tab(tab) > 0 {
+            return CloseTabStep::AskBusy;
         }
         match self.close_tab_question(tab) {
             Some(question) => CloseTabStep::AskWorktree(Box::new(question)),
@@ -2075,7 +2074,7 @@ mod tests {
         assert_eq!(view.busy_panes_of_tab(TabId::new(10)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(10), false),
-            CloseTabStep::AskBusy(1)
+            CloseTabStep::AskBusy
         );
         assert_eq!(
             view.close_tab_step(TabId::new(10), true),
@@ -2088,17 +2087,19 @@ mod tests {
         );
         // A shell running a command it marked with OSC 133 works.
         view.pane_updated(&pane(200, 20, P::Working));
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(20), false),
-            CloseTabStep::AskBusy(1)
+            CloseTabStep::AskBusy
         );
         // An agent program at rest still runs.
         let mut claude = pane(200, 20, P::Idle);
         claude.profile_id = yien_proto::ProfileId::new("claude");
         view.pane_updated(&claude);
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1);
         assert_eq!(
             view.close_tab_step(TabId::new(20), false),
-            CloseTabStep::AskBusy(1)
+            CloseTabStep::AskBusy
         );
         assert_eq!(view.busy_panes_of_tab(TabId::new(99)), 0);
     }
@@ -2110,12 +2111,18 @@ mod tests {
         wt.worktree = Some("C:/Code/app-wt/feat-x".into());
         wt.dir = "C:/Code/app-wt/feat-x".into();
         view.tab_updated(&wt);
+        assert_eq!(
+            view.busy_panes_of_tab(TabId::new(30)),
+            2,
+            "panes whose details have not arrived count as busy"
+        );
         view.pane_updated(&pane(300, 30, P::Working));
         view.pane_updated(&pane(301, 30, P::Working));
 
+        assert_eq!(view.busy_panes_of_tab(TabId::new(30)), 2);
         assert_eq!(
             view.close_tab_step(TabId::new(30), false),
-            CloseTabStep::AskBusy(2)
+            CloseTabStep::AskBusy
         );
         match view.close_tab_step(TabId::new(30), true) {
             CloseTabStep::AskWorktree(q) => assert_eq!(q.tab, TabId::new(30)),

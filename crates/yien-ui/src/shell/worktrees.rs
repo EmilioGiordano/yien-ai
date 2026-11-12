@@ -165,7 +165,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match self.workspace.close_tab_step(tab, stop_confirmed) {
-            CloseTabStep::AskBusy(_) => {
+            CloseTabStep::AskBusy => {
                 let Some(name) = self.workspace.tab(tab).map(|t| t.name.clone()) else {
                     return;
                 };
