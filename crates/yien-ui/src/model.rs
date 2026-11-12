@@ -766,10 +766,18 @@ impl WorkspaceView {
     /// at once.
     pub(crate) fn worktree_question(&self, pane: PaneId) -> Option<Question> {
         let tab = self.tab_of(pane)?;
-        let worktree = tab.worktree.as_deref()?;
         if tab.layout.panes().len() > 1 {
             return None;
         }
+        self.close_tab_question(tab.id)
+    }
+
+    /// The question to ask before closing the whole of `tab`, whatever its
+    /// panes (RF-ESP-07): the tab is on a worktree no other tab works in.
+    /// `None` closes at once.
+    pub(crate) fn close_tab_question(&self, tab: TabId) -> Option<Question> {
+        let tab = self.tab(tab)?;
+        let worktree = tab.worktree.as_deref()?;
         let shared = self.tabs.values().any(|t| {
             t.id != tab.id
                 && (same_folder(&t.dir, worktree)
@@ -1079,7 +1087,9 @@ pub(crate) fn frames_to_take(
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{AgentState as P, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot};
+    use yien_proto::{
+        AgentState as P, Command, LayoutChild, NeedsReason, Orientation, WorkspaceSnapshot,
+    };
 
     use super::*;
 
@@ -1222,6 +1232,37 @@ mod tests {
         .into();
         view.tab_updated(&other);
         assert!(view.worktree_question(PaneId::new(300)).is_none());
+    }
+
+    #[test]
+    fn rf_esp_07_closing_a_split_worktree_tab_from_its_row_still_asks() {
+        let mut view = demo();
+        let mut wt = tab(30, 1, &[300, 301]);
+        wt.worktree = Some("C:/Code/app-wt/feat-x".into());
+        wt.dir = "C:/Code/app-wt/feat-x".into();
+        wt.branch = Some("feat/x".into());
+        view.tab_updated(&wt);
+
+        assert!(view.worktree_question(PaneId::new(300)).is_none());
+        let q = view.close_tab_question(TabId::new(30)).unwrap();
+        assert_eq!(q.tab, TabId::new(30));
+        assert_eq!(q.worktree, "C:/Code/app-wt/feat-x");
+        assert_eq!(
+            q.keep(),
+            Command::CloseTab {
+                tab: TabId::new(30)
+            }
+        );
+        assert!(view.close_tab_question(TabId::new(10)).is_none());
+        assert!(view.close_tab_question(TabId::new(99)).is_none());
+
+        let mut other = tab(31, 1, &[310]);
+        other.dir = "C:/Code/app-wt/feat-x".into();
+        view.tab_updated(&other);
+        assert!(
+            view.close_tab_question(TabId::new(30)).is_none(),
+            "another tab still works in the worktree"
+        );
     }
 
     #[test]
