@@ -874,6 +874,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rf_pan_06_ctrl_backspace_and_ctrl_delete_follow_win32_input_mode() {
+        let back = press("backspace", None, Mods::CTRL);
+        let delete = press("delete", None, Mods::CTRL);
+        assert_eq!(key_bytes(&back, &modes()).unwrap(), vec![0x7f]);
+        assert_eq!(key_bytes(&delete, &modes()).unwrap(), b"\x1b[3;5~");
+        let conpty = Modes {
+            win32_input: true,
+            ..modes()
+        };
+        assert_eq!(
+            key_bytes(&back, &conpty).unwrap(),
+            b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_"
+        );
+        assert_eq!(
+            key_bytes(&delete, &conpty).unwrap(),
+            b"\x1b[46;83;0;1;264;1_\x1b[46;83;0;0;264;1_"
+        );
+        // Plain Backspace is unchanged.
+        let plain = press("backspace", None, Mods::NONE);
+        assert_eq!(key_bytes(&plain, &conpty).unwrap(), vec![0x7f]);
+    }
+
     fn modes() -> Modes {
         Modes::default()
     }
