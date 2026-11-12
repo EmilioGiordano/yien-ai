@@ -143,8 +143,10 @@ impl Shell {
     /// layout has it. A share the core already holds is not sent: the core
     /// would answer nothing and the preview would outlive it.
     fn send_share(&mut self, tab: TabId, key: DividerKey, share: f32, cx: &mut Context<Self>) {
+        // While an earlier send is unanswered the core's share is stale.
+        let pending = self.divider_grab.as_ref().is_some_and(|g| g.sent);
         let held = self.core_share(tab, key);
-        if held.is_some_and(|held| (held - share).abs() < SAME_SHARE) {
+        if !pending && held.is_some_and(|held| (held - share).abs() < SAME_SHARE) {
             self.divider_grab = None;
             cx.notify();
             return;
