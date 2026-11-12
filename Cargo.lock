@@ -8777,7 +8777,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -8809,7 +8809,7 @@ dependencies = [
 
 [[package]]
 name = "yien"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "semver",
  "serde",
@@ -8830,7 +8830,7 @@ dependencies = [
 
 [[package]]
 name = "yien-agent"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
@@ -8842,7 +8842,7 @@ dependencies = [
 
 [[package]]
 name = "yien-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
@@ -8850,7 +8850,7 @@ dependencies = [
 
 [[package]]
 name = "yien-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "proptest",
@@ -8870,7 +8870,7 @@ dependencies = [
 
 [[package]]
 name = "yien-git"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -8879,7 +8879,7 @@ dependencies = [
 
 [[package]]
 name = "yien-hook"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "yien-agent",
@@ -8891,15 +8891,15 @@ dependencies = [
 
 [[package]]
 name = "yien-input"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "yien-layout"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "yien-platform"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
  "getrandom 0.4.3",
@@ -8919,7 +8919,7 @@ dependencies = [
 
 [[package]]
 name = "yien-proto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -8928,7 +8928,7 @@ dependencies = [
 
 [[package]]
 name = "yien-pty"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "portable-pty",
  "thiserror 2.0.21",
@@ -8937,7 +8937,7 @@ dependencies = [
 
 [[package]]
 name = "yien-session"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -8948,11 +8948,11 @@ dependencies = [
 
 [[package]]
 name = "yien-testkit"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "yien-ui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "raw-window-handle",
@@ -8965,7 +8965,7 @@ dependencies = [
 
 [[package]]
 name = "yien-vt"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "proptest",
@@ -8975,7 +8975,7 @@ dependencies = [
 
 [[package]]
 name = "yien-which"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
