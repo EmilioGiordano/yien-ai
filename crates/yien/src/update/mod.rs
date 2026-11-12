@@ -10,7 +10,7 @@ mod schedule;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 use tokio::sync::mpsc;
@@ -39,6 +39,8 @@ struct Shared {
     wake: Condvar,
     /// The state dir; `None` when there is none, which turns updates off.
     dir: Option<PathBuf>,
+    /// To the window: an offer, or `None` to withdraw it.
+    offers: mpsc::UnboundedSender<Option<UpdateOffer>>,
 }
 
 #[derive(Default)]
@@ -47,6 +49,8 @@ struct State {
     enabled: Option<bool>,
     /// YIEN is quitting.
     stopped: bool,
+    /// The newest release above this version the checker knows of.
+    latest: Option<Release>,
     /// The release last offered to the window.
     offered: Option<Release>,
     /// The checked installer, once downloaded.
@@ -56,8 +60,36 @@ struct State {
 }
 
 impl Shared {
+    fn new(dir: Option<PathBuf>) -> (Arc<Self>, mpsc::UnboundedReceiver<Option<UpdateOffer>>) {
+        let (offers, receive) = mpsc::unbounded_channel();
+        let shared = Arc::new(Self {
+            state: Mutex::new(State::default()),
+            wake: Condvar::new(),
+            dir,
+            offers,
+        });
+        (shared, receive)
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends the newest known release to the window unless it is the one
+    /// offered already, or the setting is off.
+    fn offer_latest(&self) {
+        let mut state = self.lock();
+        let Some(release) = state.latest.clone() else {
+            return;
+        };
+        if state.enabled != Some(true) || state.offered.as_ref() == Some(&release) {
+            return;
+        }
+        state.offered = Some(release.clone());
+        let _ = self.offers.send(Some(UpdateOffer {
+            version: release.version,
+            notes: release.notes,
+        }));
     }
 }
 
@@ -67,16 +99,11 @@ impl Update {
         let dir = yien_platform::paths::state_dir()
             .inspect_err(|e| tracing::warn!("no data dir, update checks are off: {e}"))
             .ok();
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State::default()),
-            wake: Condvar::new(),
-            dir,
-        });
-        let (send, offers) = mpsc::unbounded_channel();
+        let (shared, offers) = Shared::new(dir);
         let worker = Arc::clone(&shared);
         let spawned = std::thread::Builder::new()
             .name("yien-update".into())
-            .spawn(move || run(&worker, &Web { loopback: false }, &send));
+            .spawn(move || run(&worker, &Web { loopback: false }, START_DELAY));
         if let Err(error) = spawned {
             tracing::warn!("the update check did not start: {error}");
         }
@@ -87,31 +114,45 @@ impl Update {
     }
 
     /// A reading of the settings file; an invalid one keeps the last value.
+    /// Turning the check off withdraws the offer and any install set up.
     pub(crate) fn reading(&self, update: &ConfigUpdate) {
         let ConfigUpdate::Loaded(loaded) = update else {
             return;
         };
+        let on = loaded.config.update_check;
         let mut state = self.shared.lock();
-        if state.enabled != Some(loaded.config.update_check) {
-            state.enabled = Some(loaded.config.update_check);
-            self.shared.wake.notify_all();
+        if state.enabled == Some(on) {
+            return;
         }
+        state.enabled = Some(on);
+        if !on {
+            state.armed = false;
+            state.downloaded = None;
+            if state.offered.take().is_some() {
+                let _ = self.shared.offers.send(None);
+            }
+        }
+        self.shared.wake.notify_all();
     }
 
-    /// YIEN is quitting, its session saved and its panes closed: the
-    /// checker stops, and the installer starts when the user asked for it.
-    pub(crate) fn quit(&self) {
+    /// YIEN is quitting, its panes closed: the checker stops, and the
+    /// installer starts when the user asked for it and the session was
+    /// saved (RNF-21).
+    pub(crate) fn quit(&self, session_saved: bool) {
         let installer = {
             let mut state = self.shared.lock();
             state.stopped = true;
             self.shared.wake.notify_all();
             to_launch(&state)
         };
-        if let Some(installer) = installer {
-            match download::launch(&installer) {
-                Ok(()) => tracing::info!("the YIEN installer started"),
-                Err(error) => tracing::warn!("the YIEN installer did not start: {error}"),
-            }
+        let Some(installer) = installer else { return };
+        if !session_saved {
+            tracing::warn!("the session was not saved, so the YIEN installer was not started");
+            return;
+        }
+        match download::launch(&installer) {
+            Ok(()) => tracing::info!("the YIEN installer started"),
+            Err(error) => tracing::warn!("the YIEN installer did not start: {error}"),
         }
     }
 }
@@ -127,16 +168,28 @@ struct Host {
     shared: Arc<Shared>,
 }
 
+type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+/// A download failed or was refused: the window gets the newest release
+/// again, which may be newer than the one it tried.
+fn failed(shared: &Shared, error: String, done: Done) {
+    shared.lock().offered = None;
+    done(Err(error));
+    shared.offer_latest();
+}
+
 impl UpdateHost for Host {
-    fn download(&self, version: &str, done: Box<dyn FnOnce(Result<(), String>) + Send>) {
-        let release = self
-            .shared
-            .lock()
-            .offered
-            .clone()
-            .filter(|r| r.version == version);
+    fn download(&self, version: &str, done: Done) {
+        let (enabled, release) = {
+            let state = self.shared.lock();
+            let release = state.offered.clone().filter(|r| r.version == version);
+            (state.enabled == Some(true), release)
+        };
+        if !enabled {
+            return done(Err("update checks are off in config.toml".into()));
+        }
         let (Some(release), Some(dir)) = (release, self.shared.dir.clone()) else {
-            return done(Err("the update is no longer offered".into()));
+            return failed(&self.shared, "the update is no longer offered".into(), done);
         };
         let shared = Arc::clone(&self.shared);
         let spawned = std::thread::Builder::new()
@@ -147,11 +200,17 @@ impl UpdateHost for Host {
                     download::download(&Web { loopback: false }, &release, &dir.join("updates"));
                 match result {
                     Ok(installer) => {
+                        let mut state = shared.lock();
+                        if state.enabled != Some(true) {
+                            drop(state);
+                            return done(Err("update checks were turned off".into()));
+                        }
                         tracing::info!("the YIEN installer matched its SHA-256");
-                        shared.lock().downloaded = Some(installer);
+                        state.downloaded = Some(installer);
+                        drop(state);
                         done(Ok(()));
                     }
-                    Err(error) => done(Err(error)),
+                    Err(error) => failed(&shared, error, done),
                 }
             });
         if let Err(error) = spawned {
@@ -174,15 +233,16 @@ fn current() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))
 }
 
-/// The checker: waits for the window, then offers the saved release and asks
-/// GitHub whenever the schedule says so, while the setting is on.
-fn run(shared: &Shared, fetch: &dyn Fetch, offers: &mpsc::UnboundedSender<UpdateOffer>) {
+/// The checker: waits `start_delay` for the window, then offers the saved
+/// release and asks GitHub whenever the schedule says so, while the setting
+/// is on.
+fn run(shared: &Shared, fetch: &dyn Fetch, start_delay: Duration) {
     let Some(dir) = shared.dir.clone() else {
         return;
     };
     let mut store = FileStore::new(dir);
     let current = current();
-    if !wait(shared, Some(START_DELAY)) {
+    if !pause(shared, start_delay) {
         return;
     }
     let mut saved = Saved::from_bytes(
@@ -194,11 +254,10 @@ fn run(shared: &Shared, fetch: &dyn Fetch, offers: &mpsc::UnboundedSender<Update
     );
     let mut failed_at = None;
     loop {
-        let enabled = shared.lock().enabled == Some(true);
-        if enabled {
-            offer(shared, saved.offer(&current), offers);
-        }
-        let timeout = match schedule::next(enabled, saved.checked_at, failed_at, now()) {
+        shared.lock().latest = saved.offer(&current).cloned();
+        shared.offer_latest();
+        let seen = shared.lock().enabled;
+        let timeout = match schedule::next(seen == Some(true), saved.checked_at, failed_at, now()) {
             Next::Off => None,
             Next::Wait(wait) => Some(wait),
             Next::Check => {
@@ -225,46 +284,48 @@ fn run(shared: &Shared, fetch: &dyn Fetch, offers: &mpsc::UnboundedSender<Update
                 continue;
             }
         };
-        if !wait(shared, timeout) {
+        if !wait(shared, timeout, seen) {
             return;
         }
     }
 }
 
-/// Sends `release` to the window unless it was the last one sent.
-fn offer(shared: &Shared, release: Option<&Release>, offers: &mpsc::UnboundedSender<UpdateOffer>) {
-    let Some(release) = release else { return };
+/// Sleeps `delay` whatever the setting does; `false` when YIEN quits first.
+fn pause(shared: &Shared, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
     let mut state = shared.lock();
-    if state.offered.as_ref() == Some(release) {
-        return;
+    loop {
+        if state.stopped {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        state = shared
+            .wake
+            .wait_timeout(state, left)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
     }
-    state.offered = Some(release.clone());
-    let _ = offers.send(UpdateOffer {
-        version: release.version.clone(),
-        notes: release.notes.clone(),
-    });
 }
 
-/// Sleeps until `timeout` passes (forever when `None`), the setting changes
-/// or YIEN quits; `false` once quitting.
-fn wait(shared: &Shared, timeout: Option<Duration>) -> bool {
+/// Sleeps until `timeout` passes (forever when `None`), the setting differs
+/// from `seen` or YIEN quits; `false` once quitting.
+fn wait(shared: &Shared, timeout: Option<Duration>, seen: Option<bool>) -> bool {
     let state = shared.lock();
-    if state.stopped {
-        return false;
-    }
-    let enabled = state.enabled;
-    let changed = |s: &mut State| !s.stopped && s.enabled == enabled;
+    let unchanged = |s: &mut State| !s.stopped && s.enabled == seen;
     let state = match timeout {
         Some(timeout) => {
             shared
                 .wake
-                .wait_timeout_while(state, timeout, changed)
+                .wait_timeout_while(state, timeout, unchanged)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0
         }
         None => shared
             .wake
-            .wait_while(state, changed)
+            .wait_while(state, unchanged)
             .unwrap_or_else(PoisonError::into_inner),
     };
     !state.stopped
@@ -286,113 +347,202 @@ mod tests {
         }
     }
 
-    fn shared(dir: Option<PathBuf>) -> Arc<Shared> {
-        Arc::new(Shared {
-            state: Mutex::new(State::default()),
-            wake: Condvar::new(),
-            dir,
-        })
-    }
-
     fn loaded(text: &str) -> ConfigUpdate {
         ConfigUpdate::Loaded(yien_config::parse(text).unwrap())
     }
 
+    fn a_release() -> Release {
+        let json = serde_json::to_vec(&serde_json::Value::Array(vec![release::tests::entry(
+            "v0.2.0", false, true,
+        )]))
+        .unwrap();
+        release::releases(&json).unwrap().pop().unwrap()
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("yien-update-{name}-{}", std::process::id()))
+    }
+
+    fn update(shared: &Arc<Shared>) -> Update {
+        Update {
+            shared: Arc::clone(shared),
+        }
+    }
+
     #[test]
     fn the_setting_reaches_the_checker_and_an_invalid_file_keeps_it() {
-        let update = Update {
-            shared: shared(None),
-        };
+        let (shared, _offers) = Shared::new(None);
+        let update = update(&shared);
         update.reading(&loaded("update.check = false"));
-        assert_eq!(update.shared.lock().enabled, Some(false));
+        assert_eq!(shared.lock().enabled, Some(false));
         update.reading(&ConfigUpdate::Unreadable("gone".into()));
-        assert_eq!(update.shared.lock().enabled, Some(false));
+        assert_eq!(shared.lock().enabled, Some(false));
         update.reading(&loaded(""));
-        assert_eq!(update.shared.lock().enabled, Some(true), "on by default");
+        assert_eq!(shared.lock().enabled, Some(true), "on by default");
+    }
+
+    #[test]
+    fn the_start_delay_holds_whatever_the_setting_does_and_ends_on_quit() {
+        let (shared, _offers) = Shared::new(None);
+        let started = Instant::now();
+        let sleeper = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || pause(&shared, Duration::from_millis(400)))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let update = update(&shared);
+        update.reading(&loaded("update.check = true"));
+        update.reading(&loaded("update.check = false"));
+        assert!(sleeper.join().unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(400));
+
+        let sleeper = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || pause(&shared, Duration::from_secs(60)))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        update.quit(true);
+        assert!(!sleeper.join().unwrap(), "quitting ends it at once");
     }
 
     #[test]
     fn a_wait_ends_when_the_setting_changes_or_yien_quits() {
-        let s = shared(None);
-        s.lock().enabled = Some(false);
+        let (shared, _offers) = Shared::new(None);
+        shared.lock().enabled = Some(false);
         let waiter = {
-            let s = Arc::clone(&s);
-            std::thread::spawn(move || wait(&s, None))
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || wait(&shared, None, Some(false)))
         };
         std::thread::sleep(Duration::from_millis(50));
-        let update = Update {
-            shared: Arc::clone(&s),
-        };
+        let update = update(&shared);
         update.reading(&loaded("update.check = true"));
         assert!(waiter.join().unwrap(), "woken by the change");
-        update.quit();
-        assert!(!wait(&s, None), "returns at once after quit");
+        update.quit(true);
+        assert!(
+            !wait(&shared, None, Some(true)),
+            "returns at once after quit"
+        );
     }
 
     #[test]
-    fn with_the_setting_off_no_request_is_ever_made() {
-        let dir = std::env::temp_dir().join(format!("yien-update-off-{}", std::process::id()));
-        let s = shared(Some(dir.clone()));
-        s.lock().enabled = Some(false);
+    fn with_the_setting_off_no_request_is_ever_made_past_the_start_delay() {
+        let dir = temp("off");
+        let (shared, _offers) = Shared::new(Some(dir.clone()));
+        shared.lock().enabled = Some(false);
         let fetch = Arc::new(Counting(AtomicUsize::new(0)));
-        let (send, _offers) = mpsc::unbounded_channel();
         let runner = {
-            let (s, fetch) = (Arc::clone(&s), Arc::clone(&fetch));
-            std::thread::spawn(move || run(&s, &*fetch, &send))
+            let (shared, fetch) = (Arc::clone(&shared), Arc::clone(&fetch));
+            std::thread::spawn(move || run(&shared, &*fetch, Duration::from_millis(50)))
         };
-        // Past the start delay would take 10 s; quitting during it must end
-        // the thread without a request.
-        std::thread::sleep(Duration::from_millis(50));
-        Update {
-            shared: Arc::clone(&s),
-        }
-        .quit();
+        // Well past the delay: the checker sits in its `Next::Off` wait.
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(fetch.0.load(Ordering::SeqCst), 0);
+        update(&shared).quit(true);
         runner.join().unwrap();
         assert_eq!(fetch.0.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn an_offer_is_sent_once_per_release() {
-        let s = shared(None);
-        let (send, mut offers) = mpsc::unbounded_channel();
-        let json = serde_json::to_vec(&serde_json::Value::Array(vec![release::tests::entry(
-            "v0.2.0", false, true,
-        )]))
-        .unwrap();
-        let r = release::releases(&json).unwrap().pop().unwrap();
-        offer(&s, Some(&r), &send);
-        offer(&s, Some(&r), &send);
-        offer(&s, None, &send);
-        assert_eq!(offers.try_recv().unwrap().version, "0.2.0");
+    fn turning_the_setting_on_past_the_delay_makes_one_request() {
+        let dir = temp("on");
+        let (shared, _offers) = Shared::new(Some(dir.clone()));
+        shared.lock().enabled = Some(false);
+        let fetch = Arc::new(Counting(AtomicUsize::new(0)));
+        let runner = {
+            let (shared, fetch) = (Arc::clone(&shared), Arc::clone(&fetch));
+            std::thread::spawn(move || run(&shared, &*fetch, Duration::from_millis(50)))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let update = update(&shared);
+        update.reading(&loaded("update.check = true"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fetch.0.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        update.quit(true);
+        runner.join().unwrap();
+        assert_eq!(fetch.0.load(Ordering::SeqCst), 1, "then it waits an hour");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_offer_is_sent_once_and_withdrawn_when_the_setting_goes_off() {
+        let (shared, mut offers) = Shared::new(None);
+        let update = update(&shared);
+        update.reading(&loaded(""));
+        shared.lock().latest = Some(a_release());
+        shared.offer_latest();
+        shared.offer_latest();
+        assert_eq!(offers.try_recv().unwrap().unwrap().version, "0.2.0");
         assert!(offers.try_recv().is_err());
+        update.reading(&loaded("update.check = false"));
+        assert_eq!(offers.try_recv().unwrap(), None, "withdrawn");
+        shared.offer_latest();
+        assert!(offers.try_recv().is_err(), "nothing offered while off");
+        update.reading(&loaded(""));
+        shared.offer_latest();
+        assert!(offers.try_recv().unwrap().is_some(), "offered again");
     }
 
     #[test]
-    fn rnf_21_the_installer_starts_only_when_downloaded_and_armed() {
-        let s = shared(None);
-        let host = Host {
-            shared: Arc::clone(&s),
-        };
-        host.install_on_quit(true);
-        assert_eq!(to_launch(&s.lock()), None, "nothing downloaded");
-        let installer = Downloaded {
-            path: PathBuf::from("setup.exe"),
-            digest: "00".into(),
-        };
-        s.lock().downloaded = Some(installer.clone());
-        assert_eq!(to_launch(&s.lock()), Some(installer));
-        host.install_on_quit(false);
-        assert_eq!(to_launch(&s.lock()), None, "the quit was cancelled");
+    fn a_download_is_refused_while_the_setting_is_off() {
+        let (shared, _offers) = Shared::new(Some(std::env::temp_dir()));
+        update(&shared).reading(&loaded("update.check = false"));
+        shared.lock().offered = Some(a_release());
+        let host = Host { shared };
+        let (send, recv) = std::sync::mpsc::channel();
+        host.download("0.2.0", Box::new(move |r| send.send(r).unwrap()));
+        assert!(recv.recv().unwrap().unwrap_err().contains("off"));
     }
 
     #[test]
-    fn a_download_of_a_version_not_offered_is_refused_at_once() {
+    fn a_refused_download_offers_the_newest_release_again() {
+        let (shared, mut offers) = Shared::new(Some(std::env::temp_dir()));
+        update(&shared).reading(&loaded(""));
+        shared.lock().latest = Some(a_release());
         let host = Host {
-            shared: shared(Some(std::env::temp_dir())),
+            shared: Arc::clone(&shared),
         };
         let (send, recv) = std::sync::mpsc::channel();
         host.download("9.9.9", Box::new(move |r| send.send(r).unwrap()));
         assert!(recv.recv().unwrap().is_err());
+        assert_eq!(offers.try_recv().unwrap().unwrap().version, "0.2.0");
+    }
+
+    #[test]
+    fn the_installer_starts_only_when_downloaded_and_armed() {
+        let (shared, _offers) = Shared::new(None);
+        let host = Host {
+            shared: Arc::clone(&shared),
+        };
+        host.install_on_quit(true);
+        assert_eq!(to_launch(&shared.lock()), None, "nothing downloaded");
+        let installer = Downloaded {
+            path: PathBuf::from("setup.exe"),
+            digest: "00".into(),
+        };
+        shared.lock().downloaded = Some(installer.clone());
+        assert_eq!(to_launch(&shared.lock()), Some(installer));
+        host.install_on_quit(false);
+        assert_eq!(to_launch(&shared.lock()), None, "the quit was cancelled");
+    }
+
+    #[test]
+    fn turning_the_setting_off_drops_an_install_set_up() {
+        let (shared, _offers) = Shared::new(None);
+        let update = update(&shared);
+        update.reading(&loaded(""));
+        {
+            let mut state = shared.lock();
+            state.downloaded = Some(Downloaded {
+                path: PathBuf::from("setup.exe"),
+                digest: "00".into(),
+            });
+            state.armed = true;
+        }
+        update.reading(&loaded("update.check = false"));
+        assert_eq!(to_launch(&shared.lock()), None);
     }
 }

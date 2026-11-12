@@ -130,7 +130,8 @@ fn main() -> ExitCode {
             if let Some(watcher) = &settings_watcher {
                 watcher.stop();
             }
-            if let Err(error) = quitting.save_session(QUIT_SAVE_TIMEOUT) {
+            let saved = quitting.save_session(QUIT_SAVE_TIMEOUT);
+            if let Err(error) = &saved {
                 tracing::warn!("the session was not saved on quit: {error}");
             }
             let started = Instant::now();
@@ -150,7 +151,7 @@ fn main() -> ExitCode {
             }
             // Last, after the session is saved and the panes are closed; the
             // installer waits for this process to exit (RNF-21).
-            update.quit();
+            update.quit(saved.is_ok());
             drop(log);
         },
     );

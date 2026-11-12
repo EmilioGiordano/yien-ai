@@ -243,6 +243,14 @@ actions!(
         InstallUpdate,
         /// Closes the release notes.
         WhatsNewClose,
+        /// Scrolls the release notes up a little.
+        WhatsNewUp,
+        /// Scrolls the release notes down a little.
+        WhatsNewDown,
+        /// Scrolls the release notes up a page.
+        WhatsNewPageUp,
+        /// Scrolls the release notes down a page.
+        WhatsNewPageDown,
     ]
 );
 
@@ -325,6 +333,10 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("enter", TrayConfirm, tray),
         KeyBinding::new("escape", TrayClose, tray),
         KeyBinding::new("escape", WhatsNewClose, whats_new),
+        KeyBinding::new("up", WhatsNewUp, whats_new),
+        KeyBinding::new("down", WhatsNewDown, whats_new),
+        KeyBinding::new("pageup", WhatsNewPageUp, whats_new),
+        KeyBinding::new("pagedown", WhatsNewPageDown, whats_new),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -395,6 +407,10 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TrayConfirm),
         Box::new(TrayClose),
         Box::new(WhatsNewClose),
+        Box::new(WhatsNewUp),
+        Box::new(WhatsNewDown),
+        Box::new(WhatsNewPageUp),
+        Box::new(WhatsNewPageDown),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))

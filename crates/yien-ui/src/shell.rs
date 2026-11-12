@@ -121,6 +121,8 @@ pub(crate) struct Shell {
     keyboard_on: Option<PaneId>,
     /// What the status bar shows in place of the key hints, if anything.
     notice: Option<Notice>,
+    /// A standing notice a passing one covers, shown again when it goes.
+    behind: Option<Notice>,
     /// Counts the notices shown, so a stale timer cannot clear a newer one.
     notice_generation: u64,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
@@ -315,6 +317,7 @@ impl Shell {
             terminals: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            behind: None,
             notice_generation: 0,
             split_menu: None,
             menu_closed: None,
@@ -731,6 +734,7 @@ impl Shell {
         self.notice_generation += 1;
         let shown = self.notice_generation;
         let lifetime = notice.lifetime();
+        self.behind = status::behind(self.notice.take(), self.behind.take(), &notice);
         self.notice = Some(notice);
         if let Some(lifetime) = lifetime {
             cx.spawn(async move |this, cx| {
@@ -752,12 +756,19 @@ impl Shell {
         }
     }
 
-    /// Takes the notice down; whether there was one.
+    /// Takes the notice down; whether there was one. A standing notice it
+    /// covered, or else the update notice, comes back.
     pub(super) fn clear_notice(&mut self, cx: &mut Context<Self>) -> bool {
-        let was_up = self.notice.take().is_some();
+        let taken = self.notice.take();
         self.notice_generation += 1;
+        if let Some(taken) = &taken {
+            self.update_notice_cleared(taken);
+        }
+        if let Some(next) = self.behind.take().or_else(|| self.update_standing_notice()) {
+            self.show(next, cx);
+        }
         cx.notify();
-        was_up
+        taken.is_some()
     }
 
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
@@ -1089,6 +1100,10 @@ impl Shell {
                 self.workspace.profiles(),
             )
         };
+        let commands: Vec<Entry> = commands
+            .into_iter()
+            .filter(|entry| self.update_lists(entry))
+            .collect();
         let places = switcher_entries(&self.workspace);
         let placeholder = match mode {
             Mode::Commands => "Execute a command…",

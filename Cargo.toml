@@ -45,7 +45,6 @@ getrandom = "0.4.3"
 windows-sys = "0.61.2"
 windows = "0.62.2"
 raw-window-handle = "0.6.2"
-markdown = "1.0.0"
 semver = "1.0.28"
 sha2 = "0.10.9"
 

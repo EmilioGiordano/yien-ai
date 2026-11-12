@@ -99,6 +99,22 @@ pub(super) fn timer_clears(showing: Option<&Notice>, shown: u64, current: u64) -
     showing.is_some_and(|notice| notice.lifetime().is_some()) && shown == current
 }
 
+/// The notice to bring back once `new` goes: a plain notice that only
+/// shows for a moment covers a standing one (a warning, an error or a
+/// lasting notice) without taking it away; a standing notice replaces
+/// everything.
+pub(super) fn behind(
+    current: Option<Notice>,
+    behind: Option<Notice>,
+    new: &Notice,
+) -> Option<Notice> {
+    new.lifetime()?;
+    match current {
+        Some(current) if current.lifetime().is_none() => Some(current),
+        _ => behind,
+    }
+}
+
 /// What the right side of the bar shows.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Line {
@@ -268,5 +284,27 @@ mod tests {
             live_hints(&keymap),
             ["Ctrl+Alt+Y commands", "Ctrl+Shift+O go to"]
         );
+    }
+
+    #[test]
+    fn a_passing_notice_never_takes_away_a_standing_one() {
+        let warning = Notice::warning("config.toml: line 3");
+        let update = Notice::lasting_info("YIEN 0.2.0 is available");
+        let info = Notice::info("Notifications muted.");
+        assert_eq!(
+            behind(Some(warning.clone()), None, &info),
+            Some(warning.clone())
+        );
+        assert_eq!(
+            behind(Some(update.clone()), None, &info),
+            Some(update.clone())
+        );
+        assert_eq!(
+            behind(Some(Notice::info("a")), Some(update.clone()), &info),
+            Some(update.clone()),
+            "one passing notice after another keeps the standing one"
+        );
+        assert_eq!(behind(Some(update), Some(warning.clone()), &warning), None);
+        assert_eq!(behind(None, None, &info), None);
     }
 }

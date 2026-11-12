@@ -36,8 +36,9 @@ pub trait UpdateHost {
 
 /// What the binary hands the window about updates.
 pub struct Updates {
-    /// Each newer release the check finds.
-    pub offers: mpsc::UnboundedReceiver<UpdateOffer>,
+    /// Each newer release the check finds; `None` withdraws the offer, as
+    /// when `update.check` is turned off.
+    pub offers: mpsc::UnboundedReceiver<Option<UpdateOffer>>,
     /// Downloads and installs.
     pub host: Box<dyn UpdateHost>,
 }
@@ -69,6 +70,13 @@ pub(crate) enum Install {
 pub(crate) struct UpdateModel {
     offer: Option<UpdateOffer>,
     stage: Stage,
+    /// The user took the "available" notice down.
+    dismissed: bool,
+    /// The installer is set to start at quit.
+    armed: bool,
+    /// A newer offer that came during an install; it takes over if the
+    /// install fails.
+    pending: Option<UpdateOffer>,
 }
 
 impl Default for UpdateModel {
@@ -76,6 +84,9 @@ impl Default for UpdateModel {
         Self {
             offer: None,
             stage: Stage::Idle,
+            dismissed: false,
+            armed: false,
+            pending: None,
         }
     }
 }
@@ -97,11 +108,52 @@ impl UpdateModel {
             return None;
         }
         if self.stage != Stage::Idle {
+            self.pending = Some(offer);
             return None;
         }
         let notice = available_notice(&offer.version);
         self.offer = Some(offer);
+        self.dismissed = false;
         Some(notice)
+    }
+
+    /// The offer is withdrawn: nothing to show or install, and an install
+    /// on its way is dropped. Whether there was one.
+    pub(crate) fn withdraw(&mut self) -> bool {
+        let had = self.offer.take().is_some();
+        self.pending = None;
+        self.stage = Stage::Idle;
+        self.armed = false;
+        had
+    }
+
+    /// The "available" notice to stand in the status bar while nothing else
+    /// is shown: until the user takes it down or an install starts.
+    pub(crate) fn standing_notice(&self) -> Option<String> {
+        let offer = self.offer.as_ref()?;
+        (!self.dismissed && self.stage == Stage::Idle).then(|| available_notice(&offer.version))
+    }
+
+    /// Whether `text` is the "available" notice of the current offer.
+    pub(crate) fn is_available_notice(&self, text: &str) -> bool {
+        self.offer
+            .as_ref()
+            .is_some_and(|o| available_notice(&o.version) == text)
+    }
+
+    /// The user took the "available" notice down.
+    pub(crate) fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
+
+    /// The installer will start at quit.
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    /// The quit was cancelled; whether an install had been set to run.
+    pub(crate) fn disarm(&mut self) -> bool {
+        std::mem::take(&mut self.armed)
     }
 
     /// The user asked to install.
@@ -133,6 +185,10 @@ impl UpdateModel {
             }
             Err(why) => {
                 self.stage = Stage::Idle;
+                if let Some(pending) = self.pending.take() {
+                    self.offer = Some(pending);
+                    self.dismissed = false;
+                }
                 Downloaded::Failed(format!("YIEN {version} was not installed: {why}"))
             }
         }
@@ -182,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_21_install_downloads_then_quits() {
+    fn install_downloads_then_quits() {
         let mut m = UpdateModel::default();
         assert!(matches!(m.install(), Install::Say(_)), "nothing offered");
         m.offered(offer("0.2.0"));
@@ -212,5 +268,57 @@ mod tests {
         );
         assert_eq!(m.install(), Install::Download("0.2.0".into()));
         assert_eq!(m.downloaded("0.1.0", Ok(())), Downloaded::Stale);
+    }
+
+    #[test]
+    fn the_available_notice_stands_until_dismissed_or_withdrawn() {
+        let mut m = UpdateModel::default();
+        assert_eq!(m.standing_notice(), None);
+        m.offered(offer("0.2.0"));
+        assert_eq!(
+            m.standing_notice().as_deref(),
+            Some("YIEN 0.2.0 is available")
+        );
+        assert!(m.is_available_notice("YIEN 0.2.0 is available"));
+        assert!(!m.is_available_notice("Saved."));
+        m.dismiss();
+        assert_eq!(m.standing_notice(), None);
+        m.offered(offer("0.3.0"));
+        assert!(m.standing_notice().is_some(), "a newer one shows again");
+        m.install();
+        assert_eq!(m.standing_notice(), None, "not while downloading");
+        assert!(m.withdraw());
+        assert_eq!(m.offer(), None);
+        assert_eq!(m.downloaded("0.3.0", Ok(())), Downloaded::Stale);
+        assert!(matches!(m.install(), Install::Say(_)));
+        assert!(!m.withdraw());
+    }
+
+    #[test]
+    fn only_an_armed_install_is_reported_as_waiting() {
+        let mut m = UpdateModel::default();
+        m.offered(offer("0.2.0"));
+        assert!(!m.disarm(), "an offer alone is not armed");
+        m.arm();
+        assert!(m.disarm());
+        assert!(!m.disarm());
+    }
+
+    #[test]
+    fn a_newer_offer_during_a_failed_download_takes_over() {
+        let mut m = UpdateModel::default();
+        m.offered(offer("0.2.0"));
+        m.install();
+        assert_eq!(m.offered(offer("0.3.0")), None);
+        assert!(matches!(
+            m.downloaded("0.2.0", Err("x".into())),
+            Downloaded::Failed(_)
+        ));
+        assert_eq!(m.offer().unwrap().version, "0.3.0");
+        assert_eq!(
+            m.standing_notice().as_deref(),
+            Some("YIEN 0.3.0 is available")
+        );
+        assert_eq!(m.install(), Install::Download("0.3.0".into()));
     }
 }

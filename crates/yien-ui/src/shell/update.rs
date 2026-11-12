@@ -12,12 +12,18 @@ use tokio::sync::{mpsc, oneshot};
 use super::status::Notice;
 use super::{CONFIRM_WIDTH, PALETTE_TOP, Shell};
 use crate::actions::*;
-use crate::release_notes::{self, Block, Span, openable};
+use crate::catalog::{CATALOG, Scope};
+use crate::palette::{Entry, Target};
+use crate::release_notes::{self, Block, Kind, Span, openable};
 use crate::theme::Theme;
 use crate::update::{Downloaded, Install, UpdateHost, UpdateModel, UpdateOffer, Updates};
 
 const NOTES_WIDTH: f32 = 640.0;
 const NOTES_HEIGHT: f32 = 460.0;
+/// How far one arrow key scrolls the notes.
+const LINE_STEP: f32 = 40.0;
+/// The catalog commands that only mean something while an update is offered.
+const UPDATE_COMMANDS: [&str; 2] = ["update.whats_new", "update.install"];
 
 /// The update state the window keeps.
 pub(super) struct UpdatePanel {
@@ -25,6 +31,8 @@ pub(super) struct UpdatePanel {
     host: Box<dyn UpdateHost>,
     /// The notes, while shown.
     notes: Option<Notes>,
+    /// The text of the last notice the update put up.
+    shown: Option<String>,
 }
 
 /// The release notes, while shown.
@@ -32,6 +40,8 @@ struct Notes {
     version: String,
     blocks: Vec<Block>,
     focus: FocusHandle,
+    close: FocusHandle,
+    install: FocusHandle,
     scroll: ScrollHandle,
 }
 
@@ -41,6 +51,7 @@ impl UpdatePanel {
             model: UpdateModel::default(),
             host,
             notes: None,
+            shown: None,
         }
     }
 
@@ -49,16 +60,31 @@ impl UpdatePanel {
     }
 }
 
+/// Whether the palette lists `id` now: the update commands only while an
+/// update is offered.
+fn listed(id: &str, offered: bool) -> bool {
+    offered || !UPDATE_COMMANDS.contains(&id)
+}
+
+/// The scroll offset after moving by `by` pixels (down is positive), kept
+/// between the top and the bottom.
+fn scrolled(offset: f32, max: f32, by: f32) -> f32 {
+    (offset - by).clamp(-max.max(0.0), 0.0)
+}
+
 impl Shell {
-    /// Takes every offer the binary's check sends, as it arrives.
-    pub(super) fn listen_to_updates(
-        mut offers: mpsc::UnboundedReceiver<UpdateOffer>,
+    /// Takes every offer, or withdrawal, the binary's check sends.
+    fn listen_to_updates(
+        mut offers: mpsc::UnboundedReceiver<Option<UpdateOffer>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(offer) = offers.recv().await {
-                let taken = this.update(cx, |shell, cx| shell.update_offered(offer, cx));
+                let taken = this.update_in(cx, |shell, window, cx| match offer {
+                    Some(offer) => shell.update_offered(offer, cx),
+                    None => shell.update_withdrawn(window, cx),
+                });
                 if taken.is_err() {
                     return;
                 }
@@ -78,8 +104,66 @@ impl Shell {
 
     fn update_offered(&mut self, offer: UpdateOffer, cx: &mut Context<Self>) {
         tracing::info!(version = %offer.version, "a newer YIEN is available");
-        if let Some(text) = self.updates.model.offered(offer) {
-            self.show(Notice::lasting_info(text), cx);
+        let Some(text) = self.updates.model.offered(offer) else {
+            return;
+        };
+        let notice = Notice::lasting_info(text);
+        match &self.notice {
+            None => self.show_update_notice(notice, cx),
+            // A passing notice goes first; the update one stands after it.
+            Some(current) if current.lifetime().is_some() && self.behind.is_none() => {
+                self.updates.shown = Some(notice.text.clone());
+                self.behind = Some(notice);
+            }
+            // Another standing notice stays; the update one comes back when
+            // it goes (`clear_notice`).
+            Some(_) => {}
+        }
+    }
+
+    fn show_update_notice(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        self.updates.shown = Some(notice.text.clone());
+        self.show(notice, cx);
+    }
+
+    /// `update.check` was turned off: the offer, its notice and notes go.
+    fn update_withdrawn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.updates.model.withdraw() {
+            return;
+        }
+        tracing::info!("the update offer was withdrawn");
+        self.close_whats_new(window, cx);
+        let ours = self.updates.shown.take();
+        if self.behind.as_ref().map(|n| &n.text) == ours.as_ref() {
+            self.behind = None;
+        }
+        if self.notice.as_ref().map(|n| &n.text) == ours.as_ref() {
+            self.clear_notice(cx);
+        }
+    }
+
+    /// A notice went down; when it was the "available" one, the user
+    /// dismissed it.
+    pub(super) fn update_notice_cleared(&mut self, notice: &Notice) {
+        if self.updates.model.is_available_notice(&notice.text) {
+            self.updates.model.dismiss();
+        }
+    }
+
+    /// The update notice to stand when nothing else shows.
+    pub(super) fn update_standing_notice(&mut self) -> Option<Notice> {
+        let text = self.updates.model.standing_notice()?;
+        self.updates.shown = Some(text.clone());
+        Some(Notice::lasting_info(text))
+    }
+
+    /// Whether the palette lists `entry` now.
+    pub(super) fn update_lists(&self, entry: &Entry) -> bool {
+        match entry.target {
+            Target::Command(at) => CATALOG
+                .get(at)
+                .is_none_or(|spec| listed(spec.id, self.updates.model.offer().is_some())),
+            _ => true,
         }
     }
 
@@ -98,6 +182,8 @@ impl Shell {
             version: offer.version.clone(),
             blocks: release_notes::parse(&offer.notes),
             focus: cx.focus_handle(),
+            close: cx.focus_handle().tab_stop(true).tab_index(1),
+            install: cx.focus_handle().tab_stop(true).tab_index(2),
             scroll: ScrollHandle::new(),
         };
         self.split_menu = None;
@@ -124,6 +210,39 @@ impl Shell {
         self.close_whats_new(window, cx);
     }
 
+    fn scroll_notes(&mut self, by: f32, cx: &mut Context<Self>) {
+        if let Some(notes) = &self.updates.notes {
+            let offset = notes.scroll.offset();
+            let max = notes.scroll.max_offset();
+            notes.scroll.set_offset(point(
+                offset.x,
+                px(scrolled(offset.y.as_f32(), max.y.as_f32(), by)),
+            ));
+            cx.notify();
+        }
+    }
+
+    fn whats_new_up(&mut self, _: &WhatsNewUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_notes(-LINE_STEP, cx);
+    }
+
+    fn whats_new_down(&mut self, _: &WhatsNewDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_notes(LINE_STEP, cx);
+    }
+
+    fn whats_new_page_up(&mut self, _: &WhatsNewPageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_notes(-NOTES_HEIGHT * 0.9, cx);
+    }
+
+    fn whats_new_page_down(
+        &mut self,
+        _: &WhatsNewPageDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_notes(NOTES_HEIGHT * 0.9, cx);
+    }
+
     /// `update: install`: downloads and checks the installer, then quits so
     /// it can run; the session is saved on the way out (RNF-21).
     pub(super) fn install_update(
@@ -137,7 +256,7 @@ impl Shell {
             Install::Say(text) => self.say(text, cx),
             Install::Quit => self.quit_to_install(window, cx),
             Install::Download(version) => {
-                self.show(
+                self.show_update_notice(
                     Notice::lasting_info(format!("Downloading YIEN {version}…")),
                     cx,
                 );
@@ -181,6 +300,7 @@ impl Shell {
     /// The installer starts once YIEN has quit; while agents work the quit
     /// asks first, and a cancelled quit leaves it ready for another try.
     fn quit_to_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.updates.model.arm();
         self.updates.host.install_on_quit(true);
         self.say("Installing the update: YIEN closes and opens again.", cx);
         self.quit(&Quit, window, cx);
@@ -189,20 +309,42 @@ impl Shell {
     /// The quit question was cancelled: the installer must not run at the
     /// next ordinary quit.
     pub(super) fn quit_cancelled(&mut self, cx: &mut Context<Self>) {
-        self.updates.host.install_on_quit(false);
-        if self.updates.model.offer().is_some() {
+        if self.updates.model.disarm() {
+            self.updates.host.install_on_quit(false);
             self.say("The update waits; run \"update: install\" again.", cx);
         }
     }
 
+    /// While the notes are open, a window command closes them and goes no
+    /// further, so the palette or a prompt never opens underneath.
+    fn close_notes_on_window_commands(
+        &self,
+        dialog: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        CATALOG
+            .iter()
+            .filter(|spec| spec.scope == Scope::Window && spec.id != "update.install")
+            .fold(dialog, |dialog, spec| {
+                dialog.on_boxed_action(
+                    &*(spec.action)(),
+                    cx.listener(|this, _: &dyn Action, window, cx| {
+                        this.close_whats_new(window, cx);
+                    }),
+                )
+            })
+    }
+
     /// The release notes over the window, read-only. Links open in the
-    /// browser only when clicked.
+    /// browser only when clicked; Tab reaches the buttons, the arrows and
+    /// Page Up/Down scroll.
     pub(super) fn render_whats_new(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let notes = self.updates.notes.as_ref()?;
         let t = self.theme;
         let hover = t.hover;
+        let ring = t.focus_ring();
         let title = format!("What's new in YIEN {}", notes.version);
-        let body = if notes.blocks.is_empty() {
+        let body: Vec<AnyElement> = if notes.blocks.is_empty() {
             vec![
                 div()
                     .text_color(t.muted)
@@ -210,13 +352,19 @@ impl Shell {
                     .into_any_element(),
             ]
         } else {
-            self.render_blocks(&notes.blocks, "notes", &t)
+            notes
+                .blocks
+                .iter()
+                .enumerate()
+                .map(|(n, block)| self.render_block(block, n, &t))
+                .collect()
         };
-        let button = |id: &'static str, label: &'static str| {
+        let button = |id: &'static str, label: &'static str, focus: &FocusHandle| {
             h_flex()
                 .id(id)
                 .role(Role::Button)
                 .aria_label(label)
+                .track_focus(focus)
                 .items_center()
                 .px(px(12.0))
                 .py(px(5.0))
@@ -225,6 +373,7 @@ impl Shell {
                 .border_color(t.line)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
+                .focus(move |s| s.border_color(ring))
                 .child(label)
         };
         Some(
@@ -254,6 +403,11 @@ impl Shell {
                         .bg(t.raised)
                         .shadow_lg()
                         .on_action(cx.listener(Self::whats_new_close))
+                        .on_action(cx.listener(Self::whats_new_up))
+                        .on_action(cx.listener(Self::whats_new_down))
+                        .on_action(cx.listener(Self::whats_new_page_up))
+                        .on_action(cx.listener(Self::whats_new_page_down))
+                        .map(|dialog| self.close_notes_on_window_commands(dialog, cx))
                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                             this.close_whats_new(window, cx);
                         }))
@@ -282,33 +436,35 @@ impl Shell {
                                 .gap(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(t.text(13.0))
-                                .child(button("whats-new-close", "Close").on_click(cx.listener(
-                                    |this, _, window, cx| this.close_whats_new(window, cx),
-                                )))
+                                .child(button("whats-new-close", "Close", &notes.close).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.close_whats_new(window, cx)
+                                    }),
+                                ))
                                 .child(
-                                    button("whats-new-install", "Install and restart")
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .border_color(t.muted)
-                                        .on_click(cx.listener(|this, _, window, cx| {
+                                    button(
+                                        "whats-new-install",
+                                        "Install and restart",
+                                        &notes.install,
+                                    )
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .border_color(t.muted)
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
                                             this.install_update(&InstallUpdate, window, cx);
-                                        })),
+                                        },
+                                    )),
                                 ),
                         ),
                 ),
         )
     }
 
-    fn render_blocks(&self, blocks: &[Block], id: &str, t: &Theme) -> Vec<AnyElement> {
-        blocks
-            .iter()
-            .enumerate()
-            .map(|(n, block)| self.render_block(block, &format!("{id}-{n}"), t))
-            .collect()
-    }
-
-    fn render_block(&self, block: &Block, id: &str, t: &Theme) -> AnyElement {
-        match block {
-            Block::Heading { level, spans } => div()
+    /// One block; blocks are flat, so this never recurses.
+    fn render_block(&self, block: &Block, n: usize, t: &Theme) -> AnyElement {
+        let id = format!("notes-{n}");
+        let inner = match &block.kind {
+            Kind::Heading(level) => div()
                 .pt(px(if *level <= 2 { 6.0 } else { 2.0 }))
                 .text_size(t.text(match level {
                     1 => 18.0,
@@ -317,36 +473,30 @@ impl Shell {
                     _ => 13.5,
                 }))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(rich_text(id, spans, t))
+                .child(rich_text(&id, &block.spans, t))
                 .into_any_element(),
-            Block::Paragraph(spans) => div().child(rich_text(id, spans, t)).into_any_element(),
-            Block::List { start, items } => v_flex()
-                .gap(px(4.0))
-                .children(items.iter().enumerate().map(|(n, item)| {
-                    let marker = match start {
-                        Some(first) => format!("{}.", u64::from(*first) + n as u64),
-                        None => "•".to_owned(),
-                    };
-                    h_flex()
-                        .items_start()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex_none()
-                                .min_w(px(16.0))
-                                .text_color(t.muted)
-                                .child(marker),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap(px(4.0))
-                                .children(self.render_blocks(item, &format!("{id}-{n}"), t)),
-                        )
-                }))
+            Kind::Paragraph => div()
+                .child(rich_text(&id, &block.spans, t))
                 .into_any_element(),
-            Block::Code(code) => div()
+            Kind::Item { depth, marker } => h_flex()
+                .items_start()
+                .gap(px(6.0))
+                .pl(px(f32::from(*depth) * 18.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .min_w(px(16.0))
+                        .text_color(t.muted)
+                        .child(marker.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(rich_text(&id, &block.spans, t)),
+                )
+                .into_any_element(),
+            Kind::Code => div()
                 .p(px(8.0))
                 .rounded(px(6.0))
                 .bg(t.panel)
@@ -354,17 +504,20 @@ impl Shell {
                 .border_color(t.line)
                 .text_size(t.text(12.5))
                 .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                .child(code.clone())
+                .children(block.spans.first().map(|s| s.text.clone()))
                 .into_any_element(),
-            Block::Quote(blocks) => v_flex()
-                .gap(px(6.0))
+            Kind::Rule => div().h(px(1.0)).bg(t.line).into_any_element(),
+        };
+        if block.quote {
+            div()
                 .pl(px(10.0))
                 .border_l_2()
                 .border_color(t.line)
                 .text_color(t.muted)
-                .children(self.render_blocks(blocks, id, t))
-                .into_any_element(),
-            Block::Rule => div().h(px(1.0)).bg(t.line).into_any_element(),
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner
         }
     }
 }
@@ -432,17 +585,14 @@ fn highlight(span: &Span, t: &Theme) -> HighlightStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, layout_spans, release_notes};
+    use super::{layout_spans, listed, release_notes, scrolled};
 
     #[test]
     fn link_ranges_cover_exactly_their_text() {
-        let spans = release_notes::parse(
+        let blocks = release_notes::parse(
             "Read **the** [notes](https://example.com/n) — é [x](file:///c:/x)",
         );
-        let Block::Paragraph(spans) = &spans[0] else {
-            panic!("{spans:?}");
-        };
-        let (text, styles, links) = layout_spans(spans);
+        let (text, styles, links) = layout_spans(&blocks[0].spans);
         assert_eq!(links.len(), 1, "the file link is plain text");
         let (range, url) = &links[0];
         assert_eq!(&text[range.clone()], "notes");
@@ -452,5 +602,21 @@ mod tests {
         for (range, _) in styles {
             assert!(text.is_char_boundary(range.start) && text.is_char_boundary(range.end));
         }
+    }
+
+    #[test]
+    fn the_update_commands_are_listed_only_while_an_update_is_offered() {
+        assert!(!listed("update.install", false));
+        assert!(!listed("update.whats_new", false));
+        assert!(listed("update.install", true));
+        assert!(listed("palette.open", false));
+    }
+
+    #[test]
+    fn keyboard_scrolling_stays_inside_the_notes() {
+        assert_eq!(scrolled(0.0, 500.0, 40.0), -40.0);
+        assert_eq!(scrolled(-480.0, 500.0, 40.0), -500.0, "stops at the bottom");
+        assert_eq!(scrolled(-10.0, 500.0, -40.0), 0.0, "stops at the top");
+        assert_eq!(scrolled(0.0, 0.0, 40.0), 0.0, "nothing to scroll");
     }
 }
