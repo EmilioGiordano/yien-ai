@@ -20,16 +20,12 @@ pub struct ShellCommand {
 }
 
 /// Wraps the `prompt` the user's profile left so it also reports FileSystem
-/// folders as `OSC 9;9` and writes the OSC 133 marks: `D;<0|1>` after a
-/// command, `A` at each prompt, `B` after a prompt returned as a string, and
-/// `C` when PSReadLine hands a non-blank line over. No `"` (PowerShell
-/// re-joins quoted arguments its own way). The user's prompt and PSReadLine
-/// run first: any statement before them resets the `$?` they read.
-/// Constrained language mode refuses method calls, so it gets no report;
-/// any other failure keeps the prompt and the line and takes its error back
-/// out of `$Error`. Only PSReadLine's own `PSConsoleHostReadLine` is
-/// wrapped: wrapping another wrapper of it would call itself. `exit` gets
-/// no `C`: the shell ending is not a command cut short.
+/// folders as `OSC 9;9`, and PSReadLine's line reader, for OSC 133 marks.
+/// No `"` (PowerShell re-joins quoted arguments its own way). The user's
+/// prompt and PSReadLine run first: any statement before them resets `$?`.
+/// Constrained language mode refuses method calls, so it gets nothing; any
+/// other failure takes its error back out of `$Error`. Wrapping a wrapper
+/// of PSReadLine could call itself. `exit` with a `C` would show an error.
 const POWERSHELL_HOOK: &str = "if ($function:prompt) { \
     $global:__YienPrompt = $function:prompt; \
     $global:__YienRan = $false; \
@@ -402,9 +398,14 @@ mod live {
 
     /// Runs `prompt`, with the hook when `hooked`, then each command once the
     /// one before it has drawn `first` or its own prompt; waits for the output
-    /// to settle and returns the bytes and the screen.
+    /// to settle and returns the bytes and the screen. With no commands
+    /// nothing is typed, so PSReadLine is left to load as in a real pane.
     fn run(prompt: &str, hooked: bool, first: &str, commands: &[(&str, &str)]) -> Run {
-        let mut script = format!("{NO_HISTORY}; {prompt}");
+        let mut script = if commands.is_empty() {
+            prompt.to_owned()
+        } else {
+            format!("{NO_HISTORY}; {prompt}")
+        };
         if hooked {
             script = format!("{script}; {POWERSHELL_HOOK}");
         }
@@ -563,6 +564,17 @@ mod live {
     #[test]
     fn rf_age_05_marks_the_users_prompt_already_writes_keep_the_states_right() {
         same_prompt_with_the_hook(MARKED_PROMPT, "O", "");
+    }
+
+    #[test]
+    fn rf_age_05_the_first_command_of_a_new_pane_is_marked() {
+        // The user's prompt runs right before the hook wraps the line reader,
+        // so PSReadLine must be there at the first prompt.
+        let prompt =
+            "function global:prompt { 'R[' + [bool]$function:PSConsoleHostReadLine + ']> ' }";
+        let first = run(prompt, true, "]> ", &[]);
+        let text = String::from_utf8_lossy(&first.raw).into_owned();
+        assert!(text.contains("R[True]> "), "{text:?}");
     }
 
     #[test]
