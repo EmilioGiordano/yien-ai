@@ -541,6 +541,20 @@ impl Workspace {
                     self.emit_tab(tab_id, &mut fx);
                 }
             }
+            Command::SetDivider {
+                before,
+                after,
+                share,
+            } => {
+                let tab_id = self.same_tab(before, after)?;
+                let tab = self.tab_mut(tab_id)?;
+                let (Some(lb), Some(la)) = (tab.leaf_of(before), tab.leaf_of(after)) else {
+                    return Err(CoreError::UnknownPane(before));
+                };
+                if tab.tree.set_divider(lb, la, share) {
+                    self.emit_tab(tab_id, &mut fx);
+                }
+            }
             Command::SwapPanes { a, b } => {
                 let tab_id = self.same_tab(a, b)?;
                 let tab = self.tab_mut(tab_id)?;
@@ -1480,6 +1494,59 @@ mod tests {
             },
         );
         assert!(fx.is_empty());
+    }
+
+    #[test]
+    fn rf_pan_02_set_divider_moves_only_its_two_neighbours() {
+        let mut ws = Workspace::new();
+        let (tab, a) = project(&mut ws);
+        let split = |pane| Command::SplitPane {
+            pane,
+            orientation: Orientation::Horizontal,
+            profile: None,
+        };
+        let b = spawned(&run(&mut ws, split(a)))[0];
+        let c = spawned(&run(&mut ws, split(b)))[0];
+        let flex = |ws: &Workspace| {
+            let LayoutNode::Split { children, .. } = ws.tab_info(ws.tab(tab).unwrap()).layout
+            else {
+                panic!("expected a split");
+            };
+            children.iter().map(|c| c.flex).collect::<Vec<_>>()
+        };
+        let before = flex(&ws);
+        assert_eq!(before.len(), 3);
+        let fx = run(
+            &mut ws,
+            Command::SetDivider {
+                before: b,
+                after: c,
+                share: 0.25,
+            },
+        );
+        assert!(
+            fx.iter()
+                .any(|e| matches!(e, Effect::Emit(CoreMsg::TabUpdated(_))))
+        );
+        let after = flex(&ws);
+        assert_eq!(after[0], before[0]);
+        let pair = before[1] + before[2];
+        assert!((after[1] - pair * 0.25).abs() < 1e-5);
+        assert!((after[2] - pair * 0.75).abs() < 1e-5);
+
+        // Not a divider, or a share out of range: nothing changes.
+        for (x, y, share) in [(a, c, 0.5), (c, b, 0.5), (a, b, 1.0), (a, b, f32::NAN)] {
+            let fx = run(
+                &mut ws,
+                Command::SetDivider {
+                    before: x,
+                    after: y,
+                    share,
+                },
+            );
+            assert!(fx.is_empty());
+        }
+        assert_eq!(flex(&ws), after);
     }
 
     #[test]

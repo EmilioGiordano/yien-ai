@@ -787,6 +787,7 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::RelaunchPane { pane }
         | Command::TerminatePane { pane } => Some(*pane),
         Command::SwapPanes { a, .. } => Some(*a),
+        Command::SetDivider { before, .. } => Some(*before),
         Command::NewProject { .. }
         | Command::CloseProject { .. }
         | Command::SetProjectCollapsed { .. }
