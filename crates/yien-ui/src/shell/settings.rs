@@ -81,11 +81,12 @@ impl Shell {
         self.settings_notice = settings_notice;
         if text != before {
             match text {
-                Some(text) if !loaded => self.fail(text, cx),
-                Some(text) => self.say(text, cx),
+                Some(text) => self.show(
+                    super::status::Notice::new(text, super::status::reading_kind(loaded)),
+                    cx,
+                ),
                 None => {
-                    self.notice = None;
-                    self.notice_generation += 1;
+                    self.clear_notice(cx);
                 }
             }
         }

@@ -117,7 +117,7 @@ pub(crate) struct Shell {
     terminals: HashMap<PaneId, Entity<TerminalPane>>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
-    /// The last error from the core, shown in the status bar.
+    /// What the status bar shows in place of the key hints, if anything.
     notice: Option<Notice>,
     /// Counts the notices shown, so a stale timer cannot clear a newer one.
     notice_generation: u64,
@@ -332,7 +332,7 @@ impl Shell {
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
-            shell.say(text, cx);
+            shell.show(Notice::warning(text), cx);
         }
         shell.apply_config(settings.initial, window, cx);
         if let Some(tray) = &shell.tray {
@@ -702,6 +702,7 @@ impl Shell {
     }
 
     /// Puts up a plain notice, which takes itself down after a few seconds.
+    /// A warning or an error stays until `clear_notice` or a newer notice.
     pub(super) fn say(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.show(Notice::info(text), cx);
     }
@@ -722,8 +723,7 @@ impl Shell {
                 let _ = this.update(cx, |shell, cx| {
                     let kind = shell.notice.as_ref().map(|n| n.kind);
                     if status::timer_clears(kind, shown, shell.notice_generation) {
-                        shell.notice = None;
-                        cx.notify();
+                        shell.clear_notice(cx);
                     }
                 });
             })
@@ -733,12 +733,17 @@ impl Shell {
     }
 
     fn dismiss_notice(&mut self, _: &DismissNotice, _: &mut Window, cx: &mut Context<Self>) {
-        if self.notice.take().is_none() {
+        if !self.clear_notice(cx) {
             cx.propagate();
-            return;
         }
+    }
+
+    /// Takes the notice down; whether there was one.
+    pub(super) fn clear_notice(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_up = self.notice.take().is_some();
         self.notice_generation += 1;
         cx.notify();
+        was_up
     }
 
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
@@ -3046,9 +3051,7 @@ impl Shell {
                             .id("notice")
                             .cursor_pointer()
                             .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.notice = None;
-                                shell.notice_generation += 1;
-                                cx.notify();
+                                shell.clear_notice(cx);
                             }))
                             .role(Role::Status)
                             .min_w_0()
