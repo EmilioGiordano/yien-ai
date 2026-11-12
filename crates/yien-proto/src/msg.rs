@@ -291,6 +291,18 @@ pub enum Command {
         /// The new name; empty goes back to the automatic name.
         name: String,
     },
+    /// Moves a tab within its project's tabs (RF-ESP-16). A tab is never
+    /// moved to another project: a `project` that is not the tab's own
+    /// refuses the move.
+    MoveTab {
+        /// The tab.
+        tab: TabId,
+        /// The project the tab is in.
+        project: ProjectId,
+        /// Where the tab ends up among its project's tabs, counted from 0
+        /// once it has left its old place; past the last tab means last.
+        to_index: u32,
+    },
     /// Mutes or unmutes a tab's toasts and taskbar flashes (RF-ATN-11). Its
     /// red mark, the counter and the badge stay (RF-ATN-16).
     SetTabMuted {
@@ -1130,6 +1142,11 @@ mod tests {
             Command::RenameTab {
                 tab: TabId::new(2),
                 name: "review".into(),
+            },
+            Command::MoveTab {
+                tab: TabId::new(2),
+                project: ProjectId::new(1),
+                to_index: 3,
             },
             Command::SetTabMuted {
                 tab: TabId::new(2),

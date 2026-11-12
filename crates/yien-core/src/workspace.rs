@@ -446,6 +446,11 @@ impl Workspace {
                     (!name.is_empty() && name != t.default_name).then(|| name.to_owned());
                 self.emit_tab(tab, &mut fx);
             }
+            Command::MoveTab {
+                tab,
+                project,
+                to_index,
+            } => self.move_tab(tab, project, to_index, &mut fx)?,
             Command::SetTabMuted { tab, muted } => {
                 let t = self.tab_mut(tab)?;
                 if t.muted != muted {
@@ -639,6 +644,39 @@ impl Workspace {
             None => self.set_active(Some(tab), fx),
         }
         self.unfold_project_of(tab, fx);
+        Ok(())
+    }
+
+    /// Moves a tab to `to_index` among its project's tabs, clamped to the
+    /// last place. The project is announced only when the order changed.
+    fn move_tab(
+        &mut self,
+        tab: TabId,
+        project: ProjectId,
+        to_index: u32,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let own = self.tab(tab)?.project;
+        if own != project {
+            return Err(CoreError::OtherProject(tab, project));
+        }
+        let p = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project)
+            .ok_or(CoreError::UnknownProject(project))?;
+        let from = p
+            .tabs
+            .iter()
+            .position(|t| *t == tab)
+            .ok_or(CoreError::UnknownTab(tab))?;
+        let last = p.tabs.len() - 1;
+        let to = usize::try_from(to_index).map_or(last, |i| i.min(last));
+        if to != from {
+            let moved = p.tabs.remove(from);
+            p.tabs.insert(to, moved);
+            fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
+        }
         Ok(())
     }
 
@@ -1940,6 +1978,96 @@ mod tests {
             name: "x".into(),
         };
         assert!(ws.apply(unknown, &resolve).is_err());
+    }
+
+    fn new_tab(ws: &mut Workspace, project: ProjectId) -> TabId {
+        let fx = run(
+            ws,
+            Command::NewTab {
+                project,
+                name: None,
+                profile: None,
+            },
+        );
+        ws.tab_of(spawned(&fx)[0]).unwrap()
+    }
+
+    fn move_to(tab: TabId, project: ProjectId, to_index: u32) -> Command {
+        Command::MoveTab {
+            tab,
+            project,
+            to_index,
+        }
+    }
+
+    #[test]
+    fn rf_esp_16_a_moved_tab_takes_its_new_place_in_its_project() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let b = new_tab(&mut ws, p);
+        let c = new_tab(&mut ws, p);
+        let selected = ws.snapshot().active_tab;
+        let fx = run(&mut ws, move_to(c, p, 0));
+        assert!(matches!(
+            emitted(&fx)[..],
+            [CoreMsg::ProjectUpdated(info)] if info.tabs == [c, a, b]
+        ));
+        assert_eq!(ws.snapshot().active_tab, selected, "moving never selects");
+        run(&mut ws, move_to(c, p, 2));
+        assert_eq!(ws.snapshot().projects[0].tabs, [a, b, c]);
+        run(&mut ws, move_to(a, p, 1));
+        assert_eq!(ws.snapshot().projects[0].tabs, [b, a, c]);
+        // Past the last tab means last.
+        run(&mut ws, move_to(b, p, u32::MAX));
+        assert_eq!(ws.snapshot().projects[0].tabs, [a, c, b]);
+        // Its own place again changes nothing and announces nothing.
+        assert!(emitted(&run(&mut ws, move_to(b, p, 9))).is_empty());
+        assert!(ws.apply(move_to(TabId::new(99), p, 0), &resolve).is_err());
+    }
+
+    #[test]
+    fn rf_esp_16_a_tab_never_moves_to_another_project() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        run(
+            &mut ws,
+            Command::NewProject {
+                root: "D:/other".into(),
+                name: None,
+            },
+        );
+        let snap = ws.snapshot();
+        let (first, second) = (snap.projects[0].id, snap.projects[1].id);
+        let before = snap.projects;
+        let refused = ws.apply(move_to(a, second, 0), &resolve);
+        assert!(matches!(refused, Err(CoreError::OtherProject(t, p)) if t == a && p == second));
+        assert_eq!(ws.snapshot().projects, before);
+        let unknown = ws.apply(move_to(a, ProjectId::new(99), 0), &resolve);
+        assert!(unknown.is_err());
+        assert!(ws.apply(move_to(a, first, 0), &resolve).is_ok());
+    }
+
+    #[test]
+    fn rf_ses_02_a_moved_tab_keeps_its_place_after_a_restart() {
+        let mut ws = Workspace::new();
+        let (a, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let b = new_tab(&mut ws, p);
+        let c = new_tab(&mut ws, p);
+        run(&mut ws, move_to(c, p, 0));
+        run(&mut ws, move_to(a, p, 2));
+        let mut store = yien_session::MemStore::new();
+        yien_session::save(&mut store, &ws.to_session()).unwrap();
+        let loaded = yien_session::load(&store).restored.unwrap().snapshot;
+        let disk = Disk {
+            existing: folders(&loaded).into_iter().collect(),
+            home: None,
+        };
+        let mut back = Workspace::new();
+        let (_, notes) = back.restore(&loaded, &resolve, &disk);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(back.snapshot().projects[0].tabs, [c, b, a]);
     }
 
     #[test]
