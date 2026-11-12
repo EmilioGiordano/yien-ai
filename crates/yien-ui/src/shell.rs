@@ -46,12 +46,14 @@ use crate::theme::{Theme, ThemeKind};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
+mod dividers;
 mod files;
 mod settings;
 mod status;
 mod tray;
 mod worktrees;
 
+use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
 use status::{Line, Notice};
 use tray::Tray;
@@ -164,6 +166,9 @@ pub(crate) struct Shell {
     /// focus; a click in a bar focuses it too, and the pane must still get
     /// the keyboard after it.
     keyboard_in_bar: bool,
+    /// The divider the pointer took (RF-PAN-02).
+    divider_grab: Option<DividerGrab>,
+    pane_area: PaneArea,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -328,6 +333,8 @@ impl Shell {
             keyboard_region: Region::Panes,
             modality: Modality::Keyboard,
             keyboard_in_bar: false,
+            divider_grab: None,
+            pane_area: PaneArea::default(),
             _subscriptions: vec![activation, appearance],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
@@ -376,7 +383,10 @@ impl Shell {
                         ready.remove(&pane);
                     }
                 }
-                CoreMsg::TabUpdated(info) => self.workspace.tab_updated(&info),
+                CoreMsg::TabUpdated(info) => {
+                    self.workspace.tab_updated(&info);
+                    self.divider_settled(info.id);
+                }
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
                         ready.remove(&pane);
@@ -2425,7 +2435,10 @@ impl Shell {
                 .text_size(t.text(18.0))
                 .child("No tab is open");
         };
-        let rects = tab.rects();
+        let rects = match self.shown_layout(tab) {
+            Some(shown) => tab.rects_in(&shown),
+            None => tab.rects(),
+        };
         let single = rects.len() == 1;
         let cells: Vec<AnyElement> = rects
             .into_iter()
@@ -2442,7 +2455,15 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
-        area.child(div().relative().size_full().children(cells))
+        let dividers = self.render_dividers(tab, cx);
+        area.child(
+            div()
+                .relative()
+                .size_full()
+                .child(self.watch_pane_area())
+                .children(cells)
+                .children(dividers),
+        )
     }
 
     /// The pane area with no project at all: an invitation to add one.
@@ -3098,8 +3119,9 @@ impl Render for Shell {
         self.sync_title(window);
         self.keyboard_region = self.region(window, cx);
         self.keyboard_in_bar = region::bar_claim_holds(self.keyboard_in_bar, self.keyboard_region);
-        // A drag that just ended sends its width here.
+        // A drag that just ended sends its width or its share here.
         self.save_side_bars(cx);
+        self.finish_divider_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
         let t = self.theme;
         v_flex()
@@ -3112,6 +3134,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::toggle_review_mode))
             .on_drag_move(cx.listener(Self::on_bar_drag))
+            .on_drag_move(cx.listener(Self::on_divider_drag))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::split_right))

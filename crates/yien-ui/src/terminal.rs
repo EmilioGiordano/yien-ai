@@ -101,6 +101,11 @@ impl TerminalPane {
         &self.focus
     }
 
+    /// The cell's width and height at the last paint; `None` before one.
+    pub(crate) fn cell(&self) -> Option<(f32, f32)> {
+        self.grid.map(|(_, m)| (m.cell_w, m.cell_h))
+    }
+
     /// The single place frames enter the view, so a change in how the core
     /// delivers them touches only this.
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
