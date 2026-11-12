@@ -30,6 +30,8 @@ pub(crate) enum NoticeKind {
 pub(crate) struct Notice {
     pub(crate) text: String,
     pub(crate) kind: NoticeKind,
+    /// Stays until dismissed or replaced, whatever its kind.
+    pub(crate) lasting: bool,
 }
 
 impl Notice {
@@ -37,27 +39,37 @@ impl Notice {
         Self {
             text: text.into(),
             kind,
+            lasting: false,
         }
     }
 
     pub(crate) fn info(text: impl Into<String>) -> Self {
+        Self::new(text, NoticeKind::Info)
+    }
+
+    /// A plain notice that stays until dismissed, such as a newer YIEN
+    /// being available.
+    pub(crate) fn lasting_info(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            kind: NoticeKind::Info,
+            lasting: true,
+            ..Self::info(text)
         }
     }
 
     pub(crate) fn warning(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            kind: NoticeKind::Warning,
-        }
+        Self::new(text, NoticeKind::Warning)
     }
 
     pub(crate) fn error(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            kind: NoticeKind::Error,
+        Self::new(text, NoticeKind::Error)
+    }
+
+    /// How long it stays up by itself.
+    pub(crate) fn lifetime(&self) -> Option<Duration> {
+        if self.lasting {
+            None
+        } else {
+            lifetime(self.kind)
         }
     }
 }
@@ -83,8 +95,8 @@ pub(super) fn reading_kind(loaded: bool) -> NoticeKind {
 
 /// Whether the timer set for notice number `shown` takes down the notice
 /// showing now, number `current`: only a plain notice, and never a newer one.
-pub(super) fn timer_clears(showing: Option<NoticeKind>, shown: u64, current: u64) -> bool {
-    showing.is_some_and(|kind| lifetime(kind).is_some()) && shown == current
+pub(super) fn timer_clears(showing: Option<&Notice>, shown: u64, current: u64) -> bool {
+    showing.is_some_and(|notice| notice.lifetime().is_some()) && shown == current
 }
 
 /// What the right side of the bar shows.
@@ -192,22 +204,37 @@ mod tests {
     fn a_plain_notice_clears_itself_and_an_error_stays() {
         assert_eq!(lifetime(NoticeKind::Info), Some(Duration::from_secs(5)));
         assert_eq!(lifetime(NoticeKind::Error), None);
-        assert!(timer_clears(Some(NoticeKind::Info), 3, 3));
-        assert!(!timer_clears(Some(NoticeKind::Error), 3, 3));
+        assert!(timer_clears(Some(&Notice::info("a")), 3, 3));
+        assert!(!timer_clears(Some(&Notice::error("a")), 3, 3));
         assert!(!timer_clears(None, 3, 3));
     }
 
     #[test]
     fn a_warning_stays_and_a_failed_reading_is_an_error() {
         assert_eq!(lifetime(NoticeKind::Warning), None);
-        assert!(!timer_clears(Some(NoticeKind::Warning), 3, 3));
+        assert!(!timer_clears(Some(&Notice::warning("a")), 3, 3));
         assert_eq!(reading_kind(true), NoticeKind::Warning);
         assert_eq!(reading_kind(false), NoticeKind::Error);
     }
 
     #[test]
+    fn a_lasting_plain_notice_stays_and_is_not_an_error() {
+        let notice = Notice::lasting_info("YIEN 0.2.0 is available");
+        assert_eq!(notice.kind, NoticeKind::Info);
+        assert_eq!(notice.lifetime(), None);
+        assert!(!timer_clears(Some(&notice), 3, 3));
+        assert_eq!(
+            line(Some(&notice), &[]),
+            Some(Line::Notice {
+                text: "YIEN 0.2.0 is available".to_owned(),
+                error: false
+            })
+        );
+    }
+
+    #[test]
     fn a_stale_timer_does_not_clear_a_newer_notice() {
-        assert!(!timer_clears(Some(NoticeKind::Info), 3, 4));
+        assert!(!timer_clears(Some(&Notice::info("a")), 3, 4));
     }
 
     #[test]

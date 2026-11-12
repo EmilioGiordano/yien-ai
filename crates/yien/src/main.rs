@@ -10,6 +10,7 @@ mod panic_log;
 mod profiles;
 mod settings;
 mod shell_switch;
+mod update;
 
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -78,7 +79,10 @@ fn main() -> ExitCode {
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
     let user_profiles = profiles::load();
-    let (settings, settings_watcher, shell_switch) = settings::start(user_profiles.notices);
+    let (update, updates) = update::Update::start();
+    let update = Arc::new(update);
+    let (settings, settings_watcher, shell_switch) =
+        settings::start(user_profiles.notices, Arc::clone(&update));
     let config = CoreConfig {
         shell_integration: settings::shell_integration(&settings.initial),
         profiles: user_profiles.profiles,
@@ -120,6 +124,7 @@ fn main() -> ExitCode {
         attention,
         settings,
         files,
+        updates,
         move || {
             tracing::info!("yien exiting");
             if let Some(watcher) = &settings_watcher {
@@ -143,6 +148,9 @@ fn main() -> ExitCode {
             if let Some(file) = &settings_file {
                 let _ = std::fs::remove_file(file);
             }
+            // Last, after the session is saved and the panes are closed; the
+            // installer waits for this process to exit (RNF-21).
+            update.quit();
             drop(log);
         },
     );

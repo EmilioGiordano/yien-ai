@@ -304,6 +304,13 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ShowChanges,
         []
     ),
+    command!(
+        "update.whats_new",
+        "update: show what's new",
+        ShowWhatsNew,
+        []
+    ),
+    command!("update.install", "update: install", InstallUpdate, []),
 ];
 
 /// A split that starts a given profile, as the split menu offers

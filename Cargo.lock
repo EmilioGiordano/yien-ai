@@ -8811,6 +8811,11 @@ dependencies = [
 name = "yien"
 version = "0.0.0"
 dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "yien-agent",
@@ -8819,6 +8824,7 @@ dependencies = [
  "yien-platform",
  "yien-proto",
  "yien-pty",
+ "yien-session",
  "yien-ui",
 ]
 
@@ -8949,6 +8955,7 @@ name = "yien-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-kit",
+ "markdown",
  "raw-window-handle",
  "tokio",
  "tracing",

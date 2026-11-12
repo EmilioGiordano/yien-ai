@@ -44,12 +44,14 @@ use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
 use crate::tray::{CloseRequest, close_request, quit_detail};
+use crate::update::Updates;
 
 mod bars;
 mod files;
 mod settings;
 mod status;
 mod tray;
+mod update;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
@@ -148,6 +150,8 @@ pub(crate) struct Shell {
     worktree_close: Option<worktrees::Closing>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
+    /// A newer YIEN: its notice, notes and install.
+    updates: update::UpdatePanel,
     /// The tab bar and the context bar as places the keyboard can be
     /// (RF-NAV-08); the pane area is the terminals' own focus.
     tab_bar_focus: FocusHandle,
@@ -212,6 +216,7 @@ impl Shell {
         os: Rc<dyn OsAttention>,
         settings: Settings,
         files: Files,
+        updates: Updates,
         base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -269,6 +274,7 @@ impl Shell {
         })
         .detach();
         Self::listen_to_settings(settings.updates, window, cx);
+        let updates = Self::update_panel(updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
         });
@@ -322,6 +328,7 @@ impl Shell {
             worktree_prompt: None,
             worktree_close: None,
             alerts: Alerts::new(os),
+            updates,
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
             tab_cursor: None,
@@ -559,6 +566,7 @@ impl Shell {
             || self.renaming.is_some()
             || self.worktree_prompt.is_some()
             || self.worktree_close.is_some()
+            || self.updates.notes_open()
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that
@@ -722,14 +730,13 @@ impl Shell {
     pub(super) fn show(&mut self, notice: Notice, cx: &mut Context<Self>) {
         self.notice_generation += 1;
         let shown = self.notice_generation;
-        let lifetime = status::lifetime(notice.kind);
+        let lifetime = notice.lifetime();
         self.notice = Some(notice);
         if let Some(lifetime) = lifetime {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(lifetime).await;
                 let _ = this.update(cx, |shell, cx| {
-                    let kind = shell.notice.as_ref().map(|n| n.kind);
-                    if status::timer_clears(kind, shown, shell.notice_generation) {
+                    if status::timer_clears(shell.notice.as_ref(), shown, shell.notice_generation) {
                         shell.clear_notice(cx);
                     }
                 });
@@ -1405,7 +1412,10 @@ impl Shell {
     }
 
     fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.take().is_some() {
+        if let Some(confirm) = self.confirm.take() {
+            if matches!(confirm.asked, Asked::Quit) {
+                self.quit_cancelled(cx);
+            }
             self.give_back_keyboard(window, cx);
         }
     }
@@ -3178,6 +3188,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::show_whats_new))
+            .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab2, w, cx| this.go_to_tab(2, w, cx)))
             .on_action(cx.listener(|this, _: &GoToTab3, w, cx| this.go_to_tab(3, w, cx)))
@@ -3211,6 +3223,7 @@ impl Render for Shell {
             .children(self.render_palette(cx))
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
+            .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
     }
 }

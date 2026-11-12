@@ -42,6 +42,9 @@ pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
 /// Key context of the attention tray (RF-ATN-13).
 pub(crate) const TRAY_CONTEXT: &str = "YienTray";
 
+/// Key context of a newer release's notes.
+pub(crate) const WHATS_NEW_CONTEXT: &str = "YienWhatsNew";
+
 actions!(
     yien,
     [
@@ -234,6 +237,12 @@ actions!(
         FileTreeOpen,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,
+        /// Shows the notes of the newer YIEN the update check found.
+        ShowWhatsNew,
+        /// Downloads the newer YIEN, checks it, quits and installs it.
+        InstallUpdate,
+        /// Closes the release notes.
+        WhatsNewClose,
     ]
 );
 
@@ -278,6 +287,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
     let file_tree = Some(file_tree.as_str());
     let tray = Some(TRAY_CONTEXT);
+    let whats_new = Some(WHATS_NEW_CONTEXT);
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -314,6 +324,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("down", TrayDown, tray),
         KeyBinding::new("enter", TrayConfirm, tray),
         KeyBinding::new("escape", TrayClose, tray),
+        KeyBinding::new("escape", WhatsNewClose, whats_new),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -383,6 +394,7 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TrayDown),
         Box::new(TrayConfirm),
         Box::new(TrayClose),
+        Box::new(WhatsNewClose),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
