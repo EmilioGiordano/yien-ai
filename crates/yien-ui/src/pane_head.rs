@@ -84,6 +84,9 @@ pub(crate) struct PaneHeadLayout {
     pub signal_lost: bool,
     /// The pane's own name, when it is not the tag.
     pub name: bool,
+    /// Room kept for a shell's first letters; without it the name may
+    /// ellipsize away so the close button stays.
+    pub shell_name: bool,
     pub close_button: bool,
 }
 
@@ -98,6 +101,7 @@ impl PaneHeadLayout {
         folder_last: true,
         signal_lost: true,
         name: true,
+        shell_name: true,
         close_button: true,
     };
 
@@ -105,10 +109,11 @@ impl PaneHeadLayout {
     /// (`ui.font.size` over 13). Pieces go in this order: the profile's
     /// display name, the state word, the split buttons, the menu button,
     /// the folder's lead, its last name, "signal lost", a renamed pane's
-    /// name, the close button. The glyph and the program stay.
+    /// name, the room for a shell's name, the close button. The glyph and an
+    /// agent's tag stay.
     pub(crate) fn at(width: f32, scale: f32, text: &HeadText<'_>) -> Self {
         let mut layout = Self::FULL;
-        let drops: [fn(&mut Self); 9] = [
+        let drops: [fn(&mut Self); 10] = [
             |l| l.profile = false,
             |l| l.state_label = false,
             |l| l.split_buttons = false,
@@ -117,6 +122,7 @@ impl PaneHeadLayout {
             |l| l.folder_last = false,
             |l| l.signal_lost = false,
             |l| l.name = false,
+            |l| l.shell_name = false,
             |l| l.close_button = false,
         ];
         for drop in drops {
@@ -141,9 +147,11 @@ impl PaneHeadLayout {
             words(text.profile)
         } else if text.agent {
             words(text.tag)
-        } else {
+        } else if self.shell_name {
             let shown = text.tag.chars().count().min(SHELL_NAME_CHARS);
             shown as f32 * EM * TEXT_SIZE * scale
+        } else {
+            0.0
         };
         pieces.push(who);
         if !separate && self.profile {
@@ -227,7 +235,7 @@ mod tests {
         }
     }
 
-    fn pieces(l: &PaneHeadLayout) -> [bool; 9] {
+    fn pieces(l: &PaneHeadLayout) -> [bool; 10] {
         [
             l.profile,
             l.state_label,
@@ -237,6 +245,7 @@ mod tests {
             l.folder_last,
             l.signal_lost,
             l.name,
+            l.shell_name,
             l.close_button,
         ]
     }
@@ -339,6 +348,12 @@ mod tests {
         let text = shell();
         let width = 2.0 * PADDING + GLYPH + 3.0 * GAP + BUTTON + 4.0 * 0.6 * 12.5 + 1.0;
         assert!(PaneHeadLayout::at(width, 1.0, &text).close_button);
+        // Narrower than the shell's first letters: the name ellipsizes away,
+        // the close button stays.
+        for width in [80.0, 90.0, 100.0] {
+            let now = PaneHeadLayout::at(width, 1.0, &text);
+            assert!(now.close_button && !now.shell_name, "{now:?} at {width}");
+        }
     }
 
     fn pane(profile: &str, runs_session: bool) -> PaneView {
