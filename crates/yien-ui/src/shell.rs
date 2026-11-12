@@ -43,15 +43,20 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
+use crate::title_bar::{
+    PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
+};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
 mod files;
 mod settings;
+mod status;
 mod tray;
 mod worktrees;
 
 use files::{ContextView, FilesPanel};
+use status::{Line, Notice};
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -117,8 +122,10 @@ pub(crate) struct Shell {
     terminals: HashMap<PaneId, Entity<TerminalPane>>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
-    /// The last error from the core, shown in the status bar.
-    notice: Option<String>,
+    /// What the status bar shows in place of the key hints, if anything.
+    notice: Option<Notice>,
+    /// Counts the notices shown, so a stale timer cannot clear a newer one.
+    notice_generation: u64,
     /// The pane whose split is choosing a profile, and which way (RF-PAN-18).
     split_menu: Option<(PaneId, Orientation)>,
     /// The chooser a mouse-down outside it just closed, and when. The click
@@ -234,8 +241,7 @@ impl Shell {
                 }
             }
             let _ = this.update(cx, |shell, cx| {
-                shell.notice = Some("The YIEN core stopped. Restart YIEN.".to_owned());
-                cx.notify();
+                shell.fail("The YIEN core stopped. Restart YIEN.", cx);
             });
         })
         .detach();
@@ -308,6 +314,7 @@ impl Shell {
             terminals: HashMap::new(),
             keyboard_on: None,
             notice: None,
+            notice_generation: 0,
             split_menu: None,
             menu_closed: None,
             palette: None,
@@ -329,7 +336,9 @@ impl Shell {
             _subscriptions: vec![activation, appearance],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
-        shell.notice.clone_from(&shell.profiles_notice);
+        if let Some(text) = shell.profiles_notice.clone() {
+            shell.show(Notice::warning(text), cx);
+        }
         shell.apply_config(settings.initial, window, cx);
         if let Some(tray) = &shell.tray {
             window.focus(tray.focus(), cx);
@@ -413,7 +422,7 @@ impl Shell {
                     self.workspace.set_notifications_muted(muted);
                 }
                 CoreMsg::Error { pane, message } => {
-                    self.notice = Some(message);
+                    self.fail(message, cx);
                     // Only an error about no pane can answer a palette
                     // request; a pane's own error leaves the list waiting.
                     if pane.is_none()
@@ -422,7 +431,7 @@ impl Shell {
                         open.model.stop_waiting();
                     }
                 }
-                CoreMsg::Notice { message } => self.notice = Some(message),
+                CoreMsg::Notice { message } => self.say(message, cx),
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {
                     project,
@@ -704,6 +713,51 @@ impl Shell {
         self.give_back_keyboard(window, cx);
     }
 
+    /// Puts up a plain notice, which takes itself down after a few seconds.
+    /// A warning or an error stays until `clear_notice` or a newer notice.
+    pub(super) fn say(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show(Notice::info(text), cx);
+    }
+
+    /// Puts up an error, which stays until it is dismissed or replaced.
+    pub(super) fn fail(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show(Notice::error(text), cx);
+    }
+
+    pub(super) fn show(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        self.notice_generation += 1;
+        let shown = self.notice_generation;
+        let lifetime = status::lifetime(notice.kind);
+        self.notice = Some(notice);
+        if let Some(lifetime) = lifetime {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(lifetime).await;
+                let _ = this.update(cx, |shell, cx| {
+                    let kind = shell.notice.as_ref().map(|n| n.kind);
+                    if status::timer_clears(kind, shown, shell.notice_generation) {
+                        shell.clear_notice(cx);
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn dismiss_notice(&mut self, _: &DismissNotice, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.clear_notice(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// Takes the notice down; whether there was one.
+    pub(super) fn clear_notice(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_up = self.notice.take().is_some();
+        self.notice_generation += 1;
+        cx.notify();
+        was_up
+    }
+
     fn tab_bar_leave(&mut self, _: &TabBarLeave, window: &mut Window, cx: &mut Context<Self>) {
         self.give_back_keyboard(window, cx);
     }
@@ -827,8 +881,7 @@ impl Shell {
                 cx,
             ),
             None => {
-                self.notice = Some("There is no project to open a tab in.".to_owned());
-                cx.notify();
+                self.say("There is no project to open a tab in.".to_owned(), cx);
             }
         }
     }
@@ -849,8 +902,7 @@ impl Shell {
         match self.workspace.next_waiting(self.focused_pane()) {
             Some(pane) => self.command(Command::FocusPane { pane }, cx),
             None => {
-                self.notice = Some("Nobody is waiting for you.".to_owned());
-                cx.notify();
+                self.say("Nobody is waiting for you.".to_owned(), cx);
             }
         }
     }
@@ -1015,8 +1067,7 @@ impl Shell {
             Mode::Sessions => match self.workspace.project_for_new_tab() {
                 Some(project) => Some(project),
                 None => {
-                    self.notice = Some("Add a project to list its past sessions.".to_owned());
-                    cx.notify();
+                    self.say("Add a project to list its past sessions.".to_owned(), cx);
                     return;
                 }
             },
@@ -1190,8 +1241,7 @@ impl Shell {
         if pane.exited {
             self.command(Command::RelaunchPane { pane: id }, cx);
         } else {
-            self.notice = Some(format!("{} has not exited.", pane.name));
-            cx.notify();
+            self.say(format!("{} has not exited.", pane.name), cx);
         }
     }
 
@@ -1229,17 +1279,18 @@ impl Shell {
             Ok(Some(path)) => path,
             Ok(None) => return,
             Err(error) => {
-                self.notice = Some(format!("The folder picker failed: {error}"));
-                cx.notify();
+                self.fail(format!("The folder picker failed: {error}"), cx);
                 return;
             }
         };
         let Some(root) = path.to_str() else {
-            self.notice = Some(format!(
-                "{} cannot be a project: its name is not valid Unicode.",
-                path.display()
-            ));
-            cx.notify();
+            self.fail(
+                format!(
+                    "{} cannot be a project: its name is not valid Unicode.",
+                    path.display()
+                ),
+                cx,
+            );
             return;
         };
         match self.workspace.folder_target(root) {
@@ -1259,8 +1310,7 @@ impl Shell {
         match self.workspace.project_for_new_tab() {
             Some(project) => self.request_close(project, window, cx),
             None => {
-                self.notice = Some("There is no project to close.".to_owned());
-                cx.notify();
+                self.say("There is no project to close.".to_owned(), cx);
             }
         }
     }
@@ -1517,8 +1567,7 @@ impl Shell {
         match self.workspace.selected_tab().map(|t| t.id) {
             Some(tab) => self.start_rename(tab, window, cx),
             None => {
-                self.notice = Some("There is no tab to rename.".to_owned());
-                cx.notify();
+                self.say("There is no tab to rename.".to_owned(), cx);
             }
         }
     }
@@ -1613,18 +1662,17 @@ impl Shell {
     ) {
         let muted = !self.workspace.notifications_muted();
         self.workspace.set_notifications_muted(muted);
-        self.notice = Some(mute_notice(muted, "Notifications"));
+        self.say(mute_notice(muted, "Notifications"), cx);
         self.command(Command::SetNotificationsMuted { muted }, cx);
         cx.notify();
     }
 
     fn toggle_tab_muted(&mut self, _: &ToggleTabMuted, _: &mut Window, cx: &mut Context<Self>) {
         let Some((tab, muted)) = self.workspace.selected_tab().map(|t| (t.id, !t.muted)) else {
-            self.notice = Some("There is no tab to mute.".to_owned());
-            cx.notify();
+            self.say("There is no tab to mute.".to_owned(), cx);
             return;
         };
-        self.notice = Some(mute_notice(muted, "This tab's notifications"));
+        self.say(mute_notice(muted, "This tab's notifications"), cx);
         self.command(Command::SetTabMuted { tab, muted }, cx);
         cx.notify();
     }
@@ -1670,8 +1718,9 @@ impl Shell {
         }
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -1685,10 +1734,19 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(project)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(project),
+                )
                 .child("/")
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.text)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tab.name.clone()),
@@ -1705,53 +1763,85 @@ impl Shell {
             .border_color(t.line)
             .child(
                 h_flex()
-                    .size_full()
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .h_full()
                     .items_center()
                     .gap(px(12.0))
-                    .pr(px(10.0))
+                    .pr(px(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
-                            .flex_none()
+                            .flex_1()
+                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
                             .items_center()
-                            .gap(px(8.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child(img(assets::MARK).size(px(20.0)))
-                            .child("YIEN"),
+                            .gap(px(12.0))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child("YIEN"),
+                            )
+                            .child(div().flex_1().w_0().min_w_0().children(crumbs)),
                     )
-                    .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_palette_pill(cx))
-                    .child(div().flex_1())
-                    .child(self.render_need_count(cx))
+                    .child(self.render_palette_pill(&layout, cx))
                     .child(
-                        icon_button("toggle-theme", assets::THEME, &t)
-                            .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_theme(&ToggleTheme, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                            .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                            .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_bar(&ToggleContextBar, window, cx)
-                            })),
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(12.0))
+                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
+                            .child(self.render_need_count(cx))
+                            .when(layout.theme_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-theme", assets::THEME, &t)
+                                        .aria_label(format!(
+                                            "Toggle sumi and washi theme ({THEME_KEYS})"
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_theme(&ToggleTheme, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.tab_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                        .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                        .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(layout.context_bar_button, |bar| {
+                                bar.child(
+                                    icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                        .aria_label(format!(
+                                            "Toggle context bar ({CONTEXT_BAR_KEYS})"
+                                        ))
+                                        .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                        .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                        })),
+                                )
+                            }),
                     ),
             )
     }
 
     /// The title bar button that opens the palette, as the prototype's.
-    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_pill(
+        &self,
+        layout: &TitleLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         h_flex()
             .id("palette-pill")
@@ -1759,8 +1849,9 @@ impl Shell {
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
             .flex_none()
-            .w(px(420.0))
-            .max_w(relative(0.4))
+            .w(px(PILL_WIDTH))
+            .max_w(relative(PILL_SHARE))
+            .min_w(px(PILL_LEAST))
             .items_center()
             .gap(px(10.0))
             .px(px(10.0))
@@ -1777,14 +1868,23 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_palette(Mode::Commands, window, cx);
             }))
-            .child(div().flex_1().min_w_0().child("Execute a command"))
             .child(
                 div()
-                    .flex_none()
-                    .text_size(t.text(11.0))
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(PALETTE_KEYS),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child("Execute a command"),
             )
+            .when(layout.pill_keys, |pill| {
+                pill.child(
+                    div()
+                        .flex_none()
+                        .text_size(t.text(11.0))
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(PALETTE_KEYS),
+                )
+            })
     }
 
     /// The command palette or the switcher over the window (RF-NAV-01,
@@ -2975,23 +3075,23 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if deleted {
-            self.notice = Some(format!("{path} was deleted; there is nothing to open."));
-            cx.notify();
+            self.say(format!("{path} was deleted; there is nothing to open."), cx);
             return;
         }
         let Some(root) = root else { return };
         match join_relative(root, path) {
             Some(file) => self.open_file(file, cx),
             None => {
-                self.notice = Some(format!("{path} is not inside the repository."));
-                cx.notify();
+                self.say(format!("{path} is not inside the repository."), cx);
             }
         }
     }
 
-    fn render_status_bar(&self) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ws = &self.workspace;
+        let hints = status::live_hints(&cx.key_bindings().borrow());
+        let right = status::line(self.notice.as_ref(), &hints);
         h_flex()
             .id("status-bar")
             .role(Role::ContentInfo)
@@ -3023,38 +3123,32 @@ impl Shell {
                         .child(text),
                 )
             })
-            .when_some(self.notice.clone(), |bar, notice| {
+            .when_some(right, |bar, line| {
                 bar.child(
-                    div()
-                        .id("notice")
-                        .role(Role::Status)
-                        .flex_shrink_0()
-                        .max_w(relative(0.5))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(t.ochre)
-                        .child(notice),
+                    h_flex().flex_1().min_w_0().justify_end().child(match line {
+                        Line::Hints(text) => div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(text)
+                            .into_any_element(),
+                        Line::Notice { text, error } => div()
+                            .id("notice")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.clear_notice(cx);
+                            }))
+                            .role(Role::Status)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(t.ochre)
+                            .when(error, |d| d.font_weight(FontWeight::BOLD))
+                            .child(text)
+                            .into_any_element(),
+                    }),
                 )
             })
-            // The hint row gives way to the notice: without `min_w_0` its
-            // unwrapped width squeezed the notice to nothing.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .justify_end()
-                    .child(div().min_w_0().overflow_hidden().text_ellipsis().child(format!(
-                "{PALETTE_KEYS} commands · {SWITCHER_KEYS} go to · \
-                 {JUMP_KEYS} next that needs you · {ADD_PROJECT_KEYS} add project · \
-                 {NEW_CLAUDE_TAB_KEYS} Claude tab · {NEW_WORKTREE_TAB_KEYS} worktree tab · \
-                 {SPLIT_CLAUDE_KEYS} split with Claude · {NEW_TAB_KEYS} new tab · \
-                 {SPLIT_RIGHT_KEYS} split right · {SPLIT_DOWN_KEYS} split down · \
-                 {CLOSE_PANE_KEYS} close pane · {FOCUS_KEYS} focus · {REGION_KEYS} move focus · \
-                 {TAB_BAR_KEYS} tab bar · \
-                 {CONTEXT_BAR_KEYS} context bar · {TAB_NUMBER_KEYS} tab N · {NEXT_TAB_KEYS} next tab · \
-                 {THEME_KEYS} theme"
-                    ))),
-            )
     }
 }
 
@@ -3151,6 +3245,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_down))
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
+            .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_changes))
@@ -3176,7 +3271,7 @@ impl Render for Shell {
             .text_color(t.text)
             .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -3189,7 +3284,7 @@ impl Render for Shell {
                         row.child(self.render_context_bar(cx))
                     }),
             )
-            .child(self.render_status_bar())
+            .child(self.render_status_bar(cx))
             .children(self.render_tray(cx))
             .children(self.render_palette(cx))
             .children(self.render_worktree_prompt(cx))

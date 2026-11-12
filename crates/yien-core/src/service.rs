@@ -30,6 +30,7 @@ use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneIn
 use crate::persist::{self, Opened, Writer};
 use crate::report::Reports;
 use crate::screens::{ScreenSource, Screens};
+use crate::shell::ShellChoice;
 use crate::workspace::{Effect, Workspace};
 use crate::worktree::{self, Done};
 use crate::{CoreConfig, CoreError, PANE_INPUT_QUEUE};
@@ -125,6 +126,8 @@ struct Service {
     screens: Option<Arc<Screens>>,
     /// Saved screens of restored panes, until their actors start.
     restored_screens: HashMap<PaneId, Vec<u8>>,
+    /// The shell with and without the folder report (RF-SES-01).
+    shells: ShellChoice,
 }
 
 /// Worktree jobs waiting for the service; a job waits for room.
@@ -137,6 +140,7 @@ pub(crate) async fn run(
     hooks_error: Option<String>,
     writer: Option<Arc<Writer>>,
     screens: Option<Arc<Screens>>,
+    shells: ShellChoice,
 ) {
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
@@ -166,6 +170,7 @@ pub(crate) async fn run(
         palette: ctx_palette,
         screens,
         restored_screens: HashMap::new(),
+        shells,
     };
     let mut notices = opened.notices;
     let mut restored = Vec::new();
@@ -587,6 +592,16 @@ impl Service {
             ClientMsg::WindowFocus { focused } => {
                 let fx = self.ws.set_window_focus(focused);
                 self.execute(fx).await;
+            }
+            ClientMsg::SetShellIntegration { on } => {
+                let shell = self.shells.pick(on);
+                if *shell != self.ctx.config.shell {
+                    tracing::info!(on, "shell integration changed for new panes");
+                    let mut config = (*self.ctx.config).clone();
+                    config.shell = shell.clone();
+                    config.shell_integration = on;
+                    self.ctx.config = Arc::new(config);
+                }
             }
             ClientMsg::SetTerminalPalette { palette: named } => {
                 let palette = convert::palette(named);

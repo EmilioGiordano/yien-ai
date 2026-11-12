@@ -145,8 +145,7 @@ impl Shell {
         match self.workspace.next_done(self.focused_pane()) {
             Some(pane) => self.command(Command::FocusPane { pane }, cx),
             None => {
-                self.notice = Some("Nothing is waiting for review.".to_owned());
-                cx.notify();
+                self.say("Nothing is waiting for review.", cx);
             }
         }
     }
@@ -162,12 +161,14 @@ impl Shell {
         let on = self.settings.toggle_grouping();
         self.workspace.set_group_by_state(on);
         self.tab_cursor = None;
-        self.notice = Some(if on {
-            "Tabs grouped by state until config.toml is next saved.".to_owned()
-        } else {
-            "Tabs grouped by project until config.toml is next saved.".to_owned()
-        });
-        cx.notify();
+        self.say(
+            if on {
+                "Tabs grouped by state until config.toml is next saved."
+            } else {
+                "Tabs grouped by project until config.toml is next saved."
+            },
+            cx,
+        );
     }
 
     /// Drops the tray's cursor onto a listed row after the workspace

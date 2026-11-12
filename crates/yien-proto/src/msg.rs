@@ -543,6 +543,12 @@ pub enum ClientMsg {
         /// The palette.
         palette: TerminalPalette,
     },
+    /// Whether shell panes started from now on report their folder at each
+    /// prompt (RF-SES-01); running panes keep how they started.
+    SetShellIntegration {
+        /// On or off.
+        on: bool,
+    },
 }
 
 /// The terminal palette that goes with each window theme.
@@ -1202,6 +1208,7 @@ mod tests {
             ClientMsg::SetTerminalPalette {
                 palette: TerminalPalette::Washi,
             },
+            ClientMsg::SetShellIntegration { on: false },
         ];
         for msg in msgs {
             assert_eq!(round_trip(&msg), msg);
