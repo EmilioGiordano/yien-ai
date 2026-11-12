@@ -59,6 +59,13 @@ pub const SCHEMA: &[Setting] = &[
               panes started after it; running panes keep theirs.",
     },
     Setting {
+        key: "update.check",
+        default: "true",
+        doc: "true: once a day YIEN asks GitHub whether a newer YIEN was released and \
+              says so in the status bar; nothing is downloaded or installed until you \
+              ask. false: YIEN makes no network request for updates.",
+    },
+    Setting {
         key: "editor",
         default: "\"\"",
         doc: "The command that opens files, such as \"code\" or \"notepad\". Empty: the \
@@ -67,7 +74,14 @@ pub const SCHEMA: &[Setting] = &[
 ];
 
 /// Tables that only group other keys.
-pub(crate) const TABLES: &[&str] = &["ui", "ui.font", "ui.tabs", "terminal", "terminal.font"];
+pub(crate) const TABLES: &[&str] = &[
+    "ui",
+    "ui.font",
+    "ui.tabs",
+    "terminal",
+    "terminal.font",
+    "update",
+];
 
 /// The table that maps command ids to chords (RF-CFG-03).
 pub(crate) const KEYS_TABLE: &str = "keys";

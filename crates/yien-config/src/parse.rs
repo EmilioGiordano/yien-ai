@@ -129,6 +129,7 @@ impl Walk<'_> {
             "terminal.shell_integration" => {
                 self.loaded.config.shell_integration = self.boolean(path, value)?;
             }
+            "update.check" => self.loaded.config.update_check = self.boolean(path, value)?,
             "ui.font.size" => {
                 self.loaded.config.ui_font.size = self.size(path, value, MAX_UI_FONT_SIZE)?;
             }
@@ -344,6 +345,20 @@ group = \"project\"")
             p.message.contains("\"project\" or \"state\""),
             "{}",
             p.message
+        );
+    }
+
+    #[test]
+    fn update_check_is_on_unless_turned_off() {
+        assert!(ok("").config.update_check);
+        let off = ok("[update]\ncheck = false");
+        assert!(!off.config.update_check);
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        assert!(!ok("update.check = false").config.update_check);
+        let p = err("update.check = 1\n");
+        assert!(
+            p.message.contains("update.check must be true or false"),
+            "{p}"
         );
     }
 
