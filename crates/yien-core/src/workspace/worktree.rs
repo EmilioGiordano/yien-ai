@@ -247,6 +247,44 @@ mod tests {
     }
 
     #[test]
+    fn rf_esp_07_removing_a_split_worktree_tab_stops_every_pane_first() {
+        let mut ws = Workspace::new();
+        let project = project(&mut ws);
+        let tab = worktree_tab(&mut ws, project, "C:/Code/app-wt/feat-x");
+        let split = Command::SplitPane {
+            pane: ws.tab(tab).unwrap().panes()[0],
+            orientation: Orientation::Horizontal,
+            profile: None,
+        };
+        ws.apply(split, &resolve).unwrap();
+        let panes = ws.tab(tab).unwrap().panes();
+        assert_eq!(panes.len(), 2);
+
+        let command = Command::RemoveWorktreeTab {
+            tab,
+            discard_changes: false,
+            confirmed: WorktreeWork::default(),
+        };
+        let fx = ws.apply(command, &resolve).unwrap();
+        let removal = fx
+            .iter()
+            .position(|e| matches!(e, Effect::RemoveWorktree(_)))
+            .unwrap();
+        let Effect::RemoveWorktree(job) = &fx[removal] else {
+            unreachable!()
+        };
+        assert_eq!(job.panes, panes);
+        for pane in &panes {
+            let stop = fx
+                .iter()
+                .position(|e| matches!(e, Effect::Stop { pane: p } if p == pane))
+                .unwrap_or_else(|| panic!("pane {pane:?} is never stopped"));
+            assert!(stop < removal, "pane {pane:?} stops before the removal");
+        }
+        assert!(!ws.has_tab(tab));
+    }
+
+    #[test]
     fn rf_esp_07_a_worktree_another_tab_uses_is_kept() {
         let mut ws = Workspace::new();
         let project = project(&mut ws);
