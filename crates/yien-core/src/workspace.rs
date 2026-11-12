@@ -2,7 +2,7 @@
 //! change returns the effects the service must carry out (messages for the UI,
 //! panes to start or stop), so the invariants are testable without a PTY.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
@@ -802,6 +802,7 @@ impl Workspace {
     ) -> Result<(), CoreError> {
         let tab_id = TabId::new(self.next()?);
         let pane = PaneId::new(self.next()?);
+        let automatic = self.free_tab_name(project);
         let p = self
             .projects
             .iter_mut()
@@ -811,7 +812,7 @@ impl Workspace {
         let custom_name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
         let (default_name, dir, branch, worktree) = match worktree {
             Some((dir, branch)) => (branch.clone(), dir.clone(), Some(branch), Some(dir)),
-            None => (format!("Tab {}", p.tabs.len()), p.root.clone(), None, None),
+            None => (automatic, p.root.clone(), None, None),
         };
         let tree = Tree::new();
         let leaves = tree.panes().into_iter().map(|leaf| (leaf, pane)).collect();
@@ -840,6 +841,21 @@ impl Workspace {
         self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
         Ok(())
+    }
+
+    /// The smallest `Tab N` that no tab of the project shows or would go
+    /// back to, so closing a tab never makes the next one a twin.
+    fn free_tab_name(&self, project: ProjectId) -> String {
+        let taken: HashSet<&str> = self
+            .tabs
+            .iter()
+            .filter(|t| t.project == project)
+            .flat_map(|t| std::iter::once(t.default_name.as_str()).chain(t.custom_name.as_deref()))
+            .collect();
+        (1..=taken.len() + 1)
+            .map(|n| format!("Tab {n}"))
+            .find(|name| !taken.contains(name.as_str()))
+            .unwrap_or_default()
     }
 
     /// Adds a pane and starts its program, resuming the agent session
@@ -2068,6 +2084,38 @@ mod tests {
         let (_, notes) = back.restore(&loaded, &resolve, &disk);
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(back.snapshot().projects[0].tabs, [c, b, a]);
+    }
+
+    #[test]
+    fn rf_esp_03_a_new_tab_takes_the_smallest_automatic_name_free_in_its_project() {
+        let mut ws = Workspace::new();
+        let (first, _) = project(&mut ws);
+        let p = ws.snapshot().projects[0].id;
+        let name = |ws: &Workspace, tab: TabId| ws.tab(tab).unwrap().default_name.clone();
+        let second = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, second), "Tab 2");
+        run(&mut ws, Command::CloseTab { tab: first });
+        let again = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, again), "Tab 1", "not a second Tab 2");
+        // A name the user gave counts too, so clearing it later shows no twin.
+        run(
+            &mut ws,
+            Command::RenameTab {
+                tab: again,
+                name: "Tab 3".into(),
+            },
+        );
+        let fourth = new_tab(&mut ws, p);
+        assert_eq!(name(&ws, fourth), "Tab 4");
+        // Another project's names do not count.
+        run(
+            &mut ws,
+            Command::NewProject {
+                root: "D:/other".into(),
+                name: None,
+            },
+        );
+        assert_eq!(ws.snapshot().tabs.last().unwrap().name, "Tab 1");
     }
 
     #[test]
