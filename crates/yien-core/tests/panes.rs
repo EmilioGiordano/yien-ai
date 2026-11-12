@@ -1333,3 +1333,37 @@ fn rf_esp_01_re_adding_a_project_whose_folder_is_gone_selects_it() {
     });
     assert_eq!(answer, Ok(()));
 }
+
+#[test]
+fn rf_ses_01_shells_started_after_a_switch_follow_it() {
+    let mut h = Harness::start_with(CoreConfig {
+        shell: ShellCommand::new("pwsh.exe"),
+        ..config()
+    });
+    let (_, pane, first) = h.project();
+    let command = |child: &FakeChild| child.spec().args.iter().any(|a| a == "-Command");
+    assert!(command(&first), "on by default");
+
+    h.send(ClientMsg::SetShellIntegration { on: false });
+    let (second_pane, second) = h.split(pane, None);
+    assert!(second.spec().args.is_empty());
+
+    h.send(ClientMsg::SetShellIntegration { on: true });
+    let (_, third) = h.split(second_pane, None);
+    assert_eq!(third.spec().args, first.spec().args);
+    assert!(
+        h.backend.take_spawned().is_empty(),
+        "running panes keep theirs"
+    );
+}
+
+#[test]
+fn rf_ses_01_a_core_started_without_the_report_runs_the_plain_shell() {
+    let mut h = Harness::start_with(CoreConfig {
+        shell: ShellCommand::new("cmd.exe"),
+        shell_integration: false,
+        ..config()
+    });
+    let (_, _, child) = h.project();
+    assert!(child.spec().env.iter().all(|(k, _)| k != "PROMPT"));
+}

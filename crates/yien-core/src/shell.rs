@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-/// A program and its arguments.
+/// A program, its arguments and the variables it starts with.
 ///
 /// ```
 /// let shell = yien_core::ShellCommand::new("pwsh.exe");
 /// assert_eq!(shell.program, "pwsh.exe");
-/// assert!(shell.args.is_empty());
+/// assert!(shell.args.is_empty() && shell.env.is_empty());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellCommand {
@@ -15,7 +15,39 @@ pub struct ShellCommand {
     pub program: String,
     /// Its arguments.
     pub args: Vec<String>,
+    /// Variables set for it, over the ones YIEN inherited.
+    pub env: Vec<(String, String)>,
 }
+
+/// Wraps the `prompt` the user's profile left so it also reports FileSystem
+/// folders as `OSC 9;9`. No `"` (PowerShell re-joins quoted arguments its own
+/// way). The user's prompt runs first so it still sees `$?`. Constrained
+/// language mode refuses method calls, so it gets no report; any other
+/// failure keeps the prompt and takes its error back out of `$Error`.
+const POWERSHELL_CWD_HOOK: &str = "if ($function:prompt) { \
+    $global:__YienPrompt = $function:prompt; \
+    function global:prompt { \
+        $p = & $global:__YienPrompt; \
+        try { \
+            $l = $executionContext.SessionState.Path.CurrentLocation; \
+            if ($executionContext.SessionState.LanguageMode -eq 'FullLanguage' \
+                -and $l.Provider.Name -eq 'FileSystem') { \
+                $Host.UI.Write([char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + '\\') \
+            } \
+        } catch { \
+            if ($global:Error.Count -gt 0 -and $global:Error[0].Exception -eq $_.Exception) { \
+                $global:Error.RemoveAt(0) \
+            } \
+        }; \
+        $p \
+    } \
+}";
+
+/// cmd's prompt codes for the same report: `$E` is ESC, `$P` the folder.
+const CMD_CWD_PROMPT: &str = "$E]9;9;\"$P\"$E\\";
+
+/// cmd's own prompt when `PROMPT` is not set.
+const CMD_DEFAULT_PROMPT: &str = "$P$G";
 
 impl ShellCommand {
     /// A program without arguments.
@@ -23,6 +55,7 @@ impl ShellCommand {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -33,11 +66,55 @@ impl ShellCommand {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.program.clone())
     }
+
+    /// The same shell, set up to report its folder at every prompt, so a
+    /// pane follows `cd` (RF-SES-01). PowerShell (5.1 and 7) starts with a
+    /// command that wraps the prompt its profile left; the profile still
+    /// loads. cmd gets the report in front of `inherited_prompt`, the
+    /// `PROMPT` it would have used. A shell with arguments of its own, or
+    /// any other shell, is returned unchanged. Nothing is written to disk.
+    ///
+    /// ```
+    /// use yien_core::ShellCommand;
+    ///
+    /// let pwsh = ShellCommand::new("pwsh.exe").reporting_cwd(None);
+    /// assert_eq!(&pwsh.args[..3], ["-NoLogo", "-NoExit", "-Command"]);
+    ///
+    /// let cmd = ShellCommand::new("cmd.exe").reporting_cwd(Some("$G"));
+    /// assert_eq!(cmd.env[0].0, "PROMPT");
+    /// assert!(cmd.env[0].1.ends_with("$G"));
+    /// ```
+    pub fn reporting_cwd(mut self, inherited_prompt: Option<&str>) -> Self {
+        if !self.args.is_empty() {
+            return self;
+        }
+        match self.display_name().to_ascii_lowercase().as_str() {
+            "powershell" | "pwsh" => {
+                self.args = ["-NoLogo", "-NoExit", "-Command", POWERSHELL_CWD_HOOK]
+                    .map(str::to_owned)
+                    .to_vec();
+            }
+            "cmd" => {
+                let own = inherited_prompt
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(CMD_DEFAULT_PROMPT);
+                // A YIEN started from a YIEN pane inherits the report already.
+                let prompt = if own.starts_with(CMD_CWD_PROMPT) {
+                    own.to_owned()
+                } else {
+                    format!("{CMD_CWD_PROMPT}{own}")
+                };
+                self.env.push(("PROMPT".to_owned(), prompt));
+            }
+            _ => {}
+        }
+        self
+    }
 }
 
 /// The user's shell: `pwsh` when it is on `PATH`, else `powershell`, else
-/// `cmd` on Windows; `$SHELL`, else `sh`, elsewhere. Reads the environment and
-/// the file system, so call it once, outside the async runtime.
+/// `cmd` on Windows; `$SHELL`, else `sh`, elsewhere. Reads the environment
+/// and the file system, so call it once, outside the async runtime.
 ///
 /// ```
 /// let shell = yien_core::default_shell();
@@ -49,6 +126,34 @@ pub fn default_shell() -> ShellCommand {
         on_path,
         std::env::var("SHELL").ok().as_deref(),
     )
+}
+
+/// The shell as configured and the same shell reporting its folder, so the
+/// report can be switched for panes started later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellChoice {
+    plain: ShellCommand,
+    reporting: ShellCommand,
+}
+
+impl ShellChoice {
+    /// Both forms of `shell`; cmd's report goes in front of
+    /// `inherited_prompt`.
+    pub fn new(shell: &ShellCommand, inherited_prompt: Option<&str>) -> Self {
+        Self {
+            plain: shell.clone(),
+            reporting: shell.clone().reporting_cwd(inherited_prompt),
+        }
+    }
+
+    /// The shell new panes run.
+    pub fn pick(&self, report_cwd: bool) -> &ShellCommand {
+        if report_cwd {
+            &self.reporting
+        } else {
+            &self.plain
+        }
+    }
 }
 
 fn pick_shell(
@@ -110,5 +215,232 @@ mod tests {
             "pwsh"
         );
         assert_eq!(ShellCommand::new("/bin/zsh").display_name(), "zsh");
+    }
+
+    #[test]
+    fn rf_ses_01_powershell_starts_with_the_prompt_hook() {
+        for program in [
+            "pwsh.exe",
+            "powershell.exe",
+            "PowerShell.EXE",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        ] {
+            let shell = ShellCommand::new(program).reporting_cwd(Some("$G"));
+            assert_eq!(shell.program, program);
+            assert_eq!(
+                shell.args,
+                ["-NoLogo", "-NoExit", "-Command", POWERSHELL_CWD_HOOK],
+                "{program}"
+            );
+            assert!(shell.env.is_empty(), "{program}");
+        }
+    }
+
+    #[test]
+    fn rf_ses_01_the_hook_survives_windows_argument_quoting() {
+        // A `"` would need escaping that PowerShell re-joins differently;
+        // a line break or NUL cannot travel in one argument.
+        assert!(!POWERSHELL_CWD_HOOK.contains(['"', '\n', '\r', '\0']));
+        // No trailing backslash, which would escape the closing quote.
+        assert!(!POWERSHELL_CWD_HOOK.ends_with('\\'));
+        assert!(POWERSHELL_CWD_HOOK.contains("'FileSystem'"));
+        assert!(POWERSHELL_CWD_HOOK.contains("']9;9;'"));
+    }
+
+    #[test]
+    fn rf_ses_01_cmd_reports_in_front_of_its_own_prompt() {
+        let cmd = ShellCommand::new("cmd.exe").reporting_cwd(None);
+        assert!(cmd.args.is_empty());
+        assert_eq!(
+            cmd.env,
+            [("PROMPT".to_owned(), "$E]9;9;\"$P\"$E\\$P$G".to_owned())]
+        );
+        let custom = ShellCommand::new("C:/Windows/System32/CMD.EXE")
+            .reporting_cwd(Some("$T $P [it's \"mine\"]$G"));
+        assert_eq!(custom.env[0].1, "$E]9;9;\"$P\"$E\\$T $P [it's \"mine\"]$G");
+        let empty = ShellCommand::new("cmd.exe").reporting_cwd(Some(""));
+        assert!(empty.env[0].1.ends_with("$E\\$P$G"));
+    }
+
+    #[test]
+    fn rf_ses_01_a_nested_cmd_gets_the_report_once() {
+        let outer = ShellCommand::new("cmd.exe").reporting_cwd(Some("$T$G"));
+        let inherited = outer.env[0].1.clone();
+        let inner = ShellCommand::new("cmd.exe").reporting_cwd(Some(&inherited));
+        assert_eq!(inner.env[0].1, inherited);
+        assert_eq!(inherited.matches("]9;9;").count(), 1);
+    }
+
+    #[test]
+    fn rf_ses_01_the_choice_switches_between_plain_and_reporting() {
+        let choice = ShellChoice::new(&ShellCommand::new("pwsh.exe"), None);
+        assert!(choice.pick(false).args.is_empty());
+        assert_eq!(choice.pick(true).args[2], "-Command");
+        let other = ShellChoice::new(&ShellCommand::new("sh"), None);
+        assert_eq!(other.pick(true), other.pick(false));
+    }
+
+    #[test]
+    fn a_shell_with_its_own_arguments_or_another_shell_is_unchanged() {
+        let mut own = ShellCommand::new("pwsh.exe");
+        own.args = vec!["-NoProfile".into()];
+        assert_eq!(own.clone().reporting_cwd(None), own);
+        for program in ["sh", "/bin/zsh", "nu.exe", "bash.exe"] {
+            let shell = ShellCommand::new(program);
+            assert_eq!(shell.clone().reporting_cwd(Some("$P")), shell);
+        }
+    }
+}
+
+/// Real Windows PowerShell 5.1 through ConPTY, as panes run it.
+#[cfg(all(test, windows))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test helpers outside #[test] fns are not covered by clippy.toml's in-test allowances"
+)]
+mod live {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+
+    use yien_pty::{PortablePty, PtyBackend, PtyEvent, SpawnSpec};
+    use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
+
+    use super::POWERSHELL_CWD_HOOK;
+
+    /// Keeps the typed test commands out of the developer's own history file.
+    const NO_HISTORY: &str =
+        "try { Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction Stop } catch {}";
+
+    /// A prompt that returns the last command's `$?`, `$LASTEXITCODE` and the
+    /// number of errors in `$Error`.
+    const FIXED_PROMPT: &str = "function global:prompt { \
+        'P[' + $? + '|' + $LASTEXITCODE + ']E' + $global:Error.Count + '> ' }";
+
+    /// A prompt written as profiles often do: it reads `$?` and
+    /// `$LASTEXITCODE` first, draws with `Write-Host` and returns a space.
+    const HOST_PROMPT: &str = "function global:prompt { \
+        $ok = $?; $code = $LASTEXITCODE; \
+        Write-Host ('S[' + $ok + '|' + $code + ']E' + $global:Error.Count + '>') \
+            -NoNewline -ForegroundColor Green; \
+        ' ' }";
+
+    struct Run {
+        raw: Vec<u8>,
+        screen: Vec<String>,
+    }
+
+    fn count(raw: &[u8], needle: &str) -> usize {
+        String::from_utf8_lossy(raw).matches(needle).count()
+    }
+
+    /// Runs `prompt`, with the hook when `hooked`, then each command once the
+    /// one before it has drawn `first` or its own prompt; waits for the output
+    /// to settle and returns the bytes and the screen.
+    fn run(prompt: &str, hooked: bool, first: &str, commands: &[(&str, &str)]) -> Run {
+        let mut script = format!("{NO_HISTORY}; {prompt}");
+        if hooked {
+            script = format!("{script}; {POWERSHELL_CWD_HOOK}");
+        }
+        let spec = SpawnSpec::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &script])
+            .cwd(r"C:\Windows")
+            .size(100, 30);
+        let session = PortablePty::new().spawn(spec).unwrap();
+        let mut engine = AlacrittyEngine::new(VtConfig::default(), 100, 30);
+        let mut raw = Vec::new();
+        let mut pump = |raw: &mut Vec<u8>, until: &dyn Fn(&[u8]) -> bool, quiet: bool| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let wait = Duration::from_millis(if quiet { 500 } else { 50 });
+                match session.events().recv_timeout(wait) {
+                    Ok(PtyEvent::Output(bytes)) => {
+                        raw.extend_from_slice(&bytes);
+                        let out = engine.feed(&bytes);
+                        if !out.replies.is_empty() {
+                            session.write(out.replies).unwrap();
+                        }
+                    }
+                    Ok(PtyEvent::Exited(status)) => panic!("powershell exited: {status:?}"),
+                    Err(RecvTimeoutError::Timeout) if quiet => return,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => panic!("the session closed"),
+                }
+                if !quiet && until(raw) {
+                    return;
+                }
+                let seen = String::from_utf8_lossy(raw).into_owned();
+                assert!(Instant::now() < deadline, "timed out; output: {seen:?}");
+            }
+        };
+        pump(&mut raw, &|raw| count(raw, first) > 0, false);
+        for (command, prompt) in commands {
+            let before = count(&raw, prompt);
+            session.write(format!("{command}\r").into_bytes()).unwrap();
+            pump(&mut raw, &|raw| count(raw, prompt) > before, false);
+        }
+        pump(&mut raw, &|_| true, true);
+        let _ = session.control().kill();
+        let screen = engine
+            .frame()
+            .lines
+            .iter()
+            .map(|row| {
+                let text: String = row.iter().map(|c| c.ch).collect();
+                text.trim_end().to_owned()
+            })
+            .collect();
+        Run { raw, screen }
+    }
+
+    fn reports(raw: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(raw).into_owned();
+        text.split("\x1b]9;9;")
+            .skip(1)
+            .map(|s| s.split("\x1b\\").next().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    /// Both prompts' runs: a failing cmdlet, a native exit code, the registry
+    /// and back to a folder.
+    fn commands(tag: &'static str) -> [(&'static str, String); 4] {
+        [
+            ("Get-Item nope-yien-missing", format!("{tag}[False|]")),
+            ("cmd /c exit 3", format!("{tag}[False|3]")),
+            ("cd HKLM:\\", format!("{tag}[True|3]")),
+            ("cd C:\\", format!("{tag}[True|3]")),
+        ]
+    }
+
+    /// The same screen with and without the hook, and one report per prompt
+    /// except in the registry.
+    fn same_prompt_with_the_hook(prompt: &str, tag: &'static str) {
+        let commands = commands(tag);
+        let commands: Vec<(&str, &str)> = commands.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let first = format!("{tag}[True|]");
+        let plain = run(prompt, false, &first, &commands);
+        let hooked = run(prompt, true, &first, &commands);
+        assert_eq!(hooked.screen, plain.screen);
+        assert!(reports(&plain.raw).is_empty());
+        assert_eq!(
+            reports(&hooked.raw),
+            [
+                r#""C:\Windows""#,
+                r#""C:\Windows""#,
+                r#""C:\Windows""#,
+                r#""C:\""#
+            ]
+        );
+    }
+
+    #[test]
+    fn rf_ses_01_the_hook_leaves_the_users_prompt_as_it_was() {
+        same_prompt_with_the_hook(FIXED_PROMPT, "P");
+    }
+
+    #[test]
+    fn rf_ses_01_the_hook_keeps_a_write_host_prompt_and_its_status() {
+        same_prompt_with_the_hook(HOST_PROMPT, "S");
     }
 }
