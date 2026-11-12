@@ -43,6 +43,7 @@ use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::TerminalPane;
 use crate::theme::{Theme, ThemeKind};
+use crate::title_bar::{PILL_LEAST, PILL_SHARE, PILL_WIDTH, TitleLayout};
 use crate::tray::{CloseRequest, close_request, quit_detail};
 
 mod bars;
@@ -1655,8 +1656,9 @@ impl Shell {
         }
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -1670,10 +1672,19 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
-                .child(project)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(project),
+                )
                 .child("/")
                 .child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.text)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tab.name.clone()),
@@ -1690,7 +1701,11 @@ impl Shell {
             .border_color(t.line)
             .child(
                 h_flex()
-                    .size_full()
+                    .flex_1()
+                    .w_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .h_full()
                     .items_center()
                     .gap(px(12.0))
                     .pr(px(10.0))
@@ -1704,48 +1719,58 @@ impl Shell {
                             .child("YIEN"),
                     )
                     .child(div().flex_1().min_w_0().children(crumbs))
-                    .child(self.render_palette_pill(cx))
+                    .child(self.render_palette_pill(&layout, cx))
                     .child(div().flex_1())
                     .child(self.render_need_count(cx))
-                    .child(
-                        icon_button("toggle-theme", assets::THEME, &t)
-                            .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_theme(&ToggleTheme, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
-                            .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
-                            .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_tab_bar(&ToggleTabBar, window, cx)
-                            })),
-                    )
-                    .child(
-                        icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
-                            .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
-                            .aria_toggled(toggled(self.bar_shown(Bar::Context)))
-                            .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_bar(&ToggleContextBar, window, cx)
-                            })),
-                    ),
+                    .when(layout.theme_button, |bar| {
+                        bar.child(
+                            icon_button("toggle-theme", assets::THEME, &t)
+                                .aria_label(format!("Toggle sumi and washi theme ({THEME_KEYS})"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_theme(&ToggleTheme, window, cx)
+                                })),
+                        )
+                    })
+                    .when(layout.tab_bar_button, |bar| {
+                        bar.child(
+                            icon_button("toggle-tab-bar", assets::PANEL_LEFT, &t)
+                                .aria_label(format!("Toggle tab bar ({TAB_BAR_KEYS})"))
+                                .aria_toggled(toggled(self.bar_shown(Bar::Tab)))
+                                .when(!self.bar_shown(Bar::Tab), |b| b.opacity(0.55))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_tab_bar(&ToggleTabBar, window, cx)
+                                })),
+                        )
+                    })
+                    .when(layout.context_bar_button, |bar| {
+                        bar.child(
+                            icon_button("toggle-context-bar", assets::PANEL_RIGHT, &t)
+                                .aria_label(format!("Toggle context bar ({CONTEXT_BAR_KEYS})"))
+                                .aria_toggled(toggled(self.bar_shown(Bar::Context)))
+                                .when(!self.bar_shown(Bar::Context), |b| b.opacity(0.55))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_context_bar(&ToggleContextBar, window, cx)
+                                })),
+                        )
+                    }),
             )
     }
 
     /// The title bar button that opens the palette, as the prototype's.
-    fn render_palette_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_pill(
+        &self,
+        layout: &TitleLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         h_flex()
             .id("palette-pill")
             .occlude()
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
-            .flex_none()
-            .w(px(420.0))
-            .max_w(relative(0.4))
+            .w(px(PILL_WIDTH))
+            .max_w(relative(PILL_SHARE))
+            .min_w(px(PILL_LEAST))
             .items_center()
             .gap(px(10.0))
             .px(px(10.0))
@@ -1762,14 +1787,23 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_palette(Mode::Commands, window, cx);
             }))
-            .child(div().flex_1().min_w_0().child("Execute a command"))
             .child(
                 div()
-                    .flex_none()
-                    .text_size(t.text(11.0))
-                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                    .child(PALETTE_KEYS),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child("Execute a command"),
             )
+            .when(layout.pill_keys, |pill| {
+                pill.child(
+                    div()
+                        .flex_none()
+                        .text_size(t.text(11.0))
+                        .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                        .child(PALETTE_KEYS),
+                )
+            })
     }
 
     /// The command palette or the switcher over the window (RF-NAV-01,
@@ -3153,7 +3187,7 @@ impl Render for Shell {
             .text_color(t.text)
             .text_size(t.text(14.0))
             .when_some(self.fonts.ui.clone(), |d, family| d.font_family(family))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 h_flex()
                     .flex_1()
