@@ -48,6 +48,30 @@ pub(crate) fn past_threshold(press: (f32, f32), now: (f32, f32)) -> bool {
     (now.0 - press.0).hypot(now.1 - press.1) >= DRAG_THRESHOLD
 }
 
+/// What the button coming up on a pressed tab row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Release {
+    /// The press became a drag: the tab goes where the line is.
+    Drop,
+    Select,
+    /// The second click of a double click.
+    Rename,
+}
+
+/// The release of a press that went [`past_threshold`] (`armed`) or not,
+/// on the `clicks`-th click in a row. gpui starts its own drag after 2 px,
+/// which swallows the click, so a double click that shook a little lands
+/// here and must still rename.
+pub(crate) fn release(armed: bool, clicks: usize) -> Release {
+    if armed {
+        Release::Drop
+    } else if clicks >= 2 {
+        Release::Rename
+    } else {
+        Release::Select
+    }
+}
+
 /// Where a tab dropped at `(x, y)` goes among `rows`, a project's rows top
 /// to bottom: a gap from 0 (above the first) to `rows.len()` (below the
 /// last). `None` when the pointer is beside the rows, or farther than half a
@@ -164,6 +188,16 @@ mod tests {
         assert!(!past_threshold((10.0, 10.0), (10.0, 15.9)));
         assert!(past_threshold((10.0, 10.0), (10.0, 16.0)));
         assert!(past_threshold((10.0, 10.0), (4.0, 10.0)), "any direction");
+    }
+
+    #[test]
+    fn rf_esp_16_a_double_click_that_shook_into_a_drag_still_renames() {
+        assert_eq!(release(false, 1), Release::Select);
+        assert_eq!(release(false, 2), Release::Rename);
+        assert_eq!(release(false, 3), Release::Rename, "a triple click");
+        assert_eq!(release(true, 1), Release::Drop);
+        assert_eq!(release(true, 2), Release::Drop, "a real drag moves");
+        assert_eq!(release(false, 0), Release::Select);
     }
 
     #[test]

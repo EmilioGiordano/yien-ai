@@ -740,9 +740,10 @@ impl Shell {
                     }
                 });
                 // Wherever the button comes up, a tab drag ends there.
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
+                        let clicks = event.click_count;
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(clicks, window, cx));
                     }
                 });
             },

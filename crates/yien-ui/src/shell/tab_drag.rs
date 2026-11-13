@@ -14,7 +14,7 @@ use super::bars::NoGhost;
 use crate::actions::*;
 use crate::model::TabView;
 use crate::region::Region;
-use crate::tab_order::{self, Span};
+use crate::tab_order::{self, Release, Span};
 
 /// How often a drag held near an end of the tab list scrolls it.
 const SCROLL_TICK: Duration = Duration::from_millis(16);
@@ -208,24 +208,34 @@ impl Shell {
         }
     }
 
-    /// The button came up. A drag past the threshold drops the tab where
-    /// the line was; a shorter one was a click, which gpui no longer
-    /// reports once its own drag started, so the tab is selected here.
-    pub(super) fn end_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The button came up after `clicks` clicks in a row. A drag past the
+    /// threshold drops the tab where the line was; a shorter one was a
+    /// click, which gpui no longer reports once its own drag started, so the
+    /// tab is selected, or renamed on a double click, here.
+    pub(super) fn end_tab_drag(
+        &mut self,
+        clicks: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let press = self.tab_drag.press.take();
         let landing = self.drop_landing();
-        match self.tab_drag.live.take() {
-            Some(live) if live.armed => {
+        let (tab, armed) = match self.tab_drag.live.take() {
+            Some(live) => (live.tab, live.armed),
+            // gpui started the drag on the last move, before any row heard of it.
+            None => match press {
+                Some((tab, _)) if cx.has_active_drag() => (tab, false),
+                _ => return,
+            },
+        };
+        match tab_order::release(armed, clicks) {
+            Release::Drop => {
                 if let Some((tab, project, to)) = landing {
                     self.move_tab_to(tab, project, to, cx);
                 }
             }
-            Some(live) => self.select_tab(live.tab, window, cx),
-            // gpui started the drag on the last move, before any row heard of it.
-            None => match press {
-                Some((tab, _)) if cx.has_active_drag() => self.select_tab(tab, window, cx),
-                _ => return,
-            },
+            Release::Select => self.select_tab(tab, window, cx),
+            Release::Rename => self.start_rename(tab, window, cx),
         }
         cx.notify();
     }
