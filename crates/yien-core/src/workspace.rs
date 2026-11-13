@@ -15,6 +15,7 @@ use yien_session::is_session_id;
 use crate::CoreError;
 use crate::convert;
 use crate::launch::LaunchPlan;
+use crate::titles::TitleFrom;
 
 mod session;
 pub(crate) mod worktree;
@@ -81,8 +82,8 @@ pub(crate) enum PaneEvent {
     Question(Option<PendingQuestion>),
     /// The "signal lost" mark went on or off.
     SignalLost(bool),
-    /// The terminal title the program set, or `None` once it reset it.
-    Title(Option<SessionTitle>),
+    /// The terminal title, or `None` once it was reset, and who set it.
+    Title(Option<SessionTitle>, TitleFrom),
     Cwd(String),
     /// The agent session the pane's launch number `launch` runs.
     SessionId {
@@ -127,7 +128,7 @@ impl PaneEvent {
             PaneEvent::State(..)
                 | PaneEvent::Question(_)
                 | PaneEvent::SignalLost(_)
-                | PaneEvent::Title(_)
+                | PaneEvent::Title(..)
                 | PaneEvent::Cwd(_)
                 | PaneEvent::SessionId { .. }
                 | PaneEvent::Program { .. }
@@ -213,9 +214,9 @@ struct Pane {
     /// The last terminal title of the current program; forgotten when that
     /// program changes, so a new run never shows the last one's topic.
     title: Option<SessionTitle>,
-    /// `title` came from the shell itself: set at its prompt, or by a
-    /// command that has ended. A CLI found later must not show it.
-    title_by_shell: bool,
+    /// `title` was set by the program the shell runs now, not by the shell
+    /// (RF-PAN-12): only such a title names a typed CLI's session.
+    title_ours: bool,
     cwd: Option<String>,
     state: AgentState,
     running: bool,
@@ -252,7 +253,8 @@ impl Pane {
     fn session_title(&self) -> Option<SessionTitle> {
         let agent =
             self.program.is_some() || (self.profile != SHELL_PROFILE && self.runs_session());
-        if !agent || self.custom_name.is_some() {
+        let own = self.profile != SHELL_PROFILE || self.title_ours;
+        if !agent || !own || self.custom_name.is_some() {
             return None;
         }
         let names = [
@@ -948,7 +950,7 @@ impl Workspace {
                 default_name: plan.default_name.clone(),
                 profile_name: plan.profile_name.clone(),
                 title: None,
-                title_by_shell: false,
+                title_ours: false,
                 cwd: None,
                 state: AgentState::Idle,
                 running: false,
@@ -1133,10 +1135,6 @@ impl Workspace {
         match event {
             PaneEvent::State(state, since) => {
                 p.state = state;
-                // Back at the prompt: whatever ran there has ended.
-                if p.program.is_none() && state != AgentState::Working {
-                    p.title_by_shell = true;
-                }
                 let since_changed = p.attention_since != since;
                 p.attention_since = since;
                 fx.push(Effect::Emit(CoreMsg::PaneState { pane, state }));
@@ -1154,12 +1152,16 @@ impl Workspace {
                 p.signal_lost = lost;
                 self.emit_pane(pane, &mut fx);
             }
-            PaneEvent::Title(title) => {
+            PaneEvent::Title(title, from) => {
                 let shown = p.session_title();
                 p.title = title;
-                // While a command runs, the title may be a CLI's that a poll
-                // has not found yet.
-                p.title_by_shell = p.program.is_none() && p.state != AgentState::Working;
+                // A shell without command marks cannot say; only a title set
+                // once its CLI was found is taken as the CLI's.
+                p.title_ours = match from {
+                    TitleFrom::Program => true,
+                    TitleFrom::Shell => false,
+                    TitleFrom::Unknown => p.program.is_some(),
+                };
                 // A spinner redraws the title many times a second; only a
                 // new topic reaches the UI.
                 if p.session_title() != shown {
@@ -1185,9 +1187,9 @@ impl Workspace {
                 // A poll can land after the shell it looked under exited.
                 let program = program.filter(|_| !p.stopped);
                 if p.program != program {
-                    // A CLI sets its title before a poll can find it, so a
-                    // title set while a command ran is kept for it.
-                    if p.program.is_some() || p.title_by_shell {
+                    // Not when one appears: a CLI sets its title before a poll
+                    // finds it, and the actor said who set it.
+                    if p.program.is_some() {
                         p.title = None;
                     }
                     p.program = program;
@@ -1951,8 +1953,13 @@ mod tests {
         assert_eq!(ws.snapshot().panes[0].name, "pwsh");
     }
 
+    /// A title the pane's program set.
     fn title(raw: &str) -> PaneEvent {
-        PaneEvent::Title(Some(SessionTitle::new(raw)))
+        titled(raw, TitleFrom::Program)
+    }
+
+    fn titled(raw: &str, from: TitleFrom) -> PaneEvent {
+        PaneEvent::Title(Some(SessionTitle::new(raw)), from)
     }
 
     fn shown(ws: &Workspace, pane: PaneId) -> Option<String> {
@@ -2006,7 +2013,7 @@ mod tests {
             let fx = ws.on_pane_event(a, title(&format!("{glyph} Fix login bug")));
             assert!(fx.is_empty(), "{glyph}");
         }
-        let fx = ws.on_pane_event(a, PaneEvent::Title(None));
+        let fx = ws.on_pane_event(a, PaneEvent::Title(None, TitleFrom::Program));
         assert!(updated(&fx, a));
         assert_eq!(shown(&ws, a), None);
     }
@@ -2026,9 +2033,8 @@ mod tests {
         let mut ws = Workspace::new();
         let (_, a) = project(&mut ws);
         ws.on_pane_event(a, PaneEvent::Started);
-        // `claude -c` runs as a command (OSC 133 C) and names its topic
-        // before a poll finds it.
-        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        // `claude -c` names its topic, inside its command, before a poll
+        // finds it.
         ws.on_pane_event(a, title("✳ Fix login bug"));
         let fx = ws.on_pane_event(a, program(0, Some("claude")));
         assert_eq!(named(&fx, a).as_deref(), Some("claude"));
@@ -2051,35 +2057,53 @@ mod tests {
         let mut ws = Workspace::new();
         let (_, a) = project(&mut ws);
         ws.on_pane_event(a, PaneEvent::Started);
-        // A prompt theme sets the title at the prompt.
-        ws.on_pane_event(a, title("build watcher"));
-        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        // A prompt theme's title, then the CLI is found.
+        ws.on_pane_event(a, titled("build watcher", TitleFrom::Shell));
         ws.on_pane_event(a, program(0, Some("claude")));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, title("✳ Fix login bug"));
+        assert_eq!(shown(&ws, a).as_deref(), Some("Fix login bug"));
+        // A shell with no command marks (cmd) cannot say: a title from
+        // before the CLI was found is not taken, one after it is.
+        ws.on_pane_event(a, program(0, None));
+        ws.on_pane_event(a, titled("build watcher", TitleFrom::Unknown));
+        ws.on_pane_event(a, program(0, Some("codex")));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, titled("⠹ Fix login bug", TitleFrom::Unknown));
+        assert_eq!(shown(&ws, a).as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn rf_pan_12_a_prompt_title_after_the_cli_exits_is_not_its_topic() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("claude")));
+        ws.on_pane_event(a, title("✳ Fix login bug"));
+        assert_eq!(shown(&ws, a).as_deref(), Some("Fix login bug"));
+        // The CLI exits: OSC 133 D and A, which the actor reports as the
+        // command's title becoming the shell's, then a prompt theme's title,
+        // all before the poll sees the CLI gone.
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Done, None));
+        ws.on_pane_event(a, titled("✳ Fix login bug", TitleFrom::Shell));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, titled("pwsh in yien-ai", TitleFrom::Shell));
         assert_eq!(shown(&ws, a), None);
         ws.on_pane_event(a, program(0, None));
-        // A command sets it and ends; the next command is the CLI.
-        ws.on_pane_event(a, title("build watcher"));
-        ws.on_pane_event(a, PaneEvent::State(AgentState::Done, None));
-        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
-        ws.on_pane_event(a, program(0, Some("claude")));
         assert_eq!(shown(&ws, a), None);
-        // A shell with no command marks (cmd): never at a command.
-        let fx = run(
-            &mut ws,
-            Command::SplitPane {
-                pane: a,
-                orientation: Orientation::Vertical,
-                profile: None,
-                before: false,
-            },
-        );
-        let b = spawned(&fx)[0];
-        ws.on_pane_event(b, PaneEvent::Started);
-        ws.on_pane_event(b, title("build watcher"));
-        ws.on_pane_event(b, program(0, Some("codex")));
-        assert_eq!(shown(&ws, b), None);
-        ws.on_pane_event(b, title("⠹ Fix login bug"));
-        assert_eq!(shown(&ws, b).as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn rf_pan_12_a_merged_batch_keeps_who_set_the_title() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("claude")));
+        // [State(Done), Title(theme), State(Working)] merged: the state moves,
+        // the title keeps its owner.
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        ws.on_pane_event(a, titled("pwsh in yien-ai", TitleFrom::Shell));
+        assert_eq!(shown(&ws, a), None);
     }
 
     #[test]

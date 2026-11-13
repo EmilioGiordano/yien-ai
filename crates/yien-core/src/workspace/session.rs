@@ -279,7 +279,7 @@ impl Workspace {
                     default_name: plan.default_name.clone(),
                     profile_name: plan.profile_name.clone(),
                     title: None,
-                    title_by_shell: false,
+                    title_ours: false,
                     cwd: None,
                     state: AgentState::Idle,
                     running: false,

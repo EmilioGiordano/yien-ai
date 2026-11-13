@@ -15,13 +15,10 @@ use yien_agent::{
     Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
-use yien_proto::{
-    AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion, SessionTitle,
-};
+use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
-    AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine,
-    VtOutput,
+    AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, VtConfig, VtEngine, VtOutput,
 };
 
 use crate::convert;
@@ -30,6 +27,7 @@ use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
 use crate::service::{Ctx, HookItem};
+use crate::titles::Titles;
 use crate::workspace::PaneEvent;
 
 /// How soon a write refused by a full input queue is tried again. Nothing
@@ -475,6 +473,8 @@ struct Actor {
     /// The restored line's row from the top of the scrollback, while this
     /// launch's screen starts with a restored one.
     restored_mark: Option<usize>,
+    /// The launch's terminal title and who set it.
+    titles: Titles,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -543,6 +543,7 @@ pub(crate) fn spawn(
         screen: setup.screen,
         restored: setup.restored,
         restored_mark: None,
+        titles: Titles::new(false),
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -825,6 +826,7 @@ impl Actor {
             .pid()
             .filter(|_| runs_shell(&self.plan))
             .map(|pid| self.ctx.shells.watch(self.id, pid, self.launch));
+        self.titles = Titles::new(runs_shell(&self.plan));
         self.session = Some(Session {
             control,
             reader,
@@ -1160,11 +1162,8 @@ impl Actor {
         if let Some(len) = out.selection_write_refused {
             tracing::debug!(pane = self.id.get(), len, "primary selection write refused");
         }
-        if let Some(title) = out.title {
-            self.report(PaneEvent::Title(match title {
-                TitleChange::Set(t) => Some(SessionTitle::new(t)),
-                TitleChange::Reset => None,
-            }));
+        if let Some((title, from)) = self.titles.absorb(&out.signals, out.title.as_ref()) {
+            self.report(PaneEvent::Title(title, from));
         }
         for signal in &out.signals {
             if let yien_vt::OscSignal::Cwd(dir) = signal {
