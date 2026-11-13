@@ -32,7 +32,7 @@ use crate::git::{ContextGit, FileMark};
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, folder_label,
+    AgentState, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView, folder_label,
     frames_to_take, typed_tab_name,
 };
 use crate::palette::{
@@ -58,6 +58,7 @@ mod files;
 mod menu;
 mod pane_menu;
 mod settings;
+mod spinner;
 mod status;
 mod tab_controls;
 mod tab_drag;
@@ -69,6 +70,7 @@ mod zoom;
 use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
+use spinner::Spinner;
 use status::{Line, Notice};
 use tab_drag::{RowMark, TabDragState};
 use tray::Tray;
@@ -214,6 +216,8 @@ pub(crate) struct Shell {
     divider_focus: FocusHandle,
     divider_cursor: Option<DividerKey>,
     pane_area: PaneArea,
+    /// The working tab rows' spinner.
+    spinner: Spinner,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -323,6 +327,9 @@ impl Shell {
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
         });
+        let visibility = cx.observe_window_visibility(window, |shell, _, window, cx| {
+            shell.keep_spinning(window, cx);
+        });
         // Before any binding: Escape must end a tab drag without reaching
         // the pane, where it would interrupt the agent.
         let shell = cx.weak_entity();
@@ -405,7 +412,8 @@ impl Shell {
             divider_focus: cx.focus_handle(),
             divider_cursor: None,
             pane_area: PaneArea::default(),
-            _subscriptions: vec![activation, appearance, escape],
+            spinner: Spinner::default(),
+            _subscriptions: vec![activation, appearance, visibility, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
@@ -2536,7 +2544,7 @@ impl Shell {
                 h_flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(glyph(state, &t))
+                    .child(self.tab_mark(self.workspace.tab_mark(tab)))
                     .when_some(project, |row, project| {
                         row.child(
                             div()
@@ -2601,6 +2609,23 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    /// A tab row's mark: a mono glyph in its 14 px slot, the spinner's frame
+    /// while it works. No id, so screen readers hear the row's state word,
+    /// never the frames.
+    fn tab_mark(&self, mark: TabMark) -> Div {
+        let t = self.theme;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(14.0))
+            .text_size(t.text(12.0))
+            .text_color(t.tab_mark_color(mark))
+            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+            .child(assets::tab_mark_text(mark, self.spinner.frame()))
     }
 
     /// The tab's name, or the field editing it.
@@ -3525,6 +3550,7 @@ impl Render for Shell {
         self.forget_ended_tab_drag(cx);
         self.finish_divider_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
+        self.keep_spinning(window, cx);
         let t = self.theme;
         v_flex()
             .key_context(CONTEXT)
