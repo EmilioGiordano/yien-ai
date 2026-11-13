@@ -8970,6 +8970,7 @@ dependencies = [
  "alacritty_terminal",
  "proptest",
  "thiserror 2.0.21",
+ "yien-input",
  "yien-proto",
 ]
 

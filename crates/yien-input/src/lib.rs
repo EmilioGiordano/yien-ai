@@ -212,7 +212,23 @@ pub fn encode_in(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
 /// The kitty keyboard protocol flag "disambiguate escape codes" (bit 0).
 pub const KITTY_DISAMBIGUATE: u8 = 1;
 
-/// The modes a program set that change how a key press is encoded.
+/// Encodings a program needs that no mode it sets announces. The caller
+/// knows which program runs and sets them; every quirk is off by default.
+///
+/// ```
+/// use yien_input::KeyQuirks;
+///
+/// assert!(!KeyQuirks::default().ctrl_delete_as_meta_d);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyQuirks {
+    /// Ctrl+Delete sends `ESC d` (Meta+D, delete the next word) whatever the
+    /// modes. Wrong for programs that read ESC as a key of its own, like vim.
+    pub ctrl_delete_as_meta_d: bool,
+}
+
+/// What changes how a key press is encoded: the modes the program set and
+/// the quirks of the program known to run.
 ///
 /// ```
 /// use yien_input::KeyModes;
@@ -228,34 +244,44 @@ pub struct KeyModes {
     pub win32_input: bool,
     /// The active kitty keyboard protocol flags (`CSI > flags u`).
     pub kitty_flags: u8,
+    /// The quirks of the program in the pane.
+    pub quirks: KeyQuirks,
 }
 
 /// Like [`encode_in`], but the keys the legacy bytes lose keep their
-/// modifiers where the program can see them. With win32-input-mode on,
-/// Shift+Enter, Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as
-/// Windows Terminal sends them. Otherwise Shift+Enter is `CSI 13;2u` when the
-/// kitty protocol asks to disambiguate. Every other key, and these keys in
-/// any other case, are encoded exactly as [`encode_in`] does.
+/// modifiers where the program can see them. Shift+Enter is `CSI 13;2u` when
+/// the kitty protocol asks to disambiguate. Otherwise, with win32-input-mode
+/// on, Shift+Enter, Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as
+/// Windows Terminal sends them. Ctrl+Delete is `ESC d` when the quirks say
+/// so. Every other key, and these keys in any other case, are encoded
+/// exactly as [`encode_in`] does.
 ///
 /// ```
-/// use yien_input::{encode_with, Key, KeyModes, Mods};
+/// use yien_input::{encode_with, Key, KeyModes, KeyQuirks, Mods};
 ///
-/// let kitty = KeyModes { kitty_flags: 1, ..KeyModes::default() };
+/// let kitty = KeyModes { kitty_flags: 1, win32_input: true, ..KeyModes::default() };
 /// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, kitty), Some(b"\x1b[13;2u".to_vec()));
 /// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, KeyModes::default()), Some(b"\r".to_vec()));
 /// assert_eq!(encode_with(&Key::Enter, Mods::NONE, kitty), Some(b"\r".to_vec()));
+/// let quirks = KeyQuirks { ctrl_delete_as_meta_d: true };
+/// let meta_d = KeyModes { quirks, ..KeyModes::default() };
+/// assert_eq!(encode_with(&Key::Delete, Mods::CTRL, meta_d), Some(b"\x1bd".to_vec()));
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
-    // ConPTY is the peer under 9001: it turns these events into CSI u for a
-    // client that asked for kitty, as for Windows Terminal. Checked first so
-    // flags left by a killed CLI never reach PSReadLine as CSI u.
+    // The bundled OpenConsole passes CSI 13;2u through verbatim to a 9001
+    // client, and Claude Code drops the Shift of a Win32 Enter event. Flags a
+    // killed CLI left on the main screen are cleared by the next prompt mark
+    // (`yien_vt::key_modes`), so PSReadLine gets the Win32 event again.
+    if *key == Key::Enter && mods == Mods::SHIFT && modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
+        return Some(b"\x1b[13;2u".to_vec());
+    }
+    if *key == Key::Delete && mods == Mods::CTRL && modes.quirks.ctrl_delete_as_meta_d {
+        return Some(vec![0x1b, b'd']);
+    }
     if modes.win32_input
         && let Some(event) = win32_event(key, mods)
     {
         return Some(win32::press(&event));
-    }
-    if *key == Key::Enter && mods == Mods::SHIFT && modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
-        return Some(b"\x1b[13;2u".to_vec());
     }
     encode_in(key, mods, modes.app_cursor)
 }
@@ -401,13 +427,23 @@ mod tests {
         app_cursor: false,
         win32_input: true,
         kitty_flags: 0,
+        quirks: KeyQuirks {
+            ctrl_delete_as_meta_d: false,
+        },
     };
     const KITTY: KeyModes = KeyModes {
         app_cursor: false,
         win32_input: false,
         kitty_flags: KITTY_DISAMBIGUATE,
+        quirks: KeyQuirks {
+            ctrl_delete_as_meta_d: false,
+        },
+    };
+    const META_D: KeyQuirks = KeyQuirks {
+        ctrl_delete_as_meta_d: true,
     };
 
+    /// Every mode combination, without quirks.
     fn all_modes() -> Vec<KeyModes> {
         let mut out = Vec::new();
         for win32_input in [false, true] {
@@ -417,11 +453,19 @@ mod tests {
                         app_cursor,
                         win32_input,
                         kitty_flags,
+                        quirks: KeyQuirks::default(),
                     });
                 }
             }
         }
         out
+    }
+
+    fn with_meta_d(modes: KeyModes) -> KeyModes {
+        KeyModes {
+            quirks: META_D,
+            ..modes
+        }
     }
 
     #[test]
@@ -451,15 +495,27 @@ mod tests {
     }
 
     #[test]
-    fn rf_age_02_win32_input_mode_wins_over_kitty_flags() {
-        let both = KeyModes {
-            win32_input: true,
-            ..KITTY
-        };
-        assert_eq!(
-            encode_with(&Key::Enter, Mods::SHIFT, both),
-            encode_with(&Key::Enter, Mods::SHIFT, WIN32)
-        );
+    fn rf_age_02_kitty_disambiguation_wins_over_win32_input_mode() {
+        // Claude Code under the bundled OpenConsole sets both, and only CSI u
+        // keeps its Shift.
+        for kitty_flags in [KITTY_DISAMBIGUATE, 0b1_1111, 0b0_0101] {
+            for app_cursor in [false, true] {
+                let both = KeyModes {
+                    app_cursor,
+                    kitty_flags,
+                    ..WIN32
+                };
+                assert_eq!(
+                    encode_with(&Key::Enter, Mods::SHIFT, both).unwrap(),
+                    b"\x1b[13;2u",
+                    "{both:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rf_age_02_kitty_flags_without_disambiguation_keep_the_win32_event() {
         let other_flags = KeyModes {
             kitty_flags: 0b0_1010,
             ..WIN32
@@ -468,6 +524,63 @@ mod tests {
             encode_with(&Key::Enter, Mods::SHIFT, other_flags),
             encode_with(&Key::Enter, Mods::SHIFT, WIN32)
         );
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_delete_is_meta_d_when_the_quirk_asks_in_every_mode() {
+        for modes in all_modes() {
+            assert_eq!(
+                encode_with(&Key::Delete, Mods::CTRL, with_meta_d(modes)).unwrap(),
+                b"\x1bd",
+                "{modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_pan_06_the_meta_d_quirk_changes_no_other_key() {
+        let keys = [
+            Key::Char('d'),
+            Key::Enter,
+            Key::Backspace,
+            Key::Delete,
+            Key::Escape,
+            Key::Up,
+            Key::F(5),
+        ];
+        let combos = [
+            Mods::NONE,
+            Mods::CTRL,
+            Mods::SHIFT,
+            Mods {
+                alt: true,
+                ..Mods::NONE
+            },
+            Mods {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+            Mods {
+                ctrl: true,
+                alt: true,
+                shift: false,
+            },
+        ];
+        for modes in all_modes() {
+            for key in &keys {
+                for mods in combos {
+                    if *key == Key::Delete && mods == Mods::CTRL {
+                        continue;
+                    }
+                    assert_eq!(
+                        encode_with(key, mods, with_meta_d(modes)),
+                        encode_with(key, mods, modes),
+                        "{key:?} {mods:?} in {modes:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

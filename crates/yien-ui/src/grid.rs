@@ -4,7 +4,7 @@
 
 use yien_input::mouse::{self, Action, Button, MouseEvent};
 use yien_input::paste::{self, Risk};
-use yien_input::{Key, KeyModes, Mods};
+use yien_input::{Key, KeyModes, KeyQuirks, Mods};
 use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, Modes, MouseEncoding, MouseTracking, Rgb,
     SelectionKind, Side, ViewportPoint,
@@ -321,6 +321,8 @@ pub(crate) struct KeyPress<'a> {
     pub(crate) platform: bool,
     /// The layout turns the modifiers into a character (AltGr, dead keys).
     pub(crate) prefer_text: bool,
+    /// What the pane's program needs that no mode it set says.
+    pub(crate) quirks: KeyQuirks,
 }
 
 /// The bytes to write for a key press, or `None` to let the text reach the
@@ -337,6 +339,7 @@ pub(crate) fn key_bytes(press: &KeyPress<'_>, modes: &Modes) -> Option<Vec<u8>> 
             app_cursor,
             win32_input: modes.win32_input,
             kitty_flags: modes.kitty_keyboard,
+            quirks: press.quirks,
         };
         return yien_input::encode_with(&key, mods, key_modes);
     }
@@ -778,6 +781,7 @@ mod tests {
             mods,
             platform: false,
             prefer_text: false,
+            quirks: KeyQuirks::default(),
         }
     }
 
@@ -881,13 +885,19 @@ mod tests {
             ..modes()
         };
         assert_eq!(key_bytes(&shift_enter, &kitty).unwrap(), b"\x1b[13;2u");
-        // Under ConPTY the Win32 event wins, so leftover flags never reach PSReadLine.
+        // Claude Code under the bundled ConPTY sets both, and reads only CSI u.
         let both = Modes {
-            kitty_keyboard: 1,
+            kitty_keyboard: 5,
+            ..conpty
+        };
+        assert_eq!(key_bytes(&shift_enter, &both).unwrap(), b"\x1b[13;2u");
+        // Flags without disambiguation leave the Win32 event alone.
+        let other_flags = Modes {
+            kitty_keyboard: 0b0_1010,
             ..conpty
         };
         assert_eq!(
-            key_bytes(&shift_enter, &both),
+            key_bytes(&shift_enter, &other_flags),
             key_bytes(&shift_enter, &conpty)
         );
         // Plain Enter is unchanged in every mode.
@@ -923,6 +933,29 @@ mod tests {
         // Plain Backspace is unchanged.
         let plain = press("backspace", None, Mods::NONE);
         assert_eq!(key_bytes(&plain, &conpty).unwrap(), vec![0x7f]);
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_delete_follows_the_quirks_of_the_pane_program() {
+        let quirks = KeyQuirks {
+            ctrl_delete_as_meta_d: true,
+        };
+        let conpty = Modes {
+            win32_input: true,
+            ..modes()
+        };
+        let mut delete = press("delete", None, Mods::CTRL);
+        delete.quirks = quirks;
+        let mut back = press("backspace", None, Mods::CTRL);
+        back.quirks = quirks;
+        for m in [modes(), conpty] {
+            assert_eq!(key_bytes(&delete, &m).unwrap(), b"\x1bd");
+            // Ctrl+Backspace already deletes a word there; it is left alone.
+            assert_eq!(
+                key_bytes(&back, &m),
+                key_bytes(&press("backspace", None, Mods::CTRL), &m)
+            );
+        }
     }
 
     fn modes() -> Modes {

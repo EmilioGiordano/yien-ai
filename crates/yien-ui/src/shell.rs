@@ -29,6 +29,7 @@ use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
 use crate::git::{ContextGit, FileMark};
+use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
@@ -627,6 +628,18 @@ impl Shell {
             });
             self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
+        }
+        self.sync_key_quirks(cx);
+    }
+
+    /// Each pane's key quirks follow the program its head names, which
+    /// changes after the view exists: details arrive, a program starts or ends.
+    fn sync_key_quirks(&self, cx: &mut Context<Self>) {
+        for (&pane, terminal) in &self.terminals {
+            let quirks = pane_key_quirks(&self.workspace.pane(pane));
+            if terminal.read(cx).quirks() != quirks {
+                terminal.update(cx, |t, _| t.set_quirks(quirks));
+            }
         }
     }
 

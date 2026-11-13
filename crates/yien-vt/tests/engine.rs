@@ -562,6 +562,54 @@ fn rf_age_02_kitty_flags_follow_the_screen() {
     assert_eq!(e.modes().kitty_keyboard, 0);
 }
 
+/// What a pane's Shift+Enter sends, given the modes the engine tracked.
+fn shift_enter(e: &AlacrittyEngine) -> Vec<u8> {
+    let modes = e.modes();
+    let key_modes = yien_input::KeyModes {
+        app_cursor: modes.app_cursor,
+        win32_input: modes.win32_input,
+        kitty_flags: modes.kitty_keyboard,
+        ..yien_input::KeyModes::default()
+    };
+    yien_input::encode_with(&yien_input::Key::Enter, yien_input::Mods::SHIFT, key_modes)
+        .unwrap_or_default()
+}
+
+const WIN32_SHIFT_ENTER: &[u8] = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_";
+
+/// Claude Code 2.1.322's keyboard setup through the bundled ConPTY, and the
+/// flags it pushes once its kitty query is answered.
+const CLAUDE_STARTUP: &[u8] = b"\x1b[?2004h\x1b[?2031h\x1b[?1004h\x1b[?9001l\x1b[?9001h\
+    \x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c\x1b[<u\x1b[>5u\x1b[>4;2m";
+
+/// YIEN's PowerShell prompt after a command, as `yien-core::shell` marks it.
+const POWERSHELL_PROMPT: &[u8] = b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\PS> \x1b]133;B\x1b\\";
+
+#[test]
+fn rf_age_02_shift_enter_reaches_claude_code_as_csi_u() {
+    let mut e = engine(100, 30);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+    e.feed(CLAUDE_STARTUP);
+    assert_eq!(shift_enter(&e), b"\x1b[13;2u");
+    // Claude Code leaves the alternate screen, and its flags with it.
+    e.feed(b"\x1b[?1049l");
+    e.feed(POWERSHELL_PROMPT);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+}
+
+#[test]
+fn rf_age_02_a_prompt_mark_drops_main_screen_flags_a_killed_cli_left() {
+    let mut e = engine(100, 30);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    e.feed(b"\x1b[>1u");
+    assert_eq!(shift_enter(&e), b"\x1b[13;2u");
+    e.feed(b"^C\r\n");
+    e.feed(POWERSHELL_PROMPT);
+    assert_eq!(e.modes().kitty_keyboard, 0);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+}
+
 #[test]
 fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
     // crossterm asks for the flags and then for device attributes, and takes
