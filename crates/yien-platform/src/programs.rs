@@ -13,13 +13,7 @@
 
 use std::collections::HashMap;
 
-/// The programs a pane head names when they run in a shell, by executable
-/// name without the extension.
-///
-/// ```
-/// assert!(yien_platform::programs::KNOWN_PROGRAMS.contains(&"claude"));
-/// ```
-pub const KNOWN_PROGRAMS: &[&str] = &["claude", "codex", "opencode"];
+pub use yien_proto::KNOWN_PROGRAMS;
 
 /// How far below the shell a known program is looked for: an npm shim runs
 /// `cmd /c`, then node, then the CLI's own executable.
