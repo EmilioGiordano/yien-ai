@@ -41,6 +41,7 @@ mod resume;
 mod screens;
 mod service;
 mod shell;
+mod titles;
 mod workspace;
 mod worktree;
 

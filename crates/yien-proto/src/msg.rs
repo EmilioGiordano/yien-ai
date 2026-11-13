@@ -72,9 +72,10 @@ impl fmt::Debug for InputBytes {
     }
 }
 
-/// The title of a past agent session: the first prompt the user typed in
-/// it, on one line. Its `Debug` shows only the length, so a prompt never
-/// reaches a log (plan §5.4).
+/// The title of an agent session: the first prompt the user typed in a past
+/// one, on one line, or the topic a running agent CLI set as its terminal
+/// title. Its `Debug` shows only the length, so a prompt never reaches a log
+/// (plan §5.4).
 ///
 /// ```
 /// let title = yien_proto::SessionTitle::new("fix the build");
@@ -840,8 +841,11 @@ pub struct PaneInfo {
     pub profile: String,
     /// The id of the profile it runs: `claude`, `shell`.
     pub profile_id: ProfileId,
-    /// The title the program set, if any.
-    pub title: Option<String>,
+    /// The session title the agent running here set as its terminal title,
+    /// cleaned by [`crate::session_title`]. `None` for a pane the user
+    /// renamed, one that runs no agent, or while the agent names no session
+    /// (RF-PAN-12).
+    pub title: Option<SessionTitle>,
     /// The working directory the shell last reported, if any.
     pub cwd: Option<String>,
     /// What its agent is doing.
@@ -1531,6 +1535,35 @@ mod tests {
         let shown = format!("{msg:?}");
         assert!(!shown.contains("secret"), "{shown}");
         assert!(shown.contains("SessionTitle(11 chars)"), "{shown}");
+    }
+
+    #[test]
+    fn rf_pan_12_a_pane_session_title_is_a_plain_string_and_hidden_in_debug() {
+        let info = PaneInfo {
+            id: PaneId::new(3),
+            tab: TabId::new(2),
+            name: "claude".into(),
+            profile: "Claude Code".into(),
+            profile_id: ProfileId::new("claude"),
+            title: Some(SessionTitle::new("secret plan")),
+            cwd: None,
+            state: AgentState::Idle,
+            running: true,
+            exit_code: None,
+            session_id: None,
+            needs_you_since: None,
+            attention_since: None,
+            question: None,
+            signal_lost: false,
+            runs_session: true,
+        };
+        // The same bytes an `Option<String>` title had: no protocol change.
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(r#""title":"secret plan""#), "{json}");
+        let msg = CoreMsg::PaneUpdated(info);
+        assert_eq!(round_trip(&msg), msg);
+        let shown = format!("{msg:?}");
+        assert!(!shown.contains("secret"), "{shown}");
     }
 
     #[test]

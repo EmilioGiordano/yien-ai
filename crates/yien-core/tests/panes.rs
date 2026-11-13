@@ -608,15 +608,91 @@ fn a_failed_spawn_is_reported_on_the_pane() {
 }
 
 #[test]
-fn rf_pan_12_program_title_reaches_the_pane() {
-    let mut h = Harness::start();
-    let (_, pane, child) = h.project();
-    child.output(b"\x1b]0;build watcher\x07");
+fn rf_pan_12_an_agent_session_title_reaches_the_pane_cleaned() {
+    let profile = Profile::from_toml(
+        "schema = 1\nid = \"agent\"\nname = \"Agent\"\n\
+         detect = { command = \"fake-agent\" }\n[[rules]]\nsources = []\n",
+    )
+    .unwrap();
+    let mut h = Harness::start_with(CoreConfig {
+        profiles: vec![profile],
+        ..config()
+    });
+    let (_, first, _) = h.project();
+    let (pane, child) = h.split(first, Some("agent"));
+    child.output("\x1b]0;fake-agent\x07\x1b]0;\u{25d0} Fix login bug\x07".as_bytes());
     let title = h.wait_for(|m| match m {
-        CoreMsg::PaneUpdated(p) if p.id == pane && p.title.is_some() => p.title.clone(),
+        CoreMsg::PaneUpdated(p) if p.id == pane => p.title.clone(),
         _ => None,
     });
-    assert_eq!(title, "build watcher");
+    assert_eq!(title.as_str(), "Fix login bug");
+}
+
+#[test]
+fn rf_pan_12_a_plain_shell_title_never_reaches_the_pane() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    // The directory report that follows makes the core send the pane again.
+    child.output(b"\x1b]0;build watcher\x07\x1b]9;9;\"C:\\work\"\x07");
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane && p.cwd.is_some() => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!(info.title, None);
+}
+
+/// Whether the fake process tree shows `claude` under every watched shell.
+static CLAUDE_RUNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn probe(pids: &[u32]) -> Vec<Option<&'static str>> {
+    let runs = CLAUDE_RUNS.load(std::sync::atomic::Ordering::SeqCst);
+    pids.iter().map(|_| runs.then_some("claude")).collect()
+}
+
+#[test]
+fn rf_pan_12_a_typed_cli_shows_only_the_title_its_command_set() {
+    let mut h = Harness::start_with(CoreConfig {
+        programs: Some(probe),
+        ..config()
+    });
+    h.backend.give_pid(Some(4242));
+    let (_, pane, child) = h.project();
+    const THEME: &str = "pwsh in yien";
+    let theme_seen = |p: &yien_proto::PaneInfo| {
+        assert_ne!(p.title.as_ref().map(|t| t.as_str()), Some(THEME), "{p:?}");
+    };
+    // A prompt theme's title, then `claude -c` runs and names its topic
+    // before the poll finds it.
+    child.output(b"\x1b]133;A\x07\x1b]0;pwsh in yien\x07\x1b]133;B\x07");
+    child.output("\x1b]133;C\x07\x1b]0;\u{2733} Fix login bug\x07".as_bytes());
+    CLAUDE_RUNS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let title = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane => {
+            theme_seen(p);
+            p.title.clone().filter(|_| p.name == "claude")
+        }
+        _ => None,
+    });
+    assert_eq!(title.as_str(), "Fix login bug");
+    // It exits: D and A, the theme's title, all before the poll sees it.
+    child.output(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]0;pwsh in yien\x07");
+    h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane => {
+            theme_seen(p);
+            (p.name == "claude" && p.title.is_none()).then_some(())
+        }
+        _ => None,
+    });
+    CLAUDE_RUNS.store(false, std::sync::atomic::Ordering::SeqCst);
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane && p.name != "claude" => Some(p.clone()),
+        CoreMsg::PaneUpdated(p) => {
+            theme_seen(p);
+            None
+        }
+        _ => None,
+    });
+    assert_eq!(info.title, None);
 }
 
 #[test]

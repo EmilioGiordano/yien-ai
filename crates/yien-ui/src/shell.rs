@@ -95,6 +95,8 @@ const CLAUDE_PROFILE: &str = "claude";
 const PANE_FOLDER_CHARS: usize = 48;
 const SIGNAL_LOST: &str = "signal lost";
 const SHELL_NAME_SHRINK: f32 = 1000.0;
+/// A session title gives way before the agent's tag.
+const TITLE_SHRINK: f32 = 1000.0;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -2772,6 +2774,7 @@ impl Shell {
             profile: &pane.profile,
             tag,
             agent: names_agent(pane),
+            title: pane.title.as_ref(),
             folder_lead: &folder_shown.lead,
             folder_last: &folder_shown.last,
             state: pane.state.label(),
@@ -2823,6 +2826,11 @@ impl Shell {
                 h.child(primary(pane.name.clone()))
             })
             .child(who)
+            .when_some(text.title.filter(|_| shows.title), |h, title| {
+                let mut title = words(title.as_str().to_owned()).text_color(t.term_text);
+                title.style().flex_shrink = Some(TITLE_SHRINK);
+                h.child(title)
+            })
             .when(!separate && shows.profile, |h| {
                 h.child(words(pane.profile.clone()))
             })
@@ -2946,6 +2954,9 @@ impl Shell {
         let mut pane_label = format!("{} pane", pane.name);
         if separate {
             pane_label.push_str(&format!(", {tag}"));
+        }
+        if let Some(title) = text.title {
+            pane_label.push_str(&format!(", {}", title.as_str()));
         }
         pane_label.push_str(&format!(", {}", pane.state.label()));
         if pane.signal_lost && !shows.signal_lost {
