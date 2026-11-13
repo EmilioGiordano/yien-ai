@@ -608,15 +608,37 @@ fn a_failed_spawn_is_reported_on_the_pane() {
 }
 
 #[test]
-fn rf_pan_12_program_title_reaches_the_pane() {
-    let mut h = Harness::start();
-    let (_, pane, child) = h.project();
-    child.output(b"\x1b]0;build watcher\x07");
+fn rf_pan_12_an_agent_session_title_reaches_the_pane_cleaned() {
+    let profile = Profile::from_toml(
+        "schema = 1\nid = \"agent\"\nname = \"Agent\"\n\
+         detect = { command = \"fake-agent\" }\n[[rules]]\nsources = []\n",
+    )
+    .unwrap();
+    let mut h = Harness::start_with(CoreConfig {
+        profiles: vec![profile],
+        ..config()
+    });
+    let (_, first, _) = h.project();
+    let (pane, child) = h.split(first, Some("agent"));
+    child.output("\x1b]0;fake-agent\x07\x1b]0;\u{25d0} Fix login bug\x07".as_bytes());
     let title = h.wait_for(|m| match m {
-        CoreMsg::PaneUpdated(p) if p.id == pane && p.title.is_some() => p.title.clone(),
+        CoreMsg::PaneUpdated(p) if p.id == pane => p.title.clone(),
         _ => None,
     });
-    assert_eq!(title, "build watcher");
+    assert_eq!(title.as_str(), "Fix login bug");
+}
+
+#[test]
+fn rf_pan_12_a_plain_shell_title_never_reaches_the_pane() {
+    let mut h = Harness::start();
+    let (_, pane, child) = h.project();
+    // The directory report that follows makes the core send the pane again.
+    child.output(b"\x1b]0;build watcher\x07\x1b]9;9;\"C:\\work\"\x07");
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id == pane && p.cwd.is_some() => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!(info.title, None);
 }
 
 #[test]

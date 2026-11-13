@@ -15,7 +15,9 @@ use yien_agent::{
     Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
-use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
+use yien_proto::{
+    AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion, SessionTitle,
+};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
     AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine,
@@ -1160,7 +1162,7 @@ impl Actor {
         }
         if let Some(title) = out.title {
             self.report(PaneEvent::Title(match title {
-                TitleChange::Set(t) => Some(t),
+                TitleChange::Set(t) => Some(SessionTitle::new(t)),
                 TitleChange::Reset => None,
             }));
         }
