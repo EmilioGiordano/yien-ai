@@ -57,7 +57,8 @@ pub const SCHEMA: &[Setting] = &[
     Setting {
         key: "terminal.font.size",
         default: "13",
-        doc: "The terminals' text size in pixels, 8 to 32.",
+        doc: "The terminals' text size in pixels, 8 to 32. Ctrl+= and Ctrl+- zoom every \
+              terminal from it, Ctrl+0 goes back to it; the zoom is kept across restarts.",
     },
     Setting {
         key: "terminal.shell_integration",

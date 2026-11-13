@@ -23,6 +23,7 @@ mod layout;
 mod matcher;
 mod model;
 mod palette;
+mod pane_head;
 mod region;
 mod release_notes;
 mod settings;
@@ -35,6 +36,7 @@ mod title_bar;
 mod tray;
 mod update;
 mod worktree;
+mod zoom;
 
 use std::rc::Rc;
 
