@@ -15,6 +15,10 @@ use std::collections::HashMap;
 
 /// The programs a pane head names when they run in a shell, by executable
 /// name without the extension.
+///
+/// ```
+/// assert!(yien_platform::programs::KNOWN_PROGRAMS.contains(&"claude"));
+/// ```
 pub const KNOWN_PROGRAMS: &[&str] = &["claude", "codex", "opencode"];
 
 /// How far below the shell a known program is looked for: an npm shim runs
@@ -45,6 +49,11 @@ pub fn known_program(exe: &str) -> Option<&'static str> {
 }
 
 /// One process in a snapshot.
+///
+/// ```
+/// let p = yien_platform::programs::Process { pid: 9, parent: 1, exe: "codex.exe".into() };
+/// assert_eq!(p.parent, 1);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Process {
     /// Its id.
@@ -56,6 +65,11 @@ pub struct Process {
 }
 
 /// The processes of a snapshot, by parent.
+///
+/// ```
+/// let tree = yien_platform::programs::ProcessTree::new(&[]);
+/// assert_eq!(tree.program_under(1), None);
+/// ```
 #[derive(Debug, Default)]
 pub struct ProcessTree<'a> {
     children: HashMap<u32, Vec<&'a Process>>,
@@ -80,6 +94,16 @@ impl<'a> ProcessTree<'a> {
 
     /// The known program closest below `shell`, a few levels deep at most;
     /// `None` when the shell runs nothing known, or has no child.
+    ///
+    /// ```
+    /// use yien_platform::programs::{Process, ProcessTree};
+    ///
+    /// let all = [
+    ///     Process { pid: 9, parent: 1, exe: "node.exe".into() },
+    ///     Process { pid: 10, parent: 9, exe: "opencode.exe".into() },
+    /// ];
+    /// assert_eq!(ProcessTree::new(&all).program_under(1), Some("opencode"));
+    /// ```
     pub fn program_under(&self, shell: u32) -> Option<&'static str> {
         let mut level = vec![shell];
         for _ in 0..DEPTH {
@@ -100,6 +124,11 @@ impl<'a> ProcessTree<'a> {
 
 /// The known program under each shell in `shells`, in the same order, from
 /// one snapshot. All `None` when the snapshot fails or off Windows.
+///
+/// ```no_run
+/// let found = yien_platform::programs::programs_under(&[4242, 4343]);
+/// assert_eq!(found.len(), 2);
+/// ```
 pub fn programs_under(shells: &[u32]) -> Vec<Option<&'static str>> {
     let processes = if shells.is_empty() {
         Vec::new()
