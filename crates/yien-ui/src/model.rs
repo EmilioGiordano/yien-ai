@@ -192,7 +192,9 @@ impl PaneView {
     }
 
     /// Whether closing it stops work the user may want: an agent or other
-    /// program that runs, or anything working or waiting for the user. A
+    /// program that runs, an agent CLI typed in a shell
+    /// ([`PaneView::runs_typed_agent`]), or anything working or waiting for
+    /// the user. A
     /// shell at its prompt is not busy; a command running inside a shell
     /// cannot be seen from here and does not count either. A pane whose
     /// details have not arrived counts as busy, to ask rather than lose work.
@@ -225,7 +227,19 @@ impl PaneView {
     pub fn is_busy(&self) -> bool {
         let agent = self.profile_id.as_str() != SHELL_PROFILE;
         let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
-        active || (self.running && agent)
+        active || (self.running && agent) || self.runs_typed_agent()
+    }
+
+    /// Whether an agent CLI the user typed in its shell runs, so the core
+    /// named the pane after it (RF-PAN-12). A pane the user renamed to
+    /// exactly `claude`, `codex` or `opencode` reads the same.
+    ///
+    /// ```ignore
+    /// let typed = PaneView { name: "codex".into(), ..shell };
+    /// assert!(typed.runs_typed_agent() && !shell.runs_typed_agent());
+    /// ```
+    pub fn runs_typed_agent(&self) -> bool {
+        self.running && yien_proto::is_known_program(&self.name)
     }
 }
 
@@ -2321,6 +2335,46 @@ mod tests {
             CloseStep::AskBusy
         );
         assert_eq!(view.busy_panes_of_tab(TabId::new(99)), 0);
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_running_a_typed_agent_cli_asks_before_it_closes() {
+        let mut view = demo();
+        // Tab 20 holds only an idle shell.
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 0);
+        let mut typed = pane(200, 20, P::Idle);
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            typed.name = (*cli).to_owned();
+            view.pane_updated(&typed);
+            assert!(view.pane(PaneId::new(200)).runs_typed_agent(), "{cli}");
+            assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1, "{cli}");
+            assert_eq!(view.busy_panes_of(ProjectId::new(2)), 1, "{cli}");
+            assert_eq!(
+                view.close_pane_step(PaneId::new(200), false),
+                CloseStep::AskBusy
+            );
+            assert_eq!(
+                view.close_tab_step(TabId::new(20), false),
+                CloseStep::AskBusy
+            );
+        }
+        // The CLI exited: the core names the pane after its shell again.
+        typed.name = "pwsh".into();
+        view.pane_updated(&typed);
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 0);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::Close
+        );
+        // Not a known name as the core writes it, or not running.
+        typed.name = "Claude Code".into();
+        view.pane_updated(&typed);
+        assert!(!view.pane(PaneId::new(200)).runs_typed_agent());
+        typed.name = "claude".into();
+        typed.running = false;
+        typed.exit_code = Some(0);
+        view.pane_updated(&typed);
+        assert!(!view.pane(PaneId::new(200)).is_busy());
     }
 
     #[test]
