@@ -194,10 +194,10 @@ impl PaneView {
     /// Whether closing it stops work the user may want: an agent or other
     /// program that runs, an agent CLI typed in a shell
     /// ([`PaneView::runs_typed_agent`]), or anything working or waiting for
-    /// the user. A
-    /// shell at its prompt is not busy; a command running inside a shell
-    /// cannot be seen from here and does not count either. A pane whose
-    /// details have not arrived counts as busy, to ask rather than lose work.
+    /// the user. A shell at its prompt is not busy; a command running inside
+    /// a shell cannot be seen from here and does not count either. A pane
+    /// whose details have not arrived counts as busy, to ask rather than lose
+    /// work.
     ///
     /// ```
     /// use yien_ui::{AgentState, PaneView};
