@@ -319,12 +319,15 @@ pub struct Rule {
     pub screen: Vec<ScreenRule>,
     /// Re-check a silent "working" pane with the screen rules after this long.
     pub watchdog: Option<Duration>,
+    /// An OSC 7501 `idle` after the agent's `working` ends its turn, for
+    /// agents that never send `done` (`idle_ends_turn = true`).
+    pub idle_ends_turn: bool,
 }
 
 impl Rule {
     /// The state machine configuration for this rule.
     pub fn machine_config(&self) -> MachineConfig {
-        MachineConfig::new(&self.sources, self.watchdog)
+        MachineConfig::new(&self.sources, self.watchdog).with_idle_ends_turn(self.idle_ends_turn)
     }
 }
 
@@ -418,6 +421,8 @@ struct RawRule {
     screen: Vec<RawScreen>,
     #[serde(default)]
     watchdog_secs: Option<u64>,
+    #[serde(default)]
+    idle_ends_turn: bool,
 }
 
 #[derive(Deserialize)]
@@ -604,6 +609,12 @@ impl Profile {
         if !r.screen.is_empty() && !declares(Source::Screen) {
             return Err(invalid(at("screen"), "set, but sources lacks \"screen\""));
         }
+        if r.idle_ends_turn && !declares(Source::Osc7501) {
+            return Err(invalid(
+                at("idle_ends_turn"),
+                "set, but sources lacks \"osc7501\"",
+            ));
+        }
         let mut screen = Vec::with_capacity(r.screen.len());
         for (j, s) in r.screen.into_iter().enumerate() {
             let field = format!("rules[{i}].screen[{j}]");
@@ -630,6 +641,7 @@ impl Profile {
             hooks: r.hooks,
             screen,
             watchdog,
+            idle_ends_turn: r.idle_ends_turn,
         })
     }
 
@@ -794,16 +806,71 @@ mod tests {
     }
 
     #[test]
-    fn rn_02_codex_and_opencode_never_declare_a_red_capable_source_alone() {
-        // Without hooks or OSC 7501 their machines never reach "working", so
-        // they never mark red; S7 and S8 decide richer sources.
+    fn rn_02_codex_and_opencode_read_osc_7501_only_where_it_was_run() {
+        // OSC 7501 tells working, blocked and the turn's end apart, so it may
+        // light the red mark; it was run against Codex 0.167.2 (sent since
+        // 0.163.0) and OpenCode 2.2.7. Older versions keep a source that never
+        // reaches "working", so they never mark red. No hooks for either.
         let profiles = builtin_profiles().unwrap();
-        for p in &profiles[1..3] {
+        let floors = [
+            ("codex", Version::new(0, 163, 0)),
+            ("opencode", Version::new(2, 2, 7)),
+        ];
+        for (p, (id, floor)) in profiles[1..3].iter().zip(floors) {
+            assert_eq!(p.id, id);
             for rule in &p.rules {
-                assert!(!rule.sources.contains(&Source::Hooks), "{}", p.id);
-                assert!(!rule.sources.contains(&Source::Osc7501), "{}", p.id);
+                assert!(!rule.sources.contains(&Source::Hooks), "{id}");
+                if rule.sources.contains(&Source::Osc7501) {
+                    let lower = rule.versions.as_ref().and_then(VersionReq::lower_bound);
+                    assert_eq!(lower, Some(floor), "{id}");
+                } else {
+                    assert!(!rule.idle_ends_turn, "{id}");
+                }
             }
+            assert!(p.select_rule(Some(floor)).verified, "{id}");
+            assert!(
+                p.select_rule(None).rule.sources.contains(&Source::Osc7501),
+                "an unprobed version runs the newest rule: {id}"
+            );
         }
+    }
+
+    #[test]
+    fn rf_age_05_only_agents_without_done_end_a_turn_on_idle() {
+        let profiles = builtin_profiles().unwrap();
+        let ends_on_idle = |id: &str| {
+            let p = profiles.iter().find(|p| p.id == id).unwrap();
+            p.select_rule(None).rule.machine_config().idle_ends_turn()
+        };
+        assert!(!ends_on_idle("claude"));
+        assert!(!ends_on_idle("codex"));
+        assert!(ends_on_idle("opencode"));
+        // A shell can run any of them.
+        assert!(ends_on_idle("shell"));
+    }
+
+    #[test]
+    fn rf_age_05_a_shell_reads_its_marks_and_the_status_of_a_typed_agent() {
+        let profiles = builtin_profiles().unwrap();
+        let shell = profiles.iter().find(|p| p.id == "shell").unwrap();
+        let config = shell.select_rule(None).rule.machine_config();
+        assert!(config.declares(Source::Osc133));
+        assert!(config.declares(Source::Osc7501));
+        assert!(!config.declares(Source::Hooks));
+    }
+
+    #[test]
+    fn idle_ends_turn_needs_osc_7501() {
+        let text = MINIMAL.replace("sources = []", "sources = [\"bel\"]\nidle_ends_turn = true");
+        assert!(text.contains("idle_ends_turn"));
+        match Profile::from_toml(&text) {
+            Err(ProfileError::Invalid { field, .. }) => {
+                assert_eq!(field, "rules[0].idle_ends_turn")
+            }
+            other => panic!("{other:?}"),
+        }
+        let ok = text.replace("[\"bel\"]", "[\"osc7501\"]");
+        assert!(Profile::from_toml(&ok).unwrap().rules[0].idle_ends_turn);
     }
 
     #[test]

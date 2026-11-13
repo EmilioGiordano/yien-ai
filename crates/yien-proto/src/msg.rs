@@ -190,6 +190,8 @@ pub enum NeedsReason {
     Permission,
     /// A question or an input request.
     Question,
+    /// The user must sign in again.
+    Auth,
     /// The agent reported it is blocked.
     Blocked,
     /// A screen rule confirmed it.

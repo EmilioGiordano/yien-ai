@@ -133,15 +133,33 @@ pub enum HookEvent {
     SessionEnd(SessionEndReason),
 }
 
-/// The value of an OSC 7501 agent status sequence.
+/// The value of an OSC 7501 agent status record about the program as a
+/// whole (records about a sub-session never reach the machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
+    /// At rest: at startup, after an interrupt, or (OpenCode) after a turn.
+    Idle,
     /// The agent is working.
     Working,
-    /// The agent is waiting for the user.
-    Blocked,
+    /// The agent is waiting for the user, for this reason when it said one.
+    Blocked(Option<BlockedKind>),
     /// The turn is done.
     Done,
+    /// The turn failed.
+    Error,
+    /// The agent gave the terminal back: it exited or suspended.
+    Clear,
+}
+
+/// What a blocked agent waits for (OSC 7501 `kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedKind {
+    /// A permission prompt.
+    Permission,
+    /// A question or a form.
+    Question,
+    /// The user must sign in again.
+    Auth,
 }
 
 /// An OSC 133 shell prompt mark.

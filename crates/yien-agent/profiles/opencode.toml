@@ -7,6 +7,13 @@ detect = { command = "opencode", version_args = ["--version"], version_regex = '
 resume = ["--session", "{session_id}"]
 session_id = "from_list"
 
-# No version verified yet (S8). BEL alone never lights the red mark.
+# OSC 7501, run against 2.2.7 only; earlier 2.2 releases were not checked.
+# It never sends `done` or `error`: `idle` after `working` ends the turn.
+[[rules]]
+versions = ">=2.2.7, <3"
+sources = ["osc7501"]
+idle_ends_turn = true
+
+# Older versions: BEL alone never lights the red mark.
 [[rules]]
 sources = ["bel"]

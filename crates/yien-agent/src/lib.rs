@@ -48,7 +48,7 @@ pub use profile::{
 };
 pub use question::{MAX_QUESTION_CHARS, claude_hook_question};
 pub use signal::{
-    AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
+    AgentStatus, BlockedKind, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
     SessionEndReason, SessionStartSource, Signal, Source,
 };
 pub use user::{

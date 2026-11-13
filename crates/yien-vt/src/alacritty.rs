@@ -310,15 +310,22 @@ impl AlacrittyEngine {
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8]) -> VtOutput {
         let mut out = VtOutput::default();
-        self.osc.scan_into(bytes, &mut out.signals);
+        let mut replies: Vec<(usize, Vec<u8>)> = self
+            .osc
+            .scan_replying(bytes, &mut out.signals)
+            .into_iter()
+            .map(|r| (r.at, r.bytes))
+            .chain(self.keys.scan(bytes).into_iter().map(|r| (r.at, r.bytes)))
+            .collect();
+        replies.sort_by_key(|(at, _)| *at);
         let mut start = 0;
-        for reply in self.keys.scan(bytes) {
-            let part = bytes.get(start..reply.at).unwrap_or_default();
+        for (at, reply) in replies {
+            let part = bytes.get(start..at).unwrap_or_default();
             self.parser
                 .advance(&mut KeepSelection(&mut self.term), part);
             self.collect(&mut out);
-            out.replies.extend_from_slice(&reply.bytes);
-            start = reply.at;
+            out.replies.extend_from_slice(&reply);
+            start = at;
         }
         let rest = bytes.get(start..).unwrap_or_default();
         self.parser

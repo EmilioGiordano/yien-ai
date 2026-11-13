@@ -2,6 +2,10 @@ schema = 1
 id = "shell"
 name = "Shell"
 
-# The command is the user's default shell, resolved by the caller.
+# The command is the user's default shell, resolved by the caller. A CLI
+# typed in it that reports over OSC 7501 drives the state instead of the
+# shell's marks until it sends `clear` or the prompt comes back. Any CLI may
+# be typed, OpenCode included, which ends its turns with `idle`.
 [[rules]]
-sources = ["osc133"]
+sources = ["osc133", "osc7501"]
+idle_ends_turn = true
