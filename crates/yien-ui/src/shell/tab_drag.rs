@@ -260,7 +260,13 @@ impl Shell {
         }
     }
 
-    fn move_tab_to(&mut self, tab: TabId, project: ProjectId, to: usize, cx: &mut Context<Self>) {
+    pub(super) fn move_tab_to(
+        &mut self,
+        tab: TabId,
+        project: ProjectId,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) {
         if self.workspace.move_tab(tab, to) {
             let to_index = u32::try_from(to).unwrap_or(u32::MAX);
             self.command(
