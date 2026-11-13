@@ -2774,7 +2774,7 @@ impl Shell {
             profile: &pane.profile,
             tag,
             agent: names_agent(pane),
-            title: pane.title.as_ref().map(|t| t.as_str()),
+            title: pane.title.as_ref(),
             folder_lead: &folder_shown.lead,
             folder_last: &folder_shown.last,
             state: pane.state.label(),
@@ -2827,7 +2827,7 @@ impl Shell {
             })
             .child(who)
             .when_some(text.title.filter(|_| shows.title), |h, title| {
-                let mut title = words(title.to_owned()).text_color(t.term_text);
+                let mut title = words(title.as_str().to_owned()).text_color(t.term_text);
                 title.style().flex_shrink = Some(TITLE_SHRINK);
                 h.child(title)
             })
@@ -2956,7 +2956,7 @@ impl Shell {
             pane_label.push_str(&format!(", {tag}"));
         }
         if let Some(title) = text.title {
-            pane_label.push_str(&format!(", {title}"));
+            pane_label.push_str(&format!(", {}", title.as_str()));
         }
         pane_label.push_str(&format!(", {}", pane.state.label()));
         if pane.signal_lost && !shows.signal_lost {

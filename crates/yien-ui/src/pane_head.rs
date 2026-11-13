@@ -2,7 +2,7 @@
 //! Flex ellipsizes the text and keeps the buttons whole; this only drops the
 //! pieces that would not fit at their full width.
 
-use yien_proto::SHELL_PROFILE;
+use yien_proto::{SHELL_PROFILE, SessionTitle};
 
 use crate::model::PaneView;
 
@@ -64,8 +64,9 @@ pub(crate) struct HeadText<'a> {
     pub tag: &'a str,
     /// Whether `tag` names an agent; else it is a shell or other program.
     pub agent: bool,
-    /// The agent's session title: `Fix login bug`.
-    pub title: Option<&'a str>,
+    /// The agent's session title: `Fix login bug`. Kept as a
+    /// [`SessionTitle`] so this struct's `Debug` never prints it.
+    pub title: Option<&'a SessionTitle>,
     /// The folder up to its last name, and that last name.
     pub folder_lead: &'a str,
     pub folder_last: &'a str,
@@ -172,7 +173,7 @@ impl PaneHeadLayout {
         };
         pieces.push(who);
         if let (true, Some(title)) = (self.title, text.title) {
-            let shown = title.chars().count().min(TITLE_CHARS);
+            let shown = title.as_str().chars().count().min(TITLE_CHARS);
             pieces.push(shown as f32 * EM * TEXT_SIZE * scale);
         }
         if !separate && self.profile {
@@ -210,7 +211,7 @@ fn chars(s: &str, size: f32, scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{PaneId, ProfileId};
+    use yien_proto::{PaneId, ProfileId, SessionTitle};
 
     use super::{
         BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, names_agent, program_tag, runs_agent,
@@ -236,7 +237,9 @@ mod tests {
 
     fn titled() -> HeadText<'static> {
         HeadText {
-            title: Some("Fix the login bug in the session restore path"),
+            title: Some(Box::leak(Box::new(SessionTitle::new(
+                "Fix the login bug in the session restore path",
+            )))),
             ..claude()
         }
     }
