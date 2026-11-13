@@ -296,6 +296,7 @@ impl Workspace {
                     visible: false,
                     seen: false,
                     standin: None,
+                    program: None,
                     stopped: false,
                 },
             );

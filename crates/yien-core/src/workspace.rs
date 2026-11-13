@@ -92,6 +92,12 @@ pub(crate) enum PaneEvent {
     EndedByUser {
         launch: u64,
     },
+    /// The known program running in the shell of launch number `launch`,
+    /// which names the pane while it runs (RF-PAN-12).
+    Program {
+        launch: u64,
+        program: Option<String>,
+    },
     Started,
     Exited(Option<u32>),
     /// The program could not start or can no longer be shown; the actor
@@ -122,6 +128,7 @@ impl PaneEvent {
                 | PaneEvent::Title(_)
                 | PaneEvent::Cwd(_)
                 | PaneEvent::SessionId { .. }
+                | PaneEvent::Program { .. }
                 | PaneEvent::Selection(_)
                 | PaneEvent::Clipboard
         )
@@ -217,6 +224,9 @@ struct Pane {
     /// The name and profile name of a stand-in program, shown instead of
     /// the profile's while it runs; the saved session keeps the profile.
     standin: Option<(String, String)>,
+    /// The known program its shell runs now; it names the pane unless the
+    /// user did (RF-PAN-12). Never saved.
+    program: Option<String>,
     /// Its program exited, failed to start or lost its actor, and has not
     /// started again.
     stopped: bool,
@@ -625,6 +635,7 @@ impl Workspace {
                 p.launch += 1;
                 p.ended_explicitly = false;
                 p.session_id = None;
+                p.program = None;
                 let launch = p.launch;
                 fx.push(Effect::Relaunch { pane, launch });
                 self.emit_pane(pane, &mut fx);
@@ -924,6 +935,7 @@ impl Workspace {
                 visible: false,
                 seen: false,
                 standin: None,
+                program: None,
                 stopped: false,
             },
         );
@@ -1123,23 +1135,35 @@ impl Workspace {
                     self.emit_pane(pane, &mut fx);
                 }
             }
-            PaneEvent::SessionId { launch, .. } | PaneEvent::EndedByUser { launch }
+            PaneEvent::SessionId { launch, .. }
+            | PaneEvent::EndedByUser { launch }
+            | PaneEvent::Program { launch, .. }
                 if launch != p.launch => {}
             PaneEvent::SessionId { id, .. } => {
                 p.session_id = Some(id);
                 self.emit_pane(pane, &mut fx);
             }
             PaneEvent::EndedByUser { .. } => p.ended_explicitly = true,
+            PaneEvent::Program { program, .. } => {
+                // A poll can land after the shell it looked under exited.
+                let program = program.filter(|_| !p.stopped);
+                if p.program != program {
+                    p.program = program;
+                    self.emit_pane(pane, &mut fx);
+                }
+            }
             PaneEvent::Started => {
                 p.running = true;
                 p.stopped = false;
                 p.exit_code = None;
+                p.program = None;
                 self.emit_pane(pane, &mut fx);
             }
             PaneEvent::Exited(code) => {
                 p.running = false;
                 p.stopped = true;
                 p.exit_code = code;
+                p.program = None;
                 fx.push(Effect::Emit(CoreMsg::PaneExited { pane, code }));
                 self.emit_pane(pane, &mut fx);
             }
@@ -1147,6 +1171,7 @@ impl Workspace {
                 p.running = false;
                 p.stopped = true;
                 p.exit_code = None;
+                p.program = None;
                 fx.push(Effect::Emit(CoreMsg::Error {
                     pane: Some(pane),
                     message,
@@ -1168,12 +1193,14 @@ impl Workspace {
             }
             PaneEvent::Standin(standin) => {
                 p.standin = standin;
+                p.program = None;
                 self.emit_pane(pane, &mut fx);
             }
             PaneEvent::Crashed => {
                 p.running = false;
                 p.stopped = true;
                 p.exit_code = None;
+                p.program = None;
                 // The restarted actor runs the pane's own program again.
                 p.standin = None;
                 // The restarted actor starts idle and reports no change, so a
@@ -1289,8 +1316,10 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
         tab: p.tab,
         name: p
             .custom_name
-            .clone()
-            .unwrap_or_else(|| default_name.clone()),
+            .as_ref()
+            .or(p.program.as_ref())
+            .unwrap_or(default_name)
+            .clone(),
         profile: profile_name.clone(),
         profile_id: ProfileId::new(p.profile.clone()),
         title: p.title.clone(),
@@ -1778,6 +1807,102 @@ mod tests {
             },
         );
         assert_eq!(ws.snapshot().panes[0].name, "sh");
+    }
+
+    fn program(launch: u64, name: Option<&str>) -> PaneEvent {
+        PaneEvent::Program {
+            launch,
+            program: name.map(str::to_owned),
+        }
+    }
+
+    fn named(fx: &[Effect], pane: PaneId) -> Option<String> {
+        fx.iter().find_map(|e| match e {
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == pane => Some(p.name.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_pane_is_named_after_the_program_it_runs() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        let fx = ws.on_pane_event(a, program(0, Some("claude")));
+        assert_eq!(named(&fx, a).as_deref(), Some("claude"));
+        assert!(ws.on_pane_event(a, program(0, Some("claude"))).is_empty());
+        let fx = ws.on_pane_event(a, program(0, None));
+        assert_eq!(named(&fx, a).as_deref(), Some("sh"));
+    }
+
+    #[test]
+    fn rf_pan_12_a_rename_wins_over_the_detected_program() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        let rename = |name: &str| Command::RenamePane {
+            pane: a,
+            name: name.into(),
+        };
+        run(&mut ws, rename("server"));
+        ws.on_pane_event(a, program(0, Some("codex")));
+        assert_eq!(ws.snapshot().panes[0].name, "server");
+        run(&mut ws, rename(""));
+        assert_eq!(ws.snapshot().panes[0].name, "codex");
+        run(&mut ws, rename("review"));
+        assert_eq!(ws.snapshot().panes[0].name, "review");
+    }
+
+    #[test]
+    fn rf_pan_12_the_detected_program_goes_with_the_shell_and_is_never_saved() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("opencode")));
+        let saved = ws.to_session();
+        let mut panes = saved
+            .projects
+            .iter()
+            .flat_map(|p| &p.tabs)
+            .flat_map(|t| &t.panes);
+        assert!(panes.all(|p| p.name.is_none()));
+        ws.on_pane_event(a, PaneEvent::Exited(Some(0)));
+        assert_eq!(ws.snapshot().panes[0].name, "sh");
+        // A poll that looked before the exit lands after it.
+        ws.on_pane_event(a, program(0, Some("opencode")));
+        assert_eq!(ws.snapshot().panes[0].name, "sh");
+    }
+
+    #[test]
+    fn rf_pan_12_a_report_of_another_launch_is_dropped() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("claude")));
+        run(&mut ws, Command::RelaunchPane { pane: a });
+        assert_eq!(ws.snapshot().panes[0].name, "sh");
+        ws.on_pane_event(a, PaneEvent::Started);
+        assert!(ws.on_pane_event(a, program(0, Some("claude"))).is_empty());
+        assert_eq!(ws.snapshot().panes[0].name, "sh");
+        ws.on_pane_event(a, program(1, Some("claude")));
+        assert_eq!(ws.snapshot().panes[0].name, "claude");
+    }
+
+    #[test]
+    fn rf_pan_12_a_crash_or_a_stand_in_drops_the_detected_program() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("claude")));
+        ws.on_pane_event(a, PaneEvent::Crashed);
+        assert_eq!(ws.snapshot().panes[0].name, "sh");
+        ws.on_pane_event(a, PaneEvent::Started);
+        ws.on_pane_event(a, program(0, Some("claude")));
+        ws.on_pane_event(
+            a,
+            PaneEvent::Standin(Some(("pwsh".to_owned(), "Fallback".to_owned()))),
+        );
+        assert_eq!(ws.snapshot().panes[0].name, "pwsh");
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
 use crate::persist::{self, Opened, Writer};
+use crate::programs::{self, Shells};
 use crate::report::Reports;
 use crate::screens::{ScreenSource, Screens};
 use crate::shell::ShellChoice;
@@ -55,6 +56,8 @@ pub(crate) struct Ctx {
     pub consoles: Arc<Consoles>,
     /// What programs asked to put on the clipboard, until the UI takes it.
     pub clipboards: Arc<Clipboards>,
+    /// The shell panes the program poller looks under (RF-PAN-12).
+    pub shells: Arc<Shells>,
 }
 
 /// Hook events waiting for one pane's actor. Beyond this the pane's channel
@@ -158,6 +161,13 @@ pub(crate) async fn run(
         Some((git, reports)) => (Some(git), Some(reports)),
         None => (None, None),
     };
+    if let Some(probe) = ctx.config.programs {
+        tokio::spawn(programs::poll(
+            probe,
+            Arc::clone(&ctx.shells),
+            Arc::clone(&reports),
+        ));
+    }
     let (jobs, mut done) = mpsc::channel(WORKTREE_JOBS);
     let ctx_palette = ctx.config.vt.palette;
     let mut service = Service {
