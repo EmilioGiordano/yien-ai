@@ -257,6 +257,8 @@ actions!(
         TabBarSelect,
         /// Gives the keyboard back to the pane without selecting anything.
         TabBarLeave,
+        /// Opens the menu of the tab under the tab bar's cursor (RF-ESP-16).
+        TabBarMenu,
         /// Gives the keyboard back to the pane from the context bar.
         ContextBarLeave,
         /// Moves the focused divider of side-by-side panes left.
@@ -383,6 +385,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("down", TabBarDown, tab_bar),
         KeyBinding::new("enter", TabBarSelect, tab_bar),
         KeyBinding::new("escape", TabBarLeave, tab_bar),
+        KeyBinding::new("shift-f10", TabBarMenu, tab_bar),
         KeyBinding::new("escape", ContextBarLeave, context_bar),
         KeyBinding::new("escape", DismissNotice, Some("YienShell && !Terminal")),
         KeyBinding::new("up", FileTreeUp, file_tree),
@@ -468,6 +471,7 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(TabBarDown),
         Box::new(TabBarSelect),
         Box::new(TabBarLeave),
+        Box::new(TabBarMenu),
         Box::new(ContextBarLeave),
         Box::new(DismissNotice),
         Box::new(FileTreeUp),
@@ -763,6 +767,13 @@ mod tests {
             crate::catalog::default_keys("pane.actions").as_deref(),
             Some("Shift+F10")
         );
+    }
+
+    #[test]
+    fn rf_esp_16_shift_f10_opens_the_tab_menu_in_the_tab_bar_only() {
+        let tab_bar = ["Root", CONTEXT, TAB_BAR_CONTEXT];
+        assert!(first_is("shift-f10", &tab_bar, &TabBarMenu));
+        assert!(first_is("shift-f10", &TERMINAL_STACK, &OpenPaneMenu));
     }
 
     #[test]
