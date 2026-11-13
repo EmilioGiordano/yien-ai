@@ -24,6 +24,7 @@ mod git;
 pub mod hook_frame;
 mod msg;
 mod path;
+mod title;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,7 @@ pub use msg::{
     WorkspaceSnapshot, WorktreeCheck, WorktreeFiles, WorktreeWork,
 };
 pub use path::{folder_key, same_folder};
+pub use title::{SESSION_TITLE_MAX, session_title};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
 ///
