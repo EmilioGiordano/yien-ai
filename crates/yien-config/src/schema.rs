@@ -40,6 +40,15 @@ pub const SCHEMA: &[Setting] = &[
               until the file is next saved.",
     },
     Setting {
+        key: "ui.tabs.default_dir",
+        default: "\"\"",
+        doc: "The folder the tab bar's new tab button opens a shell in. Empty: your home \
+              folder. ~ stands for your home folder and %NAME% for an environment \
+              variable; write a Windows path in single quotes, such as 'D:\\Code'. A \
+              folder that is a project already gets a new tab; any other is added as a \
+              project. A folder that does not exist gives a warning and your home folder.",
+    },
+    Setting {
         key: "terminal.font.family",
         default: "\"\"",
         doc: "The terminals' font; use a monospaced one. Empty: the first installed of \

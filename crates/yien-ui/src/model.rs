@@ -906,13 +906,23 @@ impl WorkspaceView {
     /// already, compared as [`same_folder`] does, goes to its most recently
     /// selected tab (RF-ESP-01).
     pub fn folder_target(&self, root: &str) -> FolderTarget {
-        let Some(project) = self.projects.iter().find(|p| same_folder(&p.root, root)) else {
+        let Some(project) = self.project_at(root) else {
             return FolderTarget::NewProject;
         };
         self.tabs_by_recent()
             .iter()
-            .find(|t| t.project == project.id)
+            .find(|t| t.project == project)
             .map_or(FolderTarget::NewProject, |t| FolderTarget::Tab(t.id))
+    }
+
+    /// The project whose folder is `root`, compared as [`same_folder`]
+    /// does, with or without tabs: a new tab in `root` opens there rather
+    /// than in a second project on the same folder.
+    pub fn project_at(&self, root: &str) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .find(|p| same_folder(&p.root, root))
+            .map(|p| p.id)
     }
 
     /// How many panes of a project closing it would stop while they work
@@ -2244,6 +2254,23 @@ mod tests {
             view.folder_target("C:/Code/elsewhere"),
             FolderTarget::NewProject
         );
+    }
+
+    #[test]
+    fn rf_esp_03_the_default_folder_reuses_its_project_tabs_or_not() {
+        let view = demo();
+        assert_eq!(
+            view.project_at("C:/Code//project-1/"),
+            Some(ProjectId::new(1))
+        );
+        assert_eq!(
+            view.project_at("C:/Code/project-3"),
+            Some(ProjectId::new(3)),
+            "a project with no tab is reused, not added again"
+        );
+        assert_eq!(view.project_at("C:/Code/project-1/sub"), None);
+        assert_eq!(view.project_at("C:/Code"), None);
+        assert_eq!(WorkspaceView::default().project_at("C:/Code"), None);
     }
 
     #[test]

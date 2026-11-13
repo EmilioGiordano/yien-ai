@@ -52,6 +52,7 @@ use crate::tray::{CloseRequest, close_request, quit_detail};
 use crate::update::Updates;
 
 mod bars;
+mod default_tab;
 mod dividers;
 mod files;
 mod menu;
@@ -2259,6 +2260,7 @@ impl Shell {
             } else {
                 "Projects"
             }))
+            .child(self.default_tab_button(cx))
             .child(
                 icon_button("add-project", assets::PLUS, &t)
                     .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
@@ -3560,6 +3562,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_default_tab))
             .on_action(cx.listener(Self::new_claude_tab))
             .on_action(cx.listener(Self::new_worktree_tab))
             .on_action(cx.listener(Self::worktree_prompt_confirm))
@@ -3769,6 +3772,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("empty state's add project button", "project.add"),
     ("project head close button", "project.close"),
     ("project head new tab button", "tab.new"),
+    ("tab bar head new tab button", "tab.new_default"),
     ("close project dialog buttons", "project.close"),
     ("close tab dialog buttons", "tab.close"),
     ("close pane dialog buttons", "pane.close"),

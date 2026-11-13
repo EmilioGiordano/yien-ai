@@ -120,6 +120,9 @@ impl Walk<'_> {
                     }
                 };
             }
+            "ui.tabs.default_dir" => {
+                self.loaded.config.default_tab_dir = non_empty(self.string(path, value)?);
+            }
             "ui.font.family" => {
                 self.loaded.config.ui_font.family = non_empty(self.string(path, value)?);
             }
@@ -348,6 +351,33 @@ group = \"project\"")
             p.message.contains("\"project\" or \"state\""),
             "{}",
             p.message
+        );
+    }
+
+    #[test]
+    fn rf_esp_03_the_default_tab_folder_is_home_unless_set() {
+        assert_eq!(ok("").config.default_tab_dir, None);
+        assert_eq!(
+            ok("ui.tabs.default_dir = \"  \"").config.default_tab_dir,
+            None
+        );
+        let set = ok("[ui.tabs]\ngroup = \"state\"\ndefault_dir = 'D:\\Code\\ '\n");
+        assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+        assert_eq!(set.config.default_tab_dir.as_deref(), Some("D:\\Code\\"));
+        assert_eq!(set.config.tab_grouping, TabGrouping::State);
+        assert_eq!(
+            ok("ui.tabs.default_dir = \"~/work\"")
+                .config
+                .default_tab_dir
+                .as_deref(),
+            Some("~/work")
+        );
+        let p = err("\nui.tabs.default_dir = 3\n");
+        assert_eq!((p.line, p.column), (2, 23));
+        assert!(
+            p.message
+                .contains("ui.tabs.default_dir must be a string, not integer"),
+            "{p}"
         );
     }
 

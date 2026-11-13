@@ -19,11 +19,13 @@
 #![forbid(unsafe_code)]
 
 mod command;
+mod dir;
 mod parse;
 mod reload;
 mod schema;
 
 pub use command::split_command;
+pub use dir::expand_dir;
 pub use parse::parse;
 pub use reload::{Reload, ReloadGate};
 pub use schema::{SCHEMA, Setting, default_file};
@@ -118,6 +120,10 @@ pub struct Config {
     pub editor: Option<String>,
     /// `ui.tabs.group`: how the tab bar lists tabs (RF-ATN-07).
     pub tab_grouping: TabGrouping,
+    /// `ui.tabs.default_dir`: the folder the tab bar's "new tab" button
+    /// opens a shell in, as written; `None` for the user's home folder.
+    /// [`expand_dir`] turns it into a path.
+    pub default_tab_dir: Option<String>,
     /// `terminal.shell_integration`: PowerShell and cmd report their folder
     /// at each prompt, so a restored pane opens where the user left it
     /// (RF-SES-01). Applies to panes started after a change.
@@ -140,6 +146,7 @@ impl Default for Config {
             terminal_font: FontSetting::default(),
             editor: None,
             tab_grouping: TabGrouping::default(),
+            default_tab_dir: None,
             shell_integration: true,
             osc52_copy: true,
             update_check: true,
