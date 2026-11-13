@@ -87,16 +87,23 @@ mod tests {
     use crate::assets::SPINNER;
 
     #[test]
-    fn rf_atn_02_the_spinner_turns_only_for_a_shown_working_row() {
+    fn the_spinner_turns_only_for_a_shown_working_row() {
         assert!(turns(true, true, true, false));
         assert!(!turns(false, true, true, false), "nothing works");
         assert!(!turns(true, false, true, false), "the tab bar is hidden");
         assert!(!turns(true, true, false, false), "the window is hidden");
-        assert!(!turns(true, true, true, true), "reduced motion");
     }
 
     #[test]
-    fn rf_atn_02_one_timer_runs_while_something_works_and_stops_after() {
+    fn rnf_17_reduced_motion_keeps_the_spinner_still() {
+        assert!(!turns(true, true, true, true));
+        let mut spinner = Spinner::default();
+        assert!(!spinner.start(turns(true, true, true, true)));
+        assert_eq!(spinner.frame(), 0, "the first frame, still");
+    }
+
+    #[test]
+    fn one_timer_runs_while_something_works_and_stops_after() {
         let mut spinner = Spinner::default();
         assert!(!spinner.start(false), "no timer while nothing works");
         assert!(spinner.start(true), "the first working row starts it");

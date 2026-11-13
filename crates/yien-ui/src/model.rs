@@ -1669,7 +1669,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_atn_02_only_a_drawn_working_tab_row_spins() {
+    fn only_a_drawn_working_tab_row_spins() {
         let mut view = demo();
         assert!(view.any_drawn_tab_working(), "tab 11 works in project 1");
         assert_eq!(view.toggle_fold(ProjectId::new(1)), Some(true));
