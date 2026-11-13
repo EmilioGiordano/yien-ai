@@ -39,7 +39,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, program_tag, runs_agent};
+use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, program_tag};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
@@ -2771,7 +2771,7 @@ impl Shell {
             name: &pane.name,
             profile: &pane.profile,
             tag,
-            agent: runs_agent(pane),
+            agent: names_agent(pane),
             folder_lead: &folder_shown.lead,
             folder_last: &folder_shown.last,
             state: pane.state.label(),
