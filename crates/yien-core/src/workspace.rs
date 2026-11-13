@@ -253,8 +253,9 @@ impl Pane {
     fn session_title(&self) -> Option<SessionTitle> {
         let agent =
             self.program.is_some() || (self.profile != SHELL_PROFILE && self.runs_session());
-        let own = self.profile != SHELL_PROFILE || self.title_ours;
-        if !agent || !own || self.custom_name.is_some() {
+        // The actor owns every title of an agent profile's own program, not
+        // those of a stand-in shell, which keeps the profile's id.
+        if !agent || !self.title_ours || self.custom_name.is_some() {
             return None;
         }
         let names = [
@@ -2086,6 +2087,29 @@ mod tests {
         // all before the poll sees the CLI gone.
         ws.on_pane_event(a, PaneEvent::State(AgentState::Done, None));
         ws.on_pane_event(a, titled("✳ Fix login bug", TitleFrom::Shell));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, titled("pwsh in yien-ai", TitleFrom::Shell));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, program(0, None));
+        assert_eq!(shown(&ws, a), None);
+    }
+
+    #[test]
+    fn rf_pan_12_a_stand_in_shell_title_is_not_a_typed_cli_s() {
+        let mut ws = Workspace::new();
+        let a = agent_pane(&mut ws, &builtin(), "claude");
+        ws.on_pane_event(
+            a,
+            PaneEvent::Standin(Some(("pwsh".to_owned(), "Fallback".to_owned()))),
+        );
+        ws.on_pane_event(a, titled("pwsh in yien-ai", TitleFrom::Shell));
+        ws.on_pane_event(a, program(0, Some("codex")));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, title("⠹ Fix login bug"));
+        assert_eq!(shown(&ws, a).as_deref(), Some("Fix login bug"));
+        // It exits: the actor hands the title to the shell, then the theme's.
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Done, None));
+        ws.on_pane_event(a, titled("⠹ Fix login bug", TitleFrom::Shell));
         assert_eq!(shown(&ws, a), None);
         ws.on_pane_event(a, titled("pwsh in yien-ai", TitleFrom::Shell));
         assert_eq!(shown(&ws, a), None);
