@@ -268,10 +268,7 @@ pub struct KeyModes {
 /// assert_eq!(encode_with(&Key::Delete, Mods::CTRL, meta_d), Some(b"\x1bd".to_vec()));
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
-    // The bundled OpenConsole passes CSI 13;2u through verbatim to a 9001
-    // client, and Claude Code drops the Shift of a Win32 Enter event. Flags a
-    // killed CLI left on the main screen are cleared by the next prompt mark
-    // (`yien_vt::key_modes`), so PSReadLine gets the Win32 event again.
+    // Claude Code drops the Shift of a Win32 Enter; OpenConsole passes CSI 13;2u verbatim.
     if *key == Key::Enter && mods == Mods::SHIFT && modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
         return Some(b"\x1b[13;2u".to_vec());
     }
