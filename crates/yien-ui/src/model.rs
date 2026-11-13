@@ -229,6 +229,21 @@ impl PaneView {
     }
 }
 
+/// What a tab row's mark shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabMark {
+    /// The state of its most urgent pane.
+    State(AgentState),
+    /// Every pane is a shell and none has anything to report.
+    Shell,
+}
+
+/// Whether `pane` runs a shell and no agent. A pane whose profile is not
+/// known yet is not one.
+pub(crate) fn is_shell_pane(pane: &PaneView) -> bool {
+    pane.profile_id.as_str() == SHELL_PROFILE
+}
+
 /// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CloseStep {
@@ -1074,6 +1089,26 @@ impl WorkspaceView {
             .unwrap_or_default()
     }
 
+    /// What a tab's row marks: its state, or that it holds only shells
+    /// with nothing to report.
+    pub(crate) fn tab_mark(&self, tab: &TabView) -> TabMark {
+        let panes = tab.layout.panes();
+        let shells_only =
+            !panes.is_empty() && panes.into_iter().all(|p| is_shell_pane(&self.pane(p)));
+        match self.tab_state(tab) {
+            AgentState::Idle if shells_only => TabMark::Shell,
+            state => TabMark::State(state),
+        }
+    }
+
+    /// Whether a tab row the tab bar draws is working, so its mark spins.
+    pub(crate) fn any_drawn_tab_working(&self) -> bool {
+        self.drawn_tabs()
+            .into_iter()
+            .filter_map(|id| self.tab(id))
+            .any(|tab| self.tab_state(tab) == AgentState::Working)
+    }
+
     /// How many of a project's tabs have a pane that needs the user.
     pub fn needs_you_tabs_of(&self, project: &ProjectView) -> usize {
         self.tabs_of(project)
@@ -1600,6 +1635,51 @@ mod tests {
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
         assert!(view.pane_state(PaneId::new(200), P::Idle));
         assert_eq!(bar(&view, 20), None);
+    }
+
+    #[test]
+    fn rf_atn_02_a_tab_of_idle_shells_marks_shell_and_an_agent_pane_its_state() {
+        let mut view = demo();
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        view.pane_updated(&pane(301, 30, P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+
+        // A shell's long command spins, and its finished one asks for a look.
+        assert!(view.pane_state(PaneId::new(301), P::Working));
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Working));
+        assert!(view.pane_state(PaneId::new(301), P::Done));
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Done));
+        assert!(view.pane_state(PaneId::new(301), NEEDS));
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::NeedsYou));
+        assert!(view.pane_state(PaneId::new(301), P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+
+        let mut claude = pane(301, 30, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+
+        // A pane whose profile has not arrived is not taken for a shell.
+        let mut unknown = pane(301, 30, P::Idle);
+        unknown.profile_id = yien_proto::ProfileId::new("");
+        view.pane_updated(&unknown);
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+    }
+
+    #[test]
+    fn rf_atn_02_only_a_drawn_working_tab_row_spins() {
+        let mut view = demo();
+        assert!(view.any_drawn_tab_working(), "tab 11 works in project 1");
+        assert_eq!(view.toggle_fold(ProjectId::new(1)), Some(true));
+        assert!(!view.any_drawn_tab_working(), "project 1 is folded");
+        view.set_group_by_state(true);
+        assert!(view.any_drawn_tab_working(), "folds do not apply by state");
+        view.set_group_by_state(false);
+        assert_eq!(view.toggle_fold(ProjectId::new(1)), Some(false));
+        assert!(view.pane_state(PaneId::new(110), P::Idle));
+        assert!(!view.any_drawn_tab_working(), "nothing works");
     }
 
     #[test]
