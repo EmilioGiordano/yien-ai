@@ -5,7 +5,7 @@ use gpui_kit::{App, Hsla, Pixels, Rgba, px, rgb, rgba};
 use yien_proto::TerminalPalette;
 
 use crate::git::FileMark;
-use crate::model::AgentState;
+use crate::model::{AgentState, TabMark};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ThemeKind {
@@ -52,6 +52,10 @@ pub(crate) struct Theme {
     pub(crate) shu_wash: Rgba,
     pub(crate) ai: Rgba,
     pub(crate) ochre: Rgba,
+    /// A tab row's mark and words in every state but "needs you".
+    pub(crate) mark_dim: Rgba,
+    /// A tab row's mark and words while it needs the user (RN-01).
+    pub(crate) mark_red: Rgba,
     pub(crate) term_bg: Rgba,
     pub(crate) term_raised: Rgba,
     pub(crate) term_line: Rgba,
@@ -100,6 +104,8 @@ impl Theme {
             shu_wash: rgba(0xe8333c1f),
             ai: rgb(0x8fa8dc),
             ochre: rgb(0xd6a24c),
+            mark_dim: rgb(0xa19d93),
+            mark_red: rgb(0xe8333c),
             term_bg: rgb(0x0d0c0b),
             term_raised: rgb(0x1c1a17),
             term_line: rgb(0x2e2b27),
@@ -127,6 +133,8 @@ impl Theme {
             shu_wash: rgba(0xb3121b14),
             ai: rgb(0x2f4f8f),
             ochre: rgb(0x8a5a12),
+            mark_dim: rgb(0x5f5c55),
+            mark_red: rgb(0xb3121b),
             term_bg: rgb(0xfbfaf6),
             term_raised: rgb(0xf1efe7),
             term_line: rgb(0xd6d4ca),
@@ -162,11 +170,14 @@ impl Theme {
 
     /// The colour of a state's words in a tab row.
     pub(crate) fn label_color(&self, state: AgentState) -> Rgba {
-        match state {
-            AgentState::NeedsYou => self.shu,
-            AgentState::Error => self.ochre,
-            AgentState::Done => self.ai,
-            AgentState::Working | AgentState::Idle => self.muted,
+        self.tab_mark_color(TabMark::State(state))
+    }
+
+    /// The colour of a tab row's mark: red for "needs you", dim otherwise (RN-01).
+    pub(crate) fn tab_mark_color(&self, mark: TabMark) -> Rgba {
+        match mark {
+            TabMark::State(AgentState::NeedsYou) => self.mark_red,
+            _ => self.mark_dim,
         }
     }
 
@@ -262,6 +273,9 @@ mod tests {
                 ("faint on bg", t.faint, t.bg),
                 ("ai on raised", t.ai, t.raised),
                 ("ochre on raised", t.ochre, t.raised),
+                ("dim mark on panel", t.mark_dim, t.panel),
+                ("dim mark on raised", t.mark_dim, t.raised),
+                ("dim mark on hover", t.mark_dim, t.hover),
                 ("term text on term bg", t.term_text, t.term_bg),
                 ("term muted on term raised", t.term_muted, t.term_raised),
                 ("term faint on term bg", t.term_faint, t.term_bg),
@@ -323,10 +337,48 @@ mod tests {
                 AgentState::Idle,
             ] {
                 assert_ne!(t.state_color(state), t.shu, "{state:?}");
-                assert_ne!(t.label_color(state), t.shu, "{state:?}");
+                for red in [t.shu, t.mark_red] {
+                    assert_ne!(t.label_color(state), red, "{state:?}");
+                    assert_ne!(t.tab_mark_color(TabMark::State(state)), red, "{state:?}");
+                    assert_ne!(t.tab_mark_color(TabMark::Shell), red);
+                }
             }
             assert_eq!(t.state_color(AgentState::NeedsYou), t.shu);
-            assert_eq!(t.label_color(AgentState::NeedsYou), t.shu);
+            assert_eq!(t.label_color(AgentState::NeedsYou), t.mark_red);
+            let needs = TabMark::State(AgentState::NeedsYou);
+            assert_eq!(t.tab_mark_color(needs), t.mark_red);
+        }
+    }
+
+    #[test]
+    fn rf_atn_15_tab_marks_are_dim_and_needs_you_red_as_the_web() {
+        let sumi = Theme::of(ThemeKind::Sumi);
+        let washi = Theme::of(ThemeKind::Washi);
+        assert_eq!(
+            (sumi.mark_dim, sumi.mark_red),
+            (rgb(0xa19d93), rgb(0xe8333c))
+        );
+        assert_eq!(
+            (washi.mark_dim, washi.mark_red),
+            (rgb(0x5f5c55), rgb(0xb3121b))
+        );
+        for t in [sumi, washi] {
+            for state in AgentState::BY_URGENCY {
+                let mark = TabMark::State(state);
+                let want = if state.needs_you() {
+                    t.mark_red
+                } else {
+                    t.mark_dim
+                };
+                assert_eq!(t.tab_mark_color(mark), want, "{state:?}");
+                assert_eq!(t.label_color(state), want, "{state:?}");
+            }
+            assert_eq!(t.tab_mark_color(TabMark::Shell), t.mark_dim);
+            // The square is a graphic, not text: 3:1 (WCAG 1.4.11).
+            for bg in [t.panel, t.raised, t.hover] {
+                let ratio = contrast(t.mark_red, bg);
+                assert!(ratio >= 3.0, "{:?}: the red mark is {ratio:.2}:1", t.kind);
+            }
         }
     }
 
