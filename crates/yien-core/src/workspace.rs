@@ -659,6 +659,7 @@ impl Workspace {
                 p.ended_explicitly = false;
                 p.session_id = None;
                 p.program = None;
+                p.title = None;
                 let launch = p.launch;
                 fx.push(Effect::Relaunch { pane, launch });
                 self.emit_pane(pane, &mut fx);
@@ -2079,6 +2080,19 @@ mod tests {
         assert_eq!(shown(&ws, b), None);
         ws.on_pane_event(b, title("⠹ Fix login bug"));
         assert_eq!(shown(&ws, b).as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn rf_pan_12_a_relaunch_sends_the_pane_without_its_title() {
+        let mut ws = Workspace::new();
+        let a = agent_pane(&mut ws, &builtin(), "claude");
+        ws.on_pane_event(a, title("✳ Fix login bug"));
+        let fx = run(&mut ws, Command::RelaunchPane { pane: a });
+        let sent = fx.iter().find_map(|e| match e {
+            Effect::Emit(CoreMsg::PaneUpdated(p)) if p.id == a => Some(p.title.clone()),
+            _ => None,
+        });
+        assert_eq!(sent, Some(None));
     }
 
     #[test]
