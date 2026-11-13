@@ -72,6 +72,10 @@ pub struct SessionSnapshot {
     /// The side bars' visibility and widths (RF-NAV-10).
     #[serde(default)]
     pub side_bars: SideBarsRecord,
+    /// Pixels the terminals' font is zoomed by, over `terminal.font.size`
+    /// (RF-CFG-02).
+    #[serde(default, deserialize_with = "lenient_zoom")]
+    pub terminal_zoom: i32,
 }
 
 impl SessionSnapshot {
@@ -89,6 +93,7 @@ impl SessionSnapshot {
             projects,
             notifications_muted: false,
             side_bars: SideBarsRecord::default(),
+            terminal_zoom: 0,
         }
     }
 }
@@ -141,6 +146,19 @@ where
         .and_then(|v| v.as_f64())
         .map(|w| w as f32)
         .filter(|w| w.is_finite()))
+}
+
+/// A zoom that is not a whole number in range reads as none, so one bad
+/// value never costs the user the whole session.
+fn lenient_zoom<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value
+        .and_then(|v| v.as_i64())
+        .and_then(|z| i32::try_from(z).ok())
+        .unwrap_or(0))
 }
 
 /// The project and tab selected when the snapshot was taken; each `None` when nothing was.

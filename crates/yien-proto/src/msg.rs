@@ -322,6 +322,12 @@ pub enum Command {
         /// The bars as the UI now draws them.
         bars: SideBars,
     },
+    /// Keeps the terminals' zoom for the next start (RF-CFG-02). The UI
+    /// applies it; the core only saves it.
+    SetTerminalZoom {
+        /// Pixels added to `terminal.font.size`, as the UI now draws it.
+        zoom: i32,
+    },
     /// Opens a tab on a new linked worktree with its own new branch
     /// (RF-ESP-05). The worktree goes beside the repository, in
     /// `<repo>-wt/<branch>`; a failure opens no tab and says why.
@@ -898,6 +904,10 @@ pub struct WorkspaceSnapshot {
     pub notifications_muted: bool,
     /// The side bars as the session saved them (RF-NAV-10).
     pub side_bars: SideBars,
+    /// Pixels the user zoomed the terminals' font by, over
+    /// `terminal.font.size`, as the session saved it (RF-CFG-02). The UI
+    /// clamps the zoomed size.
+    pub terminal_zoom: i32,
 }
 
 /// The tab bar and the context bar as the user left them (RF-NAV-10).
@@ -1204,6 +1214,7 @@ mod tests {
                     review: true,
                 },
             },
+            Command::SetTerminalZoom { zoom: -3 },
             Command::NewWorktreeTab {
                 project: ProjectId::new(1),
                 branch: "feat/x".into(),

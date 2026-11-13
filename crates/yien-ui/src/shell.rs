@@ -63,6 +63,7 @@ mod tab_drag;
 mod tray;
 mod update;
 mod worktrees;
+mod zoom;
 
 use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
@@ -102,8 +103,13 @@ pub(crate) struct Shell {
     /// The terminal palette the core has taken, `None` until it took one.
     palette_sent: Option<TerminalPalette>,
     fonts: Fonts,
-    /// The terminals' font size from the settings (RF-CFG-02).
+    /// The terminals' font size from the settings, zoomed (RF-CFG-02).
     terminal_size: f32,
+    /// Pixels the user zoomed the terminals by over the settings' size.
+    terminal_zoom: i32,
+    /// The zoom the core holds for the session; `None` until its snapshot
+    /// brings the saved one.
+    terminal_zoom_saved: Option<i32>,
     /// The last valid settings and the session's theme toggle.
     settings: SettingsModel,
     settings_host: Box<dyn SettingsHost>,
@@ -342,6 +348,8 @@ impl Shell {
             palette_sent: None,
             fonts: Fonts::default(),
             terminal_size: crate::terminal::DEFAULT_FONT_SIZE,
+            terminal_zoom: 0,
+            terminal_zoom_saved: None,
             settings: SettingsModel::default(),
             settings_host: settings.host,
             settings_notice: None,
@@ -435,6 +443,7 @@ impl Shell {
                     self.workspace = WorkspaceView::from_snapshot(&snapshot);
                     self.side_bars = snapshot.side_bars;
                     self.side_bars_saved = Some(snapshot.side_bars);
+                    self.take_saved_zoom(snapshot.terminal_zoom, window, cx);
                     self.workspace
                         .set_group_by_state(self.settings.groups_by_state());
                 }
@@ -3566,6 +3575,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::copy_session_id))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::toggle_notifications_muted))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::reset_zoom))
             .on_action(cx.listener(Self::toggle_tab_muted))
             .on_action(cx.listener(Self::add_project))
             .on_action(cx.listener(Self::close_project))

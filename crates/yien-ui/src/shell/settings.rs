@@ -116,7 +116,7 @@ impl Shell {
                 terminal.update(cx, |t, cx| t.set_theme(theme, cx));
             }
         }
-        let size = config.terminal_font.size;
+        let size = crate::zoom::size(config.terminal_font.size, self.terminal_zoom);
         if fonts.terminal != self.fonts.terminal || size != self.terminal_size {
             self.terminal_size = size;
             for terminal in self.terminals.values() {
