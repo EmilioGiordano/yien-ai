@@ -213,6 +213,9 @@ struct Pane {
     /// The last terminal title of the current program; forgotten when that
     /// program changes, so a new run never shows the last one's topic.
     title: Option<SessionTitle>,
+    /// `title` came from the shell itself: set at its prompt, or by a
+    /// command that has ended. A CLI found later must not show it.
+    title_by_shell: bool,
     cwd: Option<String>,
     state: AgentState,
     running: bool,
@@ -944,6 +947,7 @@ impl Workspace {
                 default_name: plan.default_name.clone(),
                 profile_name: plan.profile_name.clone(),
                 title: None,
+                title_by_shell: false,
                 cwd: None,
                 state: AgentState::Idle,
                 running: false,
@@ -1128,6 +1132,10 @@ impl Workspace {
         match event {
             PaneEvent::State(state, since) => {
                 p.state = state;
+                // Back at the prompt: whatever ran there has ended.
+                if p.program.is_none() && state != AgentState::Working {
+                    p.title_by_shell = true;
+                }
                 let since_changed = p.attention_since != since;
                 p.attention_since = since;
                 fx.push(Effect::Emit(CoreMsg::PaneState { pane, state }));
@@ -1148,6 +1156,9 @@ impl Workspace {
             PaneEvent::Title(title) => {
                 let shown = p.session_title();
                 p.title = title;
+                // While a command runs, the title may be a CLI's that a poll
+                // has not found yet.
+                p.title_by_shell = p.program.is_none() && p.state != AgentState::Working;
                 // A spinner redraws the title many times a second; only a
                 // new topic reaches the UI.
                 if p.session_title() != shown {
@@ -1173,9 +1184,9 @@ impl Workspace {
                 // A poll can land after the shell it looked under exited.
                 let program = program.filter(|_| !p.stopped);
                 if p.program != program {
-                    // Not when a program appears: the CLI sets its title
-                    // before a poll can find it.
-                    if p.program.is_some() {
+                    // A CLI sets its title before a poll can find it, so a
+                    // title set while a command ran is kept for it.
+                    if p.program.is_some() || p.title_by_shell {
                         p.title = None;
                     }
                     p.program = program;
@@ -2014,7 +2025,9 @@ mod tests {
         let mut ws = Workspace::new();
         let (_, a) = project(&mut ws);
         ws.on_pane_event(a, PaneEvent::Started);
-        // `claude -c` names its topic before a poll finds it.
+        // `claude -c` runs as a command (OSC 133 C) and names its topic
+        // before a poll finds it.
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
         ws.on_pane_event(a, title("✳ Fix login bug"));
         let fx = ws.on_pane_event(a, program(0, Some("claude")));
         assert_eq!(named(&fx, a).as_deref(), Some("claude"));
@@ -2030,6 +2043,42 @@ mod tests {
         // Another CLI replacing it between two polls.
         ws.on_pane_event(a, program(0, Some("codex")));
         assert_eq!(shown(&ws, a), None);
+    }
+
+    #[test]
+    fn rf_pan_12_a_title_the_shell_set_is_not_the_typed_cli_s() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        // A prompt theme sets the title at the prompt.
+        ws.on_pane_event(a, title("build watcher"));
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        ws.on_pane_event(a, program(0, Some("claude")));
+        assert_eq!(shown(&ws, a), None);
+        ws.on_pane_event(a, program(0, None));
+        // A command sets it and ends; the next command is the CLI.
+        ws.on_pane_event(a, title("build watcher"));
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Done, None));
+        ws.on_pane_event(a, PaneEvent::State(AgentState::Working, None));
+        ws.on_pane_event(a, program(0, Some("claude")));
+        assert_eq!(shown(&ws, a), None);
+        // A shell with no command marks (cmd): never at a command.
+        let fx = run(
+            &mut ws,
+            Command::SplitPane {
+                pane: a,
+                orientation: Orientation::Vertical,
+                profile: None,
+                before: false,
+            },
+        );
+        let b = spawned(&fx)[0];
+        ws.on_pane_event(b, PaneEvent::Started);
+        ws.on_pane_event(b, title("build watcher"));
+        ws.on_pane_event(b, program(0, Some("codex")));
+        assert_eq!(shown(&ws, b), None);
+        ws.on_pane_event(b, title("⠹ Fix login bug"));
+        assert_eq!(shown(&ws, b).as_deref(), Some("Fix login bug"));
     }
 
     #[test]
