@@ -22,9 +22,10 @@ const EM: f32 = 0.6;
 const SHELL_NAME_CHARS: usize = 4;
 
 /// Which program a pane head names (RF-PAN-12): the agent profile's id while
-/// that agent's own program runs there, else the pane's name. A stand-in
-/// shell after a failed resume, or a pane whose details have not arrived, is
-/// not claimed as the agent.
+/// that agent's own program runs there, else the pane's name. The core puts
+/// the user's name first, then an agent CLI typed in a shell, then the
+/// shell's. A stand-in shell after a failed resume, or a pane whose details
+/// have not arrived, is not claimed as the agent.
 ///
 /// ```ignore
 /// assert_eq!(program_tag(&claude_pane), "claude");
@@ -428,5 +429,21 @@ mod tests {
         for (profile, runs) in [("shell", true), ("claude", false), ("", true)] {
             assert!(!runs_agent(&pane(profile, runs)), "{profile} {runs}");
         }
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_running_an_agent_cli_shows_the_cli_and_an_agent_its_profile() {
+        let typed = PaneView {
+            name: "codex".into(),
+            ..pane("shell", true)
+        };
+        assert_eq!(program_tag(&typed), "codex");
+        assert!(!runs_agent(&typed));
+        // A renamed agent pane is still tagged by its agent.
+        let renamed = PaneView {
+            name: "reviewer".into(),
+            ..pane("claude", true)
+        };
+        assert_eq!(program_tag(&renamed), "claude");
     }
 }
