@@ -132,8 +132,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use std::time::Duration;
-
     use yien_proto::PaneId;
 
     use super::{POLL, Shells, changes, poll};
@@ -202,15 +200,19 @@ mod tests {
                     }][..]
                 )
             );
+            let quiet = |what: &'static str| {
+                let reports = Arc::clone(&reports);
+                async move {
+                    let waited = tokio::time::timeout(POLL * 2, reports.next()).await;
+                    assert!(waited.is_err(), "{what} was reported again");
+                }
+            };
+            // Two more polls see the same program while the pane is watched.
+            quiet("a program already reported").await;
             drop(watched);
-            tokio::time::sleep(POLL * 2).await;
+            quiet("a pane no longer watched").await;
             poller.abort();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(10), reports.next())
-                    .await
-                    .is_err(),
-                "a pane no longer watched, or a program already reported, is not reported"
-            );
+            assert!(shells.list().is_empty());
         });
     }
 
