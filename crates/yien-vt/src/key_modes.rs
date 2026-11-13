@@ -27,9 +27,11 @@ const MAX_PARAMS: usize = 64;
 /// The five flags the kitty keyboard protocol defines.
 const KITTY_ALL_FLAGS: u8 = 0b1_1111;
 
-/// The OSC payload a prompt start mark begins with, `;` included: the
-/// longest prefix kept, since nothing after it matters here.
-const PROMPT_START: &[u8] = b"133;A;";
+/// A prompt start mark's OSC payload, alone.
+const PROMPT_START: &[u8] = b"133;A";
+/// The same with parameters after it: the longest payload prefix kept,
+/// since nothing after it matters here.
+const PROMPT_START_WITH_PARAMS: &[u8] = b"133;A;";
 
 const BEL: u8 = 0x07;
 const ESC: u8 = 0x1b;
@@ -164,7 +166,7 @@ impl KeyModeTracker {
                 ESC => self.state = State::OscEscape,
                 CAN | SUB => self.state = State::Ground,
                 _ => {
-                    if self.params.len() < PROMPT_START.len() {
+                    if self.params.len() < PROMPT_START_WITH_PARAMS.len() {
                         self.params.push(byte);
                     }
                 }
@@ -249,8 +251,7 @@ impl KeyModeTracker {
     fn finish_osc(&mut self) {
         self.state = State::Ground;
         let payload = self.params.as_slice();
-        let prompt_start = PROMPT_START.strip_suffix(b";").unwrap_or(PROMPT_START);
-        if payload == prompt_start || payload == PROMPT_START {
+        if payload == PROMPT_START || payload == PROMPT_START_WITH_PARAMS {
             self.main_stack.clear();
         }
     }
