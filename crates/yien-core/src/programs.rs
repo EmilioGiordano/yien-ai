@@ -38,6 +38,7 @@ impl Shells {
             shells: Arc::clone(self),
             pane,
             pid,
+            launch,
         }
     }
 
@@ -55,13 +56,15 @@ pub(crate) struct Watched {
     shells: Arc<Shells>,
     pane: PaneId,
     pid: u32,
+    launch: u64,
 }
 
 impl Drop for Watched {
     fn drop(&mut self) {
         let mut map = self.shells.map();
-        // The pane's next launch may have registered its own shell already.
-        if map.get(&self.pane).is_some_and(|(pid, _)| *pid == self.pid) {
+        // The pane's next launch may have registered its own shell already,
+        // possibly under the same pid once Windows reused it.
+        if map.get(&self.pane) == Some(&(self.pid, self.launch)) {
             map.remove(&self.pane);
         }
     }
@@ -223,6 +226,17 @@ mod tests {
         let new = shells.watch(pane(1), 20, 2);
         drop(old);
         assert_eq!(shells.list(), vec![(pane(1), 20, 2)]);
+        drop(new);
+        assert!(shells.list().is_empty());
+    }
+
+    #[test]
+    fn a_late_guard_leaves_a_new_launch_on_a_reused_pid_watched() {
+        let shells = Arc::new(Shells::default());
+        let old = shells.watch(pane(1), 10, 1);
+        let new = shells.watch(pane(1), 10, 2);
+        drop(old);
+        assert_eq!(shells.list(), vec![(pane(1), 10, 2)]);
         drop(new);
         assert!(shells.list().is_empty());
     }
