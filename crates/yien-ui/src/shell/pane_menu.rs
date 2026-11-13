@@ -429,6 +429,7 @@ mod tests {
             id: PaneId::new(1),
             name: "claude".into(),
             profile: "Claude Code".into(),
+            title: None,
             cwd: None,
             profile_id: ProfileId::new("claude"),
             state: AgentState::Idle,

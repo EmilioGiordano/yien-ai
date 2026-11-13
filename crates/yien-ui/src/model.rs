@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
     LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
-    ProjectInfo, SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
+    ProjectInfo, SHELL_PROFILE, SessionTitle, TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -115,6 +115,9 @@ pub struct PaneView {
     pub name: String,
     /// The profile it was started with: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The session title its agent set, while the user has not named the
+    /// pane (RF-PAN-12). Its `Debug` shows only the length.
+    pub title: Option<SessionTitle>,
     /// The working directory its shell last reported, if any.
     pub cwd: Option<String>,
     /// That profile's id: `claude`, `shell`; empty until the details arrive.
@@ -154,6 +157,7 @@ impl PaneView {
             id,
             name: "terminal".to_owned(),
             profile: String::new(),
+            title: None,
             cwd: None,
             profile_id: ProfileId::new(""),
             state: AgentState::Idle,
@@ -175,6 +179,7 @@ impl PaneView {
             id: info.id,
             name: info.name.clone(),
             profile: info.profile.clone(),
+            title: info.title.clone(),
             cwd: info.cwd.clone(),
             profile_id: info.profile_id.clone(),
             state: info.state.into(),
@@ -206,6 +211,7 @@ impl PaneView {
     ///     id: yien_proto::PaneId::new(1),
     ///     name: "pwsh".into(),
     ///     profile: "Shell".into(),
+    ///     title: None,
     ///     cwd: None,
     ///     profile_id: yien_proto::ProfileId::new("shell"),
     ///     state: AgentState::Idle,
@@ -2375,6 +2381,20 @@ mod tests {
         typed.exit_code = Some(0);
         view.pane_updated(&typed);
         assert!(!view.pane(PaneId::new(200)).is_busy());
+    }
+
+    #[test]
+    fn rf_pan_12_a_pane_keeps_the_session_title_the_core_sent() {
+        let mut view = demo();
+        let mut info = pane(200, 20, P::Idle);
+        info.title = Some(yien_proto::SessionTitle::new("Fix login bug"));
+        view.pane_updated(&info);
+        let shown = view.pane(PaneId::new(200)).title;
+        assert_eq!(shown.as_ref().map(|t| t.as_str()), Some("Fix login bug"));
+        assert!(!format!("{:?}", view.pane(PaneId::new(200))).contains("login"));
+        info.title = None;
+        view.pane_updated(&info);
+        assert_eq!(view.pane(PaneId::new(200)).title, None);
     }
 
     #[test]
