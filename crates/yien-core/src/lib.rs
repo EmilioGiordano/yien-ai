@@ -35,6 +35,7 @@ mod hooks;
 mod launch;
 mod pane;
 mod persist;
+mod programs;
 mod report;
 mod resume;
 mod screens;
@@ -69,6 +70,7 @@ use crate::shell::ShellChoice;
 pub use git::GitConfig;
 pub use hooks::HookConfig;
 pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
+pub use programs::ProgramProbe;
 pub use screens::{SCREEN_INTERVAL, SCREEN_LIMITS, SCREENS_TOTAL_BYTES, ScreenFiles, ScreenStore};
 pub use shell::{ShellCommand, default_shell};
 
@@ -199,6 +201,10 @@ pub struct CoreConfig {
     /// back to a built-in profile: starting it fails with a notice naming
     /// the file (RF-AGE-04).
     pub broken_profiles: BTreeMap<String, String>,
+    /// Finds the agent CLI the user runs in a shell pane, so the pane is
+    /// named after it while it runs (RF-PAN-12). `None`, the default, looks
+    /// at no process.
+    pub programs: Option<ProgramProbe>,
 }
 
 impl Default for CoreConfig {
@@ -224,6 +230,7 @@ impl Default for CoreConfig {
             git: None,
             cli_dirs: CliDirs::default(),
             broken_profiles: BTreeMap::new(),
+            programs: None,
         }
     }
 }
@@ -403,6 +410,7 @@ impl Core {
             ui_size: Arc::new(tokio::sync::watch::Sender::new(None)),
             consoles: Arc::clone(&consoles),
             clipboards: Arc::clone(&clipboards),
+            shells: Arc::default(),
         };
         runtime.spawn(service::run(
             ctx,
