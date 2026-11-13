@@ -25,6 +25,9 @@ pub(crate) struct Titles {
     running: bool,
     text: Option<SessionTitle>,
     from: TitleFrom,
+    /// The owner of the last OSC 0/2 seen, until the terminal applies it:
+    /// it holds titles inside a synchronized update (`?2026h`).
+    pending: Option<TitleFrom>,
     sent: Option<(Option<SessionTitle>, TitleFrom)>,
 }
 
@@ -37,6 +40,7 @@ impl Titles {
             running: false,
             text: None,
             from: TitleFrom::Unknown,
+            pending: None,
             sent: None,
         };
         titles.from = titles.now();
@@ -50,7 +54,6 @@ impl Titles {
         signals: &[OscSignal],
         title: Option<&TitleChange>,
     ) -> Option<(Option<SessionTitle>, TitleFrom)> {
-        let mut titled = false;
         for signal in signals {
             match signal {
                 OscSignal::Prompt(PromptMark::CommandExecuted) => {
@@ -66,13 +69,13 @@ impl Titles {
                         if self.from == TitleFrom::Program {
                             self.from = TitleFrom::Shell;
                         }
+                        if self.pending == Some(TitleFrom::Program) {
+                            self.pending = Some(TitleFrom::Shell);
+                        }
                     }
                 }
                 OscSignal::Prompt(PromptMark::CommandStart) => self.marked = true,
-                OscSignal::Title(_) => {
-                    titled = true;
-                    self.from = self.now();
-                }
+                OscSignal::Title(_) => self.pending = Some(self.now()),
                 _ => {}
             }
         }
@@ -82,9 +85,7 @@ impl Titles {
                 TitleChange::Reset => None,
             };
             // A title popped from the stack has no OSC 0/2 of its own.
-            if !titled {
-                self.from = self.now();
-            }
+            self.from = self.pending.take().unwrap_or_else(|| self.now());
         }
         let now = (self.text.clone(), self.from);
         if self.sent.as_ref() == Some(&now) || (self.sent.is_none() && now.0.is_none()) {
@@ -189,5 +190,63 @@ mod tests {
             t.absorb(&[], Some(&TitleChange::Reset)),
             Some((None, TitleFrom::Program))
         );
+    }
+
+    #[test]
+    fn rf_pan_12_a_held_title_keeps_its_owner_until_it_is_applied() {
+        let mut t = Titles::new(true);
+        let (s, c) = title("pwsh in yien");
+        t.absorb(&[mark(PromptMark::PromptStart)], None);
+        assert_eq!(owner(&mut t, &s, c.as_ref()), TitleFrom::Shell);
+        // The OSC 0 arrives but the terminal holds it: the shown title is
+        // still the shell's, not re-reported as the command's.
+        let held = [mark(C), OscSignal::Title("✳ Fix login bug".into())];
+        assert_eq!(t.absorb(&held, None), None);
+        let change = TitleChange::Set("✳ Fix login bug".into());
+        assert_eq!(owner(&mut t, &[], Some(&change)), TitleFrom::Program);
+    }
+
+    /// Feeds `chunks` through the real terminal engine, one read each.
+    fn through_vt(t: &mut Titles, chunks: &[&[u8]]) -> Vec<(Option<String>, TitleFrom)> {
+        use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
+        let mut engine = AlacrittyEngine::new(VtConfig::default(), 40, 5);
+        chunks
+            .iter()
+            .filter_map(|bytes| {
+                let out = engine.feed(bytes);
+                t.absorb(&out.signals, out.title.as_ref())
+            })
+            .map(|(title, from)| (title.map(|s| s.as_str().to_owned()), from))
+            .collect()
+    }
+
+    #[test]
+    fn rf_pan_12_a_title_held_by_a_synchronized_update_across_reads() {
+        let mut t = Titles::new(true);
+        let fix = Some("\u{2733} Fix login bug".to_owned());
+        let sent = through_vt(
+            &mut t,
+            &[
+                b"\x1b]133;A\x07\x1b]0;pwsh\x07",
+                "\x1b]133;C\x07\x1b[?2026h\x1b]0;\u{2733} Fix login bug\x07".as_bytes(),
+                b"\x1b[?2026l",
+            ],
+        );
+        assert_eq!(
+            sent,
+            [
+                (Some("pwsh".to_owned()), TitleFrom::Shell),
+                (fix.clone(), TitleFrom::Program)
+            ]
+        );
+        // The command ends inside the block that holds its last title.
+        let sent = through_vt(
+            &mut t,
+            &[
+                "\x1b[?2026h\x1b]0;\u{2733} Fix login bug\x07\x1b]133;D;0\x07".as_bytes(),
+                b"\x1b[?2026l",
+            ],
+        );
+        assert_eq!(sent, [(fix, TitleFrom::Shell)]);
     }
 }
