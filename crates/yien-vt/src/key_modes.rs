@@ -409,6 +409,61 @@ mod tests {
         }
     }
 
+    /// The flags and replies `stream` leaves, whole and cut in two at every
+    /// byte, after asserting they all agree.
+    fn same_at_every_cut(stream: &[u8]) -> (u8, Vec<Vec<u8>>) {
+        let mut whole = KeyModeTracker::new();
+        let whole_replies: Vec<Vec<u8>> = whole.scan(stream).into_iter().map(|r| r.bytes).collect();
+        for cut in 0..=stream.len() {
+            let (a, b) = stream.split_at(cut);
+            let mut split = KeyModeTracker::new();
+            let mut replies: Vec<Vec<u8>> = split.scan(a).into_iter().map(|r| r.bytes).collect();
+            replies.extend(split.scan(b).into_iter().map(|r| r.bytes));
+            assert_eq!(replies, whole_replies, "cut at {cut}");
+            assert_eq!(split.kitty_flags(), whole.kitty_flags(), "cut at {cut}");
+        }
+        (whole.kitty_flags(), whole_replies)
+    }
+
+    #[test]
+    fn an_osc_ended_by_bel_gives_the_same_result_cut_anywhere() {
+        let (flags, replies) = same_at_every_cut(b"\x1b[>5u\x1b]133;A;aid=1\x07\x1b[?u\x1b[>2u");
+        assert_eq!(flags, 2);
+        assert_eq!(replies, vec![b"\x1b[?0u".to_vec()]);
+    }
+
+    #[test]
+    fn an_osc_ended_by_another_escape_gives_the_same_result_cut_anywhere() {
+        let (flags, _) = same_at_every_cut(b"\x1b]0;t\x1b[>3u");
+        assert_eq!(flags, 3);
+        let (flags, _) = same_at_every_cut(b"\x1b[>1u\x1b]133;A\x1b[>3u");
+        // Not ended by ST or BEL, so not a prompt mark.
+        assert_eq!(flags, 3);
+        let (flags, _) = same_at_every_cut(b"\x1b[>1u\x1b]133;A\x1b[<u");
+        assert_eq!(flags, 0);
+    }
+
+    #[test]
+    fn an_overlong_osc_gives_the_same_result_cut_anywhere() {
+        let long = |head: &[u8]| {
+            let mut s = b"\x1b[>1u\x1b]".to_vec();
+            s.extend_from_slice(head);
+            s.extend(std::iter::repeat_n(b'x', 300));
+            s.extend_from_slice(b"\x1b\\\x1b[?u");
+            s
+        };
+        // A prompt mark with long parameters still clears the flags.
+        let (flags, replies) = same_at_every_cut(&long(b"133;A;"));
+        assert_eq!(flags, 0);
+        assert_eq!(replies, vec![b"\x1b[?0u".to_vec()]);
+        // A long title, or a payload that only starts like the mark, does not.
+        for head in [&b"0;"[..], b"133;A"] {
+            let (flags, replies) = same_at_every_cut(&long(head));
+            assert_eq!(flags, 1, "{head:?}");
+            assert_eq!(replies, vec![b"\x1b[?1u".to_vec()], "{head:?}");
+        }
+    }
+
     #[test]
     fn rf_age_02_kitty_flags_push_pop_and_set() {
         let mut t = tracked(b"\x1b[>1u");
