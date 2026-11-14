@@ -926,13 +926,24 @@ fn rf_age_05_every_error_clears_when_the_pane_is_seen() {
 }
 
 #[test]
-fn rf_age_05_an_error_while_seen_shows_until_the_pane_is_seen_again() {
+fn rn_07_an_error_while_seen_gives_idle() {
     let mut p = Pane::spawned(codex());
     p.send(Signal::Seen(true))
         .send(status(AgentStatus::Working))
         .send(status(AgentStatus::Error));
-    assert_eq!(p.state(), AgentState::Error(ErrorReason::TurnFailed));
-    p.send(Signal::Seen(false)).send(Signal::Seen(true));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true))
+        .send(hook(HookEvent::StopFailure));
+    assert_eq!(p.state(), AgentState::Idle);
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true))
+        .send(Signal::Exited { code: Some(3) });
     assert_eq!(p.state(), AgentState::Idle);
 }
 

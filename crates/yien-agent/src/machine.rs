@@ -671,6 +671,11 @@ impl Machine {
 
     /// The only place the state changes, so the red mark always follows it.
     fn set_state(&mut self, to: AgentState, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
+        // Like Done, a failure the user is looking at needs no mark.
+        let to = match to {
+            AgentState::Error(_) if self.seen => AgentState::Idle,
+            to => to,
+        };
         let from = self.state;
         if from == to {
             return;
