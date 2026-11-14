@@ -9,6 +9,11 @@ session_id = "from_list"
 # Read nothing yet: the reader is a stub until the format is verified (S7).
 sessions = "codex-sessions"
 
-# No version verified yet (S7). OSC 9 alone never lights the red mark.
+# OSC 7501 since 0.163.0; run against 0.167.2.
+[[rules]]
+versions = ">=0.163, <1"
+sources = ["osc7501"]
+
+# Older versions: OSC 9 alone never lights the red mark.
 [[rules]]
 sources = ["osc9"]

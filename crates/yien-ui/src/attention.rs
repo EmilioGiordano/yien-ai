@@ -193,6 +193,7 @@ fn reason_text(reason: NeedsReason) -> &'static str {
     match reason {
         NeedsReason::Permission => "asks for permission",
         NeedsReason::Question => "has a question",
+        NeedsReason::Auth => "asks you to sign in",
         NeedsReason::Blocked => "is blocked",
         NeedsReason::ScreenRule => "is waiting for you",
     }

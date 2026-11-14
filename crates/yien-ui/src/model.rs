@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
     LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
-    ProjectInfo, SHELL_PROFILE, TabGit, TabId, TabInfo, same_folder,
+    ProjectInfo, SHELL_PROFILE, SessionTitle, TabGit, TabId, TabInfo, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -115,6 +115,9 @@ pub struct PaneView {
     pub name: String,
     /// The profile it was started with: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The session title its agent set, while the user has not named the
+    /// pane (RF-PAN-12). Its `Debug` shows only the length.
+    pub title: Option<SessionTitle>,
     /// The working directory its shell last reported, if any.
     pub cwd: Option<String>,
     /// That profile's id: `claude`, `shell`; empty until the details arrive.
@@ -154,6 +157,7 @@ impl PaneView {
             id,
             name: "terminal".to_owned(),
             profile: String::new(),
+            title: None,
             cwd: None,
             profile_id: ProfileId::new(""),
             state: AgentState::Idle,
@@ -175,6 +179,7 @@ impl PaneView {
             id: info.id,
             name: info.name.clone(),
             profile: info.profile.clone(),
+            title: info.title.clone(),
             cwd: info.cwd.clone(),
             profile_id: info.profile_id.clone(),
             state: info.state.into(),
@@ -192,10 +197,12 @@ impl PaneView {
     }
 
     /// Whether closing it stops work the user may want: an agent or other
-    /// program that runs, or anything working or waiting for the user. A
-    /// shell at its prompt is not busy; a command running inside a shell
-    /// cannot be seen from here and does not count either. A pane whose
-    /// details have not arrived counts as busy, to ask rather than lose work.
+    /// program that runs, an agent CLI typed in a shell
+    /// ([`PaneView::runs_typed_agent`]), or anything working or waiting for
+    /// the user. A shell at its prompt is not busy; a command running inside
+    /// a shell cannot be seen from here and does not count either. A pane
+    /// whose details have not arrived counts as busy, to ask rather than lose
+    /// work.
     ///
     /// ```
     /// use yien_ui::{AgentState, PaneView};
@@ -204,6 +211,7 @@ impl PaneView {
     ///     id: yien_proto::PaneId::new(1),
     ///     name: "pwsh".into(),
     ///     profile: "Shell".into(),
+    ///     title: None,
     ///     cwd: None,
     ///     profile_id: yien_proto::ProfileId::new("shell"),
     ///     state: AgentState::Idle,
@@ -225,8 +233,35 @@ impl PaneView {
     pub fn is_busy(&self) -> bool {
         let agent = self.profile_id.as_str() != SHELL_PROFILE;
         let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
-        active || (self.running && agent)
+        active || (self.running && agent) || self.runs_typed_agent()
     }
+
+    /// Whether an agent CLI the user typed in its shell runs, so the core
+    /// named the pane after it (RF-PAN-12). A pane the user renamed to
+    /// exactly `claude`, `codex` or `opencode` reads the same.
+    ///
+    /// ```ignore
+    /// let typed = PaneView { name: "codex".into(), ..shell };
+    /// assert!(typed.runs_typed_agent() && !shell.runs_typed_agent());
+    /// ```
+    pub fn runs_typed_agent(&self) -> bool {
+        self.running && yien_proto::is_known_program(&self.name)
+    }
+}
+
+/// What a tab row's mark shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabMark {
+    /// The state of its most urgent pane.
+    State(AgentState),
+    /// Every pane is a shell and none has anything to report.
+    Shell,
+}
+
+/// Whether `pane` runs a shell and no agent, typed in it or not. A pane whose
+/// profile is not known yet is not one.
+pub(crate) fn is_shell_pane(pane: &PaneView) -> bool {
+    pane.profile_id.as_str() == SHELL_PROFILE && !pane.runs_typed_agent()
 }
 
 /// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
@@ -1074,6 +1109,26 @@ impl WorkspaceView {
             .unwrap_or_default()
     }
 
+    /// What a tab's row marks: its state, or that it holds only shells
+    /// with nothing to report.
+    pub(crate) fn tab_mark(&self, tab: &TabView) -> TabMark {
+        let panes = tab.layout.panes();
+        let shells_only =
+            !panes.is_empty() && panes.into_iter().all(|p| is_shell_pane(&self.pane(p)));
+        match self.tab_state(tab) {
+            AgentState::Idle if shells_only => TabMark::Shell,
+            state => TabMark::State(state),
+        }
+    }
+
+    /// Whether a tab row the tab bar draws is working, so its mark spins.
+    pub(crate) fn any_drawn_tab_working(&self) -> bool {
+        self.drawn_tabs()
+            .into_iter()
+            .filter_map(|id| self.tab(id))
+            .any(|tab| self.tab_state(tab) == AgentState::Working)
+    }
+
     /// How many of a project's tabs have a pane that needs the user.
     pub fn needs_you_tabs_of(&self, project: &ProjectView) -> usize {
         self.tabs_of(project)
@@ -1489,7 +1544,7 @@ mod tests {
     #[test]
     fn rf_esp_04_a_long_folder_keeps_its_last_names() {
         let label = folder_label(
-            r"D:\More-Code-Projects\some-client\deep\nested\yien-ai",
+            r"D:\Projects\some-client\deep\nested\yien-ai",
             None,
             true,
             24,
@@ -1600,6 +1655,76 @@ mod tests {
         assert_eq!(view.selected_tab().map(|t| t.id), Some(TabId::new(10)));
         assert!(view.pane_state(PaneId::new(200), P::Idle));
         assert_eq!(bar(&view, 20), None);
+    }
+
+    #[test]
+    fn a_tab_of_idle_shells_marks_shell_and_an_agent_pane_its_state() {
+        let mut view = demo();
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        view.pane_updated(&pane(301, 30, P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+
+        // A shell's long command spins, and its finished one asks for a look.
+        assert!(view.pane_state(PaneId::new(301), P::Working));
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Working));
+        assert!(view.pane_state(PaneId::new(301), P::Done));
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Done));
+        assert!(view.pane_state(PaneId::new(301), P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+
+        // An agent CLI typed in a shell pane is an agent, not a shell.
+        let mut typed = pane(301, 30, P::Idle);
+        typed.name = "claude".into();
+        view.pane_updated(&typed);
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+        typed.name = "pwsh".into();
+        view.pane_updated(&typed);
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+
+        let mut claude = pane(301, 30, P::Idle);
+        claude.profile_id = yien_proto::ProfileId::new("claude");
+        view.pane_updated(&claude);
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+
+        // A pane whose profile has not arrived is not taken for a shell.
+        let mut unknown = pane(301, 30, P::Idle);
+        unknown.profile_id = yien_proto::ProfileId::new("");
+        view.pane_updated(&unknown);
+        assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+    }
+
+    #[test]
+    fn rf_atn_02_a_pane_that_needs_you_marks_its_tab_red_shells_only_too() {
+        let mut view = demo();
+        let t = crate::theme::Theme::of(crate::theme::ThemeKind::default());
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        assert_eq!(mark(&view, 10), TabMark::State(AgentState::NeedsYou));
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        view.pane_updated(&pane(301, 30, P::Working));
+        assert!(view.pane_state(PaneId::new(301), NEEDS));
+        let needs = TabMark::State(AgentState::NeedsYou);
+        assert_eq!(mark(&view, 30), needs, "a shell asking still marks red");
+        assert_eq!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
+        assert!(view.pane_state(PaneId::new(301), P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+        assert_ne!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
+    }
+
+    #[test]
+    fn only_a_drawn_working_tab_row_spins() {
+        let mut view = demo();
+        assert!(view.any_drawn_tab_working(), "tab 11 works in project 1");
+        assert_eq!(view.toggle_fold(ProjectId::new(1)), Some(true));
+        assert!(!view.any_drawn_tab_working(), "project 1 is folded");
+        view.set_group_by_state(true);
+        assert!(view.any_drawn_tab_working(), "folds do not apply by state");
+        view.set_group_by_state(false);
+        assert_eq!(view.toggle_fold(ProjectId::new(1)), Some(false));
+        assert!(view.pane_state(PaneId::new(110), P::Idle));
+        assert!(!view.any_drawn_tab_working(), "nothing works");
     }
 
     #[test]
@@ -2353,6 +2478,60 @@ mod tests {
             CloseStep::AskBusy
         );
         assert_eq!(view.busy_panes_of_tab(TabId::new(99)), 0);
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_running_a_typed_agent_cli_asks_before_it_closes() {
+        let mut view = demo();
+        // Tab 20 holds only an idle shell.
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 0);
+        let mut typed = pane(200, 20, P::Idle);
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            typed.name = (*cli).to_owned();
+            view.pane_updated(&typed);
+            assert!(view.pane(PaneId::new(200)).runs_typed_agent(), "{cli}");
+            assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 1, "{cli}");
+            assert_eq!(view.busy_panes_of(ProjectId::new(2)), 1, "{cli}");
+            assert_eq!(
+                view.close_pane_step(PaneId::new(200), false),
+                CloseStep::AskBusy
+            );
+            assert_eq!(
+                view.close_tab_step(TabId::new(20), false),
+                CloseStep::AskBusy
+            );
+        }
+        // The CLI exited: the core names the pane after its shell again.
+        typed.name = "pwsh".into();
+        view.pane_updated(&typed);
+        assert_eq!(view.busy_panes_of_tab(TabId::new(20)), 0);
+        assert_eq!(
+            view.close_pane_step(PaneId::new(200), false),
+            CloseStep::Close
+        );
+        // Not a known name as the core writes it, or not running.
+        typed.name = "Claude Code".into();
+        view.pane_updated(&typed);
+        assert!(!view.pane(PaneId::new(200)).runs_typed_agent());
+        typed.name = "claude".into();
+        typed.running = false;
+        typed.exit_code = Some(0);
+        view.pane_updated(&typed);
+        assert!(!view.pane(PaneId::new(200)).is_busy());
+    }
+
+    #[test]
+    fn rf_pan_12_a_pane_keeps_the_session_title_the_core_sent() {
+        let mut view = demo();
+        let mut info = pane(200, 20, P::Idle);
+        info.title = Some(yien_proto::SessionTitle::new("Fix login bug"));
+        view.pane_updated(&info);
+        let shown = view.pane(PaneId::new(200)).title;
+        assert_eq!(shown.as_ref().map(|t| t.as_str()), Some("Fix login bug"));
+        assert!(!format!("{:?}", view.pane(PaneId::new(200))).contains("login"));
+        info.title = None;
+        view.pane_updated(&info);
+        assert_eq!(view.pane(PaneId::new(200)).title, None);
     }
 
     #[test]

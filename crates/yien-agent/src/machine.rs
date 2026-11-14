@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use crate::signal::{
-    AgentStatus, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
+    AgentStatus, BlockedKind, HookEvent, NotificationKind, OscSignal, PromptMark, ScreenVerdict,
     SessionStartSource, Signal, Source,
 };
 
@@ -19,7 +19,9 @@ pub enum NeedsReason {
     Permission,
     /// A question or an input request.
     Question,
-    /// OSC 7501 `blocked`.
+    /// The user must sign in again.
+    Auth,
+    /// OSC 7501 `blocked` with no kind.
     Blocked,
     /// A screen rule confirmed it.
     ScreenRule,
@@ -184,6 +186,11 @@ pub struct Machine {
     watchdog_at: Option<Duration>,
     session_ended: bool,
     exited: bool,
+    /// The running turn was started by the agent's own OSC 7501 record.
+    reported_turn: bool,
+    /// An agent reports over OSC 7501 in a rule that also reads OSC 133, so
+    /// the shell's marks no longer drive the state.
+    agent_reporting: bool,
 }
 
 impl Machine {
@@ -202,6 +209,8 @@ impl Machine {
             watchdog_at: None,
             session_ended: false,
             exited: false,
+            reported_turn: false,
+            agent_reporting: false,
         }
     }
 
@@ -272,6 +281,25 @@ impl Machine {
         }
     }
 
+    /// Whether an agent reporting over OSC 7501 has taken the pane over from
+    /// the shell's OSC 133 marks, until it sends `clear` or the shell's
+    /// prompt comes back.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{AgentStatus, Machine, MachineConfig, OscSignal, Reporter, Signal, Source};
+    ///
+    /// let status = |s| Signal::Osc(OscSignal::Status7501(s));
+    /// let m = Machine::new(MachineConfig::new(&[Source::Osc133, Source::Osc7501], None));
+    /// let (m, _) = m.step(&status(AgentStatus::Idle(Reporter::Codex)), Duration::ZERO);
+    /// assert!(m.agent_reporting());
+    /// let (m, _) = m.step(&status(AgentStatus::Clear), Duration::ZERO);
+    /// assert!(!m.agent_reporting());
+    /// ```
+    pub fn agent_reporting(&self) -> bool {
+        self.agent_reporting
+    }
+
     /// The rule this machine runs with.
     pub fn config(&self) -> &MachineConfig {
         &self.config
@@ -297,7 +325,7 @@ impl Machine {
             }
             Signal::Seen(seen) => {
                 self.seen = *seen;
-                if *seen && self.state == AgentState::Done {
+                if *seen && matches!(self.state, AgentState::Done | AgentState::Error(_)) {
                     self.set_state(AgentState::Idle, Cause::User, now, fx);
                 }
             }
@@ -420,13 +448,11 @@ impl Machine {
 
     fn on_osc(&mut self, osc: OscSignal, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         match osc {
-            OscSignal::Status7501(AgentStatus::Working) => self.start_turn(cause, now, fx),
-            OscSignal::Status7501(AgentStatus::Blocked) => {
-                self.needs(NeedsReason::Blocked, cause, now, fx)
-            }
-            OscSignal::Status7501(AgentStatus::Done) => {
-                if self.in_turn() {
-                    self.end_turn(cause, now, fx);
+            OscSignal::Status7501(status) => self.on_status(status, cause, now, fx),
+            OscSignal::Prompt(mark) if self.agent_reporting => {
+                // The shell only draws its prompt once the agent is gone.
+                if matches!(mark, PromptMark::CommandEnd | PromptMark::PromptStart) {
+                    self.agent_left(now, fx);
                 }
             }
             OscSignal::Prompt(PromptMark::CommandStart) => self.start_turn(cause, now, fx),
@@ -435,9 +461,83 @@ impl Machine {
                     self.end_turn(cause, now, fx);
                 }
             }
-            // Done or waiting? A notification cannot tell (RN-02); S7 and S8
-            // decide what Codex and OpenCode notifications mean.
+            // Done or waiting? A notification cannot tell (RN-02).
             OscSignal::Notify9 | OscSignal::Notify777 | OscSignal::Bell => {}
+        }
+    }
+
+    fn on_status(
+        &mut self,
+        status: AgentStatus,
+        cause: Cause,
+        now: Duration,
+        fx: &mut Vec<Effect>,
+    ) {
+        if status == AgentStatus::Clear {
+            self.agent_reporting = false;
+            self.set_state(AgentState::Idle, cause, now, fx);
+            return;
+        }
+        if self.config.declares(Source::Osc133) {
+            self.agent_reporting = true;
+        }
+        match status {
+            AgentStatus::Working => {
+                self.start_turn(cause, now, fx);
+                self.reported_turn = true;
+            }
+            AgentStatus::Blocked(kind) => {
+                // Blocked comes without a working first after a turn ended
+                // (Codex async questions) or for a request made from outside.
+                if !self.in_turn() {
+                    self.set_state(AgentState::Working, cause, now, fx);
+                }
+                self.reported_turn = true;
+                self.needs(needs_reason(kind), cause, now, fx);
+            }
+            AgentStatus::Done => self.status_turn_end(true, cause, now, fx),
+            // Codex turns its done and error into idle on any key: only a
+            // running turn may end here, so an unseen Done or an Error stays.
+            AgentStatus::Idle(reporter) => {
+                self.status_turn_end(reporter.ends_turns_with_idle(), cause, now, fx)
+            }
+            AgentStatus::Error => {
+                if self.in_turn() {
+                    self.set_state(AgentState::Error(ErrorReason::TurnFailed), cause, now, fx);
+                }
+            }
+            AgentStatus::Clear => {}
+        }
+    }
+
+    /// Ends a running turn: as Done (when unseen) if the agent started it and
+    /// `completes`, otherwise back to Idle. A turn the shell's OSC 133 marks
+    /// started is the command that launched the agent, not an agent turn.
+    fn status_turn_end(
+        &mut self,
+        completes: bool,
+        cause: Cause,
+        now: Duration,
+        fx: &mut Vec<Effect>,
+    ) {
+        if !self.in_turn() {
+            return;
+        }
+        if completes && self.reported_turn {
+            self.end_turn(cause, now, fx);
+        } else {
+            self.set_state(AgentState::Idle, cause, now, fx);
+        }
+    }
+
+    /// The agent that took the pane over from the shell is gone without a
+    /// `clear` (killed or crashed): the shell's marks drive the state again,
+    /// and a turn it left running is an unexpected exit.
+    fn agent_left(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        self.agent_reporting = false;
+        if self.in_turn() {
+            let to = AgentState::Error(ErrorReason::UnexpectedExit { code: None });
+            self.set_state(to, Cause::Process, now, fx);
         }
     }
 
@@ -550,6 +650,11 @@ impl Machine {
 
     /// The only place the state changes, so the red mark always follows it.
     fn set_state(&mut self, to: AgentState, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
+        // Like Done, a failure the user is looking at needs no mark.
+        let to = match to {
+            AgentState::Error(_) if self.seen => AgentState::Idle,
+            to => to,
+        };
         let from = self.state;
         if from == to {
             return;
@@ -576,5 +681,17 @@ impl Machine {
             self.awaiting_screen = false;
             self.watchdog_at = None;
         }
+        if !matches!(to, AgentState::Working | AgentState::NeedsYou(_)) {
+            self.reported_turn = false;
+        }
+    }
+}
+
+fn needs_reason(kind: Option<BlockedKind>) -> NeedsReason {
+    match kind {
+        Some(BlockedKind::Permission) => NeedsReason::Permission,
+        Some(BlockedKind::Question) => NeedsReason::Question,
+        Some(BlockedKind::Auth) => NeedsReason::Auth,
+        None => NeedsReason::Blocked,
     }
 }

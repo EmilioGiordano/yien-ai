@@ -61,7 +61,9 @@ fn merge(list: &mut Vec<PaneEvent>, event: PaneEvent) {
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::AgentState;
+    use yien_proto::{AgentState, SessionTitle};
+
+    use crate::titles::TitleFrom;
 
     use super::*;
 
@@ -70,7 +72,10 @@ mod tests {
         let reports = Reports::default();
         let pane = PaneId::new(1);
         for i in 0..10_000 {
-            reports.push(pane, PaneEvent::Title(Some(format!("t{i}"))));
+            reports.push(
+                pane,
+                PaneEvent::Title(Some(SessionTitle::new(format!("t{i}"))), TitleFrom::Program),
+            );
         }
         reports.push(pane, PaneEvent::State(AgentState::Working, None));
         reports.push(pane, PaneEvent::Exited(Some(0)));
@@ -82,7 +87,7 @@ mod tests {
         assert_eq!(
             taken[&pane],
             [
-                PaneEvent::Title(Some("t9999".into())),
+                PaneEvent::Title(Some(SessionTitle::new("t9999")), TitleFrom::Program),
                 PaneEvent::State(AgentState::Working, None),
                 PaneEvent::Exited(Some(0)),
                 PaneEvent::State(AgentState::Idle, None),
@@ -91,6 +96,21 @@ mod tests {
             ]
         );
         assert!(reports.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rf_pan_12_a_merged_title_keeps_who_set_it() {
+        let reports = Reports::default();
+        let pane = PaneId::new(1);
+        let theme = || PaneEvent::Title(Some(SessionTitle::new("pwsh")), TitleFrom::Shell);
+        reports.push(pane, PaneEvent::State(AgentState::Done, None));
+        reports.push(pane, theme());
+        reports.push(pane, PaneEvent::State(AgentState::Working, None));
+        let taken = futures_now(reports.next());
+        assert_eq!(
+            taken[&pane],
+            [PaneEvent::State(AgentState::Working, None), theme()]
+        );
     }
 
     #[test]
