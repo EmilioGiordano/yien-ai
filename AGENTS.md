@@ -8,15 +8,28 @@ YIEN is a Windows-first desktop agent IDE written in Rust: projects, vertical ta
 
 ## Source of truth
 
-The specs are **not in git**. `docs/` and `design/` are gitignored and do not exist in a worktree. Use the absolute paths:
+The specs are **not in git**. `docs/` and `design/` are gitignored and do not exist in a worktree. Use the absolute paths under `<specs>`, the `YIEN_SPECS_DIR` of "Local setup":
 
 ```
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/02-ers.md                 what the system does (RF, RNF, RN, CU ids)
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/05-plan-de-ingenieria.md   engineering decisions (ADR-xx), milestones, test strategy
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/04-stack-y-arquitectura.md stack rationale, state machine, profiles, platform layer
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/01-vision.md               principles and identity
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/design/prototipo-navegacion.html the UI prototype
+<specs>/docs/02-ers.md                 what the system does (RF, RNF, RN, CU ids)
+<specs>/docs/05-plan-de-ingenieria.md   engineering decisions (ADR-xx), milestones, test strategy
+<specs>/docs/04-stack-y-arquitectura.md stack rationale, state machine, profiles, platform layer
+<specs>/docs/01-vision.md               principles and identity
+<specs>/design/prototipo-navegacion.html the UI prototype
 ```
+
+## Local setup
+
+Machine-specific paths are never in git. They live in `.yien-local`, a gitignored file in the root of the main checkout (copy `.yien-local.example`), with one `KEY=value` per line. `scripts/cargo.sh` and `cargo xtask trace` find it from any worktree through `git rev-parse --git-common-dir`, and an environment variable of the same name overrides a line.
+
+| Key | Meaning | Written below as |
+|---|---|---|
+| `YIEN_SPECS_DIR` | Folder holding `docs/` and `design/`, usually the main checkout | `<specs>` |
+| `YIEN_WORKTREES_DIR` | Folder where branch worktrees are created | `<worktrees>` |
+| `YIEN_BUILD_ROOT` | Folder of the build slots, on the build drive | `<build-root>` |
+| `YIEN_BUILD_LOCK` | Machine-wide build lock; optional | `<build-root>/yien-build.lock` by default |
+
+Without a build root or lock, `scripts/cargo.sh` stops and says to create `.yien-local`; it never guesses a drive.
 
 `ROADMAP.md` (in git) says where the project stands and what comes next. Each branch updates its own row and any decision it took, as its last commit, so the roadmap reaches `main` with the merge.
 
@@ -64,7 +77,7 @@ feat/pane-layout-drag    fix/conpty-startup-deadlock    spike/s2-conpty-host
 Parallel work means one branch, one worktree and one implementer per feature. Worktrees live outside the repo:
 
 ```
-C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic>
+<worktrees>/<topic>
 ```
 
 - cargo runs only inside the worktree the agent was given, and always through `scripts/cargo.sh` (see "Builds").
@@ -75,11 +88,11 @@ C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic>
 
 The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is the limit, not CPU.
 
-- `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the lock `D:/yien-build.lock`, and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds.
+- `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the build lock (`YIEN_BUILD_LOCK`), and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds.
 - The gate gives up after an hour with exit code 75. That is not a test failure: report it, with the memory and process counts it printed, and the orchestrator tells Emilio. A lock whose owner died, or that is older than 4 hours, is broken automatically.
 - A gated build can outlast a tool call's time limit. Run long ones (full gate, release builds, first build of a slot) in the background and wait for them to finish.
-- Each worktree has an untracked `.yien-slot` file naming its target dir: `D:/More-Code-Projects/yien-compiled/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile on `C:`. Never share a target dir between two branches: mixed builds have caused real bugs.
-- Old slots are cleaned only when `D:` drops below about 40 GB free.
+- Each worktree has an untracked `.yien-slot` file naming its target dir: `<build-root>/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile outside the build root; `scripts/cargo.sh` refuses a slot elsewhere. Never share a target dir between two branches: mixed builds have caused real bugs.
+- Old slots are cleaned only when the build drive drops below about 40 GB free.
 - Branches run cheap checks on the crates they touch: `fmt --check`, `check -p <crates> --all-targets`, `test -p <crates>`. The full gate runs at integration.
 
 ## The branch loop
@@ -110,7 +123,7 @@ A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet
 
 Ready branches are tested together before any reaches `main`.
 
-1. In the one integration worktree, `C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/staging` (created once, then reused with its own slot), run `git switch -c staging/<date> main`, or `staging/<date>-<n>` when the name is taken. Never reuse an old staging branch, and never push one.
+1. In the one integration worktree, `<worktrees>/staging` (created once, then reused with its own slot), run `git switch -c staging/<date> main`, or `staging/<date>-<n>` when the name is taken. Never reuse an old staging branch, and never push one.
 2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit; drop it with `git merge --abort` (conflict) or `git reset --hard HEAD~1` (merged but broken). `reset --hard` is allowed only on a `staging/*` branch.
 3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `xtask check-deps` and `xtask trace` (also through `scripts/cargo.sh`) once they exist.
 4. Run the UI validation of each feature on the staging build.
