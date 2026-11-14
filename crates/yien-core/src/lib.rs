@@ -152,7 +152,7 @@ pub struct CoreConfig {
     pub shell: ShellCommand,
     /// `terminal.shell`: the installed shell panes run when no profile is
     /// asked for, instead of `shell` (RF-ESP-03). One not in `shells` runs
-    /// `shell`, with a notice. Ignored off Windows. [`ClientMsg::SetShellIntegration`]
+    /// `shell`, with a notice. Ignored off Windows. [`ClientMsg::SetShell`]
     /// changes it for panes started afterwards. `None` by default.
     pub shell_kind: Option<ShellKind>,
     /// The shells a pane can start through their [`ShellKind::profile`]
@@ -162,7 +162,7 @@ pub struct CoreConfig {
     /// PowerShell, cmd and Git Bash panes report their folder at each prompt
     /// ([`ShellCommand::reporting_cwd`], RF-SES-01), so a restored pane opens
     /// where the user left it; PowerShell and Git Bash panes also mark their
-    /// commands, so they work while one runs. [`ClientMsg::SetShellIntegration`] changes
+    /// commands, so they work while one runs. [`ClientMsg::SetShell`] changes
     /// it for panes started afterwards. On by default.
     pub shell_integration: bool,
     /// The agent profiles panes can be split with (RF-PAN-18).

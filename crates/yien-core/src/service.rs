@@ -608,13 +608,13 @@ impl Service {
                 let fx = self.ws.set_window_focus(focused);
                 self.execute(fx).await;
             }
-            ClientMsg::SetShellIntegration { on: integration } => {
-                let shell = self.ctx.config.shell_kind;
-                let (default, _) = self.shells.default_shell(shell, integration);
+            ClientMsg::SetShell { shell, integration } => {
+                let (default, notice) = self.shells.default_shell(shell, integration);
                 let installed = self.shells.installed(integration);
                 let config = &self.ctx.config;
                 if default != config.shell
                     || installed != config.shells
+                    || shell != config.shell_kind
                     || integration != config.shell_integration
                 {
                     tracing::info!(
@@ -625,8 +625,16 @@ impl Service {
                     let mut config = (**config).clone();
                     config.shell = default;
                     config.shells = installed;
+                    config.shell_kind = shell;
                     config.shell_integration = integration;
                     self.ctx.config = Arc::new(config);
+                }
+                if let Some(message) = notice {
+                    self.emit(CoreMsg::Error {
+                        pane: None,
+                        message,
+                    })
+                    .await;
                 }
             }
             ClientMsg::SetTerminalPalette { palette: named } => {

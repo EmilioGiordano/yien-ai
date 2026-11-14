@@ -12,7 +12,7 @@ use yien_platform::config_file::{self, Watcher};
 use yien_proto::TerminalPalette;
 use yien_ui::{ConfigUpdate, Settings, SettingsHost};
 
-use crate::shell_switch::ShellSwitch;
+use crate::shell_switch::{ShellSwitch, ShellWanted};
 use crate::update::Update;
 
 /// Opens the file through the platform layer.
@@ -38,10 +38,10 @@ impl SettingsHost for Host {
 
 /// The first reading, the watcher sending the later ones, and the opener,
 /// with the watcher to stop on quit, and the switch that hands every later
-/// `terminal.shell_integration` to the core. Without a data dir the window
-/// runs on the defaults. `profile_problems` go to the status bar with the
-/// first reading. Every valid reading also reaches `update`, for
-/// `update.check`.
+/// `terminal.shell` and `terminal.shell_integration` to the core. Without a
+/// data dir the window runs on the defaults. `profile_problems` go to the
+/// status bar with the first reading. Every valid reading also reaches
+/// `update`, for `update.check`.
 pub(crate) fn start(
     profile_problems: Vec<String>,
     update: Arc<Update>,
@@ -59,7 +59,7 @@ pub(crate) fn start(
             host: Box::new(Host { path }),
             profile_problems,
         };
-        let switch = Arc::new(ShellSwitch::new(shell_integration(&settings.initial)));
+        let switch = Arc::new(ShellSwitch::new(shell_wanted(&settings.initial)));
         return (settings, None, switch);
     };
     match config_file::create_if_absent(&file, &yien_config::default_file(&yien_ui::commands())) {
@@ -71,7 +71,7 @@ pub(crate) fn start(
     let stamp = config_file::stamp(&file);
     let initial = reading(config_file::read(&file));
     update.reading(&initial);
-    let switch = Arc::new(ShellSwitch::new(shell_integration(&initial)));
+    let switch = Arc::new(ShellSwitch::new(shell_wanted(&initial)));
     let to_core = Arc::clone(&switch);
     let watcher = config_file::watch(file, stamp, move |text| {
         let reading = reading(text);
@@ -107,14 +107,14 @@ pub(crate) fn start_palette(initial: &ConfigUpdate) -> Option<TerminalPalette> {
     }
 }
 
-/// Whether shells report their folder, from the first reading: a file that
-/// does not read keeps the default, on. Later readings go through
-/// [`ShellSwitch`].
-pub(crate) fn shell_integration(initial: &ConfigUpdate) -> bool {
+/// The shell panes start and whether shells report their folder, from the
+/// first reading: a file that does not read keeps the defaults, YIEN's own
+/// pick with the report on. Later readings go through [`ShellSwitch`].
+pub(crate) fn shell_wanted(initial: &ConfigUpdate) -> ShellWanted {
     match initial {
-        ConfigUpdate::Loaded(loaded) => loaded.config.shell_integration,
+        ConfigUpdate::Loaded(loaded) => ShellWanted::of(&loaded.config),
         ConfigUpdate::Invalid(_) | ConfigUpdate::Unreadable(_) => {
-            yien_config::Config::default().shell_integration
+            ShellWanted::of(&yien_config::Config::default())
         }
     }
 }
@@ -134,6 +134,8 @@ fn reading(text: io::Result<Option<String>>) -> ConfigUpdate {
 
 #[cfg(test)]
 mod tests {
+    use yien_proto::ShellKind;
+
     use super::*;
 
     fn palette_for(text: &str) -> Option<TerminalPalette> {
@@ -142,14 +144,27 @@ mod tests {
 
     #[test]
     fn rf_ses_01_shells_report_their_folder_unless_the_file_says_no() {
-        let read = |text: &str| shell_integration(&reading(Ok(Some(text.to_owned()))));
+        let read = |text: &str| shell_wanted(&reading(Ok(Some(text.to_owned())))).integration;
         assert!(read(""));
         assert!(!read("terminal.shell_integration = false"));
         assert!(
             read("terminal.shell_integration = 0"),
             "invalid keeps the default"
         );
-        assert!(shell_integration(&reading(Ok(None))));
+        assert!(shell_wanted(&reading(Ok(None))).integration);
+    }
+
+    #[test]
+    fn rf_cfg_01_panes_start_on_the_file_shell() {
+        let read = |text: &str| shell_wanted(&reading(Ok(Some(text.to_owned())))).shell;
+        assert_eq!(read(""), None, "YIEN's own pick");
+        assert_eq!(read("terminal.shell = \"cmd\""), Some(ShellKind::Cmd));
+        assert_eq!(
+            read("terminal.shell = \"git-bash\"\ntheme = 3"),
+            None,
+            "invalid keeps the default"
+        );
+        assert_eq!(shell_wanted(&reading(Ok(None))).shell, None);
     }
 
     #[test]

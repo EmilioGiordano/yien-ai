@@ -1451,11 +1451,17 @@ fn rf_ses_01_shells_started_after_a_switch_follow_it() {
     let command = |child: &FakeChild| child.spec().args.iter().any(|a| a == "-Command");
     assert!(command(&first), "on by default");
 
-    h.send(ClientMsg::SetShellIntegration { on: false });
+    h.send(ClientMsg::SetShell {
+        shell: None,
+        integration: false,
+    });
     let (second_pane, second) = h.split(pane, None);
     assert!(second.spec().args.is_empty());
 
-    h.send(ClientMsg::SetShellIntegration { on: true });
+    h.send(ClientMsg::SetShell {
+        shell: None,
+        integration: true,
+    });
     let (_, third) = h.split(second_pane, None);
     assert_eq!(third.spec().args, first.spec().args);
     assert!(
@@ -1539,6 +1545,46 @@ fn rf_pan_18_a_split_on_a_shell_not_installed_runs_the_default_and_says_why() {
         "PowerShell 7 was not found; this pane runs fake-shell instead."
     );
     assert_eq!(h.child().spec().program, "fake-shell");
+}
+
+#[test]
+fn rf_cfg_01_the_default_shell_switches_for_panes_started_after() {
+    let mut h = Harness::start_with(with_shells());
+    let (_, pane, first) = h.project();
+    assert_eq!(first.spec().program, "fake-shell");
+    h.send(ClientMsg::SetShell {
+        shell: Some(ShellKind::Cmd),
+        integration: true,
+    });
+    let (second_pane, second) = h.split(pane, None);
+    // Off Windows `terminal.shell` is ignored.
+    let expected = if cfg!(windows) {
+        "fake-cmd.exe"
+    } else {
+        "fake-shell"
+    };
+    assert_eq!(second.spec().program, expected);
+
+    h.send(ClientMsg::SetShell {
+        shell: Some(ShellKind::Pwsh),
+        integration: true,
+    });
+    if cfg!(windows) {
+        let message = h.wait_for(|m| match m {
+            CoreMsg::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            message,
+            "terminal.shell: PowerShell 7 was not found; new panes run fake-shell instead."
+        );
+    }
+    let (_, third) = h.split(second_pane, None);
+    assert_eq!(third.spec().program, "fake-shell");
+    assert!(
+        h.backend.take_spawned().is_empty(),
+        "running panes keep theirs"
+    );
 }
 
 #[test]

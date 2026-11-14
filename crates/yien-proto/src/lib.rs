@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 16);
+//! assert_eq!(PROTO_VERSION, 17);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -45,7 +45,7 @@ pub use title::{SESSION_TITLE_MAX, session_title};
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 16;
+pub const PROTO_VERSION: u32 = 17;
 
 /// The least part of a pair of neighbouring panes either one keeps when
 /// [`Command::SetDivider`] moves the divider between them: a share closer to

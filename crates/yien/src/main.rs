@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use yien_core::{
-    Core, CoreConfig, CoreHandle, GitConfig, HookConfig, ScreenStore, SendError, SessionStore,
+    Core, CoreConfig, CoreHandle, GitConfig, HookConfig, InstalledShells, ScreenStore, SendError,
+    SessionStore,
 };
 use yien_platform::LogGuard;
 use yien_platform::agent_sessions::CliDirs;
@@ -29,6 +30,8 @@ use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, PaneId};
 use yien_pty::PortablePty;
 use yien_ui::{CoreClient, Refused};
+
+use crate::shell_switch::ShellWanted;
 
 /// The window's way to the core.
 struct Client(CoreHandle);
@@ -87,8 +90,11 @@ fn main() -> ExitCode {
     let update = Arc::new(update);
     let (settings, settings_watcher, shell_switch) =
         settings::start(user_profiles.notices, Arc::clone(&update));
+    let shell = settings::shell_wanted(&settings.initial);
     let config = CoreConfig {
-        shell_integration: settings::shell_integration(&settings.initial),
+        shell_kind: shell.shell,
+        shells: InstalledShells::find(),
+        shell_integration: shell.integration,
         profiles: user_profiles.profiles,
         broken_profiles: user_profiles.broken,
         hooks,
@@ -116,7 +122,7 @@ fn main() -> ExitCode {
         }
     };
     let to_core = core.clone();
-    shell_switch.attach(Box::new(move |on| deliver_shell_integration(&to_core, on)));
+    shell_switch.attach(Box::new(move |wanted| deliver_shell(&to_core, wanted)));
     // Before the window opens, so its taskbar button carries the toasts' app id.
     let attention = Rc::new(attention::Attention::new(window));
     let files = files::start();
@@ -198,12 +204,15 @@ fn claim_data_dir(window: &Arc<AtomicIsize>) -> Option<Option<Instance>> {
     }
 }
 
-/// Tells the core whether shells started from now on report their folder,
-/// waiting up to a second while its queue is full. Runs on the settings
-/// watcher's thread.
-fn deliver_shell_integration(core: &CoreHandle, on: bool) -> bool {
+/// Tells the core which shell panes started from now on run and whether
+/// they report their folder, waiting up to a second while its queue is
+/// full. Runs on the settings watcher's thread.
+fn deliver_shell(core: &CoreHandle, wanted: ShellWanted) -> bool {
     let deadline = Instant::now() + Duration::from_secs(1);
-    let mut msg = ClientMsg::SetShellIntegration { on };
+    let mut msg = ClientMsg::SetShell {
+        shell: wanted.shell,
+        integration: wanted.integration,
+    };
     loop {
         match core.try_send(msg) {
             Ok(()) => return true,
@@ -212,7 +221,7 @@ fn deliver_shell_integration(core: &CoreHandle, on: bool) -> bool {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
-                tracing::warn!(on, "the shell integration change did not reach the core");
+                tracing::warn!("the shell setting change did not reach the core");
                 return false;
             }
         }

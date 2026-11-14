@@ -13,7 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{SelectionKind, Side, ViewportPoint};
-use crate::{PaneId, ProjectId, TabGit, TabId};
+use crate::{PaneId, ProjectId, ShellKind, TabGit, TabId};
 
 /// Names an agent profile: `claude`, `codex`, `shell` (RF-AGE-01, RF-PAN-18).
 ///
@@ -582,11 +582,14 @@ pub enum ClientMsg {
         /// The palette.
         palette: TerminalPalette,
     },
-    /// Whether shell panes started from now on report their folder at each
-    /// prompt (RF-SES-01); running panes keep how they started.
-    SetShellIntegration {
-        /// On or off.
-        on: bool,
+    /// The shell panes started from now on run when no profile names one,
+    /// and whether shells report their folder at each prompt (RF-CFG-01,
+    /// RF-SES-01); running panes keep how they started.
+    SetShell {
+        /// The default shell; YIEN's own pick when `None`.
+        shell: Option<ShellKind>,
+        /// Whether shells report their folder and mark their commands.
+        integration: bool,
     },
 }
 
@@ -1294,7 +1297,10 @@ mod tests {
             ClientMsg::SetTerminalPalette {
                 palette: TerminalPalette::Washi,
             },
-            ClientMsg::SetShellIntegration { on: false },
+            ClientMsg::SetShell {
+                shell: Some(ShellKind::GitBash),
+                integration: false,
+            },
         ];
         for msg in msgs {
             assert_eq!(round_trip(&msg), msg);
