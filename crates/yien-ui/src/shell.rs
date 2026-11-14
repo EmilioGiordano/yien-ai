@@ -2581,7 +2581,7 @@ impl Shell {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(t.label_color(state))
+                                .text_color(t.tab_mark_color(TabMark::State(state)))
                                 .child(state.label()),
                         )
                         .child(

@@ -168,12 +168,7 @@ impl Theme {
         }
     }
 
-    /// The colour of a state's words in a tab row.
-    pub(crate) fn label_color(&self, state: AgentState) -> Rgba {
-        self.tab_mark_color(TabMark::State(state))
-    }
-
-    /// The colour of a tab row's mark: red for "needs you", dim otherwise (RN-01).
+    /// The colour of a tab row's mark and state words: red for "needs you", dim otherwise (RN-01).
     pub(crate) fn tab_mark_color(&self, mark: TabMark) -> Rgba {
         match mark {
             TabMark::State(AgentState::NeedsYou) => self.mark_red,
@@ -338,13 +333,11 @@ mod tests {
             ] {
                 assert_ne!(t.state_color(state), t.shu, "{state:?}");
                 for red in [t.shu, t.mark_red] {
-                    assert_ne!(t.label_color(state), red, "{state:?}");
                     assert_ne!(t.tab_mark_color(TabMark::State(state)), red, "{state:?}");
                     assert_ne!(t.tab_mark_color(TabMark::Shell), red);
                 }
             }
             assert_eq!(t.state_color(AgentState::NeedsYou), t.shu);
-            assert_eq!(t.label_color(AgentState::NeedsYou), t.mark_red);
             let needs = TabMark::State(AgentState::NeedsYou);
             assert_eq!(t.tab_mark_color(needs), t.mark_red);
         }
@@ -371,7 +364,6 @@ mod tests {
                     t.mark_dim
                 };
                 assert_eq!(t.tab_mark_color(mark), want, "{state:?}");
-                assert_eq!(t.label_color(state), want, "{state:?}");
             }
             assert_eq!(t.tab_mark_color(TabMark::Shell), t.mark_dim);
             // The square is a graphic, not text: 3:1 (WCAG 1.4.11).
