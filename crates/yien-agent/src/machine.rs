@@ -16,6 +16,11 @@ pub const NEEDS_YOU_CONFIRM: Duration = Duration::from_millis(300);
 /// startup screen, such as folder trust or sign-in, that waits for the user.
 pub const STARTUP_SCREEN_SETTLE: Duration = NEEDS_YOU_CONFIRM;
 
+/// The longest a startup screen goes unread while output keeps coming: an
+/// animated screen (Codex's sign-in shimmer redraws every 100 ms) never
+/// settles.
+pub const STARTUP_SCREEN_MAX_WAIT: Duration = Duration::from_secs(1);
+
 /// Why an agent needs the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeedsReason {
@@ -215,6 +220,8 @@ pub struct Machine {
     agent_reporting: bool,
     /// When the startup screen is read next, once output settles.
     settle_at: Option<Duration>,
+    /// The first output since the startup screen was last read.
+    unread_since: Option<Duration>,
     /// The red mark is a startup screen's, not a turn's.
     startup_red: bool,
 }
@@ -238,6 +245,7 @@ impl Machine {
             reported_turn: false,
             agent_reporting: false,
             settle_at: None,
+            unread_since: None,
             startup_red: false,
         }
     }
@@ -362,6 +370,7 @@ impl Machine {
             Signal::Exited { code } => {
                 self.exited = true;
                 self.settle_at = None;
+                self.unread_since = None;
                 match self.state {
                     // Quitting a startup screen ends no turn.
                     AgentState::Working | AgentState::NeedsYou(_)
@@ -386,7 +395,8 @@ impl Machine {
                     // An answered startup screen is read again, not taken
                     // for a turn going on.
                     self.input_pending = false;
-                    let at = now + STARTUP_SCREEN_SETTLE;
+                    let first = *self.unread_since.get_or_insert(now);
+                    let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
                     self.settle_at = Some(at);
                     fx.push(Effect::WakeAt(at));
                 } else if self.state.is_red() && self.input_pending {
@@ -423,6 +433,7 @@ impl Machine {
             self.signal_lost = false;
             // The agent got past its startup screens and speaks for itself.
             self.settle_at = None;
+            self.unread_since = None;
             if self.startup_red {
                 self.set_state(AgentState::Idle, Cause::Source(source), now, fx);
             }
@@ -623,6 +634,7 @@ impl Machine {
                 fx.push(Effect::WakeAt(at));
             } else {
                 self.settle_at = None;
+                self.unread_since = None;
                 if self.reads_startup_screen() && !self.awaiting_screen {
                     self.awaiting_screen = true;
                     fx.push(Effect::CheckScreen);
@@ -732,6 +744,7 @@ impl Machine {
         self.pending = None;
         self.awaiting_screen = false;
         self.settle_at = None;
+        self.unread_since = None;
         self.set_state(AgentState::Idle, cause, now, fx);
     }
 
@@ -759,6 +772,7 @@ impl Machine {
         }
         if to == AgentState::Working {
             self.settle_at = None;
+            self.unread_since = None;
             self.last_activity = now;
             if let Some(period) = self.config.watchdog {
                 let at = now + period;
