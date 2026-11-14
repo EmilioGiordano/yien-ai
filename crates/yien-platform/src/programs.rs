@@ -16,8 +16,9 @@ use std::collections::HashMap;
 pub use yien_proto::KNOWN_PROGRAMS;
 
 /// How far below the shell a known program is looked for: an npm shim runs
-/// `cmd /c`, then node, then the CLI's own executable.
-const DEPTH: usize = 3;
+/// `cmd /c` (in Git Bash, a bash), then node, then the CLI's own
+/// executable; Git Bash's `bin\bash.exe` is a launcher one level above.
+const DEPTH: usize = 4;
 
 /// The known program an executable name means, if any: case does not matter,
 /// a folder and a `.exe` are dropped.
@@ -272,13 +273,26 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_12_a_cli_started_from_git_bash_through_a_shim_is_named() {
+        let all = [
+            p(10, 1, "bash.exe"),
+            p(11, 10, "bash.exe"),
+            p(12, 11, "bash.exe"),
+            p(13, 12, "node.exe"),
+            p(14, 13, "codex.exe"),
+        ];
+        assert_eq!(ProcessTree::new(&all).program_under(10), Some("codex"));
+    }
+
+    #[test]
     fn rf_pan_12_a_program_too_deep_or_in_another_shell_is_not_named() {
         let all = [
             p(10, 1, "pwsh.exe"),
             p(11, 10, "a.exe"),
             p(12, 11, "b.exe"),
             p(13, 12, "c.exe"),
-            p(14, 13, "claude.exe"),
+            p(15, 13, "d.exe"),
+            p(14, 15, "claude.exe"),
             p(20, 1, "pwsh.exe"),
             p(21, 20, "opencode.exe"),
         ];
