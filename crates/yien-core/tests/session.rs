@@ -391,6 +391,21 @@ fn rf_nav_10_the_side_bars_come_back_after_a_restart() {
 }
 
 #[test]
+fn rf_cfg_02_the_terminal_zoom_comes_back_after_a_restart() {
+    let store = Shared::default();
+    {
+        let mut run = Run::start(&store);
+        assert_eq!(run.snapshot().terminal_zoom, 0);
+        run.first_pane();
+        run.command(Command::SetTerminalZoom { zoom: 3 });
+        wait_until(|| store.saved().is_some_and(|s| s.terminal_zoom == 3));
+        run.save();
+    }
+    let mut run = Run::start(&store);
+    assert_eq!(run.snapshot().terminal_zoom, 3);
+}
+
+#[test]
 fn rf_ses_02_a_restart_restores_layout_focus_and_selection() {
     let store = Shared::default();
     let mut run = Run::start(&store);

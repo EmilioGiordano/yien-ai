@@ -258,6 +258,18 @@ mod tests {
     }
 
     #[test]
+    fn rf_cfg_01_the_default_tab_folder_applies_live_and_an_invalid_file_keeps_it() {
+        let mut m = SettingsModel::default();
+        assert_eq!(m.config().default_tab_dir, None);
+        m.apply(loaded("ui.tabs.default_dir = 'D:\\Code'"));
+        assert_eq!(m.config().default_tab_dir.as_deref(), Some("D:\\Code"));
+        m.apply(invalid("ui.tabs.default_dir = 1"));
+        assert_eq!(m.config().default_tab_dir.as_deref(), Some("D:\\Code"));
+        m.apply(loaded(""));
+        assert_eq!(m.config().default_tab_dir, None);
+    }
+
+    #[test]
     fn rf_cfg_02_the_file_picks_the_palette() {
         let mut m = SettingsModel::default();
         assert_eq!(m.theme(false), ThemeKind::Sumi, "sumi by default");

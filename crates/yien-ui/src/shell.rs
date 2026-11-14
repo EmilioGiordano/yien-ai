@@ -29,6 +29,7 @@ use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
 use crate::git::{ContextGit, FileMark};
+use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
@@ -52,6 +53,7 @@ use crate::tray::{CloseRequest, close_request, quit_detail};
 use crate::update::Updates;
 
 mod bars;
+mod default_tab;
 mod dividers;
 mod files;
 mod menu;
@@ -63,6 +65,7 @@ mod tab_drag;
 mod tray;
 mod update;
 mod worktrees;
+mod zoom;
 
 use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
@@ -104,8 +107,13 @@ pub(crate) struct Shell {
     /// The terminal palette the core has taken, `None` until it took one.
     palette_sent: Option<TerminalPalette>,
     fonts: Fonts,
-    /// The terminals' font size from the settings (RF-CFG-02).
+    /// The terminals' font size from the settings, zoomed (RF-CFG-02).
     terminal_size: f32,
+    /// Pixels the user zoomed the terminals by over the settings' size.
+    terminal_zoom: i32,
+    /// The zoom the core holds for the session; `None` until its snapshot
+    /// brings the saved one.
+    terminal_zoom_saved: Option<i32>,
     /// The last valid settings and the session's theme toggle.
     settings: SettingsModel,
     settings_host: Box<dyn SettingsHost>,
@@ -344,6 +352,8 @@ impl Shell {
             palette_sent: None,
             fonts: Fonts::default(),
             terminal_size: crate::terminal::DEFAULT_FONT_SIZE,
+            terminal_zoom: 0,
+            terminal_zoom_saved: None,
             settings: SettingsModel::default(),
             settings_host: settings.host,
             settings_notice: None,
@@ -437,6 +447,7 @@ impl Shell {
                     self.workspace = WorkspaceView::from_snapshot(&snapshot);
                     self.side_bars = snapshot.side_bars;
                     self.side_bars_saved = Some(snapshot.side_bars);
+                    self.take_saved_zoom(snapshot.terminal_zoom, window, cx);
                     self.workspace
                         .set_group_by_state(self.settings.groups_by_state());
                 }
@@ -629,6 +640,18 @@ impl Shell {
             });
             self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
+        }
+        self.sync_key_quirks(cx);
+    }
+
+    /// Each pane's key quirks follow the program its head names, which
+    /// changes after the view exists: details arrive, a program starts or ends.
+    fn sync_key_quirks(&self, cx: &mut Context<Self>) {
+        for (&pane, terminal) in &self.terminals {
+            let quirks = pane_key_quirks(&self.workspace.pane(pane));
+            if terminal.read(cx).quirks() != quirks {
+                terminal.update(cx, |t, _| t.set_quirks(quirks));
+            }
         }
     }
 
@@ -2252,6 +2275,7 @@ impl Shell {
             } else {
                 "Projects"
             }))
+            .child(self.default_tab_button(cx))
             .child(
                 icon_button("add-project", assets::PLUS, &t)
                     .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
@@ -3562,6 +3586,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::resume_past_session))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_default_tab))
             .on_action(cx.listener(Self::new_claude_tab))
             .on_action(cx.listener(Self::new_worktree_tab))
             .on_action(cx.listener(Self::worktree_prompt_confirm))
@@ -3577,6 +3602,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::copy_session_id))
             .on_action(cx.listener(Self::toggle_project_fold))
             .on_action(cx.listener(Self::toggle_notifications_muted))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::reset_zoom))
             .on_action(cx.listener(Self::toggle_tab_muted))
             .on_action(cx.listener(Self::add_project))
             .on_action(cx.listener(Self::close_project))
@@ -3768,6 +3796,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("empty state's add project button", "project.add"),
     ("project head close button", "project.close"),
     ("project head new tab button", "tab.new"),
+    ("tab bar head new tab button", "tab.new_default"),
     ("close project dialog buttons", "project.close"),
     ("close tab dialog buttons", "tab.close"),
     ("close pane dialog buttons", "pane.close"),

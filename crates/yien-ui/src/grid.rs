@@ -4,7 +4,7 @@
 
 use yien_input::mouse::{self, Action, Button, MouseEvent};
 use yien_input::paste::{self, Risk};
-use yien_input::{Key, KeyModes, Mods};
+use yien_input::{Key, KeyModes, KeyQuirks, Mods};
 use yien_proto::frame::{
     Cell, CellFlags, Cursor, CursorShape, Frame, Modes, MouseEncoding, MouseTracking, Rgb,
     SelectionKind, Side, ViewportPoint,
@@ -321,6 +321,8 @@ pub(crate) struct KeyPress<'a> {
     pub(crate) platform: bool,
     /// The layout turns the modifiers into a character (AltGr, dead keys).
     pub(crate) prefer_text: bool,
+    /// What the pane's program needs that no mode it set says.
+    pub(crate) quirks: KeyQuirks,
 }
 
 /// The bytes to write for a key press, or `None` to let the text reach the
@@ -337,6 +339,7 @@ pub(crate) fn key_bytes(press: &KeyPress<'_>, modes: &Modes) -> Option<Vec<u8>> 
             app_cursor,
             win32_input: modes.win32_input,
             kitty_flags: modes.kitty_keyboard,
+            quirks: press.quirks,
         };
         return yien_input::encode_with(&key, mods, key_modes);
     }
@@ -375,6 +378,8 @@ pub(crate) enum WheelAction {
     Report(Vec<u8>),
     /// Scroll the viewport; positive goes back into the history.
     Scroll(i32),
+    /// Zoom every terminal one step: bigger when positive (RF-CFG-02).
+    Zoom(i32),
 }
 
 pub(crate) fn tracking(modes: &Modes) -> mouse::Tracking {
@@ -464,7 +469,9 @@ pub(crate) fn clipboard_text(text: &str, crlf: bool) -> String {
 }
 
 /// `lines` positive means away from the user. Shift keeps the wheel for the
-/// terminal even when the program asked for the mouse.
+/// terminal even when the program asked for the mouse. Ctrl zooms, one step
+/// per turn whatever its length, unless Shift is held too or the program
+/// asked for the mouse.
 pub(crate) fn wheel_action(
     lines: i32,
     modes: &Modes,
@@ -473,6 +480,9 @@ pub(crate) fn wheel_action(
 ) -> Option<WheelAction> {
     if lines == 0 {
         return None;
+    }
+    if mods.ctrl && !mods.shift && modes.mouse == MouseTracking::Off {
+        return Some(WheelAction::Zoom(lines.signum()));
     }
     let count = lines.unsigned_abs().min(100) as usize;
     if pointer(modes, mods.shift) == Pointer::Program {
@@ -778,6 +788,7 @@ mod tests {
             mods,
             platform: false,
             prefer_text: false,
+            quirks: KeyQuirks::default(),
         }
     }
 
@@ -881,13 +892,19 @@ mod tests {
             ..modes()
         };
         assert_eq!(key_bytes(&shift_enter, &kitty).unwrap(), b"\x1b[13;2u");
-        // Under ConPTY the Win32 event wins, so leftover flags never reach PSReadLine.
+        // Claude Code under the bundled ConPTY sets both, and reads only CSI u.
         let both = Modes {
-            kitty_keyboard: 1,
+            kitty_keyboard: 5,
+            ..conpty
+        };
+        assert_eq!(key_bytes(&shift_enter, &both).unwrap(), b"\x1b[13;2u");
+        // Flags without disambiguation leave the Win32 event alone.
+        let other_flags = Modes {
+            kitty_keyboard: 0b0_1010,
             ..conpty
         };
         assert_eq!(
-            key_bytes(&shift_enter, &both),
+            key_bytes(&shift_enter, &other_flags),
             key_bytes(&shift_enter, &conpty)
         );
         // Plain Enter is unchanged in every mode.
@@ -923,6 +940,29 @@ mod tests {
         // Plain Backspace is unchanged.
         let plain = press("backspace", None, Mods::NONE);
         assert_eq!(key_bytes(&plain, &conpty).unwrap(), vec![0x7f]);
+    }
+
+    #[test]
+    fn rf_pan_06_ctrl_delete_follows_the_quirks_of_the_pane_program() {
+        let quirks = KeyQuirks {
+            ctrl_delete_as_meta_d: true,
+        };
+        let conpty = Modes {
+            win32_input: true,
+            ..modes()
+        };
+        let mut delete = press("delete", None, Mods::CTRL);
+        delete.quirks = quirks;
+        let mut back = press("backspace", None, Mods::CTRL);
+        back.quirks = quirks;
+        for m in [modes(), conpty] {
+            assert_eq!(key_bytes(&delete, &m).unwrap(), b"\x1bd");
+            // Ctrl+Backspace already deletes a word there; it is left alone.
+            assert_eq!(
+                key_bytes(&back, &m),
+                key_bytes(&press("backspace", None, Mods::CTRL), &m)
+            );
+        }
     }
 
     fn modes() -> Modes {
@@ -963,6 +1003,68 @@ mod tests {
             Some(WheelAction::Report(b"\x1b[<64;3;2M\x1b[<64;3;2M".to_vec()))
         );
         assert_eq!(wheel_action(2, &m, at, SHIFT), Some(WheelAction::Scroll(2)));
+    }
+
+    #[test]
+    fn rf_cfg_02_ctrl_and_the_wheel_zoom_one_step_per_turn() {
+        let at = ViewportPoint::new(0, 0);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            wheel_action(3, &modes(), at, ctrl),
+            Some(WheelAction::Zoom(1))
+        );
+        assert_eq!(
+            wheel_action(-7, &modes(), at, ctrl),
+            Some(WheelAction::Zoom(-1))
+        );
+        assert_eq!(wheel_action(0, &modes(), at, ctrl), None);
+        let ctrl_shift = Mods {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            wheel_action(2, &modes(), at, ctrl_shift),
+            Some(WheelAction::Scroll(2)),
+            "Ctrl+Shift keeps scrolling the history"
+        );
+        let full_screen = Modes {
+            alt_screen: true,
+            alternate_scroll: true,
+            ..modes()
+        };
+        assert_eq!(
+            wheel_action(1, &full_screen, at, ctrl),
+            Some(WheelAction::Zoom(1))
+        );
+    }
+
+    #[test]
+    fn rf_cfg_02_the_wheel_stays_with_a_program_that_asked_for_the_mouse() {
+        let m = Modes {
+            mouse: MouseTracking::Click,
+            mouse_encoding: MouseEncoding::Sgr,
+            ..modes()
+        };
+        let at = ViewportPoint::new(1, 2);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert!(matches!(
+            wheel_action(1, &m, at, ctrl),
+            Some(WheelAction::Report(_))
+        ));
+        let ctrl_shift = Mods {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            wheel_action(1, &m, at, ctrl_shift),
+            Some(WheelAction::Scroll(1))
+        );
     }
 
     #[test]
