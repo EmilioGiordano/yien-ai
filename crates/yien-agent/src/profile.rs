@@ -275,10 +275,16 @@ pub struct ScreenRule {
 
 impl ScreenRule {
     /// Whether the pattern matches the last `bottom_rows` of `rows` (top to
-    /// bottom), joined with newlines.
+    /// bottom) that end at the lowest row with text, joined with newlines.
     pub fn matches(&self, rows: &[&str]) -> bool {
-        let start = rows.len().saturating_sub(usize::from(self.bottom_rows));
-        self.pattern.is_match(&rows[start..].join("\n"))
+        // A program that draws inline leaves blank rows under its prompt
+        // until the screen fills.
+        let end = rows
+            .iter()
+            .rposition(|row| !row.trim().is_empty())
+            .map_or(0, |last| last + 1);
+        let start = end.saturating_sub(usize::from(self.bottom_rows));
+        self.pattern.is_match(&rows[start..end].join("\n"))
     }
 }
 
@@ -867,6 +873,21 @@ pattern = '\[y/N\]'
         assert_eq!(rule.watchdog, Some(Duration::from_secs(30)));
         assert!(rule.screen[0].matches(&["a", "b", "Continue? [y/N]"]));
         assert!(rule.machine_config().declares(Source::Screen));
+    }
+
+    #[test]
+    fn rf_age_05_screen_rows_are_counted_up_from_the_lowest_row_with_text() {
+        let text = format!(
+            "{}[[rules.screen]]\nconfirms = \"needs_you\"\nbottom_rows = 2\npattern = '^Proceed\\?'\n",
+            MINIMAL.replace("sources = []", "sources = [\"screen\"]")
+        );
+        let rule = &Profile::from_toml(&text).unwrap().rules[0].screen[0];
+        let blank = ["", "  ", ""];
+        let drawn = |rows: &[&'static str]| [rows, &blank[..]].concat();
+        assert!(rule.matches(&drawn(&["banner", "Proceed?", "> yes"])));
+        assert!(!rule.matches(&drawn(&["Proceed?", "> yes", "  no"])));
+        assert!(!rule.matches(&blank));
+        assert!(!rule.matches(&[]));
     }
 
     #[test]
