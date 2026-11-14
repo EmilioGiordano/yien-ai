@@ -44,6 +44,8 @@ mod workspace;
 mod worktree;
 
 #[cfg(test)]
+mod status_replay;
+#[cfg(test)]
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};

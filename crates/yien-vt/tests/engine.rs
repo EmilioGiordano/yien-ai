@@ -2,8 +2,9 @@
 
 use yien_vt::{
     AlacrittyEngine, CellFlags, CursorShape, DEFAULT_SCROLLBACK, DUMP_END, DumpLimits, Frame,
-    GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, PromptMark, Rgb,
-    SelectionKind, Side, Size, TitleChange, ViewportPoint, VtConfig, VtEngine, is_screen_dump,
+    GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, ProgramState,
+    ProgramStatus, PromptMark, Rgb, SelectionKind, Side, Size, StatusApp, TitleChange,
+    ViewportPoint, VtConfig, VtEngine, is_screen_dump,
 };
 
 fn engine(cols: u16, rows: u16) -> AlacrittyEngine {
@@ -576,6 +577,51 @@ fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
     let mut e = engine(20, 5);
     assert!(e.feed(b"\x1b[?").replies.is_empty());
     assert_eq!(e.feed(b"u\x1b[c").replies, b"\x1b[?0u\x1b[?6c");
+}
+
+/// Claude Code's startup probe as it reached the pseudo console (2.1.323):
+/// XTVERSION, the kitty flags, the status query, then device attributes as
+/// the sentinel that ends the wait.
+const CLAUDE_PROBE: [&[u8]; 4] = [b"\x1b[>0q", b"\x1b[?u", b"\x1b]7501;?\x07", b"\x1b[c"];
+
+#[test]
+fn rf_age_05_the_status_query_is_answered_before_device_attributes() {
+    let expected: &[u8] = b"\x1b[?0u\x1b]7501;?\x1b\\\x1b[?6c";
+    let mut e = engine(20, 5);
+    assert_eq!(e.feed(&CLAUDE_PROBE.concat()).replies, expected);
+    // As Claude's four writes arrived: one read each.
+    let mut e = engine(20, 5);
+    let replies: Vec<u8> = CLAUDE_PROBE
+        .iter()
+        .flat_map(|chunk| e.feed(chunk).replies)
+        .collect();
+    assert_eq!(replies, expected);
+    // Cut at every byte.
+    let whole = CLAUDE_PROBE.concat();
+    for cut in 0..=whole.len() {
+        let (a, b) = whole.split_at(cut);
+        let mut e = engine(20, 5);
+        let mut replies = e.feed(a).replies;
+        replies.extend(e.feed(b).replies);
+        assert_eq!(replies, expected, "cut at {cut}");
+    }
+}
+
+#[test]
+fn rf_age_05_status_query_with_st_and_records_reach_the_signals() {
+    let mut e = engine(20, 5);
+    let out = e.feed(b"\x1b]7501;?\x1b\\\x1b[c\x1b]7501;state=working:app=codex\x1b\\ok");
+    assert_eq!(out.replies, b"\x1b]7501;?\x1b\\\x1b[?6c");
+    assert_eq!(
+        out.signals,
+        vec![OscSignal::Status(ProgramStatus {
+            state: ProgramState::Working,
+            kind: None,
+            app: StatusApp::Codex,
+            sub_session: false,
+        })]
+    );
+    assert_eq!(e.frame().line_text(0), "ok");
 }
 
 /// A program that enters the alternate screen, asks for mouse reports and

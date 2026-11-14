@@ -794,16 +794,41 @@ mod tests {
     }
 
     #[test]
-    fn rn_02_codex_and_opencode_never_declare_a_red_capable_source_alone() {
-        // Without hooks or OSC 7501 their machines never reach "working", so
-        // they never mark red; S7 and S8 decide richer sources.
+    fn rn_02_codex_and_opencode_read_osc_7501_only_where_it_was_run() {
+        // OSC 7501 tells working, blocked and the turn's end apart, so it may
+        // light the red mark; it was run against Codex 0.167.2 (sent since
+        // 0.163.0) and OpenCode 2.2.7. Older versions keep a source that never
+        // reaches "working", so they never mark red. No hooks for either.
         let profiles = builtin_profiles().unwrap();
-        for p in &profiles[1..3] {
+        let floors = [
+            ("codex", Version::new(0, 163, 0)),
+            ("opencode", Version::new(2, 2, 7)),
+        ];
+        for (p, (id, floor)) in profiles[1..3].iter().zip(floors) {
+            assert_eq!(p.id, id);
             for rule in &p.rules {
-                assert!(!rule.sources.contains(&Source::Hooks), "{}", p.id);
-                assert!(!rule.sources.contains(&Source::Osc7501), "{}", p.id);
+                assert!(!rule.sources.contains(&Source::Hooks), "{id}");
+                if rule.sources.contains(&Source::Osc7501) {
+                    let lower = rule.versions.as_ref().and_then(VersionReq::lower_bound);
+                    assert_eq!(lower, Some(floor), "{id}");
+                }
             }
+            assert!(p.select_rule(Some(floor)).verified, "{id}");
+            assert!(
+                p.select_rule(None).rule.sources.contains(&Source::Osc7501),
+                "an unprobed version runs the newest rule: {id}"
+            );
         }
+    }
+
+    #[test]
+    fn rf_age_05_a_shell_reads_its_marks_and_the_status_of_a_typed_agent() {
+        let profiles = builtin_profiles().unwrap();
+        let shell = profiles.iter().find(|p| p.id == "shell").unwrap();
+        let config = shell.select_rule(None).rule.machine_config();
+        assert!(config.declares(Source::Osc133));
+        assert!(config.declares(Source::Osc7501));
+        assert!(!config.declares(Source::Hooks));
     }
 
     #[test]
