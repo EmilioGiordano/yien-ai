@@ -63,6 +63,7 @@ mod spinner;
 mod status;
 mod tab_controls;
 mod tab_drag;
+mod tab_menu;
 mod tray;
 mod update;
 mod worktrees;
@@ -74,6 +75,7 @@ use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use spinner::Spinner;
 use status::{Line, Notice};
 use tab_drag::{RowMark, TabDragState};
+use tab_menu::TabMenuState;
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -167,6 +169,8 @@ pub(crate) struct Shell {
     menu: Option<PaneMenu>,
     /// The menu a mouse-down outside it just closed, and when.
     menu_closed_at: Option<(PaneMenuKey, Instant)>,
+    /// The tab menu, while open (RF-ESP-16).
+    tab_menu: TabMenuState,
     /// Where each pane head was painted, for the menu opened by keyboard.
     pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
     /// The user's home folder, which pane heads show as `~`.
@@ -391,6 +395,7 @@ impl Shell {
             menu_closed: None,
             menu: None,
             menu_closed_at: None,
+            tab_menu: TabMenuState::default(),
             pane_heads: Rc::default(),
             home: home_folder(),
             palette: None,
@@ -685,12 +690,14 @@ impl Shell {
         }
         self.drop_stale_worktree_question(window, cx);
         self.drop_stale_menu(window, cx);
+        self.drop_stale_tab_menu(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
         self.palette.is_some()
             || self.menu.is_some()
+            || self.tab_menu.is_open()
             || self.tray.is_some()
             || self.confirm.is_some()
             || self.renaming.is_some()
@@ -763,9 +770,10 @@ impl Shell {
                     }
                 });
                 // Wherever the button comes up, a tab drag ends there.
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
+                        let clicks = event.click_count;
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(clicks, window, cx));
                     }
                 });
             },
@@ -2551,6 +2559,7 @@ impl Shell {
             }))
             .when(draggable, |row| self.draggable_row(row, tab, cx))
             .when(drop_target, |row| self.drop_target_row(row, tab, cx))
+            .map(|row| self.tab_menu_row(row, id, cx))
             .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
             .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
                 row.child(drop_line(mark == RowMark::LineAbove, &t))
@@ -3654,6 +3663,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_down))
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
+            .on_action(cx.listener(Self::tab_bar_menu))
             .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
             .on_action(cx.listener(Self::divider_left))
@@ -3708,6 +3718,7 @@ impl Render for Shell {
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
             .children(self.render_menu(cx))
+            .children(self.render_tab_menu(cx))
             .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
     }

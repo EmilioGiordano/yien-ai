@@ -193,6 +193,7 @@ impl Shell {
         };
         // Dropped first, so its blur cannot close the menu opened now.
         self.menu = None;
+        self.tab_menu.forget();
         let maximized = tab.maximized == Some(pane);
         let alone = tab.layout.panes().len() == 1;
         let focused = tab.focused == pane;
