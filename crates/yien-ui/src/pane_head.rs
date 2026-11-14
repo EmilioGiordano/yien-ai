@@ -2,7 +2,7 @@
 //! Flex ellipsizes the text and keeps the buttons whole; this only drops the
 //! pieces that would not fit at their full width.
 
-use yien_proto::{SHELL_PROFILE, SessionTitle};
+use yien_proto::{SessionTitle, is_shell_profile};
 
 use crate::model::PaneView;
 
@@ -44,7 +44,7 @@ pub(crate) fn program_tag(pane: &PaneView) -> &str {
 /// Whether an agent profile's own program runs in `pane`.
 pub(crate) fn runs_agent(pane: &PaneView) -> bool {
     let id = pane.profile_id.as_str();
-    !id.is_empty() && id != SHELL_PROFILE && pane.runs_session
+    !id.is_empty() && !is_shell_profile(id) && pane.runs_session
 }
 
 /// Whether the head's tag names an agent, laid out to stay whole until the

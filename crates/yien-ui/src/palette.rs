@@ -1075,6 +1075,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rf_esp_03_rf_pan_18_the_palette_starts_each_installed_shell() {
+        use yien_proto::ShellKind;
+        let info = |id: ProfileId, name: &str| yien_proto::ProfileInfo {
+            id,
+            name: name.into(),
+        };
+        // The core's list: the default shell, the installed shells, the agents.
+        let mut profiles = vec![info(ProfileId::new("shell"), "Shell")];
+        profiles.extend(
+            ShellKind::ALL
+                .into_iter()
+                .map(|kind| info(kind.profile(), kind.name())),
+        );
+        profiles.push(info(ProfileId::new("claude"), "Claude Code"));
+        let entries = command_entries(|_| None, &profiles);
+        let mut palette = Palette::new(Mode::Commands, entries, Vec::new());
+        for kind in ShellKind::ALL {
+            let name = kind.name().to_ascii_lowercase();
+            palette.set_query(&format!("new tab with {name}"));
+            assert_eq!(palette.target(), Some(Target::NewTab(kind.profile())));
+            palette.set_query(&format!("split down with {name}"));
+            assert_eq!(
+                palette.target(),
+                Some(Target::Split(kind.profile(), Orientation::Vertical))
+            );
+        }
+    }
+
     const NOW: u64 = 1_762_500_000_000;
     const HOUR: u64 = 3_600_000;
 
