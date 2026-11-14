@@ -371,7 +371,7 @@ mod live {
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
 
-    use yien_agent::{AgentState, Effect, Machine, MachineConfig, Signal, Source};
+    use yien_agent::{AgentState, Effect, Machine, Signal};
     use yien_pty::{PortablePty, PtyBackend, PtyEvent, SpawnSpec};
     use yien_vt::osc_scan::OscScanner;
     use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -502,7 +502,9 @@ mod live {
     /// it: OSC scanner, signal mapping, the shell rule's state machine.
     fn shell_states(raw: &[u8]) -> Vec<AgentState> {
         let now = Duration::ZERO;
-        let mut machine = Machine::new(MachineConfig::new(&[Source::Osc133], None));
+        let profiles = yien_agent::builtin_profiles().unwrap();
+        let shell = profiles.iter().find(|p| p.id == "shell").unwrap();
+        let mut machine = Machine::new(shell.select_rule(None).rule.machine_config());
         machine = machine.step(&Signal::Spawned, now).0;
         machine = machine.step(&Signal::Seen(true), now).0;
         let mut states = Vec::new();

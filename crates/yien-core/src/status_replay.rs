@@ -252,8 +252,10 @@ fn rf_atn_08_opencode_turn_ends_on_idle_and_ignores_session_records() {
 fn rf_age_05_agents_typed_in_a_shell_report_as_in_their_own_pane() {
     for (capture, profile) in [
         (CODEX_PERMISSION, "codex"),
+        (CODEX_STARTUP, "codex"),
         (OPENCODE_PERMISSION, "opencode"),
         (CLAUDE_QUESTION, "claude"),
+        (CLAUDE_INTERRUPT, "claude"),
     ] {
         assert_eq!(
             states(capture, "shell"),
