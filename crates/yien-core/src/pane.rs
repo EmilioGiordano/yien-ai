@@ -15,14 +15,16 @@ use yien_agent::{
     Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
-use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
+use yien_proto::{
+    AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion, is_shell_profile,
+};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
     AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, VtConfig, VtEngine, VtOutput,
 };
 
 use crate::convert;
-use crate::launch::{self, Fill, HookFill, LaunchPlan, SHELL_PROFILE};
+use crate::launch::{self, Fill, HookFill, LaunchPlan};
 use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
@@ -1365,7 +1367,7 @@ impl Actor {
 /// in. An agent profile's own program is not looked under: its tools would
 /// count as programs the user ran.
 fn runs_shell(plan: &LaunchPlan) -> bool {
-    plan.profile == SHELL_PROFILE
+    is_shell_profile(&plan.profile)
 }
 
 /// Longest panic message logged, in chars. Messages can quote runtime
@@ -1526,7 +1528,7 @@ mod tests {
             launch::resolve(id.as_ref(), &config.profiles, &config.shell).unwrap()
         };
         assert!(runs_shell(&resolve(None)));
-        assert!(runs_shell(&resolve(Some(SHELL_PROFILE))));
+        assert!(runs_shell(&resolve(Some(yien_proto::SHELL_PROFILE))));
         for agent in ["claude", "codex", "opencode"] {
             assert!(!runs_shell(&resolve(Some(agent))), "{agent}");
         }
