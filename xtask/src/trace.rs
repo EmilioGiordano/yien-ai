@@ -3,10 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
-/// The ERS lives outside git, in the main checkout's `docs/`.
-const ERS_FALLBACK: &str = "C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai/docs/02-ers.md";
+/// The ERS lives outside git, in `<specs>/docs/`.
+const ERS_IN_SPECS: &str = "docs/02-ers.md";
+
+/// Names the folder holding `docs/` and `design/`, in the environment or in `.yien-local`.
+const SPECS_KEY: &str = "YIEN_SPECS_DIR";
 
 /// One test that names a requirement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,14 +189,70 @@ pub fn scan(root: &Path) -> anyhow::Result<BTreeMap<String, Vec<TracedTest>>> {
     Ok(by_id)
 }
 
+/// The value of `key` in a `.yien-local` file: `KEY=value` lines, `#` comments,
+/// optional quotes around the value. The last line wins, as when the shell
+/// sources it; an empty value counts as unset.
+pub fn local_value(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix(key)?.strip_prefix('='))
+        .map(|value| {
+            let value = value.trim();
+            ['"', '\'']
+                .into_iter()
+                .find_map(|q| value.strip_prefix(q)?.strip_suffix(q))
+                .unwrap_or(value)
+                .to_string()
+        })
+        .next_back()
+        .filter(|value| !value.is_empty())
+}
+
+/// Where to look for the ERS, in order: the repo's own `docs/`, then the specs
+/// folder (the environment over `.yien-local`), then the main checkout's `docs/`.
+pub fn ers_candidates(
+    root: &Path,
+    specs_env: Option<String>,
+    local_file: Option<&str>,
+    main_checkout: Option<&Path>,
+) -> Vec<PathBuf> {
+    let specs = specs_env
+        .filter(|dir| !dir.is_empty())
+        .or_else(|| local_value(local_file?, SPECS_KEY));
+    let mut candidates = vec![root.join(ERS_IN_SPECS)];
+    candidates.extend(specs.map(|dir| Path::new(&dir).join(ERS_IN_SPECS)));
+    candidates.extend(main_checkout.map(|dir| dir.join(ERS_IN_SPECS)));
+    candidates
+}
+
+/// The main checkout: the parent of the git dir every worktree shares.
+fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let common = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    common.parent().map(Path::to_path_buf)
+}
+
 fn find_ers(root: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
     if explicit.is_some() {
         return explicit;
     }
-    [
-        root.join("docs").join("02-ers.md"),
-        PathBuf::from(ERS_FALLBACK),
-    ]
+    let main = main_checkout(root);
+    let local = main
+        .as_deref()
+        .and_then(|dir| std::fs::read_to_string(dir.join(".yien-local")).ok());
+    ers_candidates(
+        root,
+        std::env::var(SPECS_KEY).ok(),
+        local.as_deref(),
+        main.as_deref(),
+    )
     .into_iter()
     .find(|p| p.is_file())
 }
@@ -350,6 +409,67 @@ Text mentioning RF-PAN-02 outside a table.
 ";
         let ids: Vec<String> = ers_r1_ids(ers).into_iter().collect();
         assert_eq!(ids, vec!["RF-PAN-01", "RN-02", "RNF-03"]);
+    }
+
+    #[test]
+    fn local_values_skip_comments_and_strip_quotes() {
+        let text = "\
+# YIEN_SPECS_DIR=X:/commented
+YIEN_SPECS_DIR_OLD=X:/other-key
+  YIEN_SPECS_DIR=X:/first\r
+YIEN_SPECS_DIR=\"X:/quoted dir\"\t
+YIEN_BUILD_ROOT='X:/build'
+YIEN_WORKTREES_DIR=
+";
+        assert_eq!(
+            local_value(text, "YIEN_SPECS_DIR").as_deref(),
+            Some("X:/quoted dir")
+        );
+        assert_eq!(
+            local_value(text, "YIEN_BUILD_ROOT").as_deref(),
+            Some("X:/build")
+        );
+        assert_eq!(local_value(text, "YIEN_WORKTREES_DIR"), None);
+        assert_eq!(local_value(text, "YIEN_BUILD_LOCK"), None);
+    }
+
+    #[test]
+    fn ers_lookup_prefers_repo_docs_then_env_then_local_file_then_main_checkout() {
+        let root = Path::new("X:/wt/topic");
+        let main = Path::new("X:/main");
+        let local = "YIEN_SPECS_DIR=X:/from-file\n";
+        let ers = |dir: &str| Path::new(dir).join("docs/02-ers.md");
+
+        let with_env = ers_candidates(root, Some("X:/from-env".into()), Some(local), Some(main));
+        assert_eq!(
+            with_env,
+            vec![ers("X:/wt/topic"), ers("X:/from-env"), ers("X:/main")]
+        );
+
+        let empty_env = ers_candidates(root, Some(String::new()), Some(local), Some(main));
+        assert_eq!(
+            empty_env,
+            vec![ers("X:/wt/topic"), ers("X:/from-file"), ers("X:/main")]
+        );
+
+        let nothing = ers_candidates(root, None, None, None);
+        assert_eq!(nothing, vec![ers("X:/wt/topic")]);
+    }
+
+    #[test]
+    fn the_ers_is_found_through_the_specs_dir() {
+        let specs = std::env::temp_dir().join(format!("yien-trace-specs-{}", std::process::id()));
+        std::fs::create_dir_all(specs.join("docs")).unwrap();
+        std::fs::write(specs.join(ERS_IN_SPECS), "| RF-PAN-01 | x | E | R1 |\n").unwrap();
+        let empty = specs.join("empty-root");
+        let local = format!("{SPECS_KEY}={}\n", specs.display());
+
+        let found = ers_candidates(&empty, None, Some(&local), None)
+            .into_iter()
+            .find(|p| p.is_file());
+
+        std::fs::remove_dir_all(&specs).unwrap();
+        assert_eq!(found, Some(specs.join(ERS_IN_SPECS)));
     }
 
     #[test]
