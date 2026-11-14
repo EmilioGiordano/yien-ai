@@ -45,13 +45,16 @@ pub enum OscSignal {
 /// any order.
 ///
 /// ```
-/// use yien_vt::osc_scan::{OscScanner, OscSignal, ProgramState, ProgramStatus, StatusKind};
+/// use yien_vt::osc_scan::{
+///     OscScanner, OscSignal, ProgramState, ProgramStatus, StatusApp, StatusKind,
+/// };
 ///
 /// let mut scanner = OscScanner::new();
 /// let signals = scanner.scan(b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\");
 /// let status = ProgramStatus {
 ///     state: ProgramState::Blocked,
 ///     kind: Some(StatusKind::Permission),
+///     app: StatusApp::Codex,
 ///     sub_session: false,
 /// };
 /// assert_eq!(signals, vec![OscSignal::Status(status)]);
@@ -62,6 +65,8 @@ pub struct ProgramStatus {
     pub state: ProgramState,
     /// Why it is blocked, when the program said and the value is known.
     pub kind: Option<StatusKind>,
+    /// The program that sent it (`app`).
+    pub app: StatusApp,
     /// The record carries an `id`: it is about a sub-session or a background
     /// task, not the program as a whole.
     pub sub_session: bool,
@@ -93,6 +98,19 @@ pub enum StatusKind {
     Question,
     /// `auth`.
     Auth,
+}
+
+/// The `app` of an OSC 7501 record: the programs whose records were seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusApp {
+    /// `claude-code`.
+    ClaudeCode,
+    /// `codex`.
+    Codex,
+    /// `opencode`.
+    OpenCode,
+    /// Any other value, or none.
+    Other,
 }
 
 /// A reply the program asked for (`OSC 7501 ; ?`), to be written to the PTY
@@ -317,6 +335,7 @@ fn parse(payload: &[u8]) -> Option<OscSignal> {
 fn parse_status(rest: &str) -> Option<ProgramStatus> {
     let mut state = None;
     let mut kind = None;
+    let mut app = None;
     let mut sub_session = false;
     for field in rest.split(':') {
         let Some((key, value)) = field.split_once('=') else {
@@ -325,6 +344,7 @@ fn parse_status(rest: &str) -> Option<ProgramStatus> {
         match key {
             "state" if state.is_none() => state = Some(program_state(value)?),
             "kind" if kind.is_none() => kind = status_kind(value),
+            "app" if app.is_none() => app = Some(status_app(value)),
             "id" => sub_session = true,
             _ => {}
         }
@@ -332,8 +352,18 @@ fn parse_status(rest: &str) -> Option<ProgramStatus> {
     Some(ProgramStatus {
         state: state?,
         kind,
+        app: app.unwrap_or(StatusApp::Other),
         sub_session,
     })
+}
+
+fn status_app(value: &str) -> StatusApp {
+    match value {
+        "claude-code" => StatusApp::ClaudeCode,
+        "codex" => StatusApp::Codex,
+        "opencode" => StatusApp::OpenCode,
+        _ => StatusApp::Other,
+    }
 }
 
 fn program_state(value: &str) -> Option<ProgramState> {
@@ -615,10 +645,16 @@ mod tests {
         );
     }
 
-    fn status(state: ProgramState, kind: Option<StatusKind>, sub_session: bool) -> OscSignal {
+    fn status(
+        app: StatusApp,
+        state: ProgramState,
+        kind: Option<StatusKind>,
+        sub_session: bool,
+    ) -> OscSignal {
         OscSignal::Status(ProgramStatus {
             state,
             kind,
+            app,
             sub_session,
         })
     }
@@ -646,7 +682,7 @@ mod tests {
                 let bytes = format!("\x1b]7501;state={word}:app=codex{end}");
                 assert_eq!(
                     scan(bytes.as_bytes()),
-                    vec![status(state, None, false)],
+                    vec![status(StatusApp::Codex, state, None, false)],
                     "{word}"
                 );
             }
@@ -654,7 +690,7 @@ mod tests {
         // `clear` on exit comes bare, with no other field.
         assert_eq!(
             scan(b"\x1b]7501;state=clear\x1b\\"),
-            vec![status(ProgramState::Clear, None, false)]
+            vec![status(StatusApp::Other, ProgramState::Clear, None, false)]
         );
     }
 
@@ -668,28 +704,43 @@ mod tests {
             let bytes = format!("\x1b]7501;state=blocked:kind={word}:app=claude-code\x1b\\");
             assert_eq!(
                 scan(bytes.as_bytes()),
-                vec![status(ProgramState::Blocked, Some(kind), false)]
+                vec![status(
+                    StatusApp::ClaudeCode,
+                    ProgramState::Blocked,
+                    Some(kind),
+                    false
+                )]
             );
         }
         // A kind a later version adds still means blocked.
         assert_eq!(
             scan(b"\x1b]7501;state=blocked:kind=payment\x1b\\"),
-            vec![status(ProgramState::Blocked, None, false)]
+            vec![status(StatusApp::Other, ProgramState::Blocked, None, false)]
         );
     }
 
     #[test]
     fn rf_age_05_7501_fields_in_any_order_with_base64_values() {
         // Real records from Claude Code, Codex and OpenCode.
-        let records: [&[u8]; 3] = [
-            b"\x1b]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBCYXNoOiBjdXJs\x1b\\",
-            b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\",
-            b"\x1b]7501;state=blocked:kind=permission:app=opencode:title=eWllbiBwZXJt:msg=UGVybWlzc2lvbiBuZWVkcyBpbnB1dA==\x1b\\",
+        let records: [(&[u8], StatusApp); 3] = [
+            (
+                b"\x1b]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBCYXNoOiBjdXJs\x1b\\",
+                StatusApp::ClaudeCode,
+            ),
+            (
+                b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\",
+                StatusApp::Codex,
+            ),
+            (
+                b"\x1b]7501;state=blocked:kind=permission:app=opencode:title=eWllbiBwZXJt:msg=UGVybWlzc2lvbiBuZWVkcyBpbnB1dA==\x1b\\",
+                StatusApp::OpenCode,
+            ),
         ];
-        for bytes in records {
+        for (bytes, app) in records {
             assert_eq!(
                 scan(bytes),
                 vec![status(
+                    app,
                     ProgramState::Blocked,
                     Some(StatusKind::Permission),
                     false
@@ -699,19 +750,54 @@ mod tests {
         // State last, after padded base64; the first `state` wins.
         assert_eq!(
             scan(b"\x1b]7501;msg=ZG9uZQ==:title=dA==:state=working:state=done\x07"),
-            vec![status(ProgramState::Working, None, false)]
+            vec![status(StatusApp::Other, ProgramState::Working, None, false)]
         );
+    }
+
+    #[test]
+    fn rf_age_05_7501_app_is_one_of_the_known_programs_or_other() {
+        for (bytes, app) in [
+            (
+                &b"\x1b]7501;state=idle:app=opencode\x07"[..],
+                StatusApp::OpenCode,
+            ),
+            (
+                b"\x1b]7501;state=idle:app=claude-code\x07",
+                StatusApp::ClaudeCode,
+            ),
+            (b"\x1b]7501;state=idle:app=codex\x07", StatusApp::Codex),
+            (b"\x1b]7501;state=idle:app=aider\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle:app=\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle:app=OpenCode\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle\x07", StatusApp::Other),
+            // The first `app` wins.
+            (
+                b"\x1b]7501;app=codex:state=idle:app=opencode\x07",
+                StatusApp::Codex,
+            ),
+        ] {
+            assert_eq!(
+                scan(bytes),
+                vec![status(app, ProgramState::Idle, None, false)],
+                "{bytes:?}"
+            );
+        }
     }
 
     #[test]
     fn rf_age_05_7501_records_with_an_id_are_marked() {
         assert_eq!(
             scan(b"\x1b]7501;state=working:id=ses_e29191ec0ffe3tC2NzOxg6Pfch:app=opencode\x1b\\"),
-            vec![status(ProgramState::Working, None, true)]
+            vec![status(
+                StatusApp::OpenCode,
+                ProgramState::Working,
+                None,
+                true
+            )]
         );
         assert_eq!(
             scan(b"\x1b]7501;state=clear:id=ses_1\x1b\\"),
-            vec![status(ProgramState::Clear, None, true)]
+            vec![status(StatusApp::Other, ProgramState::Clear, None, true)]
         );
     }
 
@@ -741,7 +827,7 @@ mod tests {
         bytes.extend_from_slice(b"\x1b\\\x1b]7501;state=working\x1b\\");
         assert_eq!(
             scan(&bytes),
-            vec![status(ProgramState::Working, None, false)]
+            vec![status(StatusApp::Other, ProgramState::Working, None, false)]
         );
     }
 

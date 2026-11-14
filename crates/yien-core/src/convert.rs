@@ -133,7 +133,12 @@ pub(crate) fn osc_signal(signal: &yien_vt::OscSignal) -> Option<agent::OscSignal
 
 fn agent_status(status: &yien_vt::ProgramStatus) -> agent::AgentStatus {
     match status.state {
-        yien_vt::ProgramState::Idle => agent::AgentStatus::Idle,
+        yien_vt::ProgramState::Idle => agent::AgentStatus::Idle(match status.app {
+            yien_vt::StatusApp::ClaudeCode => agent::Reporter::ClaudeCode,
+            yien_vt::StatusApp::Codex => agent::Reporter::Codex,
+            yien_vt::StatusApp::OpenCode => agent::Reporter::OpenCode,
+            yien_vt::StatusApp::Other => agent::Reporter::Other,
+        }),
         yien_vt::ProgramState::Working => agent::AgentStatus::Working,
         yien_vt::ProgramState::Blocked => {
             agent::AgentStatus::Blocked(status.kind.map(|kind| match kind {
@@ -193,8 +198,34 @@ mod tests {
         yien_vt::OscSignal::Status(yien_vt::ProgramStatus {
             state,
             kind,
+            app: yien_vt::StatusApp::Other,
             sub_session,
         })
+    }
+
+    #[test]
+    fn rf_age_05_an_idle_record_names_its_reporter() {
+        use agent::Reporter as R;
+        use yien_vt::StatusApp as S;
+        for (app, reporter) in [
+            (S::ClaudeCode, R::ClaudeCode),
+            (S::Codex, R::Codex),
+            (S::OpenCode, R::OpenCode),
+            (S::Other, R::Other),
+        ] {
+            let idle = yien_vt::OscSignal::Status(yien_vt::ProgramStatus {
+                state: yien_vt::ProgramState::Idle,
+                kind: None,
+                app,
+                sub_session: false,
+            });
+            assert_eq!(
+                osc_signal(&idle),
+                Some(agent::OscSignal::Status7501(agent::AgentStatus::Idle(
+                    reporter
+                )))
+            );
+        }
     }
 
     #[test]
@@ -202,7 +233,7 @@ mod tests {
         use agent::{AgentStatus as A, BlockedKind as K};
         use yien_vt::{ProgramState as P, StatusKind as V};
         for (state, kind, expected) in [
-            (P::Idle, None, A::Idle),
+            (P::Idle, None, A::Idle(agent::Reporter::Other)),
             (P::Working, None, A::Working),
             (P::Blocked, None, A::Blocked(None)),
             (

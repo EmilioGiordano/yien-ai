@@ -233,8 +233,7 @@ pub(crate) fn resolve(
                 args: shell.args.clone(),
                 resume_args: Vec::new(),
                 env: shell.env.clone(),
-                machine: MachineConfig::new(&[Source::Osc133, Source::Osc7501], None)
-                    .with_idle_ends_turn(true),
+                machine: MachineConfig::new(&[Source::Osc133, Source::Osc7501], None),
                 screen: Vec::new(),
                 profile_name: "Shell".to_owned(),
                 default_name: shell.display_name(),

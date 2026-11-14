@@ -5,7 +5,7 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, AgentStatus, BlockedKind, Cause, Effect, ErrorReason, HookEvent, Machine,
     MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason, NotificationKind, OscSignal, PromptMark,
-    ScreenVerdict, SessionEndReason, SessionStartSource, Signal, Source,
+    Reporter, ScreenVerdict, SessionEndReason, SessionStartSource, Signal, Source,
 };
 use yien_testkit::FakeClock;
 
@@ -709,19 +709,18 @@ fn blocked(kind: Option<BlockedKind>) -> Signal {
     status(AgentStatus::Blocked(kind))
 }
 
-/// Codex from 0.163: OSC 7501 alone, `done` ends its turns.
+fn idle(reporter: Reporter) -> Signal {
+    status(AgentStatus::Idle(reporter))
+}
+
+/// The rule of Codex from 0.163 and OpenCode from 2.2.7: OSC 7501 alone.
 fn codex() -> MachineConfig {
     MachineConfig::new(&[Source::Osc7501], None)
 }
 
-/// OpenCode from 2.2.7: OSC 7501 alone, `idle` ends its turns.
-fn opencode() -> MachineConfig {
-    MachineConfig::new(&[Source::Osc7501], None).with_idle_ends_turn(true)
-}
-
 /// The shell rule: its own marks, and the status of a CLI typed in it.
 fn shell() -> MachineConfig {
-    MachineConfig::new(&[Source::Osc133, Source::Osc7501], None).with_idle_ends_turn(true)
+    MachineConfig::new(&[Source::Osc133, Source::Osc7501], None)
 }
 
 fn mark(m: PromptMark) -> Signal {
@@ -823,39 +822,46 @@ fn rf_age_05_osc_7501_blocked_with_no_turn_running_still_asks() {
 
 #[test]
 fn rf_atn_08_opencode_idle_after_working_ends_the_turn() {
-    let mut p = Pane::spawned(opencode());
-    p.send(status(AgentStatus::Idle));
+    let mut p = Pane::spawned(codex());
+    p.send(idle(Reporter::OpenCode));
     assert_eq!(p.state(), AgentState::Idle);
     p.send(status(AgentStatus::Working))
-        .send(status(AgentStatus::Idle));
+        .send(idle(Reporter::OpenCode));
     assert_eq!(p.state(), AgentState::Done);
     p.send(Signal::Seen(true));
     assert_eq!(p.state(), AgentState::Idle);
     // Seen while the turn ends: Idle at once.
     p.send(status(AgentStatus::Working))
-        .send(status(AgentStatus::Idle));
+        .send(idle(Reporter::OpenCode));
     assert_eq!(p.state(), AgentState::Idle);
 }
 
 #[test]
 fn rf_atn_08_opencode_idle_after_blocked_ends_the_turn() {
-    let mut p = Pane::spawned(opencode());
+    let mut p = Pane::spawned(codex());
     p.send(status(AgentStatus::Working))
         .send(blocked(Some(BlockedKind::Permission)));
     p.confirm();
     assert!(p.state().is_red());
-    p.send(status(AgentStatus::Idle));
+    p.send(idle(Reporter::OpenCode));
     assert_eq!(p.state(), AgentState::Done);
     assert!(p.fx.contains(&Effect::ClearRed));
 }
 
 #[test]
 fn rf_age_05_idle_with_no_turn_running_stays_idle() {
-    for config in [codex(), opencode(), shell()] {
-        let mut p = Pane::spawned(config);
-        p.send(status(AgentStatus::Idle));
-        assert!(p.fx.is_empty());
-        assert_eq!(p.state(), AgentState::Idle);
+    for config in [codex(), shell()] {
+        for reporter in [
+            Reporter::ClaudeCode,
+            Reporter::Codex,
+            Reporter::OpenCode,
+            Reporter::Other,
+        ] {
+            let mut p = Pane::spawned(config.clone());
+            p.send(idle(reporter));
+            assert!(p.fx.is_empty());
+            assert_eq!(p.state(), AgentState::Idle);
+        }
     }
 }
 
@@ -864,12 +870,12 @@ fn rf_age_05_codex_idle_after_working_is_an_interrupt_not_a_done() {
     // Esc, or Codex settling after its startup `working`, unseen.
     let mut p = Pane::spawned(codex());
     p.send(status(AgentStatus::Working))
-        .send(status(AgentStatus::Idle));
+        .send(idle(Reporter::Codex));
     assert_eq!(p.state(), AgentState::Idle);
     p.send(status(AgentStatus::Working))
         .send(blocked(None))
         .confirm();
-    p.send(status(AgentStatus::Idle));
+    p.send(idle(Reporter::Codex));
     assert_eq!(p.state(), AgentState::Idle);
     assert!(p.fx.contains(&Effect::ClearRed));
 }
@@ -880,7 +886,7 @@ fn rf_atn_08_codex_done_then_idle_keeps_done_until_seen() {
     let mut p = Pane::spawned(codex());
     p.send(status(AgentStatus::Working))
         .send(status(AgentStatus::Done))
-        .send(status(AgentStatus::Idle));
+        .send(idle(Reporter::Codex));
     assert_eq!(p.state(), AgentState::Done);
     p.send(Signal::Seen(true));
     assert_eq!(p.state(), AgentState::Idle);
@@ -888,12 +894,12 @@ fn rf_atn_08_codex_done_then_idle_keeps_done_until_seen() {
 
 #[test]
 fn rf_age_05_osc_7501_error_holds_against_idle_and_clears_when_seen() {
-    for config in [codex(), opencode()] {
-        let mut p = Pane::spawned(config);
+    for reporter in [Reporter::Codex, Reporter::OpenCode] {
+        let mut p = Pane::spawned(codex());
         p.send(status(AgentStatus::Working))
             .send(status(AgentStatus::Error));
         assert_eq!(p.state(), AgentState::Error(ErrorReason::TurnFailed));
-        p.send(status(AgentStatus::Idle));
+        p.send(idle(reporter));
         assert_eq!(p.state(), AgentState::Error(ErrorReason::TurnFailed));
         p.send(Signal::Seen(true));
         assert_eq!(p.state(), AgentState::Idle);
@@ -979,7 +985,7 @@ fn rf_age_05_a_killed_agent_without_clear_errors_on_exit() {
 fn adr_08_hooks_outrank_osc_7501_in_a_claude_pane() {
     let mut p = Pane::working_claude();
     for s in [
-        AgentStatus::Idle,
+        AgentStatus::Idle(Reporter::OpenCode),
         AgentStatus::Clear,
         AgentStatus::Error,
         AgentStatus::Done,
@@ -1007,7 +1013,7 @@ fn rf_age_05_an_agent_typed_in_a_shell_takes_over_until_clear() {
     p.send(mark(PromptMark::CommandStart));
     assert_eq!(p.state(), AgentState::Working);
     // The agent's first record: at rest, not a finished turn.
-    p.send(status(AgentStatus::Idle));
+    p.send(idle(Reporter::Codex));
     assert_eq!(p.state(), AgentState::Idle);
     assert!(p.m.agent_reporting());
     assert!(p.fx.contains(&Effect::Transition {
@@ -1046,7 +1052,7 @@ fn rf_age_05_an_agent_killed_in_a_shell_mid_turn_is_an_error() {
     ] {
         let mut p = Pane::spawned(shell());
         p.send(mark(PromptMark::CommandStart))
-            .send(status(AgentStatus::Idle));
+            .send(idle(Reporter::Codex));
         for s in turn {
             p.send(s);
         }
@@ -1068,7 +1074,7 @@ fn rf_age_05_an_agent_killed_in_a_shell_mid_turn_is_an_error() {
 #[test]
 fn rf_age_05_an_agent_killed_in_a_shell_at_rest_leaves_its_state() {
     for (end, expected) in [
-        (AgentStatus::Idle, AgentState::Idle),
+        (AgentStatus::Idle(Reporter::Codex), AgentState::Idle),
         (AgentStatus::Done, AgentState::Done),
         (
             AgentStatus::Error,
@@ -1077,7 +1083,7 @@ fn rf_age_05_an_agent_killed_in_a_shell_at_rest_leaves_its_state() {
     ] {
         let mut p = Pane::spawned(MachineConfig::new(&[Source::Osc133, Source::Osc7501], None));
         p.send(mark(PromptMark::CommandStart))
-            .send(status(AgentStatus::Idle))
+            .send(idle(Reporter::Codex))
             .send(status(AgentStatus::Working))
             .send(status(end));
         assert_eq!(p.state(), expected, "{end:?}");
@@ -1091,16 +1097,31 @@ fn rf_age_05_an_agent_killed_in_a_shell_at_rest_leaves_its_state() {
 fn rf_atn_08_opencode_typed_in_a_shell_ends_turns_on_idle() {
     let mut p = Pane::spawned(shell());
     p.send(mark(PromptMark::CommandStart))
-        .send(status(AgentStatus::Idle))
+        .send(idle(Reporter::OpenCode))
         .send(status(AgentStatus::Working))
-        .send(status(AgentStatus::Idle));
+        .send(idle(Reporter::OpenCode));
     assert_eq!(p.state(), AgentState::Done);
+}
+
+#[test]
+fn rf_atn_08_in_a_shell_only_opencode_ends_a_turn_with_idle() {
+    // Claude's Esc, Codex's settling after its startup work, and a program
+    // YIEN does not know: idle after working, unseen, is not a finished turn.
+    for reporter in [Reporter::ClaudeCode, Reporter::Codex, Reporter::Other] {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::CommandStart))
+            .send(idle(reporter))
+            .send(status(AgentStatus::Working))
+            .send(idle(reporter));
+        assert_eq!(p.state(), AgentState::Idle, "{reporter:?}");
+        assert!(p.m.agent_reporting());
+    }
 }
 
 #[test]
 fn rf_age_05_a_respawned_shell_forgets_the_agent() {
     let mut p = Pane::spawned(shell());
-    p.send(status(AgentStatus::Idle));
+    p.send(idle(Reporter::Codex));
     assert!(p.m.agent_reporting());
     p.send(Signal::Exited { code: Some(0) })
         .send(Signal::Spawned);
@@ -1112,7 +1133,7 @@ fn rf_age_05_a_respawned_shell_forgets_the_agent() {
 #[test]
 fn rf_age_05_osc_7501_takes_nothing_over_without_osc_133() {
     let mut p = Pane::spawned(codex());
-    p.send(status(AgentStatus::Idle));
+    p.send(idle(Reporter::Codex));
     assert!(!p.m.agent_reporting());
 }
 
@@ -1178,7 +1199,14 @@ fn other_signals() -> Vec<Step> {
         (hook(HookEvent::SessionEnd(SessionEndReason::Other)), 0),
         (osc(OscSignal::Status7501(AgentStatus::Working)), 0),
         (osc(OscSignal::Status7501(AgentStatus::Done)), 0),
-        (osc(OscSignal::Status7501(AgentStatus::Idle)), 0),
+        (
+            osc(OscSignal::Status7501(AgentStatus::Idle(Reporter::Codex))),
+            0,
+        ),
+        (
+            osc(OscSignal::Status7501(AgentStatus::Idle(Reporter::OpenCode))),
+            0,
+        ),
         (osc(OscSignal::Status7501(AgentStatus::Error)), 0),
         (osc(OscSignal::Status7501(AgentStatus::Clear)), 0),
         (osc(OscSignal::Prompt(PromptMark::CommandStart)), 0),
@@ -1208,7 +1236,6 @@ fn configs() -> Vec<MachineConfig> {
         ),
         MachineConfig::new(&[Source::Osc133], None),
         shell(),
-        opencode(),
         MachineConfig::unprofiled(),
     ]
 }

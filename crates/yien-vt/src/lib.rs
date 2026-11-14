@@ -27,7 +27,7 @@ mod screen_dump;
 use std::time::Duration;
 
 pub use alacritty::{AlacrittyEngine, MAX_MATCHES, MAX_SCROLLBACK};
-pub use osc_scan::{OscSignal, ProgramState, ProgramStatus, PromptMark, StatusKind};
+pub use osc_scan::{OscSignal, ProgramState, ProgramStatus, PromptMark, StatusApp, StatusKind};
 pub use palette::{Palette, Rgb};
 pub use screen_dump::{DUMP_END, DumpLimits, is_screen_dump};
 pub use yien_proto::frame::{

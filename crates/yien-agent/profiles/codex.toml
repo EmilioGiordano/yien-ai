@@ -9,8 +9,7 @@ session_id = "from_list"
 # Read nothing yet: the reader is a stub until the format is verified (S7).
 sessions = "codex-sessions"
 
-# OSC 7501 since 0.163.0; run against 0.167.2. Its `idle` after `working` is
-# an interrupt or startup, never the end of a turn: Codex sends `done`.
+# OSC 7501 since 0.163.0; run against 0.167.2.
 [[rules]]
 versions = ">=0.163, <1"
 sources = ["osc7501"]

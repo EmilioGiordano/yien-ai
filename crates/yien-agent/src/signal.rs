@@ -137,8 +137,9 @@ pub enum HookEvent {
 /// whole (records about a sub-session never reach the machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
-    /// At rest: at startup, after an interrupt, or (OpenCode) after a turn.
-    Idle,
+    /// At rest: at startup, after an interrupt, or, from a reporter that
+    /// never sends `done`, after a turn.
+    Idle(Reporter),
     /// The agent is working.
     Working,
     /// The agent is waiting for the user, for this reason when it said one.
@@ -149,6 +150,36 @@ pub enum AgentStatus {
     Error,
     /// The agent gave the terminal back: it exited or suspended.
     Clear,
+}
+
+/// The program that sent an OSC 7501 record (its `app`).
+///
+/// ```
+/// use yien_agent::Reporter;
+///
+/// assert!(Reporter::OpenCode.ends_turns_with_idle());
+/// assert!(!Reporter::Other.ends_turns_with_idle());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reporter {
+    /// Claude Code (`claude-code`).
+    ClaudeCode,
+    /// Codex (`codex`).
+    Codex,
+    /// OpenCode (`opencode`).
+    OpenCode,
+    /// Any other program, or a record without `app`.
+    Other,
+}
+
+impl Reporter {
+    /// Whether its `idle` after `working` is the end of a turn. Only OpenCode
+    /// (2.2.7) never sends `done`; for Claude Code and Codex such an `idle`
+    /// is an interrupt or the end of their startup, and an unknown program
+    /// is taken the same way so it never shows a turn that did not finish.
+    pub fn ends_turns_with_idle(self) -> bool {
+        self == Reporter::OpenCode
+    }
 }
 
 /// What a blocked agent waits for (OSC 7501 `kind`).

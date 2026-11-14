@@ -3,8 +3,8 @@
 use yien_vt::{
     AlacrittyEngine, CellFlags, CursorShape, DEFAULT_SCROLLBACK, DUMP_END, DumpLimits, Frame,
     GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, ProgramState,
-    ProgramStatus, PromptMark, Rgb, SelectionKind, Side, Size, TitleChange, ViewportPoint,
-    VtConfig, VtEngine, is_screen_dump,
+    ProgramStatus, PromptMark, Rgb, SelectionKind, Side, Size, StatusApp, TitleChange,
+    ViewportPoint, VtConfig, VtEngine, is_screen_dump,
 };
 
 fn engine(cols: u16, rows: u16) -> AlacrittyEngine {
@@ -617,6 +617,7 @@ fn rf_age_05_status_query_with_st_and_records_reach_the_signals() {
         vec![OscSignal::Status(ProgramStatus {
             state: ProgramState::Working,
             kind: None,
+            app: StatusApp::Codex,
             sub_session: false,
         })]
     );

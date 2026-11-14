@@ -126,7 +126,6 @@ pub enum Effect {
 pub struct MachineConfig {
     sources: Vec<Source>,
     watchdog: Option<Duration>,
-    idle_ends_turn: bool,
 }
 
 impl MachineConfig {
@@ -136,29 +135,7 @@ impl MachineConfig {
         Self {
             sources: sources.to_vec(),
             watchdog,
-            idle_ends_turn: false,
         }
-    }
-
-    /// The same rule, where an OSC 7501 `idle` after the agent's own
-    /// `working` or `blocked` ends the turn, as `done` does. For agents that
-    /// never send `done` (OpenCode); for the others such an `idle` is an
-    /// interrupt or startup, and the pane goes Idle.
-    ///
-    /// ```
-    /// use yien_agent::{MachineConfig, Source};
-    ///
-    /// let config = MachineConfig::new(&[Source::Osc7501], None).with_idle_ends_turn(true);
-    /// assert!(config.idle_ends_turn());
-    /// ```
-    pub fn with_idle_ends_turn(mut self, on: bool) -> Self {
-        self.idle_ends_turn = on;
-        self
-    }
-
-    /// Whether an OSC 7501 `idle` can end a turn.
-    pub fn idle_ends_turn(&self) -> bool {
-        self.idle_ends_turn
     }
 
     /// A program without a profile: only its process lifecycle counts
@@ -310,11 +287,11 @@ impl Machine {
     ///
     /// ```
     /// use std::time::Duration;
-    /// use yien_agent::{AgentStatus, Machine, MachineConfig, OscSignal, Signal, Source};
+    /// use yien_agent::{AgentStatus, Machine, MachineConfig, OscSignal, Reporter, Signal, Source};
     ///
     /// let status = |s| Signal::Osc(OscSignal::Status7501(s));
     /// let m = Machine::new(MachineConfig::new(&[Source::Osc133, Source::Osc7501], None));
-    /// let (m, _) = m.step(&status(AgentStatus::Idle), Duration::ZERO);
+    /// let (m, _) = m.step(&status(AgentStatus::Idle(Reporter::Codex)), Duration::ZERO);
     /// assert!(m.agent_reporting());
     /// let (m, _) = m.step(&status(AgentStatus::Clear), Duration::ZERO);
     /// assert!(!m.agent_reporting());
@@ -521,7 +498,9 @@ impl Machine {
             AgentStatus::Done => self.status_turn_end(true, cause, now, fx),
             // Codex turns its done and error into idle on any key: only a
             // running turn may end here, so an unseen Done or an Error stays.
-            AgentStatus::Idle => self.status_turn_end(self.config.idle_ends_turn, cause, now, fx),
+            AgentStatus::Idle(reporter) => {
+                self.status_turn_end(reporter.ends_turns_with_idle(), cause, now, fx)
+            }
             AgentStatus::Error => {
                 if self.in_turn() {
                     self.set_state(AgentState::Error(ErrorReason::TurnFailed), cause, now, fx);
