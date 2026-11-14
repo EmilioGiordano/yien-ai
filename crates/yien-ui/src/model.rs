@@ -1638,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn rf_atn_02_a_tab_of_idle_shells_marks_shell_and_an_agent_pane_its_state() {
+    fn a_tab_of_idle_shells_marks_shell_and_an_agent_pane_its_state() {
         let mut view = demo();
         let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
         view.tab_updated(&tab(30, 1, &[300, 301]));
@@ -1651,8 +1651,6 @@ mod tests {
         assert_eq!(mark(&view, 30), TabMark::State(AgentState::Working));
         assert!(view.pane_state(PaneId::new(301), P::Done));
         assert_eq!(mark(&view, 30), TabMark::State(AgentState::Done));
-        assert!(view.pane_state(PaneId::new(301), NEEDS));
-        assert_eq!(mark(&view, 30), TabMark::State(AgentState::NeedsYou));
         assert!(view.pane_state(PaneId::new(301), P::Idle));
         assert_eq!(mark(&view, 30), TabMark::Shell);
 
@@ -1666,6 +1664,24 @@ mod tests {
         unknown.profile_id = yien_proto::ProfileId::new("");
         view.pane_updated(&unknown);
         assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+    }
+
+    #[test]
+    fn rf_atn_02_a_pane_that_needs_you_marks_its_tab_red_shells_only_too() {
+        let mut view = demo();
+        let t = crate::theme::Theme::of(crate::theme::ThemeKind::default());
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        assert_eq!(mark(&view, 10), TabMark::State(AgentState::NeedsYou));
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        view.pane_updated(&pane(301, 30, P::Working));
+        assert!(view.pane_state(PaneId::new(301), NEEDS));
+        let needs = TabMark::State(AgentState::NeedsYou);
+        assert_eq!(mark(&view, 30), needs, "a shell asking still marks red");
+        assert_eq!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
+        assert!(view.pane_state(PaneId::new(301), P::Idle));
+        assert_eq!(mark(&view, 30), TabMark::Shell);
+        assert_ne!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
     }
 
     #[test]
