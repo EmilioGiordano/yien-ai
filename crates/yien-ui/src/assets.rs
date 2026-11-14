@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_17_every_tab_mark_differs_by_shape_or_colour_in_both_themes() {
+    fn every_tab_mark_differs_by_shape_or_colour_in_both_themes() {
         use crate::theme::{Theme, ThemeKind};
         for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
             let t = Theme::of(kind);
