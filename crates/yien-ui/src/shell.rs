@@ -29,6 +29,7 @@ use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
 use crate::git::{ContextGit, FileMark};
+use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
@@ -39,7 +40,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, program_tag, runs_agent};
+use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, program_tag};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
@@ -99,6 +100,8 @@ const CLAUDE_PROFILE: &str = "claude";
 const PANE_FOLDER_CHARS: usize = 48;
 const SIGNAL_LOST: &str = "signal lost";
 const SHELL_NAME_SHRINK: f32 = 1000.0;
+/// A session title gives way before the agent's tag.
+const TITLE_SHRINK: f32 = 1000.0;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -645,6 +648,18 @@ impl Shell {
             });
             self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
+        }
+        self.sync_key_quirks(cx);
+    }
+
+    /// Each pane's key quirks follow the program its head names, which
+    /// changes after the view exists: details arrive, a program starts or ends.
+    fn sync_key_quirks(&self, cx: &mut Context<Self>) {
+        for (&pane, terminal) in &self.terminals {
+            let quirks = pane_key_quirks(&self.workspace.pane(pane));
+            if terminal.read(cx).quirks() != quirks {
+                terminal.update(cx, |t, _| t.set_quirks(quirks));
+            }
         }
     }
 
@@ -2807,7 +2822,8 @@ impl Shell {
             name: &pane.name,
             profile: &pane.profile,
             tag,
-            agent: runs_agent(pane),
+            agent: names_agent(pane),
+            title: pane.title.as_ref(),
             folder_lead: &folder_shown.lead,
             folder_last: &folder_shown.last,
             state: pane.state.label(),
@@ -2859,6 +2875,11 @@ impl Shell {
                 h.child(primary(pane.name.clone()))
             })
             .child(who)
+            .when_some(text.title.filter(|_| shows.title), |h, title| {
+                let mut title = words(title.as_str().to_owned()).text_color(t.term_text);
+                title.style().flex_shrink = Some(TITLE_SHRINK);
+                h.child(title)
+            })
             .when(!separate && shows.profile, |h| {
                 h.child(words(pane.profile.clone()))
             })
@@ -2982,6 +3003,9 @@ impl Shell {
         let mut pane_label = format!("{} pane", pane.name);
         if separate {
             pane_label.push_str(&format!(", {tag}"));
+        }
+        if let Some(title) = text.title {
+            pane_label.push_str(&format!(", {}", title.as_str()));
         }
         pane_label.push_str(&format!(", {}", pane.state.label()));
         if pane.signal_lost && !shows.signal_lost {

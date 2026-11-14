@@ -2,8 +2,9 @@
 
 use yien_vt::{
     AlacrittyEngine, CellFlags, CursorShape, DEFAULT_SCROLLBACK, DUMP_END, DumpLimits, Frame,
-    GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, PromptMark, Rgb,
-    SelectionKind, Side, Size, TitleChange, ViewportPoint, VtConfig, VtEngine, is_screen_dump,
+    GridPoint, LinkKind, MouseEncoding, MouseTracking, OscSignal, Palette, ProgramState,
+    ProgramStatus, PromptMark, Rgb, SelectionKind, Side, Size, StatusApp, TitleChange,
+    ViewportPoint, VtConfig, VtEngine, is_screen_dump,
 };
 
 fn engine(cols: u16, rows: u16) -> AlacrittyEngine {
@@ -562,6 +563,54 @@ fn rf_age_02_kitty_flags_follow_the_screen() {
     assert_eq!(e.modes().kitty_keyboard, 0);
 }
 
+/// What a pane's Shift+Enter sends, given the modes the engine tracked.
+fn shift_enter(e: &AlacrittyEngine) -> Vec<u8> {
+    let modes = e.modes();
+    let key_modes = yien_input::KeyModes {
+        app_cursor: modes.app_cursor,
+        win32_input: modes.win32_input,
+        kitty_flags: modes.kitty_keyboard,
+        ..yien_input::KeyModes::default()
+    };
+    yien_input::encode_with(&yien_input::Key::Enter, yien_input::Mods::SHIFT, key_modes)
+        .unwrap_or_default()
+}
+
+const WIN32_SHIFT_ENTER: &[u8] = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_";
+
+/// Claude Code 2.1.322's keyboard setup through the bundled ConPTY, and the
+/// flags it pushes once its kitty query is answered.
+const CLAUDE_STARTUP: &[u8] = b"\x1b[?2004h\x1b[?2031h\x1b[?1004h\x1b[?9001l\x1b[?9001h\
+    \x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c\x1b[<u\x1b[>5u\x1b[>4;2m";
+
+/// YIEN's PowerShell prompt after a command, as `yien-core::shell` marks it.
+const POWERSHELL_PROMPT: &[u8] = b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\PS> \x1b]133;B\x1b\\";
+
+#[test]
+fn rf_age_02_shift_enter_reaches_claude_code_as_csi_u() {
+    let mut e = engine(100, 30);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+    e.feed(CLAUDE_STARTUP);
+    assert_eq!(shift_enter(&e), b"\x1b[13;2u");
+    // Claude Code leaves the alternate screen, and its flags with it.
+    e.feed(b"\x1b[?1049l");
+    e.feed(POWERSHELL_PROMPT);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+}
+
+#[test]
+fn rf_age_02_a_prompt_mark_drops_main_screen_flags_a_killed_cli_left() {
+    let mut e = engine(100, 30);
+    e.feed(CONPTY_1_24_POWERSHELL);
+    e.feed(b"\x1b[>1u");
+    assert_eq!(shift_enter(&e), b"\x1b[13;2u");
+    e.feed(b"^C\r\n");
+    e.feed(POWERSHELL_PROMPT);
+    assert_eq!(e.modes().kitty_keyboard, 0);
+    assert_eq!(shift_enter(&e), WIN32_SHIFT_ENTER);
+}
+
 #[test]
 fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
     // crossterm asks for the flags and then for device attributes, and takes
@@ -576,6 +625,51 @@ fn rf_age_02_the_kitty_flag_query_keeps_its_place_among_replies() {
     let mut e = engine(20, 5);
     assert!(e.feed(b"\x1b[?").replies.is_empty());
     assert_eq!(e.feed(b"u\x1b[c").replies, b"\x1b[?0u\x1b[?6c");
+}
+
+/// Claude Code's startup probe as it reached the pseudo console (2.1.323):
+/// XTVERSION, the kitty flags, the status query, then device attributes as
+/// the sentinel that ends the wait.
+const CLAUDE_PROBE: [&[u8]; 4] = [b"\x1b[>0q", b"\x1b[?u", b"\x1b]7501;?\x07", b"\x1b[c"];
+
+#[test]
+fn rf_age_05_the_status_query_is_answered_before_device_attributes() {
+    let expected: &[u8] = b"\x1b[?0u\x1b]7501;?\x1b\\\x1b[?6c";
+    let mut e = engine(20, 5);
+    assert_eq!(e.feed(&CLAUDE_PROBE.concat()).replies, expected);
+    // As Claude's four writes arrived: one read each.
+    let mut e = engine(20, 5);
+    let replies: Vec<u8> = CLAUDE_PROBE
+        .iter()
+        .flat_map(|chunk| e.feed(chunk).replies)
+        .collect();
+    assert_eq!(replies, expected);
+    // Cut at every byte.
+    let whole = CLAUDE_PROBE.concat();
+    for cut in 0..=whole.len() {
+        let (a, b) = whole.split_at(cut);
+        let mut e = engine(20, 5);
+        let mut replies = e.feed(a).replies;
+        replies.extend(e.feed(b).replies);
+        assert_eq!(replies, expected, "cut at {cut}");
+    }
+}
+
+#[test]
+fn rf_age_05_status_query_with_st_and_records_reach_the_signals() {
+    let mut e = engine(20, 5);
+    let out = e.feed(b"\x1b]7501;?\x1b\\\x1b[c\x1b]7501;state=working:app=codex\x1b\\ok");
+    assert_eq!(out.replies, b"\x1b]7501;?\x1b\\\x1b[?6c");
+    assert_eq!(
+        out.signals,
+        vec![OscSignal::Status(ProgramStatus {
+            state: ProgramState::Working,
+            kind: None,
+            app: StatusApp::Codex,
+            sub_session: false,
+        })]
+    );
+    assert_eq!(e.frame().line_text(0), "ok");
 }
 
 /// A program that enters the alternate screen, asks for mouse reports and

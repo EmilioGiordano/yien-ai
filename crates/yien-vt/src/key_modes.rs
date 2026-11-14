@@ -1,6 +1,8 @@
 //! A streaming tracker for the keyboard modes the emulator does not keep:
 //! win32-input-mode (DECSET 9001, which ConPTY asks for) and the kitty
-//! keyboard protocol flags, with one stack for each screen.
+//! keyboard protocol flags, with one stack for each screen. A shell prompt
+//! mark (OSC 133 A) empties the main screen's stack: a program that pushed
+//! flags there and was killed never popped them, and the shell reads none.
 //!
 //! Like [`crate::osc_scan`], it keeps its state between calls, so a sequence
 //! cut at any byte gives the same result as the whole sequence.
@@ -25,6 +27,13 @@ const MAX_PARAMS: usize = 64;
 /// The five flags the kitty keyboard protocol defines.
 const KITTY_ALL_FLAGS: u8 = 0b1_1111;
 
+/// A prompt start mark's OSC payload, alone.
+const PROMPT_START: &[u8] = b"133;A";
+/// The same with parameters after it: the longest payload prefix kept,
+/// since nothing after it matters here.
+const PROMPT_START_WITH_PARAMS: &[u8] = b"133;A;";
+
+const BEL: u8 = 0x07;
 const ESC: u8 = 0x1b;
 const CAN: u8 = 0x18;
 const SUB: u8 = 0x1a;
@@ -34,6 +43,8 @@ enum State {
     Ground,
     Escape,
     Csi,
+    Osc,
+    OscEscape,
 }
 
 /// A reply the program asked for (`CSI ? u`), to be written to the PTY after
@@ -139,6 +150,10 @@ impl KeyModeTracker {
                     self.ignore = false;
                     self.state = State::Csi;
                 }
+                b']' => {
+                    self.params.clear();
+                    self.state = State::Osc;
+                }
                 b'c' => {
                     self.reset();
                     self.state = State::Ground;
@@ -146,6 +161,25 @@ impl KeyModeTracker {
                 ESC => {}
                 _ => self.state = State::Ground,
             },
+            State::Osc => match byte {
+                BEL => self.finish_osc(),
+                ESC => self.state = State::OscEscape,
+                CAN | SUB => self.state = State::Ground,
+                _ => {
+                    if self.params.len() < PROMPT_START_WITH_PARAMS.len() {
+                        self.params.push(byte);
+                    }
+                }
+            },
+            State::OscEscape => {
+                if byte == b'\\' {
+                    self.finish_osc();
+                } else {
+                    // An ESC that is not ST ends the OSC and starts a new sequence.
+                    self.state = State::Escape;
+                    return self.step(byte);
+                }
+            }
             State::Csi => match byte {
                 ESC => self.state = State::Escape,
                 CAN | SUB => self.state = State::Ground,
@@ -211,6 +245,15 @@ impl KeyModeTracker {
             _ => {}
         }
         None
+    }
+
+    /// An OSC ended: `params` holds the start of its payload.
+    fn finish_osc(&mut self) {
+        self.state = State::Ground;
+        let payload = self.params.as_slice();
+        if payload == PROMPT_START || payload == PROMPT_START_WITH_PARAMS {
+            self.main_stack.clear();
+        }
     }
 
     fn push(&mut self, flags: u8) {
@@ -342,12 +385,18 @@ mod tests {
     #[test]
     fn a_sequence_cut_at_any_byte_gives_the_same_modes_and_replies() {
         let stream: &[u8] =
-            b"x\x1b[?1004;9001h\x1b[>1u\x1b[?u\x1b[?1049h\x1b[>3u\x1b[=4;2u\x1b[?u\x1b[<u";
+            b"x\x1b[?1004;9001h\x1b[>1u\x1b[?u\x1b[?1049h\x1b[>3u\x1b[=4;2u\x1b[?u\x1b[<u\
+              \x1b[?1049l\x1b[>5u\x1b]133;A\x1b\\\x1b[?u\x1b[>1u\x1b[?u";
         let mut whole = KeyModeTracker::new();
         let whole_replies: Vec<Vec<u8>> = whole.scan(stream).into_iter().map(|r| r.bytes).collect();
         assert_eq!(
             whole_replies,
-            vec![b"\x1b[?1u".to_vec(), b"\x1b[?7u".to_vec()]
+            vec![
+                b"\x1b[?1u".to_vec(),
+                b"\x1b[?7u".to_vec(),
+                b"\x1b[?0u".to_vec(),
+                b"\x1b[?1u".to_vec(),
+            ]
         );
         for cut in 0..=stream.len() {
             let (a, b) = stream.split_at(cut);
@@ -357,6 +406,61 @@ mod tests {
             assert_eq!(replies, whole_replies, "cut at {cut}");
             assert_eq!(split.win32_input(), whole.win32_input(), "cut at {cut}");
             assert_eq!(split.kitty_flags(), whole.kitty_flags(), "cut at {cut}");
+        }
+    }
+
+    /// The flags and replies `stream` leaves, whole and cut in two at every
+    /// byte, after asserting they all agree.
+    fn same_at_every_cut(stream: &[u8]) -> (u8, Vec<Vec<u8>>) {
+        let mut whole = KeyModeTracker::new();
+        let whole_replies: Vec<Vec<u8>> = whole.scan(stream).into_iter().map(|r| r.bytes).collect();
+        for cut in 0..=stream.len() {
+            let (a, b) = stream.split_at(cut);
+            let mut split = KeyModeTracker::new();
+            let mut replies: Vec<Vec<u8>> = split.scan(a).into_iter().map(|r| r.bytes).collect();
+            replies.extend(split.scan(b).into_iter().map(|r| r.bytes));
+            assert_eq!(replies, whole_replies, "cut at {cut}");
+            assert_eq!(split.kitty_flags(), whole.kitty_flags(), "cut at {cut}");
+        }
+        (whole.kitty_flags(), whole_replies)
+    }
+
+    #[test]
+    fn an_osc_ended_by_bel_gives_the_same_result_cut_anywhere() {
+        let (flags, replies) = same_at_every_cut(b"\x1b[>5u\x1b]133;A;aid=1\x07\x1b[?u\x1b[>2u");
+        assert_eq!(flags, 2);
+        assert_eq!(replies, vec![b"\x1b[?0u".to_vec()]);
+    }
+
+    #[test]
+    fn an_osc_ended_by_another_escape_gives_the_same_result_cut_anywhere() {
+        let (flags, _) = same_at_every_cut(b"\x1b]0;t\x1b[>3u");
+        assert_eq!(flags, 3);
+        let (flags, _) = same_at_every_cut(b"\x1b[>1u\x1b]133;A\x1b[>3u");
+        // Not ended by ST or BEL, so not a prompt mark.
+        assert_eq!(flags, 3);
+        let (flags, _) = same_at_every_cut(b"\x1b[>1u\x1b]133;A\x1b[<u");
+        assert_eq!(flags, 0);
+    }
+
+    #[test]
+    fn an_overlong_osc_gives_the_same_result_cut_anywhere() {
+        let long = |head: &[u8]| {
+            let mut s = b"\x1b[>1u\x1b]".to_vec();
+            s.extend_from_slice(head);
+            s.extend(std::iter::repeat_n(b'x', 300));
+            s.extend_from_slice(b"\x1b\\\x1b[?u");
+            s
+        };
+        // A prompt mark with long parameters still clears the flags.
+        let (flags, replies) = same_at_every_cut(&long(b"133;A;"));
+        assert_eq!(flags, 0);
+        assert_eq!(replies, vec![b"\x1b[?0u".to_vec()]);
+        // A long title, or a payload that only starts like the mark, does not.
+        for head in [&b"0;"[..], b"133;A"] {
+            let (flags, replies) = same_at_every_cut(&long(head));
+            assert_eq!(flags, 1, "{head:?}");
+            assert_eq!(replies, vec![b"\x1b[?1u".to_vec()], "{head:?}");
         }
     }
 
@@ -413,6 +517,57 @@ mod tests {
         // Leaving the alternate screen cleared its stack.
         t.scan(b"\x1b[?1049h");
         assert_eq!(t.kitty_flags(), 0);
+    }
+
+    #[test]
+    fn rf_age_02_a_prompt_mark_clears_the_main_kitty_stack() {
+        // Ended by ST, by BEL, and with parameters after the mark.
+        for mark in [
+            &b"\x1b]133;A\x1b\\"[..],
+            b"\x1b]133;A\x07",
+            b"\x1b]133;A;aid=7;cl=m\x07",
+        ] {
+            let mut t = tracked(b"\x1b[?9001h\x1b[>1u\x1b[>5u");
+            assert_eq!(t.kitty_flags(), 5);
+            t.scan(mark);
+            assert_eq!(t.kitty_flags(), 0, "{mark:?}");
+            assert!(t.win32_input(), "{mark:?}");
+            // A program started from that prompt pushes again.
+            t.scan(b"\x1b[>1u");
+            assert_eq!(t.kitty_flags(), 1, "{mark:?}");
+        }
+    }
+
+    #[test]
+    fn rf_age_02_a_prompt_mark_leaves_the_alt_screen_stack_alone() {
+        let mut t = tracked(b"\x1b[>1u\x1b[?1049h\x1b[>5u");
+        t.scan(b"\x1b]133;A\x07");
+        assert_eq!(t.kitty_flags(), 5);
+        t.scan(b"\x1b[?1049l");
+        assert_eq!(t.kitty_flags(), 0);
+    }
+
+    #[test]
+    fn other_osc_sequences_keep_the_kitty_stack() {
+        for osc in [
+            &b"\x1b]133;B\x07"[..],
+            b"\x1b]133;D;0\x1b\\",
+            b"\x1b]133;AB\x07",
+            b"\x1b]1133;A\x07",
+            b"\x1b]0;133;A\x07",
+            b"\x1b]133;A",
+            b"\x1b]133;A\x18\x07",
+            b"\x1b]133;A\x1b[m\x07",
+        ] {
+            let t = tracked(&[&b"\x1b[>1u"[..], osc].concat());
+            assert_eq!(t.kitty_flags(), 1, "{osc:?}");
+        }
+    }
+
+    #[test]
+    fn an_esc_that_ends_an_osc_starts_the_next_sequence() {
+        let t = tracked(b"\x1b]0;title\x1b[>3u");
+        assert_eq!(t.kitty_flags(), 3);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 15);
+//! assert_eq!(PROTO_VERSION, 16);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -24,6 +24,7 @@ mod git;
 pub mod hook_frame;
 mod msg;
 mod path;
+mod title;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,13 +36,14 @@ pub use msg::{
     WorkspaceSnapshot, WorktreeCheck, WorktreeFiles, WorktreeWork,
 };
 pub use path::{folder_key, same_folder};
+pub use title::{SESSION_TITLE_MAX, session_title};
 
 /// Version of the wire protocol. Bumped on any incompatible change to a message.
 ///
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 15;
+pub const PROTO_VERSION: u32 = 16;
 
 /// The least part of a pair of neighbouring panes either one keeps when
 /// [`Command::SetDivider`] moves the divider between them: a share closer to
@@ -59,6 +61,27 @@ pub const MIN_DIVIDER_SHARE: f32 = 0.02;
 /// assert_eq!(yien_proto::ProfileId::new(yien_proto::SHELL_PROFILE).as_str(), "shell");
 /// ```
 pub const SHELL_PROFILE: &str = "shell";
+
+/// The agent CLIs a shell pane is named after while one runs in it
+/// (RF-PAN-12), by executable name without the extension. The core puts one
+/// of these in [`PaneInfo::name`] when it finds it under the pane's shell.
+///
+/// ```
+/// assert!(yien_proto::KNOWN_PROGRAMS.contains(&"claude"));
+/// ```
+pub const KNOWN_PROGRAMS: &[&str] = &["claude", "codex", "opencode"];
+
+/// Whether `name` is exactly one of [`KNOWN_PROGRAMS`], as the core writes it
+/// in a pane's name: lowercase, without a folder or an extension.
+///
+/// ```
+/// assert!(yien_proto::is_known_program("codex"));
+/// assert!(!yien_proto::is_known_program("Codex"));
+/// assert!(!yien_proto::is_known_program("pwsh"));
+/// ```
+pub fn is_known_program(name: &str) -> bool {
+    KNOWN_PROGRAMS.contains(&name)
+}
 
 macro_rules! id_newtype {
     ($(#[$doc:meta])* $name:ident) => {

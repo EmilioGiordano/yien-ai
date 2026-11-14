@@ -2,7 +2,7 @@
 //! Flex ellipsizes the text and keeps the buttons whole; this only drops the
 //! pieces that would not fit at their full width.
 
-use yien_proto::SHELL_PROFILE;
+use yien_proto::{SHELL_PROFILE, SessionTitle};
 
 use crate::model::PaneView;
 
@@ -20,11 +20,15 @@ const EM: f32 = 0.6;
 /// What a shell's name keeps before the pieces after it drop: a name is
 /// "only if room", but a few letters still tell `pwsh` from `bash`.
 const SHELL_NAME_CHARS: usize = 4;
+/// What a session title counts: it takes the room left and ellipsizes
+/// first, but is dropped before it shows fewer letters than this.
+const TITLE_CHARS: usize = 8;
 
 /// Which program a pane head names (RF-PAN-12): the agent profile's id while
-/// that agent's own program runs there, else the pane's name. A stand-in
-/// shell after a failed resume, or a pane whose details have not arrived, is
-/// not claimed as the agent.
+/// that agent's own program runs there, else the pane's name. The core puts
+/// the user's name first, then an agent CLI typed in a shell, then the
+/// shell's. A stand-in shell after a failed resume, or a pane whose details
+/// have not arrived, is not claimed as the agent.
 ///
 /// ```ignore
 /// assert_eq!(program_tag(&claude_pane), "claude");
@@ -43,6 +47,12 @@ pub(crate) fn runs_agent(pane: &PaneView) -> bool {
     !id.is_empty() && id != SHELL_PROFILE && pane.runs_session
 }
 
+/// Whether the head's tag names an agent, laid out to stay whole until the
+/// last: an agent profile's program, or an agent CLI typed in a shell.
+pub(crate) fn names_agent(pane: &PaneView) -> bool {
+    runs_agent(pane) || pane.runs_typed_agent()
+}
+
 /// The text a pane head may show, as it would read in full.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HeadText<'a> {
@@ -54,6 +64,9 @@ pub(crate) struct HeadText<'a> {
     pub tag: &'a str,
     /// Whether `tag` names an agent; else it is a shell or other program.
     pub agent: bool,
+    /// The agent's session title: `Fix login bug`. Kept as a
+    /// [`SessionTitle`] so this struct's `Debug` never prints it.
+    pub title: Option<&'a SessionTitle>,
     /// The folder up to its last name, and that last name.
     pub folder_lead: &'a str,
     pub folder_last: &'a str,
@@ -82,6 +95,8 @@ pub(crate) struct PaneHeadLayout {
     pub folder_lead: bool,
     pub folder_last: bool,
     pub signal_lost: bool,
+    /// The agent's session title, after the tag.
+    pub title: bool,
     /// The pane's own name, when it is not the tag.
     pub name: bool,
     /// Room kept for a shell's first letters; without it the name may
@@ -100,6 +115,7 @@ impl PaneHeadLayout {
         folder_lead: true,
         folder_last: true,
         signal_lost: true,
+        title: true,
         name: true,
         shell_name: true,
         close_button: true,
@@ -108,12 +124,12 @@ impl PaneHeadLayout {
     /// The layout for a head `width` px wide, text scaled by `scale`
     /// (`ui.font.size` over 13). Pieces go in this order: the profile's
     /// display name, the state word, the split buttons, the menu button,
-    /// the folder's lead, its last name, "signal lost", a renamed pane's
-    /// name, the room for a shell's name, the close button. The glyph and an
-    /// agent's tag stay.
+    /// the folder's lead, its last name, "signal lost", the session title, a
+    /// renamed pane's name, the room for a shell's name, the close button.
+    /// The glyph and an agent's tag stay.
     pub(crate) fn at(width: f32, scale: f32, text: &HeadText<'_>) -> Self {
         let mut layout = Self::FULL;
-        let drops: [fn(&mut Self); 10] = [
+        let drops: [fn(&mut Self); 11] = [
             |l| l.profile = false,
             |l| l.state_label = false,
             |l| l.split_buttons = false,
@@ -121,6 +137,7 @@ impl PaneHeadLayout {
             |l| l.folder_lead = false,
             |l| l.folder_last = false,
             |l| l.signal_lost = false,
+            |l| l.title = false,
             |l| l.name = false,
             |l| l.shell_name = false,
             |l| l.close_button = false,
@@ -135,7 +152,8 @@ impl PaneHeadLayout {
     }
 
     /// The width this layout takes with each piece at its full estimated
-    /// width, except a shell's name, which counts only its first letters.
+    /// width, except a shell's name and a session title, which count only
+    /// their first letters.
     pub(crate) fn need(&self, scale: f32, text: &HeadText<'_>) -> f32 {
         let words = |s: &str| chars(s, TEXT_SIZE, scale);
         let mut pieces = vec![GLYPH];
@@ -154,6 +172,10 @@ impl PaneHeadLayout {
             0.0
         };
         pieces.push(who);
+        if let (true, Some(title)) = (self.title, text.title) {
+            let shown = title.as_str().chars().count().min(TITLE_CHARS);
+            pieces.push(shown as f32 * EM * TEXT_SIZE * scale);
+        }
         if !separate && self.profile {
             pieces.push(words(text.profile));
         }
@@ -189,9 +211,11 @@ fn chars(s: &str, size: f32, scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use yien_proto::{PaneId, ProfileId};
+    use yien_proto::{PaneId, ProfileId, SessionTitle};
 
-    use super::{BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, program_tag, runs_agent};
+    use super::{
+        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, names_agent, program_tag, runs_agent,
+    };
     use crate::model::{AgentState, PaneView};
 
     const BIGGEST: f32 = 20.0 / 13.0;
@@ -203,10 +227,20 @@ mod tests {
             profile: "Claude Code",
             tag: "claude",
             agent: true,
+            title: None,
             folder_lead: "~/Code/",
             folder_last: "yien-ai",
             state: "Working",
             signal_lost: None,
+        }
+    }
+
+    fn titled() -> HeadText<'static> {
+        HeadText {
+            title: Some(Box::leak(Box::new(SessionTitle::new(
+                "Fix the login bug in the session restore path",
+            )))),
+            ..claude()
         }
     }
 
@@ -235,7 +269,7 @@ mod tests {
         }
     }
 
-    fn pieces(l: &PaneHeadLayout) -> [bool; 10] {
+    fn pieces(l: &PaneHeadLayout) -> [bool; 11] {
         [
             l.profile,
             l.state_label,
@@ -244,6 +278,7 @@ mod tests {
             l.folder_lead,
             l.folder_last,
             l.signal_lost,
+            l.title,
             l.name,
             l.shell_name,
             l.close_button,
@@ -252,7 +287,7 @@ mod tests {
 
     /// Each width from wide to narrow, at each scale, for each kind of head.
     fn sweep(mut check: impl FnMut(f32, f32, &HeadText<'_>, PaneHeadLayout)) {
-        for text in [claude(), renamed(), shell(), lost()] {
+        for text in [claude(), renamed(), shell(), lost(), titled()] {
             for scale in SCALES {
                 let mut width = 1600.0;
                 while width >= 10.0 {
@@ -265,7 +300,7 @@ mod tests {
 
     #[test]
     fn rf_pan_12_a_wide_pane_keeps_every_piece() {
-        for text in [claude(), renamed(), shell(), lost()] {
+        for text in [claude(), renamed(), shell(), lost(), titled()] {
             for scale in SCALES {
                 assert_eq!(
                     PaneHeadLayout::at(900.0, scale, &text),
@@ -391,11 +426,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rf_pan_12_a_session_title_goes_before_the_agent_tag_is_cut() {
+        sweep(|width, scale, text, now| {
+            if text.title.is_some() && now.title {
+                // The need counts the tag whole and the title's first letters.
+                assert!(
+                    now.need(scale, text) <= width,
+                    "{now:?} at {width}, {scale}"
+                );
+            }
+        });
+        for scale in SCALES {
+            let text = titled();
+            let tag = 6.0 * 0.6 * 12.5 * scale;
+            let title = 8.0 * 0.6 * 12.5 * scale;
+            // Glyph, tag, title, the spacer and the close button.
+            let width = 2.0 * PADDING + GLYPH + tag + title + 4.0 * GAP + BUTTON;
+            let now = PaneHeadLayout::at(width + 1.0, scale, &text);
+            assert!(now.title && now.close_button, "{now:?} at {scale}");
+            let now = PaneHeadLayout::at(width - 1.0, scale, &text);
+            assert!(!now.title && now.close_button, "{now:?} at {scale}");
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_session_title_outlasts_the_folder() {
+        let text = titled();
+        let kept = (100..900)
+            .map(|w| PaneHeadLayout::at(w as f32, 1.0, &text))
+            .find(|l| l.title && !l.folder_last);
+        assert!(
+            kept.is_some(),
+            "no width shows the title without the folder"
+        );
+    }
+
     fn pane(profile: &str, runs_session: bool) -> PaneView {
         PaneView {
             id: PaneId::new(1),
             name: "powershell".into(),
             profile: String::new(),
+            title: None,
             cwd: None,
             profile_id: ProfileId::new(profile),
             state: AgentState::Idle,
@@ -428,5 +500,98 @@ mod tests {
         for (profile, runs) in [("shell", true), ("claude", false), ("", true)] {
             assert!(!runs_agent(&pane(profile, runs)), "{profile} {runs}");
         }
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_running_an_agent_cli_shows_the_cli_and_an_agent_its_profile() {
+        let typed = PaneView {
+            name: "codex".into(),
+            ..pane("shell", true)
+        };
+        assert_eq!(program_tag(&typed), "codex");
+        assert!(!runs_agent(&typed));
+        // A renamed agent pane is still tagged by its agent.
+        let renamed = PaneView {
+            name: "reviewer".into(),
+            ..pane("claude", true)
+        };
+        assert_eq!(program_tag(&renamed), "claude");
+    }
+
+    fn typed(cli: &str) -> PaneView {
+        PaneView {
+            name: cli.into(),
+            profile: "Shell".into(),
+            ..pane("shell", true)
+        }
+    }
+
+    fn head(pane: &PaneView) -> HeadText<'_> {
+        HeadText {
+            name: &pane.name,
+            profile: &pane.profile,
+            tag: program_tag(pane),
+            agent: names_agent(pane),
+            title: None,
+            folder_lead: "~/Code/",
+            folder_last: "yien-ai",
+            state: "Idle",
+            signal_lost: None,
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_typed_agent_cli_is_laid_out_as_an_agent() {
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            let pane = typed(cli);
+            let text = head(&pane);
+            assert!(text.agent && !text.separate_name(), "{cli}");
+            for scale in SCALES {
+                let tag = cli.chars().count() as f32 * 0.6 * 12.5 * scale;
+                // Room for the glyph and the whole tag, not for the button.
+                let width = 2.0 * PADDING + GLYPH + tag + 2.0 * GAP;
+                let now = PaneHeadLayout::at(width, scale, &text);
+                assert!(!now.close_button, "{cli} {now:?} at {scale}");
+                // With the button too, both stay and the tag is not cut.
+                let width = width + GAP + BUTTON + 1.0;
+                let now = PaneHeadLayout::at(width, scale, &text);
+                assert!(now.close_button, "{cli} {now:?} at {scale}");
+                assert!(now.need(scale, &text) <= width, "{cli} at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_typed_agent_cli_outlives_the_folder_and_the_close_button() {
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            let pane = typed(cli);
+            let text = head(&pane);
+            for scale in SCALES {
+                let mut width = 1600.0;
+                while width >= 10.0 {
+                    let now = PaneHeadLayout::at(width, scale, &text);
+                    if now.folder_last || now.close_button {
+                        // The need counts the tag at its full width.
+                        assert!(now.need(scale, &text) <= width, "{cli} at {width}, {scale}");
+                    }
+                    width -= 2.0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_only_a_running_known_name_is_a_typed_agent() {
+        assert!(!names_agent(&pane("shell", true)));
+        assert!(!names_agent(&typed("Claude")));
+        let exited = PaneView {
+            running: false,
+            ..typed("claude")
+        };
+        assert!(!names_agent(&exited));
+        // A shell name keeps counting only its first letters.
+        let shell = pane("shell", true);
+        let text = head(&shell);
+        assert!(!text.agent);
     }
 }

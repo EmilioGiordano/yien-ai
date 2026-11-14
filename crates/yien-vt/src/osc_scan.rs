@@ -36,7 +36,101 @@ pub enum OscSignal {
     },
     /// OSC 133: a shell integration prompt mark.
     Prompt(PromptMark),
+    /// OSC 7501: a program reported its own state. Its `msg` and `title`
+    /// fields are user content and are not kept.
+    Status(ProgramStatus),
 }
+
+/// An OSC 7501 status record: `state=<s>[:kind=<k>][:id=<id>]…`, fields in
+/// any order.
+///
+/// ```
+/// use yien_vt::osc_scan::{
+///     OscScanner, OscSignal, ProgramState, ProgramStatus, StatusApp, StatusKind,
+/// };
+///
+/// let mut scanner = OscScanner::new();
+/// let signals = scanner.scan(b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\");
+/// let status = ProgramStatus {
+///     state: ProgramState::Blocked,
+///     kind: Some(StatusKind::Permission),
+///     app: StatusApp::Codex,
+///     sub_session: false,
+/// };
+/// assert_eq!(signals, vec![OscSignal::Status(status)]);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramStatus {
+    /// The reported state.
+    pub state: ProgramState,
+    /// Why it is blocked, when the program said and the value is known.
+    pub kind: Option<StatusKind>,
+    /// The program that sent it (`app`).
+    pub app: StatusApp,
+    /// The record carries an `id`: it is about a sub-session or a background
+    /// task, not the program as a whole.
+    pub sub_session: bool,
+}
+
+/// The `state` of an OSC 7501 record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    /// `idle`.
+    Idle,
+    /// `working`.
+    Working,
+    /// `blocked`: it waits for the user.
+    Blocked,
+    /// `done`: the turn completed.
+    Done,
+    /// `error`: the turn failed.
+    Error,
+    /// `clear`: the program gave the terminal back.
+    Clear,
+}
+
+/// The `kind` of a blocked OSC 7501 record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// `permission`.
+    Permission,
+    /// `question`.
+    Question,
+    /// `auth`.
+    Auth,
+}
+
+/// The `app` of an OSC 7501 record: the programs whose records were seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusApp {
+    /// `claude-code`.
+    ClaudeCode,
+    /// `codex`.
+    Codex,
+    /// `opencode`.
+    OpenCode,
+    /// Any other value, or none.
+    Other,
+}
+
+/// A reply the program asked for (`OSC 7501 ; ?`), to be written to the PTY
+/// after the bytes before `at` are processed, so it keeps its place among the
+/// emulator's own replies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscReply {
+    /// The index just past the query's last byte in the scanned slice.
+    pub at: usize,
+    /// The bytes to write.
+    pub bytes: Vec<u8>,
+}
+
+/// The answer to `OSC 7501 ; ?`: support, with no capabilities listed.
+/// Claude Code reports its state only once this arrives, and only if it
+/// arrives before the answer to the `CSI c` it sends right after the query.
+pub const STATUS_QUERY_REPLY: &[u8] = b"\x1b]7501;?\x1b\\";
+
+/// An OSC 7501 payload that asks whether the terminal reads status records.
+const STATUS_QUERY: &[u8] = b"7501;?";
 
 /// The OSC 133 marks (FinalTerm shell integration).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,25 +198,53 @@ impl OscScanner {
 
     /// Scans `bytes` and appends the signals completed in them to `out`.
     pub fn scan_into(&mut self, bytes: &[u8], out: &mut Vec<OscSignal>) {
-        let mut rest = bytes;
-        while let Some((&byte, tail)) = rest.split_first() {
+        self.scan_replying(bytes, out);
+    }
+
+    /// Like [`OscScanner::scan_into`], and also returns the replies owed to
+    /// the queries completed in `bytes`, in order.
+    ///
+    /// ```
+    /// use yien_vt::osc_scan::{OscScanner, STATUS_QUERY_REPLY};
+    ///
+    /// let mut scanner = OscScanner::new();
+    /// let mut signals = Vec::new();
+    /// let replies = scanner.scan_replying(b"ab\x1b]7501;?\x07\x1b[c", &mut signals);
+    /// assert_eq!(replies[0].at, 11);
+    /// assert_eq!(replies[0].bytes, STATUS_QUERY_REPLY);
+    /// assert!(signals.is_empty());
+    /// ```
+    pub fn scan_replying(&mut self, bytes: &[u8], out: &mut Vec<OscSignal>) -> Vec<OscReply> {
+        let mut replies = Vec::new();
+        let mut at = 0;
+        while let Some(rest) = bytes.get(at..) {
+            let Some(&byte) = rest.first() else {
+                break;
+            };
             if self.state == State::Ground {
                 // Fast path: plain output is most of the stream.
                 match rest.iter().position(|&b| b == ESC) {
-                    Some(at) => {
+                    Some(offset) => {
                         self.state = State::Escape;
-                        rest = rest.get(at + 1..).unwrap_or_default();
+                        at += offset + 1;
                     }
-                    None => return,
+                    None => break,
                 }
                 continue;
             }
-            self.step(byte, out);
-            rest = tail;
+            at += 1;
+            if self.step(byte, out) {
+                replies.push(OscReply {
+                    at,
+                    bytes: STATUS_QUERY_REPLY.to_vec(),
+                });
+            }
         }
+        replies
     }
 
-    fn step(&mut self, byte: u8, out: &mut Vec<OscSignal>) {
+    /// Returns whether `byte` completed a status query.
+    fn step(&mut self, byte: u8, out: &mut Vec<OscSignal>) -> bool {
         match self.state {
             State::Ground => {
                 if byte == ESC {
@@ -131,7 +253,7 @@ impl OscScanner {
             }
             State::Escape => self.after_escape(byte),
             State::Osc => match byte {
-                BEL => self.finish(out),
+                BEL => return self.finish(out),
                 ESC => self.state = State::OscEscape,
                 CAN | SUB => self.abort(),
                 _ if self.payload.len() < MAX_PAYLOAD => self.payload.push(byte),
@@ -142,12 +264,11 @@ impl OscScanner {
             },
             State::OscEscape => {
                 if byte == b'\\' {
-                    self.finish(out);
-                } else {
-                    // An ESC that is not ST cancels the sequence and starts a new one.
-                    self.payload.clear();
-                    self.after_escape(byte);
+                    return self.finish(out);
                 }
+                // An ESC that is not ST cancels the sequence and starts a new one.
+                self.payload.clear();
+                self.after_escape(byte);
             }
             State::Discard => match byte {
                 BEL | CAN | SUB => self.state = State::Ground,
@@ -162,6 +283,7 @@ impl OscScanner {
                 }
             }
         }
+        false
     }
 
     fn after_escape(&mut self, byte: u8) {
@@ -180,11 +302,14 @@ impl OscScanner {
         self.state = State::Ground;
     }
 
-    fn finish(&mut self, out: &mut Vec<OscSignal>) {
-        if let Some(signal) = parse(&self.payload) {
+    /// Returns whether the sequence was a status query.
+    fn finish(&mut self, out: &mut Vec<OscSignal>) -> bool {
+        let query = self.payload.starts_with(STATUS_QUERY);
+        if !query && let Some(signal) = parse(&self.payload) {
             out.push(signal);
         }
         self.abort();
+        query
     }
 }
 
@@ -200,8 +325,66 @@ fn parse(payload: &[u8]) -> Option<OscSignal> {
         "9" => parse_osc9(rest?),
         "777" => parse_osc777(rest?),
         "133" => parse_prompt_mark(rest?).map(OscSignal::Prompt),
+        "7501" => parse_status(rest?).map(OscSignal::Status),
         _ => None,
     }
+}
+
+/// `key=value` fields split on `:`; the first `=` splits, as base64 values
+/// end in `=` padding. Unknown keys and fields without `=` are skipped.
+fn parse_status(rest: &str) -> Option<ProgramStatus> {
+    let mut state = None;
+    let mut kind = None;
+    let mut app = None;
+    let mut sub_session = false;
+    for field in rest.split(':') {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "state" if state.is_none() => state = Some(program_state(value)?),
+            "kind" if kind.is_none() => kind = status_kind(value),
+            "app" if app.is_none() => app = Some(status_app(value)),
+            "id" => sub_session = true,
+            _ => {}
+        }
+    }
+    Some(ProgramStatus {
+        state: state?,
+        kind,
+        app: app.unwrap_or(StatusApp::Other),
+        sub_session,
+    })
+}
+
+fn status_app(value: &str) -> StatusApp {
+    match value {
+        "claude-code" => StatusApp::ClaudeCode,
+        "codex" => StatusApp::Codex,
+        "opencode" => StatusApp::OpenCode,
+        _ => StatusApp::Other,
+    }
+}
+
+fn program_state(value: &str) -> Option<ProgramState> {
+    Some(match value {
+        "idle" => ProgramState::Idle,
+        "working" => ProgramState::Working,
+        "blocked" => ProgramState::Blocked,
+        "done" => ProgramState::Done,
+        "error" => ProgramState::Error,
+        "clear" => ProgramState::Clear,
+        _ => return None,
+    })
+}
+
+fn status_kind(value: &str) -> Option<StatusKind> {
+    Some(match value {
+        "permission" => StatusKind::Permission,
+        "question" => StatusKind::Question,
+        "auth" => StatusKind::Auth,
+        _ => return None,
+    })
 }
 
 /// OSC 9 is a notification for iTerm2, but ConEmu and Windows Terminal use
@@ -460,5 +643,239 @@ mod tests {
             scan(b"\x1b]0;\xff\xfe\x07"),
             vec![OscSignal::Title("\u{fffd}\u{fffd}".into())]
         );
+    }
+
+    fn status(
+        app: StatusApp,
+        state: ProgramState,
+        kind: Option<StatusKind>,
+        sub_session: bool,
+    ) -> OscSignal {
+        OscSignal::Status(ProgramStatus {
+            state,
+            kind,
+            app,
+            sub_session,
+        })
+    }
+
+    fn scan_with_replies(
+        scanner: &mut OscScanner,
+        bytes: &[u8],
+    ) -> (Vec<OscSignal>, Vec<OscReply>) {
+        let mut signals = Vec::new();
+        let replies = scanner.scan_replying(bytes, &mut signals);
+        (signals, replies)
+    }
+
+    #[test]
+    fn rf_age_05_every_7501_state_with_either_terminator() {
+        for (word, state) in [
+            ("idle", ProgramState::Idle),
+            ("working", ProgramState::Working),
+            ("blocked", ProgramState::Blocked),
+            ("done", ProgramState::Done),
+            ("error", ProgramState::Error),
+            ("clear", ProgramState::Clear),
+        ] {
+            for end in ["\x07", "\x1b\\"] {
+                let bytes = format!("\x1b]7501;state={word}:app=codex{end}");
+                assert_eq!(
+                    scan(bytes.as_bytes()),
+                    vec![status(StatusApp::Codex, state, None, false)],
+                    "{word}"
+                );
+            }
+        }
+        // `clear` on exit comes bare, with no other field.
+        assert_eq!(
+            scan(b"\x1b]7501;state=clear\x1b\\"),
+            vec![status(StatusApp::Other, ProgramState::Clear, None, false)]
+        );
+    }
+
+    #[test]
+    fn rf_age_05_7501_kinds_and_unknown_kinds() {
+        for (word, kind) in [
+            ("permission", StatusKind::Permission),
+            ("question", StatusKind::Question),
+            ("auth", StatusKind::Auth),
+        ] {
+            let bytes = format!("\x1b]7501;state=blocked:kind={word}:app=claude-code\x1b\\");
+            assert_eq!(
+                scan(bytes.as_bytes()),
+                vec![status(
+                    StatusApp::ClaudeCode,
+                    ProgramState::Blocked,
+                    Some(kind),
+                    false
+                )]
+            );
+        }
+        // A kind a later version adds still means blocked.
+        assert_eq!(
+            scan(b"\x1b]7501;state=blocked:kind=payment\x1b\\"),
+            vec![status(StatusApp::Other, ProgramState::Blocked, None, false)]
+        );
+    }
+
+    #[test]
+    fn rf_age_05_7501_fields_in_any_order_with_base64_values() {
+        // Real records from Claude Code, Codex and OpenCode.
+        let records: [(&[u8], StatusApp); 3] = [
+            (
+                b"\x1b]7501;state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBCYXNoOiBjdXJs\x1b\\",
+                StatusApp::ClaudeCode,
+            ),
+            (
+                b"\x1b]7501;state=blocked:app=codex:kind=permission\x1b\\",
+                StatusApp::Codex,
+            ),
+            (
+                b"\x1b]7501;state=blocked:kind=permission:app=opencode:title=eWllbiBwZXJt:msg=UGVybWlzc2lvbiBuZWVkcyBpbnB1dA==\x1b\\",
+                StatusApp::OpenCode,
+            ),
+        ];
+        for (bytes, app) in records {
+            assert_eq!(
+                scan(bytes),
+                vec![status(
+                    app,
+                    ProgramState::Blocked,
+                    Some(StatusKind::Permission),
+                    false
+                )]
+            );
+        }
+        // State last, after padded base64; the first `state` wins.
+        assert_eq!(
+            scan(b"\x1b]7501;msg=ZG9uZQ==:title=dA==:state=working:state=done\x07"),
+            vec![status(StatusApp::Other, ProgramState::Working, None, false)]
+        );
+    }
+
+    #[test]
+    fn rf_age_05_7501_app_is_one_of_the_known_programs_or_other() {
+        for (bytes, app) in [
+            (
+                &b"\x1b]7501;state=idle:app=opencode\x07"[..],
+                StatusApp::OpenCode,
+            ),
+            (
+                b"\x1b]7501;state=idle:app=claude-code\x07",
+                StatusApp::ClaudeCode,
+            ),
+            (b"\x1b]7501;state=idle:app=codex\x07", StatusApp::Codex),
+            (b"\x1b]7501;state=idle:app=aider\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle:app=\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle:app=OpenCode\x07", StatusApp::Other),
+            (b"\x1b]7501;state=idle\x07", StatusApp::Other),
+            // The first `app` wins.
+            (
+                b"\x1b]7501;app=codex:state=idle:app=opencode\x07",
+                StatusApp::Codex,
+            ),
+        ] {
+            assert_eq!(
+                scan(bytes),
+                vec![status(app, ProgramState::Idle, None, false)],
+                "{bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_age_05_7501_records_with_an_id_are_marked() {
+        assert_eq!(
+            scan(b"\x1b]7501;state=working:id=ses_e29191ec0ffe3tC2NzOxg6Pfch:app=opencode\x1b\\"),
+            vec![status(
+                StatusApp::OpenCode,
+                ProgramState::Working,
+                None,
+                true
+            )]
+        );
+        assert_eq!(
+            scan(b"\x1b]7501;state=clear:id=ses_1\x1b\\"),
+            vec![status(StatusApp::Other, ProgramState::Clear, None, true)]
+        );
+    }
+
+    #[test]
+    fn rn_02_7501_junk_gives_no_signal() {
+        for bytes in [
+            &b"\x1b]7501\x07"[..],
+            b"\x1b]7501;\x07",
+            b"\x1b]7501;state=\x07",
+            b"\x1b]7501;state=sleeping:app=x\x07",
+            b"\x1b]7501;state\x07",
+            b"\x1b]7501;app=codex:kind=permission\x07",
+            b"\x1b]7501;STATE=working\x07",
+            b"\x1b]7501;state=Working\x07",
+            b"\x1b]7501;state=working\x1b[c",
+            b"\x1b]7501;state=working\x18",
+            b"\x1b]75010;state=working\x07",
+        ] {
+            assert!(scan(bytes).is_empty(), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn rn_02_overlong_7501_record_is_dropped_and_scanning_recovers() {
+        let mut bytes = b"\x1b]7501;state=blocked:kind=permission:msg=".to_vec();
+        bytes.extend(std::iter::repeat_n(b'A', MAX_PAYLOAD));
+        bytes.extend_from_slice(b"\x1b\\\x1b]7501;state=working\x1b\\");
+        assert_eq!(
+            scan(&bytes),
+            vec![status(StatusApp::Other, ProgramState::Working, None, false)]
+        );
+    }
+
+    #[test]
+    fn rf_age_05_7501_query_is_answered_where_it_ends() {
+        let mut scanner = OscScanner::new();
+        let (signals, replies) =
+            scan_with_replies(&mut scanner, b"\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[c");
+        assert!(signals.is_empty());
+        assert_eq!(
+            replies,
+            vec![OscReply {
+                at: 18,
+                bytes: STATUS_QUERY_REPLY.to_vec()
+            }]
+        );
+        // ST works too, and so does a query with more after the `?`.
+        let (_, replies) = scan_with_replies(&mut scanner, b"\x1b]7501;?\x1b\\x\x1b]7501;?x=1\x07");
+        let ends: Vec<usize> = replies.iter().map(|r| r.at).collect();
+        assert_eq!(ends, vec![10, 23]);
+        // Nothing else is a query.
+        let (_, replies) = scan_with_replies(
+            &mut scanner,
+            b"\x1b]7501;state=idle\x07\x1b]7501\x07\x1b]0;?\x07\x1b]7501;?\x18",
+        );
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn rf_age_05_7501_cut_at_any_byte_gives_the_same_records_and_replies() {
+        let stream: &[u8] = b"ab\x1b]7501;?\x1b\\\x1b[c\x1b]7501;state=idle:app=claude-code\x1b\\\
+            \x1b]7501;state=blocked:id=s1:kind=question\x07\x1b]0;t\x07\
+            \x1b]7501;state=error:app=codex:msg=QQ==\x1b\\\x1b]7501;?\x07";
+        let mut whole = OscScanner::new();
+        let (whole_signals, whole_replies) = scan_with_replies(&mut whole, stream);
+        assert_eq!(whole_signals.len(), 4);
+        assert_eq!(whole_replies.len(), 2);
+        let ends: Vec<usize> = whole_replies.iter().map(|r| r.at).collect();
+        for cut in 0..=stream.len() {
+            let (a, b) = stream.split_at(cut);
+            let mut split = OscScanner::new();
+            let (mut signals, first) = scan_with_replies(&mut split, a);
+            let (more, second) = scan_with_replies(&mut split, b);
+            signals.extend(more);
+            let mut split_ends: Vec<usize> = first.iter().map(|r| r.at).collect();
+            split_ends.extend(second.iter().map(|r| r.at + cut));
+            assert_eq!(signals, whole_signals, "cut at {cut}");
+            assert_eq!(split_ends, ends, "cut at {cut}");
+        }
     }
 }
