@@ -592,7 +592,12 @@ impl Machine {
             let cause = Cause::Source(Source::Screen);
             match verdict {
                 ScreenVerdict::NeedsYou if !self.startup_red => {
-                    self.set_state(AgentState::NeedsYou(NeedsReason::ScreenRule), cause, now, fx);
+                    self.set_state(
+                        AgentState::NeedsYou(NeedsReason::ScreenRule),
+                        cause,
+                        now,
+                        fx,
+                    );
                     self.startup_red = true;
                 }
                 ScreenVerdict::NoMatch if self.startup_red => {

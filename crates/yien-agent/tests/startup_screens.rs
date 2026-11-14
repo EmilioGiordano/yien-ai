@@ -29,7 +29,11 @@ macro_rules! codex_screen {
     ($name:literal) => {
         (
             $name,
-            include_str!(concat!("fixtures/startup-screens/codex-0.167.2-", $name, ".txt")),
+            include_str!(concat!(
+                "fixtures/startup-screens/codex-0.167.2-",
+                $name,
+                ".txt"
+            )),
         )
     };
 }
@@ -189,7 +193,11 @@ fn rn_02_ordinary_output_is_no_startup_screen() {
         let version = if id == "claude" { CLAUDE } else { CODEX };
         let rules = rules(id, version);
         for text in ORDINARY {
-            assert_eq!(verdict(&rules, text), ScreenVerdict::NoMatch, "{id}: {text}");
+            assert_eq!(
+                verdict(&rules, text),
+                ScreenVerdict::NoMatch,
+                "{id}: {text}"
+            );
         }
     }
 }
@@ -222,7 +230,11 @@ fn rn_02_only_the_versions_whose_screens_were_read_get_startup_rules() {
     let claude = profiles.iter().find(|p| p.id == "claude").unwrap();
     let old = claude.select_rule(Some(Version::new(2, 0, 50))).rule;
     for (name, screen) in CLAUDE_SCREENS {
-        assert_eq!(verdict(&old.screen, screen), ScreenVerdict::NoMatch, "{name}");
+        assert_eq!(
+            verdict(&old.screen, screen),
+            ScreenVerdict::NoMatch,
+            "{name}"
+        );
     }
     let codex = profiles.iter().find(|p| p.id == "codex").unwrap();
     let catch_all = codex.rules.iter().find(|r| r.versions.is_none()).unwrap();
@@ -239,9 +251,6 @@ fn rn_02_opencode_and_the_shell_read_no_startup_screens() {
     let profiles = builtin_profiles().unwrap();
     for id in ["opencode", "shell"] {
         let profile = profiles.iter().find(|p| p.id == id).unwrap();
-        assert!(
-            profile.rules.iter().all(|r| r.screen.is_empty()),
-            "{id}"
-        );
+        assert!(profile.rules.iter().all(|r| r.screen.is_empty()), "{id}");
     }
 }

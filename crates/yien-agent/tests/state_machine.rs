@@ -1192,7 +1192,11 @@ fn rn_02_a_startup_screen_is_read_only_once_output_settles() {
     p.send(Signal::Output);
     p.at(ms(200)).send(Signal::Output);
     p.at(ms(300)).send(Signal::Tick);
-    assert_eq!(p.fx, vec![Effect::WakeAt(ms(500))], "output came in between");
+    assert_eq!(
+        p.fx,
+        vec![Effect::WakeAt(ms(500))],
+        "output came in between"
+    );
     p.at(ms(500)).send(Signal::Tick);
     assert_eq!(p.fx, vec![Effect::CheckScreen]);
     assert_eq!(p.m.next_wake(), None);
@@ -1218,8 +1222,7 @@ fn rf_age_05_an_answered_startup_screen_clears_once_the_screen_moves_on() {
     p.settled_screen(ScreenVerdict::NeedsYou);
     assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
     assert!(p.fx.is_empty(), "the same red, no second notification");
-    p.send(Signal::Input)
-        .settled_screen(ScreenVerdict::NoMatch);
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
     assert_eq!(p.state(), AgentState::Idle);
     assert!(p.fx.contains(&Effect::ClearRed));
 }
