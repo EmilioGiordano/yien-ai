@@ -35,6 +35,7 @@ local_value() {
     | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
 }
 build_root=${YIEN_BUILD_ROOT:-$(local_value YIEN_BUILD_ROOT)}
+build_root=$(printf '%s' "$build_root" | tr '\\' '/')
 build_root=${build_root%/}
 lock=${YIEN_BUILD_LOCK:-$(local_value YIEN_BUILD_LOCK)}
 if [ -z "$lock" ] && [ -n "$build_root" ]; then lock="$build_root/yien-build.lock"; fi
