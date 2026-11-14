@@ -13,11 +13,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use yien_agent::Profile;
-use yien_core::{Core, CoreConfig, CoreHandle, SendError, ShellCommand, ShutdownError};
+use yien_core::{
+    Core, CoreConfig, CoreHandle, InstalledShells, SendError, ShellCommand, ShutdownError,
+};
 use yien_proto::frame::{CellFlags, Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
-    ProfileId, ProjectId, TabId, TerminalPalette,
+    ProfileId, ProjectId, ShellKind, TabId, TerminalPalette,
 };
 use yien_pty::{FakeChild, FakeInput, FakePty};
 use yien_vt::Palette;
@@ -1471,6 +1473,89 @@ fn rf_ses_01_a_core_started_without_the_report_runs_the_plain_shell() {
     });
     let (_, _, child) = h.project();
     assert!(child.spec().env.iter().all(|(k, _)| k != "PROMPT"));
+}
+
+/// The default shell `fake-shell`, with cmd and Git Bash installed.
+fn with_shells() -> CoreConfig {
+    CoreConfig {
+        shells: InstalledShells::from_programs([
+            (ShellKind::Cmd, "fake-cmd.exe".to_owned()),
+            (ShellKind::GitBash, "D:/Git/bin/bash.exe".to_owned()),
+        ]),
+        ..config()
+    }
+}
+
+#[test]
+fn rf_esp_03_rf_pan_18_a_new_tab_or_a_split_starts_the_shell_picked_for_it() {
+    let mut h = Harness::start_with(with_shells());
+    let (project, _, pane) = h.pending_project();
+    assert_eq!(h.child().spec().program, "fake-shell", "the default");
+
+    h.command(Command::SplitPane {
+        pane,
+        orientation: Orientation::Vertical,
+        profile: Some(ShellKind::GitBash.profile()),
+        before: false,
+    });
+    let info = h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if p.id != pane => Some(p.clone()),
+        _ => None,
+    });
+    let bash = h.child();
+    assert_eq!(bash.spec().program, "D:/Git/bin/bash.exe");
+    assert_eq!(bash.spec().args, ["--login", "-i"]);
+    assert!(bash.spec().env.iter().any(|(k, _)| k == "PROMPT_COMMAND"));
+    assert_eq!(info.profile_id, ShellKind::GitBash.profile());
+    assert_eq!(
+        (info.profile.as_str(), info.name.as_str()),
+        ("Git Bash", "bash")
+    );
+
+    h.command(Command::NewTab {
+        project,
+        name: None,
+        profile: Some(ShellKind::Cmd.profile()),
+    });
+    assert_eq!(h.child().spec().program, "fake-cmd.exe");
+}
+
+#[test]
+fn rf_pan_18_a_split_on_a_shell_not_installed_runs_the_default_and_says_why() {
+    let mut h = Harness::start_with(with_shells());
+    let (_, pane, _) = h.project();
+    h.command(Command::SplitPane {
+        pane,
+        orientation: Orientation::Horizontal,
+        profile: Some(ShellKind::Pwsh.profile()),
+        before: false,
+    });
+    let message = h.wait_for(|m| match m {
+        CoreMsg::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        message,
+        "PowerShell 7 was not found; this pane runs fake-shell instead."
+    );
+    assert_eq!(h.child().spec().program, "fake-shell");
+}
+
+#[test]
+fn rf_cfg_01_a_core_started_on_a_missing_shell_says_so_once_it_runs() {
+    let mut h = Harness::start_with(CoreConfig {
+        shell_kind: Some(ShellKind::GitBash),
+        ..config()
+    });
+    if cfg!(windows) {
+        let message = h.wait_for(|m| match m {
+            CoreMsg::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        });
+        assert!(message.contains("Git Bash was not found"), "{message}");
+    }
+    let (_, _, child) = h.project();
+    assert_eq!(child.spec().program, "fake-shell");
 }
 
 fn base64(bytes: &[u8]) -> String {
