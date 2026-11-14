@@ -9,12 +9,15 @@ use yien_agent::{ScreenRule, ScreenVerdict, Version, builtin_profiles, evaluate_
 const CODEX: Version = Version::new(0, 167, 2);
 const CLAUDE: Version = Version::new(2, 1, 325);
 
+/// The screen rules `id` runs for a version its profile verified.
 fn rules(id: &str, version: Version) -> Vec<ScreenRule> {
-    let profiles = builtin_profiles().unwrap();
-    let profile = profiles.iter().find(|p| p.id == id).unwrap();
-    let choice = profile.select_rule(Some(version));
-    assert!(choice.verified, "{id} {version}");
-    choice.rule.screen.clone()
+    let profiles = builtin_profiles().unwrap_or_default();
+    let choice = profiles
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.select_rule(Some(version)));
+    assert!(choice.is_some_and(|c| c.verified), "{id} {version}");
+    choice.map(|c| c.rule.screen.clone()).unwrap_or_default()
 }
 
 /// `text` as a pane shows it: under earlier output, over blank rows.
