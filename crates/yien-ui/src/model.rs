@@ -1489,7 +1489,7 @@ mod tests {
     #[test]
     fn rf_esp_04_a_long_folder_keeps_its_last_names() {
         let label = folder_label(
-            r"D:\More-Code-Projects\some-client\deep\nested\yien-ai",
+            r"D:\Projects\some-client\deep\nested\yien-ai",
             None,
             true,
             24,
