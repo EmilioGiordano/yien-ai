@@ -270,7 +270,7 @@ pub struct Launch {
 pub struct ScreenRule {
     /// What a match confirms.
     pub confirms: Confirms,
-    /// How many rows from the bottom the pattern sees.
+    /// How many rows, up from the lowest row with text, the pattern sees.
     pub bottom_rows: u16,
     pattern: Regex,
 }
