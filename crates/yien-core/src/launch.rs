@@ -4,7 +4,7 @@
 
 use yien_agent::{CLAUDE_SESSION_MARKERS, MachineConfig, Profile, ScreenRule, Source};
 use yien_platform::hook_pipe::{HOOK_PIPE_ENV, HOOK_TOKEN_ENV};
-use yien_proto::{PaneId, ProfileId};
+use yien_proto::{PaneId, ProfileId, ShellKind};
 use yien_pty::SpawnSpec;
 
 use crate::shell::ShellCommand;
@@ -34,6 +34,9 @@ pub(crate) struct LaunchPlan {
     /// The rule reports through hooks: each launch gets a hook token and the
     /// settings file, or has no structured channel.
     pub hooks: bool,
+    /// Why the pane runs another program than the one asked for, for the
+    /// user: a shell that is not installed.
+    pub notice: Option<String>,
 }
 
 /// The values one launch fills in.
@@ -193,11 +196,26 @@ fn format_uuid(mut b: [u8; 16]) -> String {
 }
 
 /// [`resolve`] against the core's profiles, refusing an id whose user file
-/// was skipped rather than starting anything else in its place.
+/// was skipped rather than starting anything else in its place. A
+/// [`ShellKind::profile`] id runs that installed shell; one not installed
+/// runs the default shell and says why, keeping its id, so the pane gets
+/// its shell back once it is installed.
 pub(crate) fn resolve_in(
     profile: Option<&ProfileId>,
     config: &CoreConfig,
 ) -> Result<LaunchPlan, CoreError> {
+    if let Some(kind) = profile.and_then(|id| ShellKind::from_profile(id.as_str())) {
+        let Some(shell) = config.shells.get(kind) else {
+            let mut plan = shell_plan(kind, &config.shell, &config.profiles);
+            plan.notice = Some(format!(
+                "{} was not found; this pane runs {} instead.",
+                kind.name(),
+                config.shell.display_name()
+            ));
+            return Ok(plan);
+        };
+        return Ok(shell_plan(kind, shell, &config.profiles));
+    }
     if let Some(id) = profile
         && let Some(file) = config.broken_profiles.get(id.as_str())
         && !config.profiles.iter().any(|p| p.id == id.as_str())
@@ -208,6 +226,36 @@ pub(crate) fn resolve_in(
         });
     }
     resolve(profile, &config.profiles, &config.shell)
+}
+
+/// `shell` started for a [`ShellKind::profile`] pane: the shell profile's
+/// rule and variables, whatever program that profile names.
+fn shell_plan(kind: ShellKind, shell: &ShellCommand, profiles: &[Profile]) -> LaunchPlan {
+    let mut env = shell.env.clone();
+    let (machine, screen) = match profiles.iter().find(|p| p.id == SHELL_PROFILE) {
+        Some(found) => {
+            let rule = found.select_rule(None).rule;
+            env.extend(found.launch.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            (rule.machine_config(), rule.screen.clone())
+        }
+        None => (
+            MachineConfig::new(&[Source::Osc133, Source::Osc7501], None),
+            Vec::new(),
+        ),
+    };
+    LaunchPlan {
+        profile: kind.profile().as_str().to_owned(),
+        program: shell.program.clone(),
+        args: shell.args.clone(),
+        resume_args: Vec::new(),
+        env,
+        machine,
+        screen,
+        profile_name: kind.name().to_owned(),
+        default_name: shell.display_name(),
+        hooks: false,
+        notice: None,
+    }
 }
 
 /// Resolves `profile` (the shell when `None`) against the known profiles.
@@ -238,6 +286,7 @@ pub(crate) fn resolve(
                 profile_name: "Shell".to_owned(),
                 default_name: shell.display_name(),
                 hooks: false,
+                notice: None,
             });
         }
         return Err(CoreError::UnknownProfile(id.to_owned()));
@@ -272,6 +321,7 @@ pub(crate) fn resolve(
         profile_name: found.name.clone(),
         default_name,
         hooks: rule.hooks.is_some() && rule.sources.contains(&Source::Hooks),
+        notice: None,
     })
 }
 
@@ -632,5 +682,74 @@ mod tests {
         let spec = plan.spec(&fill, "C:/Code", 0, 30);
         assert_eq!((spec.cols, spec.rows), (1, 30));
         assert_eq!(spec.cwd.as_deref(), Some(std::path::Path::new("C:/Code")));
+    }
+
+    /// A core config with cmd and Git Bash installed, reporting their folder.
+    fn with_shells() -> CoreConfig {
+        let installed = crate::InstalledShells::from_programs([
+            (ShellKind::Cmd, "cmd.exe".to_owned()),
+            (ShellKind::GitBash, "C:/Git/bin/bash.exe".to_owned()),
+        ]);
+        let setup = crate::shell::ShellSetup::new(&shell(), &installed, None, true);
+        CoreConfig {
+            shell: setup.default_shell(None, true).0,
+            shells: setup.installed(true),
+            ..CoreConfig::default()
+        }
+    }
+
+    #[test]
+    fn rf_pan_18_a_shell_profile_runs_that_shell_with_its_hook() {
+        let config = with_shells();
+        let fill = Fill {
+            pane: PaneId::new(4),
+            session_id: None,
+            resume: None,
+            hooks: Some(HOOKS),
+        };
+        let bash = resolve_in(Some(&ShellKind::GitBash.profile()), &config).unwrap();
+        assert_eq!(bash.profile, "shell:git-bash");
+        assert_eq!(bash.profile_name, "Git Bash");
+        assert_eq!(bash.default_name, "bash");
+        assert_eq!(bash.notice, None);
+        assert!(bash.machine.declares(Source::Osc133) && bash.machine.declares(Source::Osc7501));
+        assert!(!bash.hooks && !bash.can_resume());
+        let spec = bash.spec(&fill, "C:/Code", 80, 24);
+        assert_eq!(spec.program, "C:/Git/bin/bash.exe");
+        assert_eq!(args(&spec), ["--login", "-i"]);
+        assert!(env(&spec, "PROMPT_COMMAND").is_some_and(|v| v.contains("133;A")));
+        assert_eq!(
+            env(&spec, HOOK_TOKEN_ENV),
+            Some(""),
+            "a shell gets no token"
+        );
+
+        let cmd = resolve_in(Some(&ShellKind::Cmd.profile()), &config).unwrap();
+        assert_eq!(
+            (cmd.program.as_str(), cmd.default_name.as_str()),
+            ("cmd.exe", "cmd")
+        );
+        assert!(env(&cmd.spec(&fill, "", 80, 24), "PROMPT").is_some());
+
+        let default = resolve_in(None, &config).unwrap();
+        assert_eq!(
+            (default.profile.as_str(), default.program.as_str()),
+            ("shell", "pwsh.exe")
+        );
+    }
+
+    #[test]
+    fn rf_pan_18_a_shell_not_installed_runs_the_default_with_a_notice() {
+        let plan = resolve_in(Some(&ShellKind::Pwsh.profile()), &with_shells()).unwrap();
+        assert_eq!(plan.program, "pwsh.exe");
+        assert_eq!(
+            plan.profile, "shell:pwsh",
+            "saved as asked, for a later install"
+        );
+        assert_eq!(
+            plan.notice.as_deref(),
+            Some("PowerShell 7 was not found; this pane runs pwsh instead.")
+        );
+        assert!(plan.machine.declares(Source::Osc133));
     }
 }

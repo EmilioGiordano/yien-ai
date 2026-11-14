@@ -16,7 +16,7 @@ use yien_agent::{HookError, HookEvent};
 use yien_platform::agent_sessions::{self, MAX_SESSIONS};
 use yien_proto::{
     AgentSession, ClientMsg, Command, CoreMsg, PaneId, PendingQuestion, ProfileId, ProfileInfo,
-    ProjectId, SessionTitle, TabGit, TabId,
+    ProjectId, SessionTitle, ShellKind, TabGit, TabId, is_shell_profile,
 };
 use yien_pty::PtyBackend;
 use yien_vt::Palette;
@@ -32,7 +32,7 @@ use crate::persist::{self, Opened, Writer};
 use crate::programs::{self, Shells};
 use crate::report::Reports;
 use crate::screens::{ScreenSource, Screens};
-use crate::shell::ShellChoice;
+use crate::shell::ShellSetup;
 use crate::workspace::{Effect, Workspace};
 use crate::worktree::{self, Done};
 use crate::{CoreConfig, CoreError, PANE_INPUT_QUEUE};
@@ -132,8 +132,8 @@ struct Service {
     screens: Option<Arc<Screens>>,
     /// Saved screens of restored panes, until their actors start.
     restored_screens: HashMap<PaneId, Vec<u8>>,
-    /// The shell with and without the folder report (RF-SES-01).
-    shells: ShellChoice,
+    /// Every shell with and without the folder report (RF-SES-01).
+    shells: ShellSetup,
 }
 
 /// Worktree jobs waiting for the service; a job waits for room.
@@ -146,7 +146,7 @@ pub(crate) async fn run(
     hooks_error: Option<String>,
     writer: Option<Arc<Writer>>,
     screens: Option<Arc<Screens>>,
-    shells: ShellChoice,
+    (shells, shell_notice): (ShellSetup, Option<String>),
 ) {
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
@@ -186,6 +186,7 @@ pub(crate) async fn run(
         shells,
     };
     let mut notices = opened.notices;
+    notices.extend(shell_notice);
     let mut restored = Vec::new();
     if let Some(snapshot) = &opened.snapshot {
         let config = Arc::clone(&service.ctx.config);
@@ -607,13 +608,24 @@ impl Service {
                 let fx = self.ws.set_window_focus(focused);
                 self.execute(fx).await;
             }
-            ClientMsg::SetShellIntegration { on } => {
-                let shell = self.shells.pick(on);
-                if *shell != self.ctx.config.shell {
-                    tracing::info!(on, "shell integration changed for new panes");
-                    let mut config = (*self.ctx.config).clone();
-                    config.shell = shell.clone();
-                    config.shell_integration = on;
+            ClientMsg::SetShellIntegration { on: integration } => {
+                let shell = self.ctx.config.shell_kind;
+                let (default, _) = self.shells.default_shell(shell, integration);
+                let installed = self.shells.installed(integration);
+                let config = &self.ctx.config;
+                if default != config.shell
+                    || installed != config.shells
+                    || integration != config.shell_integration
+                {
+                    tracing::info!(
+                        shell = shell.map(ShellKind::id),
+                        integration,
+                        "the shell changed for new panes"
+                    );
+                    let mut config = (**config).clone();
+                    config.shell = default;
+                    config.shells = installed;
+                    config.shell_integration = integration;
                     self.ctx.config = Arc::new(config);
                 }
             }
@@ -661,6 +673,7 @@ impl Service {
     }
 
     async fn execute(&mut self, effects: Vec<Effect>) {
+        let mut said = Vec::new();
         for effect in effects {
             match effect {
                 Effect::Emit(msg) => self.emit(msg).await,
@@ -671,7 +684,17 @@ impl Service {
                     resume,
                 } => {
                     let size = self.ctx.config.initial_size;
+                    let notice = plan.notice.clone();
                     self.start_pane(pane, *plan, cwd, size, resume, true);
+                    // A restored tab of panes on a missing shell says so once.
+                    if let Some(message) = notice.filter(|m| !said.contains(m)) {
+                        said.push(message.clone());
+                        self.emit(CoreMsg::Error {
+                            pane: Some(pane),
+                            message,
+                        })
+                        .await;
+                    }
                 }
                 Effect::Stop { pane } => self.stop_pane(pane),
                 Effect::Relaunch { pane, launch } => self.relaunch(pane, launch).await,
@@ -776,11 +799,15 @@ fn profile_list(config: &CoreConfig) -> Vec<ProfileInfo> {
         id: ProfileId::new(SHELL_PROFILE),
         name: shell_name,
     }];
+    list.extend(config.shells.kinds().map(|kind| ProfileInfo {
+        id: kind.profile(),
+        name: kind.name().to_owned(),
+    }));
     list.extend(
         config
             .profiles
             .iter()
-            .filter(|p| p.id != SHELL_PROFILE && p.detect.is_some())
+            .filter(|p| !is_shell_profile(&p.id) && p.detect.is_some())
             .map(|p| ProfileInfo {
                 id: ProfileId::new(p.id.clone()),
                 name: p.name.clone(),
@@ -829,6 +856,40 @@ mod tests {
 
     use super::*;
     use crate::shell::ShellCommand;
+
+    #[test]
+    fn rf_pan_18_the_picker_lists_the_shells_next_to_the_agents() {
+        let config = CoreConfig {
+            shells: crate::InstalledShells::from_programs([
+                (ShellKind::GitBash, "C:/Git/bin/bash.exe".to_owned()),
+                (ShellKind::Cmd, "cmd.exe".to_owned()),
+            ]),
+            ..CoreConfig::default()
+        };
+        let list: Vec<(String, String)> = profile_list(&config)
+            .into_iter()
+            .map(|p| (p.id.as_str().to_owned(), p.name))
+            .collect();
+        let ids: Vec<&str> = list.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "shell",
+                "shell:cmd",
+                "shell:git-bash",
+                "claude",
+                "codex",
+                "opencode"
+            ]
+        );
+        assert_eq!(list[1].1, "Command Prompt");
+        assert_eq!(list[2].1, "Git Bash");
+        let none = profile_list(&CoreConfig::default());
+        assert!(
+            none.iter()
+                .all(|p| ShellKind::from_profile(p.id.as_str()).is_none())
+        );
+    }
 
     fn workspace() -> (Workspace, TabId) {
         let mut ws = Workspace::new();
