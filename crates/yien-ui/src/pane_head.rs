@@ -22,9 +22,10 @@ const EM: f32 = 0.6;
 const SHELL_NAME_CHARS: usize = 4;
 
 /// Which program a pane head names (RF-PAN-12): the agent profile's id while
-/// that agent's own program runs there, else the pane's name. A stand-in
-/// shell after a failed resume, or a pane whose details have not arrived, is
-/// not claimed as the agent.
+/// that agent's own program runs there, else the pane's name. The core puts
+/// the user's name first, then an agent CLI typed in a shell, then the
+/// shell's. A stand-in shell after a failed resume, or a pane whose details
+/// have not arrived, is not claimed as the agent.
 ///
 /// ```ignore
 /// assert_eq!(program_tag(&claude_pane), "claude");
@@ -41,6 +42,12 @@ pub(crate) fn program_tag(pane: &PaneView) -> &str {
 pub(crate) fn runs_agent(pane: &PaneView) -> bool {
     let id = pane.profile_id.as_str();
     !id.is_empty() && id != SHELL_PROFILE && pane.runs_session
+}
+
+/// Whether the head's tag names an agent, laid out to stay whole until the
+/// last: an agent profile's program, or an agent CLI typed in a shell.
+pub(crate) fn names_agent(pane: &PaneView) -> bool {
+    runs_agent(pane) || pane.runs_typed_agent()
 }
 
 /// The text a pane head may show, as it would read in full.
@@ -191,7 +198,9 @@ fn chars(s: &str, size: f32, scale: f32) -> f32 {
 mod tests {
     use yien_proto::{PaneId, ProfileId};
 
-    use super::{BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, program_tag, runs_agent};
+    use super::{
+        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, names_agent, program_tag, runs_agent,
+    };
     use crate::model::{AgentState, PaneView};
 
     const BIGGEST: f32 = 20.0 / 13.0;
@@ -428,5 +437,97 @@ mod tests {
         for (profile, runs) in [("shell", true), ("claude", false), ("", true)] {
             assert!(!runs_agent(&pane(profile, runs)), "{profile} {runs}");
         }
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_running_an_agent_cli_shows_the_cli_and_an_agent_its_profile() {
+        let typed = PaneView {
+            name: "codex".into(),
+            ..pane("shell", true)
+        };
+        assert_eq!(program_tag(&typed), "codex");
+        assert!(!runs_agent(&typed));
+        // A renamed agent pane is still tagged by its agent.
+        let renamed = PaneView {
+            name: "reviewer".into(),
+            ..pane("claude", true)
+        };
+        assert_eq!(program_tag(&renamed), "claude");
+    }
+
+    fn typed(cli: &str) -> PaneView {
+        PaneView {
+            name: cli.into(),
+            profile: "Shell".into(),
+            ..pane("shell", true)
+        }
+    }
+
+    fn head(pane: &PaneView) -> HeadText<'_> {
+        HeadText {
+            name: &pane.name,
+            profile: &pane.profile,
+            tag: program_tag(pane),
+            agent: names_agent(pane),
+            folder_lead: "~/Code/",
+            folder_last: "yien-ai",
+            state: "Idle",
+            signal_lost: None,
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_typed_agent_cli_is_laid_out_as_an_agent() {
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            let pane = typed(cli);
+            let text = head(&pane);
+            assert!(text.agent && !text.separate_name(), "{cli}");
+            for scale in SCALES {
+                let tag = cli.chars().count() as f32 * 0.6 * 12.5 * scale;
+                // Room for the glyph and the whole tag, not for the button.
+                let width = 2.0 * PADDING + GLYPH + tag + 2.0 * GAP;
+                let now = PaneHeadLayout::at(width, scale, &text);
+                assert!(!now.close_button, "{cli} {now:?} at {scale}");
+                // With the button too, both stay and the tag is not cut.
+                let width = width + GAP + BUTTON + 1.0;
+                let now = PaneHeadLayout::at(width, scale, &text);
+                assert!(now.close_button, "{cli} {now:?} at {scale}");
+                assert!(now.need(scale, &text) <= width, "{cli} at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_typed_agent_cli_outlives_the_folder_and_the_close_button() {
+        for cli in yien_proto::KNOWN_PROGRAMS {
+            let pane = typed(cli);
+            let text = head(&pane);
+            for scale in SCALES {
+                let mut width = 1600.0;
+                while width >= 10.0 {
+                    let now = PaneHeadLayout::at(width, scale, &text);
+                    if now.folder_last || now.close_button {
+                        // The need counts the tag at its full width.
+                        assert!(now.need(scale, &text) <= width, "{cli} at {width}, {scale}");
+                    }
+                    width -= 2.0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_only_a_running_known_name_is_a_typed_agent() {
+        assert!(!names_agent(&pane("shell", true)));
+        assert!(!names_agent(&typed("Claude")));
+        let exited = PaneView {
+            running: false,
+            ..typed("claude")
+        };
+        assert!(!names_agent(&exited));
+        // A shell name keeps counting only its first letters.
+        let shell = pane("shell", true);
+        let text = head(&shell);
+        assert!(!text.agent);
     }
 }
