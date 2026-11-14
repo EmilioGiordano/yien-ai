@@ -207,8 +207,10 @@ pub enum SessionReader {
     CodexSessions,
 }
 
-/// What a screen rule confirms. Only "needs you" exists: a screen rule never
-/// lights the red mark alone, it confirms a weaker signal (ADR-08).
+/// What a screen rule confirms. Only "needs you" exists: a screen rule
+/// confirms a weaker signal (ADR-08), and lights the red mark alone only on
+/// a startup screen, before the agent's hooks or OSC 7501 first speak
+/// ([`MachineConfig::reads_startup_screens`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confirms {
