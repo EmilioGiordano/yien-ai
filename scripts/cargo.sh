@@ -3,7 +3,10 @@
 # Usage: scripts/cargo.sh [--full] <cargo args...>
 #   --full  waits for 4000 MB free instead of 2000 MB (full gate, release builds)
 # The target dir comes from .yien-slot in the worktree root (untracked):
-#   one line, e.g. D:/More-Code-Projects/yien-compiled/slot-1
+#   one line, <build-root>/slot-<n>
+# The build root and the lock come from YIEN_BUILD_ROOT and YIEN_BUILD_LOCK,
+# read from the environment or else from .yien-local in the main checkout
+# (see .yien-local.example).
 # Exit codes: 2 setup error, 75 gate not acquired within YIEN_GATE_MAX_WAIT
 # seconds (default 3600); otherwise cargo's own exit code.
 set -euo pipefail
@@ -21,11 +24,36 @@ if [ ! -f "$slot_file" ]; then
   exit 2
 fi
 target_dir=$(tr -d '\r\n' < "$slot_file")
-case "$target_dir" in
-  [Cc]:*) echo "cargo.sh: target dir must not be on C: ($target_dir)" >&2; exit 2 ;;
-esac
 
-lock=D:/yien-build.lock
+# .yien-local lives in the main checkout, the parent of the common git dir.
+main_root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+local_file="$main_root/.yien-local"
+# Parsed, not sourced, so the file cannot run code. The last line of a key wins.
+local_value() {
+  [ -f "$local_file" ] || return 0
+  tr -d '\r' < "$local_file" | sed -n "s/^[[:space:]]*$1=//p" | tail -n 1 \
+    | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+build_root=${YIEN_BUILD_ROOT:-$(local_value YIEN_BUILD_ROOT)}
+build_root=${build_root%/}
+lock=${YIEN_BUILD_LOCK:-$(local_value YIEN_BUILD_LOCK)}
+if [ -z "$lock" ] && [ -n "$build_root" ]; then lock="$build_root/yien-build.lock"; fi
+if [ -z "$lock" ]; then
+  echo "cargo.sh: the build lock location is not set. Copy .yien-local.example to" \
+    "$local_file and set YIEN_BUILD_ROOT (or YIEN_BUILD_LOCK), or export them." >&2
+  exit 2
+fi
+if [ ! -d "$(dirname "$lock")" ]; then
+  echo "cargo.sh: the folder of the build lock $lock does not exist; create it or fix $local_file" >&2
+  exit 2
+fi
+if [ -n "$build_root" ]; then
+  lower_slashes() { printf '%s' "$1" | tr '\\' '/' | tr '[:upper:]' '[:lower:]'; }
+  case "$(lower_slashes "$target_dir")" in
+    "$(lower_slashes "$build_root")"/*) ;;
+    *) echo "cargo.sh: target dir $target_dir is outside the build root $build_root" >&2; exit 2 ;;
+  esac
+fi
 
 ps_int() {
   local v
