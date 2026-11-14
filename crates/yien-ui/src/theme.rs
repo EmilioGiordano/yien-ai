@@ -56,6 +56,9 @@ pub(crate) struct Theme {
     pub(crate) mark_dim: Rgba,
     /// A tab row's mark and words while it needs the user or failed (RN-01).
     pub(crate) mark_red: Rgba,
+    /// A tab row's state words while it needs the user or failed: the mark
+    /// red, lighter where that red is below 4.5:1 as text (RN-01, RNF-18).
+    pub(crate) word_red: Rgba,
     /// A tab row's dot once its agent finished a turn.
     pub(crate) mark_done: Rgba,
     /// A tab row's dot while its agent waits with nothing to do.
@@ -110,6 +113,7 @@ impl Theme {
             ochre: rgb(0xd6a24c),
             mark_dim: rgb(0xa19d93),
             mark_red: rgb(0xe8333c),
+            word_red: rgb(0xf0545c),
             mark_done: rgb(0x6fd39a),
             mark_idle: rgb(0xcc7a2e),
             term_bg: rgb(0x0d0c0b),
@@ -141,6 +145,7 @@ impl Theme {
             ochre: rgb(0x8a5a12),
             mark_dim: rgb(0x5f5c55),
             mark_red: rgb(0xb3121b),
+            word_red: rgb(0xb3121b),
             mark_done: rgb(0x22633e),
             mark_idle: rgb(0xbc6a1e),
             term_bg: rgb(0xfbfaf6),
@@ -191,7 +196,7 @@ impl Theme {
     /// error (RN-01), dim otherwise; the dots' colours are too faint for text.
     pub(crate) fn tab_word_color(&self, state: AgentState) -> Rgba {
         match state {
-            AgentState::NeedsYou | AgentState::Error => self.mark_red,
+            AgentState::NeedsYou | AgentState::Error => self.word_red,
             _ => self.mark_dim,
         }
     }
@@ -291,6 +296,9 @@ mod tests {
                 ("dim mark on panel", t.mark_dim, t.panel),
                 ("dim mark on raised", t.mark_dim, t.raised),
                 ("dim mark on hover", t.mark_dim, t.hover),
+                ("red words on panel", t.word_red, t.panel),
+                ("red words on raised", t.word_red, t.raised),
+                ("red words on hover", t.word_red, t.hover),
                 ("term text on term bg", t.term_text, t.term_bg),
                 ("term muted on term raised", t.term_muted, t.term_raised),
                 ("term faint on term bg", t.term_faint, t.term_bg),
@@ -349,7 +357,7 @@ mod tests {
                 let red = matches!(state, AgentState::NeedsYou | AgentState::Error);
                 let mark = t.tab_mark_color(TabMark::State(state));
                 assert_eq!(mark == t.mark_red, red, "{kind:?} {state:?} mark");
-                assert_eq!(t.tab_word_color(state) == t.mark_red, red, "{state:?}");
+                assert_eq!(t.tab_word_color(state) == t.word_red, red, "{state:?}");
                 if !red {
                     assert_ne!(mark, t.shu, "{kind:?} {state:?}");
                 }
@@ -381,6 +389,10 @@ mod tests {
             ),
             (rgb(0x5f5c55), rgb(0xb3121b), rgb(0x22633e), rgb(0xbc6a1e))
         );
+        assert_eq!(
+            (sumi.word_red, washi.word_red),
+            (rgb(0xf0545c), rgb(0xb3121b))
+        );
         for t in [sumi, washi] {
             let color = |state| t.tab_mark_color(TabMark::State(state));
             assert_eq!(color(AgentState::NeedsYou), t.mark_red, "{:?}", t.kind);
@@ -395,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn rnf_18_tab_marks_stand_out_on_every_row_background() {
+    fn rf_atn_15_tab_marks_stand_out_on_every_row_background() {
         for t in [Theme::of(ThemeKind::Sumi), Theme::of(ThemeKind::Washi)] {
             // The marks are graphics, not text: 3:1 (WCAG 1.4.11).
             let marks = [
