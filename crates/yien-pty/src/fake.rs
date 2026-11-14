@@ -1,6 +1,6 @@
 //! A scripted backend for tests that need a PTY but not a process.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -44,6 +44,7 @@ pub struct FakePty {
     refuse: Arc<AtomicBool>,
     batch: Arc<AtomicBool>,
     stall: Arc<AtomicBool>,
+    pid: Arc<AtomicU32>,
 }
 
 impl FakePty {
@@ -104,6 +105,20 @@ impl FakePty {
         self.stall.store(stall, Ordering::SeqCst);
     }
 
+    /// Makes the following children report `pid` as their process id;
+    /// `None`, the default, reports none.
+    ///
+    /// ```
+    /// use yien_pty::{FakePty, PtyBackend, SpawnSpec};
+    /// let backend = FakePty::new();
+    /// backend.give_pid(Some(4242));
+    /// let session = backend.spawn(SpawnSpec::new("sh")).unwrap();
+    /// assert_eq!(session.into_parts().0.pid(), Some(4242));
+    /// ```
+    pub fn give_pid(&self, pid: Option<u32>) {
+        self.pid.store(pid.unwrap_or(0), Ordering::SeqCst);
+    }
+
     /// The children spawned since the last call, oldest first.
     ///
     /// ```
@@ -141,6 +156,7 @@ impl PtyBackend for FakePty {
             killed: AtomicBool::new(false),
             close_asked: AtomicBool::new(false),
             stall: self.stall.load(Ordering::SeqCst),
+            pid: Some(self.pid.load(Ordering::SeqCst)).filter(|p| *p != 0),
             closed: Mutex::new(false),
             closed_changed: Condvar::new(),
         });
@@ -166,6 +182,8 @@ struct FakeState {
     close_asked: AtomicBool,
     /// Never confirm the close (see [`FakePty::stall_closes`]).
     stall: bool,
+    /// What [`FakePty::give_pid`] said when it spawned.
+    pid: Option<u32>,
     closed: Mutex<bool>,
     closed_changed: Condvar,
 }
@@ -199,7 +217,7 @@ impl ChildControl for FakeControl {
     }
 
     fn pid(&self) -> Option<u32> {
-        None
+        self.0.pid
     }
 
     fn start_close(&self) -> Result<(), PtyError> {

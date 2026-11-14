@@ -54,6 +54,7 @@ mod tests {
             signal_lost: false,
             session_id: None,
             runs_session,
+            title: None,
         }
     }
 
