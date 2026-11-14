@@ -1187,6 +1187,24 @@ fn rf_atn_09_a_startup_screen_marks_red_and_notifies() {
 }
 
 #[test]
+fn rf_age_05_an_animated_startup_screen_is_read_once_a_second() {
+    // Codex's "Finish signing in via your browser" shimmers every 100 ms.
+    let mut p = Pane::spawned(codex_with_screens());
+    let mut reads = Vec::new();
+    for t in (0..=2_500).step_by(100) {
+        p.at(ms(t)).send(Signal::Tick);
+        if p.fx.contains(&Effect::CheckScreen) {
+            reads.push(t);
+            p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+        }
+        p.send(Signal::Output);
+    }
+    assert_eq!(reads, [1_000, 2_000]);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    assert_eq!(p.m.next_wake(), Some(ms(2_500) + STARTUP_SCREEN_SETTLE));
+}
+
+#[test]
 fn rn_02_a_startup_screen_is_read_only_once_output_settles() {
     let mut p = Pane::spawned(codex_with_screens());
     p.send(Signal::Output);
@@ -1298,7 +1316,7 @@ fn rn_02_no_startup_screen_is_read_after_the_source_is_lost() {
 }
 
 #[test]
-fn rf_atn_08_quitting_a_startup_screen_is_not_an_error() {
+fn rf_age_05_quitting_a_startup_screen_is_not_an_error() {
     let mut p = Pane::on_startup_screen(codex_with_screens());
     p.send(Signal::Exited { code: Some(1) });
     assert_eq!(p.state(), AgentState::Done);
