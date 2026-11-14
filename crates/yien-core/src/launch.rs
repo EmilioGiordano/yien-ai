@@ -224,7 +224,8 @@ pub(crate) fn resolve(
     let found = profiles.iter().find(|p| p.id == id);
     let Some(found) = found else {
         // Reached when the user's `shell.toml` is broken: the marks come from
-        // YIEN's own launch arguments, and OSC 133 can never turn a pane red.
+        // YIEN's own launch arguments, and OSC 133 can never turn a pane red;
+        // a CLI typed in it still reports over OSC 7501, as with the built-in.
         if id == SHELL_PROFILE {
             return Ok(LaunchPlan {
                 profile: SHELL_PROFILE.to_owned(),
@@ -232,7 +233,7 @@ pub(crate) fn resolve(
                 args: shell.args.clone(),
                 resume_args: Vec::new(),
                 env: shell.env.clone(),
-                machine: MachineConfig::new(&[Source::Osc133], None),
+                machine: MachineConfig::new(&[Source::Osc133, Source::Osc7501], None),
                 screen: Vec::new(),
                 profile_name: "Shell".to_owned(),
                 default_name: shell.display_name(),
@@ -570,6 +571,7 @@ mod tests {
         assert_eq!(plan.program, "pwsh.exe");
         assert_eq!(plan.profile, SHELL_PROFILE);
         assert!(plan.machine.declares(Source::Osc133));
+        assert!(plan.machine.declares(Source::Osc7501));
         let builtin = resolve(None, &builtin_profiles().unwrap(), &shell()).unwrap();
         assert_eq!(plan.machine, builtin.machine);
         assert!(!plan.hooks);

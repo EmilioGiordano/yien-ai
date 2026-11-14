@@ -38,6 +38,18 @@ fn known_sequence() -> impl Strategy<Value = Vec<u8>> {
         Just("133;B".to_owned()),
         Just("133;C".to_owned()),
         (any::<i32>()).prop_map(|code| format!("133;D;{code}")),
+        (
+            prop_oneof![
+                Just("idle"),
+                Just("working"),
+                Just("blocked"),
+                Just("done"),
+                Just("error"),
+                Just("clear")
+            ],
+            "(:kind=[a-z]{0,10})?(:id=[a-z0-9_]{0,8})?(:msg=[A-Za-z0-9+/]{0,12}={0,2})?",
+        )
+            .prop_map(|(state, rest)| format!("7501;state={state}{rest}")),
     ];
     (body, terminator()).prop_map(|(body, end)| format!("\x1b]{body}{end}").into_bytes())
 }

@@ -69,6 +69,7 @@ fn detail(pane: &crate::model::PaneView) -> String {
             (Some(question), _) => question.as_str().to_owned(),
             (None, Some(NeedsReason::Permission)) => "Asks for permission".to_owned(),
             (None, Some(NeedsReason::Question)) => "Has a question".to_owned(),
+            (None, Some(NeedsReason::Auth)) => "Asks you to sign in".to_owned(),
             (None, Some(NeedsReason::Blocked)) => "Is blocked".to_owned(),
             (None, Some(NeedsReason::ScreenRule) | None) => "Is waiting for you".to_owned(),
         },
