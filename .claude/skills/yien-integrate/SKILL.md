@@ -8,7 +8,7 @@ description: Test a batch of reviewed YIEN branches together on a staging branch
 Invoke as `/yien-integrate [branch...]`; with no argument, every branch with a PASS and a draft PR. `AGENTS.md` "Integration and merge" and "Validating in the UI" are the rules; this is the checklist.
 
 1. `git fetch origin`; in the main checkout, `git pull --ff-only` on `main`.
-2. In the integration worktree `C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/staging` (create it once with `git worktree add <path> main --detach` and give it a `.yien-slot`), run `git switch -c staging/<date> main`.
+2. In the integration worktree `<worktrees>/staging` (`YIEN_WORKTREES_DIR` in `.yien-local`; create it once with `git worktree add <path> main --detach` and give it a `.yien-slot`), run `git switch -c staging/<date> main`.
 3. Merge each branch with `--no-ff`, then `scripts/cargo.sh check --workspace --all-targets`. On a break, drop that merge (`git merge --abort` or `git reset --hard HEAD~1`), send the failure back to its implementer, and continue with the rest.
 4. Run the full gate once, in the background, with `scripts/cargo.sh --full`. Map a failing test to its branch by crate and module.
 5. Run the UI validation of each feature against the staging release build.
