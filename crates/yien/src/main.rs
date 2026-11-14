@@ -100,6 +100,7 @@ fn main() -> ExitCode {
         ui_wait: UI_WAIT,
         git: Some(GitConfig::default()),
         cli_dirs: CliDirs::from_env(),
+        programs: Some(yien_platform::programs::programs_under),
         ..CoreConfig::default()
     };
     let config = match settings::start_palette(&settings.initial) {

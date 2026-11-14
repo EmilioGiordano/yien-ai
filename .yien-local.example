@@ -1,0 +1,20 @@
+# Machine-specific paths for YIEN's scripts and xtask. Copy this file to
+# .yien-local in the root of the main checkout (never in a worktree; it is
+# gitignored) and set the values for this machine. One KEY=value per line,
+# no spaces around '=', forward slashes. An environment variable with the
+# same name overrides the line.
+
+# Folder holding docs/ and design/ (gitignored specs), usually the main
+# checkout itself. Used by `cargo xtask trace` to find docs/02-ers.md.
+YIEN_SPECS_DIR=X:/path/to/yien-ai
+
+# Folder where branch worktrees are created: <worktrees>/<topic>.
+YIEN_WORKTREES_DIR=X:/path/to/yien-ai-wt
+
+# Build root: each worktree's .yien-slot names <build-root>/slot-<n>, and
+# scripts/cargo.sh refuses a slot outside this folder.
+YIEN_BUILD_ROOT=X:/path/to/yien-compiled
+
+# Machine-wide build lock taken by scripts/cargo.sh. Optional; defaults to
+# <YIEN_BUILD_ROOT>/yien-build.lock.
+# YIEN_BUILD_LOCK=X:/path/to/yien-compiled/yien-build.lock

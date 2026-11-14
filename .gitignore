@@ -15,3 +15,6 @@ REPORT-*.md
 
 # Per-worktree build slot
 /.yien-slot
+
+# Machine-specific paths (see .yien-local.example)
+/.yien-local

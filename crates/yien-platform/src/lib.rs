@@ -9,8 +9,8 @@
 //! keeps one YIEN per data dir ([`single_instance`]), the settings file
 //! on disk ([`config_file`]), the read-only listing of each agent CLI's
 //! past sessions ([`agent_sessions`]), the user's agent profile files
-//! ([`user_profiles`]), and a tab's folder for the file
-//! tree ([`file_tree`]).
+//! ([`user_profiles`]), a tab's folder for the file tree ([`file_tree`]),
+//! and the agent CLI running under a shell ([`programs`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -31,6 +31,7 @@ pub mod hook_pipe;
 pub mod http;
 mod logging;
 pub mod paths;
+pub mod programs;
 pub mod single_instance;
 pub mod state_store;
 pub mod user_profiles;

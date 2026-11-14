@@ -14,10 +14,10 @@ Read `AGENTS.md` first; it is the rulebook. The briefs in `.claude/agents/` are 
 From the main checkout, run `git fetch origin`, then cut from `origin/main` (or `main` while the remote has no `main`):
 
 ```
-git worktree add -b <type>/<topic> C:/Users/giord/Desktop/Code-Projects/Self-Tools/yien-ai-wt/<topic> origin/main
+git worktree add -b <type>/<topic> <worktrees>/<topic> origin/main
 ```
 
-Write `.yien-slot` in the worktree root with a slot no running branch uses: `D:/More-Code-Projects/yien-compiled/slot-<n>`.
+Write `.yien-slot` in the worktree root with a slot no running branch uses: `<build-root>/slot-<n>` (`<worktrees>` and `<build-root>` are `YIEN_WORKTREES_DIR` and `YIEN_BUILD_ROOT` from `.yien-local`, see `AGENTS.md` "Local setup").
 
 If another running branch touches the same files, do not start this one in parallel; say so.
 

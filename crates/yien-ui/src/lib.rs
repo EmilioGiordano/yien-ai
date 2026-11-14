@@ -18,6 +18,7 @@ mod files;
 mod fonts;
 mod git;
 mod grid;
+mod key_quirks;
 mod keys;
 mod layout;
 mod matcher;
