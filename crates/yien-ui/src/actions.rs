@@ -138,6 +138,13 @@ actions!(
         /// Lists tabs in sections by agent state, or under their projects
         /// again, for this session (RF-ATN-07).
         ToggleTabGrouping,
+        /// Makes every terminal's text one pixel bigger (RF-CFG-02).
+        ZoomIn,
+        /// Makes every terminal's text one pixel smaller (RF-CFG-02).
+        ZoomOut,
+        /// Puts every terminal's text back to `terminal.font.size`
+        /// (RF-CFG-02).
+        ResetZoom,
         /// Quits YIEN, asking first while agents are working (RF-SES-13).
         Quit,
         /// Lists the selected project's past agent sessions to resume one
@@ -150,6 +157,10 @@ actions!(
         ToggleTabMuted,
         /// Opens a tab with the shell in the selected tab's project.
         NewTab,
+        /// Opens a tab with the shell in the folder `ui.tabs.default_dir`
+        /// names, the home folder by default, adding it as a project when it
+        /// is not one (RF-ESP-01, RF-ESP-03).
+        NewDefaultTab,
         /// Opens a tab with Claude Code in the selected tab's project
         /// (RF-PAN-18).
         NewClaudeTab,
@@ -316,6 +327,7 @@ pub(crate) const SPLIT_CLAUDE_KEYS: &str = "Ctrl+Shift+S";
 pub(crate) const PALETTE_KEYS: &str = "Ctrl+Shift+P";
 pub(crate) const ADD_PROJECT_KEYS: &str = "Ctrl+Shift+K";
 pub(crate) const NEW_TAB_KEYS: &str = "Ctrl+Shift+T";
+pub(crate) const DEFAULT_TAB_KEYS: &str = "Ctrl+Shift+H";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
@@ -622,7 +634,17 @@ mod tests {
                 "{n}"
             );
         }
-        assert_eq!(matches("ctrl-0", &TERMINAL_STACK), 0);
+        // There is no tab 0: Ctrl+0 resets the terminals' zoom (RF-CFG-02).
+        assert_eq!(matches("ctrl-0", &TERMINAL_STACK), 1);
+        assert!(first_is("ctrl-0", &TERMINAL_STACK, &ResetZoom));
+    }
+
+    #[test]
+    fn rf_cfg_02_the_zoom_keys_work_from_a_terminal() {
+        assert!(first_is("ctrl-=", &TERMINAL_STACK, &ZoomIn));
+        assert!(first_is("ctrl-+", &TERMINAL_STACK, &ZoomIn));
+        assert!(first_is("ctrl--", &TERMINAL_STACK, &ZoomOut));
+        assert_eq!(matches("ctrl-_", &TERMINAL_STACK), 0, "undo in the CLIs");
     }
 
     #[test]
@@ -753,6 +775,12 @@ mod tests {
     #[test]
     fn rf_esp_01_add_project_has_a_key_from_a_terminal() {
         assert!(first_is("ctrl-shift-k", &TERMINAL_STACK, &AddProject));
+    }
+
+    #[test]
+    fn rf_esp_03_a_tab_in_the_default_folder_has_a_key_from_a_terminal() {
+        assert!(first_is("ctrl-shift-h", &TERMINAL_STACK, &NewDefaultTab));
+        assert!(first_is("ctrl-shift-t", &TERMINAL_STACK, &NewTab));
     }
 
     #[test]

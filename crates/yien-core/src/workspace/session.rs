@@ -94,6 +94,7 @@ impl Workspace {
         };
         snapshot.notifications_muted = self.notifications_muted;
         snapshot.side_bars = side_bars_record(&self.side_bars);
+        snapshot.terminal_zoom = self.terminal_zoom;
         snapshot
     }
 
@@ -174,6 +175,7 @@ impl Workspace {
         };
         self.notifications_muted = snapshot.notifications_muted;
         self.side_bars = side_bars(&snapshot.side_bars);
+        self.terminal_zoom = snapshot.terminal_zoom;
         self.active_tab = snapshot
             .selected
             .tab
@@ -1194,6 +1196,23 @@ mod tests {
         let saved = yien_session::deserialize(&bytes).unwrap();
         let (back, _, _) = restore(&saved, &all_exist(&saved));
         assert_eq!(back.snapshot().side_bars, bars);
+        assert_eq!(back.to_session(), saved);
+    }
+
+    #[test]
+    fn rf_cfg_02_the_terminal_zoom_survives_a_save_and_a_restore() {
+        let (mut ws, _) = workspace("shell");
+        assert_eq!(ws.snapshot().terminal_zoom, 0);
+        let fx = ws
+            .apply(Command::SetTerminalZoom { zoom: 5 }, &resolve)
+            .unwrap();
+        assert!(fx.is_empty(), "the UI already drew it");
+        assert_eq!(ws.snapshot().terminal_zoom, 5);
+        let bytes = yien_session::serialize(&ws.to_session()).unwrap();
+        let saved = yien_session::deserialize(&bytes).unwrap();
+        assert_eq!(saved.terminal_zoom, 5);
+        let (back, _, _) = restore(&saved, &all_exist(&saved));
+        assert_eq!(back.snapshot().terminal_zoom, 5);
         assert_eq!(back.to_session(), saved);
     }
 

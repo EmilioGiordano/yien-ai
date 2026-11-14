@@ -37,6 +37,7 @@ mod title_bar;
 mod tray;
 mod update;
 mod worktree;
+mod zoom;
 
 use std::rc::Rc;
 
