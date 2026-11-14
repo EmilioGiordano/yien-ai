@@ -141,7 +141,7 @@ Every feature is checked in the running app, driven by tools, not only by unit t
 
 - **Test control (preferred):** `yien --test-control <pipe>` exposes a local pipe that dumps UI state (projects, tabs, panes, focus, agent states, visible text) and injects actions (commands, keys, text, resizes). It is test-only, off by default and protected like the hook pipe (RNF-11). Every feature adds the state fields and actions its validation needs, so the check is a script, not a person.
 - **Throwaway profile:** every run sets YIEN's data and config dirs to a new folder under the slot, so a test never touches Emilio's real sessions or settings. Only generated files, never his documents.
-- **Screen driving (fallback):** PowerShell with user32 (`SetForegroundWindow`, `SendInput`, `PrintWindow`) for what the pipe cannot reach: real focus, IME, a real keyboard. It takes focus, so it runs only when Emilio has said he is away.
+- **Screen driving (fallback):** PowerShell with user32 (`SetForegroundWindow`, `SendInput`, `PrintWindow`) for what the pipe cannot reach: real focus, IME, a real keyboard. It takes focus and sends real input, so ask Emilio right before each run and run it only if he says yes.
 - Watch the process while it runs: responding, CPU and working set every 5 seconds. A freeze is a failure.
 - Copy the release exe to the slot's `run/` folder before starting it. If the file is locked, report it; never kill a process you did not start.
 - What still needs a human (a real screen reader, feel, look) goes in the PR as a short checklist.
