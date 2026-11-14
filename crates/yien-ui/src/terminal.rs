@@ -9,12 +9,12 @@ use std::time::Duration;
 use gpui_kit::base::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_input::Mods;
 use yien_input::mouse::{self, Action, Button};
+use yien_input::{KeyQuirks, Mods};
 use yien_proto::frame::{Frame, Modes, Rgb, ViewportPoint};
 use yien_proto::{ClientMsg, Command, InputBytes, PaneId};
 
-use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT};
+use crate::actions::{CopySelection, PasteClipboard, TERMINAL_CONTEXT, ZoomIn, ZoomOut};
 use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
 use crate::grid::{
     self, CursorPaint, PastePlan, Pointer, PromptKey, RightClick, Underline, WheelAction,
@@ -71,6 +71,8 @@ pub(crate) struct TerminalPane {
     last_motion: Option<ViewportPoint>,
     /// A risky paste waiting for a yes (RF-PAN-09).
     pending_paste: Option<(Vec<u8>, String)>,
+    /// The key quirks of the program the pane head names.
+    quirks: KeyQuirks,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -107,6 +109,7 @@ impl TerminalPane {
             reported: None,
             last_motion: None,
             pending_paste: None,
+            quirks: KeyQuirks::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -125,6 +128,14 @@ impl TerminalPane {
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
         self.frame = Some(frame);
         cx.notify();
+    }
+
+    pub(crate) fn quirks(&self) -> KeyQuirks {
+        self.quirks
+    }
+
+    pub(crate) fn set_quirks(&mut self, quirks: KeyQuirks) {
+        self.quirks = quirks;
     }
 
     pub(crate) fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
@@ -274,6 +285,7 @@ impl TerminalPane {
             mods: mods_of(&keystroke.modifiers),
             platform: keystroke.modifiers.platform,
             prefer_text: event.prefer_character_input,
+            quirks: self.quirks,
         };
         if let Some(bytes) = grid::key_bytes(&press, &self.modes()) {
             self.write_input(bytes, cx);
@@ -466,7 +478,7 @@ impl TerminalPane {
         }
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, m)) = self.grid else {
             return;
         };
@@ -491,6 +503,14 @@ impl TerminalPane {
                     },
                     cx,
                 );
+            }
+            Some(WheelAction::Zoom(step)) => {
+                self.wheel_rest = 0.0;
+                if step > 0 {
+                    window.dispatch_action(Box::new(ZoomIn), cx);
+                } else {
+                    window.dispatch_action(Box::new(ZoomOut), cx);
+                }
             }
             None => {}
         }

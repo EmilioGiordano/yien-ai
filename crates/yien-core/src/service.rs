@@ -810,6 +810,7 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::SetTabMuted { .. }
         | Command::SetNotificationsMuted { .. }
         | Command::SetSideBars { .. }
+        | Command::SetTerminalZoom { .. }
         | Command::NewTab { .. }
         | Command::NewWorktreeTab { .. }
         | Command::CheckWorktree { .. }

@@ -263,6 +263,8 @@ pub(crate) struct Workspace {
     notifications_muted: bool,
     /// The side bars as the UI last drew them (RF-NAV-10).
     side_bars: SideBars,
+    /// The terminals' zoom as the UI last drew it (RF-CFG-02).
+    terminal_zoom: i32,
 }
 
 impl Workspace {
@@ -295,6 +297,7 @@ impl Workspace {
             profiles: self.profiles.clone(),
             notifications_muted: self.notifications_muted,
             side_bars: self.side_bars,
+            terminal_zoom: self.terminal_zoom,
         }
     }
 
@@ -478,6 +481,7 @@ impl Workspace {
                 }
             }
             Command::SetSideBars { bars } => self.side_bars = finite_widths(bars),
+            Command::SetTerminalZoom { zoom } => self.terminal_zoom = zoom,
             Command::NewTab {
                 project,
                 name,

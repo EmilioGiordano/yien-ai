@@ -570,6 +570,7 @@ mod tests {
             profiles: vec![],
             notifications_muted: false,
             side_bars: Default::default(),
+            terminal_zoom: 0,
         })
     }
 

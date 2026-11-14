@@ -20,8 +20,9 @@ pub(crate) const PLUS: &str = "yien/plus.svg";
 pub(crate) const CLOSE: &str = "yien/close.svg";
 pub(crate) const FOLDER: &str = "yien/folder.svg";
 pub(crate) const DOTS: &str = "yien/dots.svg";
+pub(crate) const TERMINAL: &str = "yien/terminal.svg";
 
-const OWN: [(&str, &[u8]); 17] = [
+const OWN: [(&str, &[u8]); 18] = [
     (MARK, include_bytes!("../assets/mark.svg")),
     (CHEVRON, include_bytes!("../assets/chevron.svg")),
     (PANEL_LEFT, include_bytes!("../assets/panel-left.svg")),
@@ -34,6 +35,7 @@ const OWN: [(&str, &[u8]); 17] = [
     (CLOSE, include_bytes!("../assets/close.svg")),
     (FOLDER, include_bytes!("../assets/folder.svg")),
     (DOTS, include_bytes!("../assets/dots.svg")),
+    (TERMINAL, include_bytes!("../assets/terminal.svg")),
     (
         "yien/state-needs.svg",
         include_bytes!("../assets/state-needs.svg"),
