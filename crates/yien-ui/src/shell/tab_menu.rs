@@ -91,6 +91,13 @@ pub(super) fn tab_menu(
     ]))
 }
 
+/// Whether closing the menu gives the keyboard back to the tab bar: only
+/// when the bar held it by keyboard (F6), not after a click left the focus
+/// there, or typing would stop reaching the terminal.
+pub(super) fn menu_returns_to_bar(keyboard_in_bar: bool, region: Region) -> bool {
+    keyboard_in_bar && region == Region::TabBar
+}
+
 /// The tab menu while open, and where the tab rows were painted.
 #[derive(Default)]
 pub(super) struct TabMenuState {
@@ -172,7 +179,7 @@ impl Shell {
         let Some(name) = self.workspace.tab(tab).map(|t| t.name.clone()) else {
             return;
         };
-        let back_to_bar = self.region(window, cx) == Region::TabBar;
+        let back_to_bar = menu_returns_to_bar(self.keyboard_in_bar, self.region(window, cx));
         // Dropped first, so their blur cannot close the menu opened now.
         self.tab_menu.open = None;
         self.menu = None;
@@ -299,7 +306,8 @@ impl Shell {
 mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
     use super::{
-        Menu, MenuEntry, MenuEvent, MenuOutcome, TabAction, TabEffect, tab_effect, tab_menu,
+        Menu, MenuEntry, MenuEvent, MenuOutcome, TabAction, TabEffect, menu_returns_to_bar,
+        tab_effect, tab_menu,
     };
     use crate::catalog::{default_keys, spec};
     use crate::model::WorkspaceView;
@@ -423,6 +431,16 @@ mod tests {
         assert_eq!(tab_effect(&view, clicked, TabAction::MoveDown), None);
         assert_eq!(tab_effect(&view, TabId::new(9), TabAction::Close), None);
         assert!(tab_menu(&view, TabId::new(9), &no_keys).is_none());
+    }
+
+    #[test]
+    fn rnf_16_only_a_menu_opened_from_the_keyboard_in_the_tab_bar_returns_there() {
+        use crate::region::Region;
+        assert!(menu_returns_to_bar(true, Region::TabBar));
+        // A click left the focus in the bar: the pane gets the keyboard back.
+        assert!(!menu_returns_to_bar(false, Region::TabBar));
+        assert!(!menu_returns_to_bar(false, Region::Panes));
+        assert!(!menu_returns_to_bar(true, Region::Panes));
     }
 
     #[test]
