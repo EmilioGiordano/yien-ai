@@ -72,9 +72,8 @@ pub(crate) fn state_icon(state: AgentState) -> &'static str {
 
 pub(crate) const NEEDS_YOU_MARK: &str = "■";
 pub(crate) const ERROR_MARK: &str = "!";
-pub(crate) const DONE_MARK: &str = "✓";
-pub(crate) const IDLE_MARK: &str = "○";
-pub(crate) const SHELL_MARK: &str = ">";
+pub(crate) const DONE_MARK: &str = "●";
+pub(crate) const IDLE_MARK: &str = "●";
 
 /// The working spinner's frames, one per [`SPINNER_FRAME`].
 pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -85,15 +84,26 @@ pub(crate) fn next_frame(frame: usize) -> usize {
     (frame + 1) % SPINNER.len()
 }
 
-/// A tab row's mark in the mono font; `frame` is the spinner's while it works.
-pub(crate) fn tab_mark_text(mark: TabMark, frame: usize) -> &'static str {
+/// A glyph drawn in a tab row's mark slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MarkGlyph {
+    pub(crate) text: &'static str,
+    /// The text size at the prototype's 13 px window text.
+    pub(crate) size: f32,
+    pub(crate) bold: bool,
+}
+
+/// A tab row's mark in the mono font, `None` for a tab of shells only, whose
+/// slot stays empty; `frame` is the spinner's while it works.
+pub(crate) fn tab_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
+    let glyph = |text, size, bold| Some(MarkGlyph { text, size, bold });
     match mark {
-        TabMark::State(AgentState::NeedsYou) => NEEDS_YOU_MARK,
-        TabMark::State(AgentState::Error) => ERROR_MARK,
-        TabMark::State(AgentState::Done) => DONE_MARK,
-        TabMark::State(AgentState::Working) => SPINNER[frame % SPINNER.len()],
-        TabMark::State(AgentState::Idle) => IDLE_MARK,
-        TabMark::Shell => SHELL_MARK,
+        TabMark::State(AgentState::NeedsYou) => glyph(NEEDS_YOU_MARK, 13.5, false),
+        TabMark::State(AgentState::Error) => glyph(ERROR_MARK, 13.5, true),
+        TabMark::State(AgentState::Done) => glyph(DONE_MARK, 11.0, false),
+        TabMark::State(AgentState::Working) => glyph(SPINNER[frame % SPINNER.len()], 12.0, false),
+        TabMark::State(AgentState::Idle) => glyph(IDLE_MARK, 11.0, false),
+        TabMark::Shell => None,
     }
 }
 
@@ -139,25 +149,59 @@ mod tests {
         assert_eq!(paths.len(), states.len());
     }
 
+    fn tab_mark_text(mark: TabMark, frame: usize) -> &'static str {
+        tab_mark_glyph(mark, frame).unwrap().text
+    }
+
     #[test]
-    fn rnf_17_every_tab_mark_has_its_own_shape() {
-        let marks = [
-            TabMark::State(AgentState::NeedsYou),
-            TabMark::State(AgentState::Error),
-            TabMark::State(AgentState::Done),
-            TabMark::State(AgentState::Working),
-            TabMark::State(AgentState::Idle),
-            TabMark::Shell,
+    fn tab_marks_are_the_canvas_glyphs_at_their_sizes() {
+        let glyph = |state| tab_mark_glyph(TabMark::State(state), 0).unwrap();
+        let want = [
+            (AgentState::NeedsYou, "■", 13.5, false),
+            (AgentState::Error, "!", 13.5, true),
+            (AgentState::Done, "●", 11.0, false),
+            (AgentState::Working, "⠋", 12.0, false),
+            (AgentState::Idle, "●", 11.0, false),
         ];
-        let texts: std::collections::HashSet<_> =
-            marks.iter().map(|m| tab_mark_text(*m, 0)).collect();
-        assert_eq!(texts.len(), marks.len());
-        assert_eq!(tab_mark_text(marks[0], 0), "■");
-        assert_eq!(tab_mark_text(marks[2], 0), "✓");
-        assert_eq!(tab_mark_text(marks[5], 0), ">");
-        for mark in marks.iter().filter(|m| **m != marks[3]) {
-            let text = tab_mark_text(*mark, 0);
-            assert!(!SPINNER.contains(&text), "{mark:?} looks like working");
+        for (state, text, size, bold) in want {
+            let got = glyph(state);
+            assert_eq!(
+                (got.text, got.size, got.bold),
+                (text, size, bold),
+                "{state:?}"
+            );
+            assert!(got.size <= 14.0, "{state:?} fits its 14 px slot");
+        }
+    }
+
+    #[test]
+    fn a_tab_of_shells_only_has_no_mark() {
+        assert_eq!(tab_mark_glyph(TabMark::Shell, 0), None);
+        assert_eq!(tab_mark_glyph(TabMark::Shell, 7), None);
+    }
+
+    #[test]
+    fn rnf_17_every_tab_mark_differs_by_shape_or_colour_in_both_themes() {
+        use crate::theme::{Theme, ThemeKind};
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let look = |s| {
+                let mark = TabMark::State(s);
+                (tab_mark_text(mark, 0), t.tab_mark_color(mark))
+            };
+            for (i, a) in AgentState::BY_URGENCY.into_iter().enumerate() {
+                for b in AgentState::BY_URGENCY.into_iter().skip(i + 1) {
+                    assert_ne!(look(a), look(b), "{kind:?}: {a:?} and {b:?}");
+                }
+            }
+        }
+        let working = TabMark::State(AgentState::Working);
+        for state in AgentState::BY_URGENCY {
+            let mark = TabMark::State(state);
+            if mark != working {
+                let text = tab_mark_text(mark, 0);
+                assert!(!SPINNER.contains(&text), "{state:?} looks like working");
+            }
         }
     }
 
