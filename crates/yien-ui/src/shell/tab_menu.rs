@@ -136,12 +136,13 @@ impl Shell {
         row.on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                // Or the tab bar, which tracks focus, takes the keyboard back
+                // from the menu, or from the rename field (committing it), as
+                // this mouse-down bubbles up.
+                window.prevent_default();
                 if this.renaming.as_ref().is_some_and(|r| r.tab == tab) {
                     return;
                 }
-                // Or the tab bar, which tracks focus, takes the keyboard back
-                // from the menu as this mouse-down bubbles up.
-                window.prevent_default();
                 this.open_tab_menu(tab, event.position, window, cx);
             }),
         )
