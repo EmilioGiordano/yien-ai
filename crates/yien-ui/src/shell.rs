@@ -57,6 +57,7 @@ mod default_tab;
 mod dividers;
 mod files;
 mod menu;
+mod new_tab_menu;
 mod pane_menu;
 mod settings;
 mod spinner;
@@ -71,6 +72,7 @@ mod zoom;
 
 use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
+use new_tab_menu::NewTabMenuState;
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
 use spinner::Spinner;
 use status::{Line, Notice};
@@ -171,6 +173,7 @@ pub(crate) struct Shell {
     menu_closed_at: Option<(PaneMenuKey, Instant)>,
     /// The tab menu, while open (RF-ESP-16).
     tab_menu: TabMenuState,
+    new_tab_menu: NewTabMenuState,
     /// Where each pane head was painted, for the menu opened by keyboard.
     pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
     /// The user's home folder, which pane heads show as `~`.
@@ -396,6 +399,7 @@ impl Shell {
             menu: None,
             menu_closed_at: None,
             tab_menu: TabMenuState::default(),
+            new_tab_menu: NewTabMenuState::default(),
             pane_heads: Rc::default(),
             home: home_folder(),
             palette: None,
@@ -698,6 +702,7 @@ impl Shell {
         self.palette.is_some()
             || self.menu.is_some()
             || self.tab_menu.is_open()
+            || self.new_tab_menu.is_open()
             || self.tray.is_some()
             || self.confirm.is_some()
             || self.renaming.is_some()
@@ -2468,7 +2473,14 @@ impl Shell {
                         .child(format!("{waiting} need you")),
                 )
             })
-            .child(self.new_tab_button(project, cx).ml_auto())
+            .child(
+                h_flex()
+                    .ml_auto()
+                    .flex_none()
+                    .items_center()
+                    .child(self.new_tab_button(project, cx))
+                    .child(self.new_tab_menu_button(id, &project.name, cx)),
+            )
             .child(
                 div()
                     .id(("close-project", id.get()))
@@ -3172,12 +3184,19 @@ impl Shell {
     ) -> Stateful<Div> {
         let t = self.theme;
         let hover = t.term_raised;
-        let options: Vec<AnyElement> = self
-            .workspace
-            .profiles()
+        let profiles = self.workspace.profiles();
+        let options: Vec<AnyElement> = profiles
             .iter()
             .enumerate()
-            .map(|(at, profile)| {
+            .flat_map(|(at, profile)| {
+                let separator = new_tab_menu::agents_start_at(profiles, at).then(|| {
+                    div()
+                        .mx(px(6.0))
+                        .my(px(4.0))
+                        .h(px(1.0))
+                        .bg(t.term_line)
+                        .into_any_element()
+                });
                 let hint = match (profile.id.as_str(), orientation) {
                     (CLAUDE_PROFILE, Orientation::Horizontal) => SPLIT_CLAUDE_KEYS,
                     (SHELL_PROFILE, Orientation::Horizontal) => SPLIT_RIGHT_KEYS,
@@ -3185,7 +3204,7 @@ impl Shell {
                     _ => "",
                 };
                 let id = profile.id.clone();
-                h_flex()
+                let item = h_flex()
                     .id(("split-profile", at))
                     .role(Role::MenuItem)
                     .aria_label(format!("Start {}", profile.name))
@@ -3206,7 +3225,8 @@ impl Shell {
                             .child(profile.name.clone()),
                     )
                     .child(div().flex_none().text_color(t.term_faint).child(hint))
-                    .into_any_element()
+                    .into_any_element();
+                separator.into_iter().chain([item])
             })
             .collect();
         v_flex()
@@ -3623,6 +3643,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_default_tab))
             .on_action(cx.listener(Self::new_claude_tab))
+            .on_action(cx.listener(Self::new_tab_menu_command))
             .on_action(cx.listener(Self::new_worktree_tab))
             .on_action(cx.listener(Self::worktree_prompt_confirm))
             .on_action(cx.listener(Self::worktree_prompt_cancel))
@@ -3719,6 +3740,7 @@ impl Render for Shell {
             .children(self.render_worktree_close(cx))
             .children(self.render_menu(cx))
             .children(self.render_tab_menu(cx))
+            .children(self.render_new_tab_menu(cx))
             .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
     }

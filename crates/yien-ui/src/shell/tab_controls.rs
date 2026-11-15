@@ -90,6 +90,16 @@ impl Shell {
         let id = project.id;
         small_button(("new-tab-in", id.get()).into(), assets::PLUS, &self.theme)
             .aria_label(new_tab_label(&project.name))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // Or the tab bar, which tracks focus, takes the keyboard
+                    // back from the menu as this mouse-down bubbles up.
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_new_tab_menu(id, event.position, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 if this.workspace.is_folded(id) {
