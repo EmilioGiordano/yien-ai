@@ -23,7 +23,7 @@ pub(crate) const FOLDER: &str = "yien/folder.svg";
 pub(crate) const DOTS: &str = "yien/dots.svg";
 pub(crate) const TERMINAL: &str = "yien/terminal.svg";
 
-const OWN: [(&str, &[u8]); 18] = [
+const OWN: [(&str, &[u8]); 13] = [
     (MARK, include_bytes!("../assets/mark.svg")),
     (CHEVRON, include_bytes!("../assets/chevron.svg")),
     (PANEL_LEFT, include_bytes!("../assets/panel-left.svg")),
@@ -37,26 +37,6 @@ const OWN: [(&str, &[u8]); 18] = [
     (FOLDER, include_bytes!("../assets/folder.svg")),
     (DOTS, include_bytes!("../assets/dots.svg")),
     (TERMINAL, include_bytes!("../assets/terminal.svg")),
-    (
-        "yien/state-needs.svg",
-        include_bytes!("../assets/state-needs.svg"),
-    ),
-    (
-        "yien/state-error.svg",
-        include_bytes!("../assets/state-error.svg"),
-    ),
-    (
-        "yien/state-done.svg",
-        include_bytes!("../assets/state-done.svg"),
-    ),
-    (
-        "yien/state-working.svg",
-        include_bytes!("../assets/state-working.svg"),
-    ),
-    (
-        "yien/state-idle.svg",
-        include_bytes!("../assets/state-idle.svg"),
-    ),
 ];
 
 pub(crate) const NEEDS_YOU_MARK: &str = "■";
