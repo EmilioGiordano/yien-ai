@@ -2535,4 +2535,124 @@ mod tests {
         );
         drop(pane.cmds);
     }
+
+    const OPENCODE_PERMISSION: &[u8] =
+        include_bytes!("../tests/fixtures/osc7501/opencode-2.2.7-permission.bin");
+
+    /// The session OpenCode named in the capture.
+    const CAPTURED: &str = "ses_e29191ec0ffe3tC2NzOxg6Pfch";
+
+    const TURN_FAILED: AgentState = AgentState::Error(yien_proto::ErrorReason::TurnFailed);
+
+    /// The capture up to OpenCode's exit, and from its `at`-th record.
+    fn capture_until_exit() -> &'static [u8] {
+        let exit = b"\x1b]7501;state=clear\x1b\\";
+        let at = OPENCODE_PERMISSION
+            .windows(exit.len())
+            .rposition(|w| w == exit)
+            .unwrap();
+        &OPENCODE_PERMISSION[..at]
+    }
+
+    /// Waits until `n` panes hold the OpenCode watcher.
+    fn assert_holders(pane: &Solo, n: usize) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while pane.opencode.panes() != n {
+            assert!(
+                Instant::now() < end,
+                "{} panes, not {n}",
+                pane.opencode.panes()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn rf_age_05_an_opencode_turn_its_service_says_failed_shows_error() {
+        let pane = Solo::opencode();
+        let child = pane.next_child();
+        assert_holders(&pane, 1);
+        child.output(capture_until_exit());
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Done), "{events:?}");
+        // Another client's session, then this pane's.
+        pane.opencode.report_failed("ses_another_client");
+        assert_eq!(last_state(&pane.collect(SETTLE)), None);
+        pane.opencode.report_failed(CAPTURED);
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(TURN_FAILED), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        // Its exit lets the watcher go.
+        child.output(b"\x1b]7501;state=clear\x1b\\");
+        child.exit(0);
+        assert_holders(&pane, 0);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_a_failure_of_a_session_the_pane_never_named_changes_nothing() {
+        let pane = Solo::opencode();
+        let child = pane.next_child();
+        // Working, but OpenCode named no session yet.
+        child.output(b"\x1b]7501;state=working:app=opencode\x1b\\");
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(AgentState::Working));
+        pane.opencode.report_failed(CAPTURED);
+        assert_eq!(last_state(&pane.collect(SETTLE)), None);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_opencode_typed_in_a_shell_holds_the_watcher_while_it_runs() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        assert_holders(&pane, 0);
+        pane.cmds.try_send(found(0, Some(OPENCODE))).unwrap();
+        assert_holders(&pane, 1);
+        child.output(b"\x1b]133;C\x07");
+        child.output(capture_until_exit());
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Done), "{events:?}");
+        pane.opencode.report_failed(CAPTURED);
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(TURN_FAILED));
+        // OpenCode left without its `clear`: the pane lets the watcher go.
+        pane.cmds.try_send(found(0, None)).unwrap();
+        assert_holders(&pane, 0);
+        // Reporting again holds it again.
+        child.output(b"\x1b]7501;state=idle:app=opencode\x1b\\");
+        assert_holders(&pane, 1);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_a_shell_forgets_the_sessions_of_an_opencode_that_left() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        pane.cmds.try_send(found(0, Some(OPENCODE))).unwrap();
+        child.output(b"\x1b]133;C\x07");
+        child.output(capture_until_exit());
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, None)).unwrap();
+        // The shell's prompt is back; the same session fails elsewhere.
+        child.output(b"\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+        pane.collect(SETTLE);
+        pane.opencode.report_failed(CAPTURED);
+        let events = pane.collect(SETTLE);
+        assert_ne!(last_state(&events), Some(TURN_FAILED), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rnf_14_a_pane_without_opencode_never_starts_the_watcher() {
+        let pane = Solo::start(Vec::new(), false);
+        let child = pane.next_child();
+        child.output(b"\x1b]7501;state=working:id=ses_1:app=claude-code\x1b\\");
+        pane.collect(SETTLE);
+        assert_eq!(pane.opencode.panes(), 0);
+        drop(pane.cmds);
+    }
 }
