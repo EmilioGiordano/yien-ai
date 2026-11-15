@@ -295,7 +295,7 @@ mod tests {
                 stream.write_all(&response).unwrap();
                 // Close only after the client has: dropping the stream first
                 // races WinHTTP's read of the answer (error 12030 or 12152).
-                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
