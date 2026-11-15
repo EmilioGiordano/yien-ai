@@ -15,14 +15,16 @@ use yien_agent::{
     Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
-use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
+use yien_proto::{
+    AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion, is_shell_profile,
+};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
     AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, VtConfig, VtEngine, VtOutput,
 };
 
 use crate::convert;
-use crate::launch::{self, Fill, HookFill, LaunchPlan, SHELL_PROFILE};
+use crate::launch::{self, Fill, HookFill, LaunchPlan};
 use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
@@ -1365,7 +1367,7 @@ impl Actor {
 /// in. An agent profile's own program is not looked under: its tools would
 /// count as programs the user ran.
 fn runs_shell(plan: &LaunchPlan) -> bool {
-    plan.profile == SHELL_PROFILE
+    is_shell_profile(&plan.profile)
 }
 
 /// Longest panic message logged, in chars. Messages can quote runtime
@@ -1526,7 +1528,7 @@ mod tests {
             launch::resolve(id.as_ref(), &config.profiles, &config.shell).unwrap()
         };
         assert!(runs_shell(&resolve(None)));
-        assert!(runs_shell(&resolve(Some(SHELL_PROFILE))));
+        assert!(runs_shell(&resolve(Some(yien_proto::SHELL_PROFILE))));
         for agent in ["claude", "codex", "opencode"] {
             assert!(!runs_shell(&resolve(Some(agent))), "{agent}");
         }
@@ -2235,6 +2237,37 @@ mod tests {
             !text.iter().any(|l| l.contains("No conversation found")),
             "{text:?}"
         );
+        drop(pane.cmds);
+    }
+
+    /// Claude Code's folder trust as the 2.1.325 binary lays it out.
+    const CLAUDE_TRUST: &str = " Accessing workspace:\r\n\r\n \u{276f} No, exit\r\n   \
+                                Yes, I trust this folder\r\n\r\n Enter to confirm";
+
+    #[test]
+    fn rf_atn_09_a_startup_screen_turns_the_pane_red_until_the_agent_reports() {
+        let pane = Solo::launch(Vec::new(), false, Some(RESUMED), None);
+        let child = pane.next_child();
+        child.output(CLAUDE_TRUST.as_bytes());
+        let events = pane.collect(SETTLE);
+        let red = AgentState::NeedsYou(yien_proto::NeedsReason::ScreenRule);
+        assert_eq!(last_state(&events), Some(red), "{events:?}");
+        child.output(b"\x1b[2J\x1b[H\x1b]7501;state=idle:app=claude-code\x1b\\> ");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_an_answered_startup_screen_clears_once_it_is_gone() {
+        let pane = Solo::launch(Vec::new(), false, Some(RESUMED), None);
+        let child = pane.next_child();
+        child.output(CLAUDE_TRUST.as_bytes());
+        let red = AgentState::NeedsYou(yien_proto::NeedsReason::ScreenRule);
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(red));
+        child.output(b"\x1b[2J\x1b[HLoading\xe2\x80\xa6");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
         drop(pane.cmds);
     }
 }

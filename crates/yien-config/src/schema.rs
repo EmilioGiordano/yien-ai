@@ -61,9 +61,19 @@ pub const SCHEMA: &[Setting] = &[
               terminal from it, Ctrl+0 goes back to it; the zoom is kept across restarts.",
     },
     Setting {
+        key: "terminal.shell",
+        default: "\"auto\"",
+        doc: "The shell new tabs and panes run: \"auto\" (PowerShell 7 when pwsh is on \
+              PATH, else Windows PowerShell, else cmd), \"cmd\", \"powershell\" (Windows \
+              PowerShell), \"pwsh\" (PowerShell 7) or \"git-bash\". A shell that is not \
+              installed gives a notice and the auto pick. The split menu, the new tab menu \
+              and the palette start any installed shell in one pane. A change applies to panes started after it. Windows only; \
+              elsewhere panes run $SHELL.",
+    },
+    Setting {
         key: "terminal.shell_integration",
         default: "true",
-        doc: "true: PowerShell and cmd report their folder at each prompt, so a pane \
+        doc: "true: PowerShell, cmd and Git Bash report their folder at each prompt, so a pane \
               reopens where you left it; your profile and prompt stay as they are. \
               false: panes reopen in the folder they started in. A change applies to \
               panes started after it; running panes keep theirs.",

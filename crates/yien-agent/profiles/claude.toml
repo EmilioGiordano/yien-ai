@@ -20,6 +20,48 @@ confirms = "needs_you"
 bottom_rows = 12
 pattern = '(?m)^\s*Do you want to proceed\?'
 
+# Startup screens: they come before the REPL, so no hook fires and no OSC
+# 7501 is sent while they wait. Text read from the 2.1.325 binary.
+
+# Folder trust, with its two choices in either order.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 12
+pattern = '(?ms)^\W*Yes, I trust this folder\W*$.*^\W*No, (?:exit|continue without these permissions)\W*$|^\W*No, (?:exit|continue without these permissions)\W*$.*^\W*Yes, I trust this folder\W*$'
+
+# First run: the theme picker, its title above the list and the preview.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 40
+pattern = '(?m)^\W*Choose the text style that looks best with your terminal\W*$'
+
+# Sign-in.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '(?m)^\W*Select login method:\W*$'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 8
+pattern = '(?m)^\W*Paste code here if prompted >'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 12
+pattern = '(?s)Detected a custom API key in your environment.*Do you want to use this API key\?'
+
+# The last first-run steps.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '(?ms)^\W*Security notes:\W*$.*Claude can make mistakes\.'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '''(?m)^\W*Use Claude Code's terminal setup\?\W*$'''
+
 [[rules]]
 versions = ">=2.0, <2.1.295"
 sources = ["hooks", "screen"]

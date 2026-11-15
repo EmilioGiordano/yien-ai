@@ -61,21 +61,21 @@ use tokio::sync::mpsc::error::TrySendError;
 use yien_agent::Profile;
 use yien_platform::agent_sessions::CliDirs;
 use yien_proto::frame::Frame;
-use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, TabId};
+use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, ShellKind, TabId};
 use yien_pty::PtyBackend;
 use yien_vt::VtConfig;
 
 use crate::consoles::Consoles;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
-use crate::shell::ShellChoice;
+use crate::shell::ShellSetup;
 
 pub use git::GitConfig;
 pub use hooks::HookConfig;
 pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
 pub use programs::ProgramProbe;
 pub use screens::{SCREEN_INTERVAL, SCREEN_LIMITS, SCREENS_TOTAL_BYTES, ScreenFiles, ScreenStore};
-pub use shell::{ShellCommand, default_shell};
+pub use shell::{InstalledShells, ShellCommand, default_shell};
 
 /// Commands waiting for the core; beyond this [`CoreHandle::try_send`]
 /// reports [`SendError::Busy`] (plan §4.2: the UI shows the core as busy and
@@ -146,14 +146,24 @@ impl Clock for MonotonicClock {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
-    /// What a pane runs when no profile is asked for, as configured; with
-    /// `shell_integration` the core adds the folder report to it.
+    /// What a pane runs when no profile is asked for and `shell_kind` names
+    /// no installed shell, as configured; with `shell_integration` the core
+    /// adds the folder report to it.
     pub shell: ShellCommand,
-    /// PowerShell and cmd panes report their folder at each prompt
+    /// `terminal.shell`: the installed shell panes run when no profile is
+    /// asked for, instead of `shell` (RF-ESP-03). One not in `shells` runs
+    /// `shell`, with a notice. Ignored off Windows. [`ClientMsg::SetShell`]
+    /// changes it for panes started afterwards. `None` by default.
+    pub shell_kind: Option<ShellKind>,
+    /// The shells a pane can start through their [`ShellKind::profile`]
+    /// ids (RF-PAN-18); [`InstalledShells::find`] lists this machine's.
+    /// None by default.
+    pub shells: InstalledShells,
+    /// PowerShell, cmd and Git Bash panes report their folder at each prompt
     /// ([`ShellCommand::reporting_cwd`], RF-SES-01), so a restored pane opens
-    /// where the user left it; PowerShell panes also mark their commands, so
-    /// they work while one runs. [`ClientMsg::SetShellIntegration`] changes it
-    /// for panes started afterwards. On by default.
+    /// where the user left it; PowerShell and Git Bash panes also mark their
+    /// commands, so they work while one runs. [`ClientMsg::SetShell`] changes
+    /// it for panes started afterwards. On by default.
     pub shell_integration: bool,
     /// The agent profiles panes can be split with (RF-PAN-18).
     pub profiles: Vec<Profile>,
@@ -215,6 +225,8 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             shell: default_shell(),
+            shell_kind: None,
+            shells: InstalledShells::default(),
             shell_integration: true,
             profiles: yien_agent::builtin_profiles().unwrap_or_default(),
             vt: VtConfig::default(),
@@ -372,8 +384,16 @@ impl Core {
         mut config: CoreConfig,
         engine: EngineFactory,
     ) -> Result<(CoreHandle, mpsc::Receiver<CoreMsg>), CoreError> {
-        let shells = ShellChoice::new(&config.shell, std::env::var("PROMPT").ok().as_deref());
-        config.shell = shells.pick(config.shell_integration).clone();
+        let shells = ShellSetup::new(
+            &config.shell,
+            &config.shells,
+            std::env::var("PROMPT").ok().as_deref(),
+            cfg!(windows),
+        );
+        let (shell, shell_notice) =
+            shells.default_shell(config.shell_kind, config.shell_integration);
+        config.shell = shell;
+        config.shells = shells.installed(config.shell_integration);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.worker_threads.max(1))
             .thread_name("yien-core")
@@ -422,7 +442,7 @@ impl Core {
             hooks_error,
             writer.clone(),
             screens.clone(),
-            shells,
+            (shells, shell_notice),
         ));
         let handle = CoreHandle {
             commands,

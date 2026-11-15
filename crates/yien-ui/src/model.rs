@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
     LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
-    ProjectInfo, SHELL_PROFILE, SessionTitle, TabGit, TabId, TabInfo, same_folder,
+    ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -28,7 +28,7 @@ use crate::worktree::Question;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AgentState {
-    /// Waiting for the user: a permission, a question. The only red state (RN-01).
+    /// Waiting for the user: a permission, a question. The only state with the red bar (RN-01).
     NeedsYou,
     /// The program stopped with an error.
     Error,
@@ -231,7 +231,7 @@ impl PaneView {
     /// assert!(claude.is_busy());
     /// ```
     pub fn is_busy(&self) -> bool {
-        let agent = self.profile_id.as_str() != SHELL_PROFILE;
+        let agent = !is_shell_profile(self.profile_id.as_str());
         let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
         active || (self.running && agent) || self.runs_typed_agent()
     }
@@ -261,7 +261,7 @@ pub(crate) enum TabMark {
 /// Whether `pane` runs a shell and no agent, typed in it or not. A pane whose
 /// profile is not known yet is not one.
 pub(crate) fn is_shell_pane(pane: &PaneView) -> bool {
-    pane.profile_id.as_str() == SHELL_PROFILE && !pane.runs_typed_agent()
+    is_shell_profile(pane.profile_id.as_str()) && !pane.runs_typed_agent()
 }
 
 /// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
@@ -1159,7 +1159,7 @@ impl WorkspaceView {
         self.all_panes()
             .into_iter()
             .map(|p| self.pane(p))
-            .filter(|p| p.state == AgentState::Working && p.profile_id.as_str() == SHELL_PROFILE)
+            .filter(|p| p.state == AgentState::Working && is_shell_profile(p.profile_id.as_str()))
             .count()
     }
 
@@ -1696,6 +1696,21 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_18_a_pane_started_on_a_chosen_shell_is_a_shell() {
+        let mut view = demo();
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        for kind in yien_proto::ShellKind::ALL {
+            let mut chosen = pane(301, 30, P::Idle);
+            chosen.profile_id = kind.profile();
+            view.pane_updated(&chosen);
+            assert_eq!(mark(&view, 30), TabMark::Shell, "{kind:?}");
+            assert!(!view.pane(PaneId::new(301)).is_busy(), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn rf_atn_02_a_pane_that_needs_you_marks_its_tab_red_shells_only_too() {
         let mut view = demo();
         let t = crate::theme::Theme::of(crate::theme::ThemeKind::default());
@@ -1711,6 +1726,31 @@ mod tests {
         assert!(view.pane_state(PaneId::new(301), P::Idle));
         assert_eq!(mark(&view, 30), TabMark::Shell);
         assert_ne!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
+    }
+
+    #[test]
+    fn rn_01_an_error_marks_its_tab_red_without_the_bar() {
+        let failed = P::Error(yien_proto::ErrorReason::TurnFailed);
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        let state = |v: &WorkspaceView, id| v.tab_state(v.tab(TabId::new(id)).unwrap());
+        for kind in [
+            crate::theme::ThemeKind::Sumi,
+            crate::theme::ThemeKind::Washi,
+        ] {
+            let t = crate::theme::Theme::of(kind);
+            let mut view = demo();
+            assert!(view.pane_state(PaneId::new(110), failed));
+            assert_eq!(mark(&view, 11), TabMark::State(AgentState::Error));
+            assert_eq!(t.tab_mark_color(mark(&view, 11)), t.mark_red, "{kind:?}");
+            assert_eq!(t.tab_row_bar(state(&view, 11)), None, "{kind:?}");
+            assert_eq!(view.needs_you_tabs(), 1, "an error is not counted");
+
+            // "Needs you" outranks the error and brings the bar.
+            view.tab_updated(&tab(11, 1, &[110, 111]));
+            view.pane_updated(&pane(111, 11, NEEDS));
+            assert_eq!(mark(&view, 11), TabMark::State(AgentState::NeedsYou));
+            assert_eq!(t.tab_row_bar(state(&view, 11)), Some(t.shu), "{kind:?}");
+        }
     }
 
     #[test]

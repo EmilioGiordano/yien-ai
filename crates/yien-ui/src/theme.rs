@@ -52,10 +52,17 @@ pub(crate) struct Theme {
     pub(crate) shu_wash: Rgba,
     pub(crate) ai: Rgba,
     pub(crate) ochre: Rgba,
-    /// A tab row's mark and words in every state but "needs you".
+    /// A tab row's spinner, and its state words but the red ones.
     pub(crate) mark_dim: Rgba,
-    /// A tab row's mark and words while it needs the user (RN-01).
+    /// A tab row's mark and words while it needs the user or failed (RN-01).
     pub(crate) mark_red: Rgba,
+    /// A tab row's state words while it needs the user or failed: the mark
+    /// red, lighter where that red is below 4.5:1 as text (RN-01, RNF-18).
+    pub(crate) word_red: Rgba,
+    /// A tab row's dot once its agent finished a turn.
+    pub(crate) mark_done: Rgba,
+    /// A tab row's dot while its agent waits with nothing to do.
+    pub(crate) mark_idle: Rgba,
     pub(crate) term_bg: Rgba,
     pub(crate) term_raised: Rgba,
     pub(crate) term_line: Rgba,
@@ -106,6 +113,9 @@ impl Theme {
             ochre: rgb(0xd6a24c),
             mark_dim: rgb(0xa19d93),
             mark_red: rgb(0xe8333c),
+            word_red: rgb(0xf0545c),
+            mark_done: rgb(0x6fd39a),
+            mark_idle: rgb(0xcc7a2e),
             term_bg: rgb(0x0d0c0b),
             term_raised: rgb(0x1c1a17),
             term_line: rgb(0x2e2b27),
@@ -135,6 +145,9 @@ impl Theme {
             ochre: rgb(0x8a5a12),
             mark_dim: rgb(0x5f5c55),
             mark_red: rgb(0xb3121b),
+            word_red: rgb(0xb3121b),
+            mark_done: rgb(0x22633e),
+            mark_idle: rgb(0xbc6a1e),
             term_bg: rgb(0xfbfaf6),
             term_raised: rgb(0xf1efe7),
             term_line: rgb(0xd6d4ca),
@@ -148,7 +161,7 @@ impl Theme {
         }
     }
 
-    /// The glyph colour of a state. Red is for "needs you" and nothing else (RN-01).
+    /// The glyph colour of a state in the pane head: red for "needs you" (RN-01).
     pub(crate) fn state_color(&self, state: AgentState) -> Rgba {
         match state {
             AgentState::NeedsYou => self.shu,
@@ -168,10 +181,22 @@ impl Theme {
         }
     }
 
-    /// The colour of a tab row's mark and state words: red for "needs you", dim otherwise (RN-01).
+    /// The colour of a tab row's mark: red for "needs you" and an error,
+    /// told apart by shape (RN-01), green when done, orange when idle.
     pub(crate) fn tab_mark_color(&self, mark: TabMark) -> Rgba {
         match mark {
-            TabMark::State(AgentState::NeedsYou) => self.mark_red,
+            TabMark::State(AgentState::NeedsYou | AgentState::Error) => self.mark_red,
+            TabMark::State(AgentState::Done) => self.mark_done,
+            TabMark::State(AgentState::Idle) => self.mark_idle,
+            TabMark::State(AgentState::Working) | TabMark::Shell => self.mark_dim,
+        }
+    }
+
+    /// The colour of a tab row's state words: red for "needs you" and an
+    /// error (RN-01), dim otherwise; the dots' colours are too faint for text.
+    pub(crate) fn tab_word_color(&self, state: AgentState) -> Rgba {
+        match state {
+            AgentState::NeedsYou | AgentState::Error => self.word_red,
             _ => self.mark_dim,
         }
     }
@@ -222,7 +247,7 @@ pub(crate) fn sync_component_theme(theme: &Theme, cx: &mut App) {
         colors.secondary_foreground = c(theme.muted);
         colors.secondary_hover = c(theme.hover);
         colors.secondary_active = c(theme.raised);
-        // The close button hovers in `danger`; red belongs to "needs you" (RN-01).
+        // The close button hovers in `danger`; red belongs to agent states (RN-01).
         colors.danger = c(theme.ochre);
         colors.danger_hover = c(theme.ochre);
         colors.danger_active = c(theme.ochre);
@@ -271,6 +296,9 @@ mod tests {
                 ("dim mark on panel", t.mark_dim, t.panel),
                 ("dim mark on raised", t.mark_dim, t.raised),
                 ("dim mark on hover", t.mark_dim, t.hover),
+                ("red words on panel", t.word_red, t.panel),
+                ("red words on raised", t.word_red, t.raised),
+                ("red words on hover", t.word_red, t.hover),
                 ("term text on term bg", t.term_text, t.term_bg),
                 ("term muted on term raised", t.term_muted, t.term_raised),
                 ("term faint on term bg", t.term_faint, t.term_bg),
@@ -322,55 +350,99 @@ mod tests {
     }
 
     #[test]
-    fn rn_01_only_needs_you_is_red() {
+    fn rn_01_only_needs_you_and_error_are_red_and_only_needs_you_has_the_bar() {
         for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
             let t = Theme::of(kind);
-            for state in [
-                AgentState::Error,
-                AgentState::Done,
-                AgentState::Working,
-                AgentState::Idle,
-            ] {
-                assert_ne!(t.state_color(state), t.shu, "{state:?}");
-                for red in [t.shu, t.mark_red] {
-                    assert_ne!(t.tab_mark_color(TabMark::State(state)), red, "{state:?}");
-                    assert_ne!(t.tab_mark_color(TabMark::Shell), red);
+            for state in AgentState::BY_URGENCY {
+                let red = matches!(state, AgentState::NeedsYou | AgentState::Error);
+                let mark = t.tab_mark_color(TabMark::State(state));
+                assert_eq!(mark == t.mark_red, red, "{kind:?} {state:?} mark");
+                assert_eq!(t.tab_word_color(state) == t.word_red, red, "{state:?}");
+                if !red {
+                    assert_ne!(mark, t.shu, "{kind:?} {state:?}");
                 }
+                let bar = t.tab_row_bar(state);
+                assert_eq!(bar.is_some(), state == AgentState::NeedsYou, "{state:?}");
+                // The pane head keeps red for "needs you" alone.
+                let head_red = t.state_color(state) == t.shu;
+                assert_eq!(head_red, state == AgentState::NeedsYou, "{state:?}");
             }
-            assert_eq!(t.state_color(AgentState::NeedsYou), t.shu);
-            let needs = TabMark::State(AgentState::NeedsYou);
-            assert_eq!(t.tab_mark_color(needs), t.mark_red);
+            assert_ne!(t.tab_mark_color(TabMark::Shell), t.mark_red);
+            assert_ne!(t.tab_mark_color(TabMark::Shell), t.shu);
         }
     }
 
     #[test]
-    fn rf_atn_15_tab_marks_are_dim_and_needs_you_red_as_the_web() {
+    fn rf_atn_15_tab_marks_take_the_canvas_colours() {
         let sumi = Theme::of(ThemeKind::Sumi);
         let washi = Theme::of(ThemeKind::Washi);
         assert_eq!(
-            (sumi.mark_dim, sumi.mark_red),
-            (rgb(0xa19d93), rgb(0xe8333c))
+            (sumi.mark_dim, sumi.mark_red, sumi.mark_done, sumi.mark_idle),
+            (rgb(0xa19d93), rgb(0xe8333c), rgb(0x6fd39a), rgb(0xcc7a2e))
         );
         assert_eq!(
-            (washi.mark_dim, washi.mark_red),
-            (rgb(0x5f5c55), rgb(0xb3121b))
+            (
+                washi.mark_dim,
+                washi.mark_red,
+                washi.mark_done,
+                washi.mark_idle
+            ),
+            (rgb(0x5f5c55), rgb(0xb3121b), rgb(0x22633e), rgb(0xbc6a1e))
+        );
+        assert_eq!(
+            (sumi.word_red, washi.word_red),
+            (rgb(0xf0545c), rgb(0xb3121b))
         );
         for t in [sumi, washi] {
-            for state in AgentState::BY_URGENCY {
-                let mark = TabMark::State(state);
-                let want = if state.needs_you() {
-                    t.mark_red
-                } else {
-                    t.mark_dim
-                };
-                assert_eq!(t.tab_mark_color(mark), want, "{state:?}");
+            let color = |state| t.tab_mark_color(TabMark::State(state));
+            assert_eq!(color(AgentState::NeedsYou), t.mark_red, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Error), t.mark_red, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Done), t.mark_done, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Idle), t.mark_idle, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Working), t.mark_dim, "{:?}", t.kind);
+            for state in [AgentState::Done, AgentState::Working, AgentState::Idle] {
+                assert_eq!(t.tab_word_color(state), t.mark_dim, "{state:?}");
             }
-            assert_eq!(t.tab_mark_color(TabMark::Shell), t.mark_dim);
-            // The square is a graphic, not text: 3:1 (WCAG 1.4.11).
-            for bg in [t.panel, t.raised, t.hover] {
-                let ratio = contrast(t.mark_red, bg);
-                assert!(ratio >= 3.0, "{:?}: the red mark is {ratio:.2}:1", t.kind);
+        }
+    }
+
+    #[test]
+    fn rf_atn_15_tab_marks_stand_out_on_every_row_background() {
+        for t in [Theme::of(ThemeKind::Sumi), Theme::of(ThemeKind::Washi)] {
+            // The marks are graphics, not text: 3:1 (WCAG 1.4.11).
+            let marks = [
+                ("red", t.mark_red),
+                ("done", t.mark_done),
+                ("idle", t.mark_idle),
+            ];
+            for (name, mark) in marks {
+                for bg in [t.panel, t.raised, t.hover] {
+                    let ratio = contrast(mark, bg);
+                    assert!(ratio >= 3.0, "{:?}: {name} is {ratio:.2}:1", t.kind);
+                }
             }
+        }
+    }
+
+    /// CIE L*, the lightness a colour-blind eye still tells apart.
+    fn lightness(c: Rgba) -> f32 {
+        let y = luminance(c);
+        if y > 0.008856 {
+            116.0 * y.cbrt() - 16.0
+        } else {
+            903.3 * y
+        }
+    }
+
+    #[test]
+    fn rnf_17_done_and_idle_dots_differ_in_lightness_not_only_hue() {
+        for t in [Theme::of(ThemeKind::Sumi), Theme::of(ThemeKind::Washi)] {
+            let gap = (lightness(t.mark_done) - lightness(t.mark_idle)).abs();
+            assert!(
+                gap >= 15.0,
+                "{:?}: green and orange are {gap:.1} L* apart",
+                t.kind
+            );
         }
     }
 

@@ -3,7 +3,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_layout::{Shape, Tree};
-use yien_proto::{AgentState, PaneId, ProjectId, SideBar, SideBars, TabId, same_folder};
+use yien_proto::{
+    AgentState, PaneId, ProjectId, SideBar, SideBars, TabId, is_shell_profile, same_folder,
+};
 use yien_session::{
     AgentRecord, LayoutRecord, PaneRecord, ProjectRecord, ResumeAction, Selection, SessionRef,
     SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord, resume_plan,
@@ -11,7 +13,7 @@ use yien_session::{
 
 use super::{Effect, Pane, Project, Tab, Workspace};
 use crate::CoreError;
-use crate::launch::{LaunchPlan, SHELL_PROFILE};
+use crate::launch::LaunchPlan;
 
 /// The saved form of a pane that a restore launched differently.
 #[derive(Debug, Clone, PartialEq)]
@@ -426,7 +428,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
         name: p.custom_name.clone(),
         profile: kind.clone(),
         cwd: p.cwd.clone().unwrap_or_else(|| p.launch_cwd.clone()),
-        agent: (p.profile != SHELL_PROFILE).then(|| AgentRecord {
+        agent: (!is_shell_profile(&p.profile)).then(|| AgentRecord {
             kind,
             session_id: p.session_id.clone().map(SessionRef::new),
             ended_explicitly: p.ended_explicitly,

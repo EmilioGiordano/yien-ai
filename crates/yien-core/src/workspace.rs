@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use yien_layout::{Rect, Tree};
 use yien_proto::{
     AgentState, Command, CoreMsg, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PendingQuestion, ProfileId,
-    ProfileInfo, ProjectId, ProjectInfo, SHELL_PROFILE, SessionTitle, SideBars, TabId, TabInfo,
-    WorkspaceSnapshot, same_folder,
+    ProfileInfo, ProjectId, ProjectInfo, SessionTitle, SideBars, TabId, TabInfo, WorkspaceSnapshot,
+    is_shell_profile, same_folder,
 };
 use yien_session::is_session_id;
 
@@ -252,7 +252,7 @@ impl Pane {
     /// named the pane.
     fn session_title(&self) -> Option<SessionTitle> {
         let agent =
-            self.program.is_some() || (self.profile != SHELL_PROFILE && self.runs_session());
+            self.program.is_some() || (!is_shell_profile(&self.profile) && self.runs_session());
         // The actor owns every title of an agent profile's own program, not
         // those of a stand-in shell, which keeps the profile's id.
         if !agent || !self.title_ours || self.custom_name.is_some() {

@@ -1,7 +1,7 @@
 //! The attention tray (RF-ATN-13) and the quit question (RF-SES-13), as
 //! plain functions of the view model; `shell` draws them.
 
-use yien_proto::{NeedsReason, PaneId, SHELL_PROFILE, TabId};
+use yien_proto::{NeedsReason, PaneId, TabId, is_shell_profile};
 
 use crate::model::{AgentState, WorkspaceView};
 
@@ -77,7 +77,7 @@ fn detail(pane: &crate::model::PaneView) -> String {
             Some(code) if pane.exited => format!("Stopped with exit code {code}"),
             _ => "The turn failed".to_owned(),
         },
-        _ if pane.profile_id.as_str() == SHELL_PROFILE => "Command finished".to_owned(),
+        _ if is_shell_profile(pane.profile_id.as_str()) => "Command finished".to_owned(),
         _ => "Turn finished".to_owned(),
     }
 }
@@ -182,7 +182,8 @@ pub(crate) fn quit_detail(workspace: &WorkspaceView) -> String {
 mod tests {
     use yien_proto::{
         AgentState as P, ErrorReason, LayoutChild, LayoutNode, Orientation, PaneInfo,
-        PendingQuestion, ProfileId, ProjectId, ProjectInfo, TabInfo, WorkspaceSnapshot,
+        PendingQuestion, ProfileId, ProjectId, ProjectInfo, SHELL_PROFILE, TabInfo,
+        WorkspaceSnapshot,
     };
 
     use super::*;

@@ -24,6 +24,7 @@ pub(super) enum TabAction {
     Rename,
     MoveUp,
     MoveDown,
+    NewTabWith,
     Close,
 }
 
@@ -34,6 +35,7 @@ impl TabAction {
             TabAction::Rename => "tab.rename",
             TabAction::MoveUp => "tab.move_up",
             TabAction::MoveDown => "tab.move_down",
+            TabAction::NewTabWith => "tab.new_menu",
             TabAction::Close => "tab.close",
         }
     }
@@ -49,6 +51,7 @@ pub(super) enum TabEffect {
         to: usize,
     },
     Close(TabId),
+    NewTabWith(ProjectId),
 }
 
 /// What `action` does to `tab` as the window shows it now; `None` when the
@@ -57,6 +60,7 @@ pub(super) fn tab_effect(view: &WorkspaceView, tab: TabId, action: TabAction) ->
     match action {
         TabAction::Rename => view.tab(tab).map(|_| TabEffect::Rename(tab)),
         TabAction::Close => view.tab(tab).map(|_| TabEffect::Close(tab)),
+        TabAction::NewTabWith => view.tab(tab).map(|t| TabEffect::NewTabWith(t.project)),
         TabAction::MoveUp | TabAction::MoveDown => {
             let (project, from, len) = view.place_of(tab)?;
             let to = tab_order::step(from, len, action == TabAction::MoveDown)?;
@@ -86,6 +90,8 @@ pub(super) fn tab_menu(
         MenuEntry::Separator,
         item("Move up", TabAction::MoveUp),
         item("Move down", TabAction::MoveDown),
+        MenuEntry::Separator,
+        item("New tab with…", TabAction::NewTabWith),
         MenuEntry::Separator,
         item("Close tab", TabAction::Close),
     ]))
@@ -183,6 +189,7 @@ impl Shell {
         let back_to_bar = menu_returns_to_bar(self.keyboard_in_bar, self.region(window, cx));
         // Dropped first, so their blur cannot close the menu opened now.
         self.tab_menu.open = None;
+        self.new_tab_menu.forget();
         self.menu = None;
         self.split_menu = None;
         self.close_tray(window, cx);
@@ -298,6 +305,14 @@ impl Shell {
             Some(TabEffect::Rename(tab)) => self.start_rename(tab, window, cx),
             Some(TabEffect::Move { tab, project, to }) => self.move_tab_to(tab, project, to, cx),
             Some(TabEffect::Close(tab)) => self.close_tab_now(tab, window, cx),
+            Some(TabEffect::NewTabWith(project)) => {
+                let row = self.tab_menu.rows.borrow().get(&tab).copied();
+                let at = row.map_or_else(
+                    || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
+                    |row| point(row.left() + px(8.0), row.bottom() + px(2.0)),
+                );
+                self.open_new_tab_menu(project, at, window, cx);
+            }
             None => {}
         }
     }
@@ -365,13 +380,14 @@ mod tests {
     }
 
     #[test]
-    fn rf_esp_16_the_tab_menu_offers_rename_moves_and_close_last() {
+    fn rf_esp_16_the_tab_menu_offers_rename_moves_new_tab_and_close_last() {
         let menu = menu_of(&[1, 2, 3], 2);
         let all = |on: bool| {
             vec![
                 ("Rename".to_owned(), true),
                 ("Move up".to_owned(), on),
                 ("Move down".to_owned(), on),
+                ("New tab with…".to_owned(), true),
                 ("Close tab".to_owned(), true),
             ]
         };
@@ -404,6 +420,8 @@ mod tests {
         let mut single = menu_of(&[1], 1);
         assert_eq!(single.chosen(), Some(&TabAction::Rename));
         single.move_by(1);
+        assert_eq!(single.chosen(), Some(&TabAction::NewTabWith));
+        single.move_by(1);
         assert_eq!(single.chosen(), Some(&TabAction::Close));
         assert_eq!(single.respond(MenuEvent::Pick(2)), MenuOutcome::Stay);
     }
@@ -428,7 +446,11 @@ mod tests {
                 to: 1
             })
         );
-        assert_eq!(run(MenuEvent::Pick(5)), Some(TabEffect::Close(clicked)));
+        assert_eq!(
+            run(MenuEvent::Pick(5)),
+            Some(TabEffect::NewTabWith(project))
+        );
+        assert_eq!(run(MenuEvent::Pick(7)), Some(TabEffect::Close(clicked)));
         assert_eq!(tab_effect(&view, clicked, TabAction::MoveDown), None);
         assert_eq!(tab_effect(&view, TabId::new(9), TabAction::Close), None);
         assert!(tab_menu(&view, TabId::new(9), &no_keys).is_none());
