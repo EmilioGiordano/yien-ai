@@ -293,6 +293,13 @@ mod tests {
                 }
                 seen.push(String::from_utf8_lossy(&request).into_owned());
                 stream.write_all(&response).unwrap();
+                // Close only after the client has: dropping the stream first
+                // races WinHTTP's read of the answer (error 12030 or 12152).
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                while matches!(stream.read(&mut byte), Ok(n) if n > 0) {}
             }
             seen
         });
@@ -370,7 +377,10 @@ mod tests {
     #[test]
     fn a_redirect_is_followed() {
         let (base, server) = serve(vec![
-            b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            // Without `Connection: close`, WinHTTP may send `GET /final` on
+            // this connection, which `serve` never reads.
+            b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
             response("200 OK", b"moved"),
         ]);
         let mut body = Vec::new();
