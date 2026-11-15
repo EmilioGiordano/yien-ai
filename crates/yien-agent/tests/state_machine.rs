@@ -1521,6 +1521,24 @@ fn rf_atn_08_seeing_a_typed_agent_s_startup_screen_does_not_clear_it() {
 }
 
 #[test]
+fn rn_02_a_report_landing_after_the_prompt_came_back_reads_nothing() {
+    // The CLI exited between the poll's snapshot and its report.
+    for end in [PromptMark::CommandEnd, PromptMark::PromptStart] {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::CommandStart))
+            .send(mark(end))
+            .send(Signal::TypedAgent(true));
+        assert!(p.fx.is_empty(), "{end:?}");
+        assert!(!p.m.reads_typed_agent(), "{end:?}");
+        assert_eq!(p.m.next_wake(), None, "{end:?}");
+        p.send(Signal::Output).at(ms(2_000)).send(Signal::Tick);
+        assert!(p.fx.is_empty(), "{end:?}");
+        p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+        assert!(!p.state().is_red(), "{end:?}");
+    }
+}
+
+#[test]
 fn rn_02_an_agent_that_already_reported_gets_no_startup_reads() {
     let mut p = Pane::spawned(shell());
     p.send(mark(PromptMark::CommandStart))
