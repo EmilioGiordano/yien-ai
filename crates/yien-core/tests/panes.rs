@@ -1571,12 +1571,14 @@ fn rf_cfg_01_the_default_shell_switches_for_panes_started_after() {
     });
     if cfg!(windows) {
         let message = h.wait_for(|m| match m {
-            CoreMsg::Error { message, .. } => Some(message.clone()),
+            CoreMsg::Notice { message } => Some(Ok(message.clone())),
+            CoreMsg::Error { message, .. } => Some(Err(message.clone())),
             _ => None,
         });
         assert_eq!(
-            message,
-            "terminal.shell: PowerShell 7 was not found; new panes run fake-shell instead."
+            message.as_deref(),
+            Ok("terminal.shell: PowerShell 7 was not found; new panes run fake-shell instead."),
+            "a notice, not a refused command"
         );
     }
     let (_, third) = h.split(second_pane, None);

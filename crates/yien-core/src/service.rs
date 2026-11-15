@@ -630,11 +630,8 @@ impl Service {
                     self.ctx.config = Arc::new(config);
                 }
                 if let Some(message) = notice {
-                    self.emit(CoreMsg::Error {
-                        pane: None,
-                        message,
-                    })
-                    .await;
+                    // Not an Error with no pane: the UI reads that as a refused command.
+                    self.emit(CoreMsg::Notice { message }).await;
                 }
             }
             ClientMsg::SetTerminalPalette { palette: named } => {
