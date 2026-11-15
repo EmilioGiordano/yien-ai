@@ -250,10 +250,77 @@ fn rn_02_only_the_versions_whose_screens_were_read_get_startup_rules() {
 #[test]
 fn rn_02_opencode_and_the_shell_read_no_startup_screens() {
     // OpenCode reports idle over OSC 7501 as it starts, before any dialog;
-    // a typed CLI in a shell is left to its own branch.
+    // a CLI typed in a shell is read with its own profile's patterns.
     let profiles = builtin_profiles().unwrap();
     for id in ["opencode", "shell"] {
         let profile = profiles.iter().find(|p| p.id == id).unwrap();
         assert!(profile.rules.iter().all(|r| r.screen.is_empty()), "{id}");
+        assert!(profile.typed_startup_screens().is_empty(), "{id}");
+    }
+}
+
+/// The patterns a shell pane reads for `id` typed in it.
+fn typed(id: &str) -> Vec<ScreenRule> {
+    let profiles = builtin_profiles().unwrap_or_default();
+    let profile = profiles.iter().find(|p| p.id == id);
+    profile.map_or_else(Vec::new, |p| p.typed_startup_screens().to_vec())
+}
+
+#[test]
+fn rf_age_05_an_agent_typed_in_a_shell_reads_the_screens_of_its_newest_rule() {
+    // The version of a typed CLI is not probed, as in its own pane.
+    for (name, screen) in CODEX_SCREENS {
+        assert_eq!(
+            verdict(&typed("codex"), screen),
+            ScreenVerdict::NeedsYou,
+            "{name}"
+        );
+    }
+    for (name, screen) in CLAUDE_SCREENS {
+        assert_eq!(
+            verdict(&typed("claude"), screen),
+            ScreenVerdict::NeedsYou,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn rn_02_a_typed_agent_needs_a_rule_that_reports_over_osc_7501() {
+    // A shell pane never gets hooks: only OSC 7501 can end the reads.
+    let hooks_only = "schema = 1\nid = \"a\"\nname = \"A\"\n[[rules]]\n\
+                      sources = [\"hooks\", \"screen\"]\nhooks = \"claude-command-v1\"\n\
+                      [[rules.screen]]\nconfirms = \"needs_you\"\nbottom_rows = 3\npattern = \"x\"\n";
+    let profile = yien_agent::Profile::from_toml(hooks_only).unwrap();
+    assert!(profile.typed_startup_screens().is_empty());
+    let reporting = hooks_only.replace(
+        "\"hooks\", \"screen\"",
+        "\"hooks\", \"osc7501\", \"screen\"",
+    );
+    let profile = yien_agent::Profile::from_toml(&reporting).unwrap();
+    assert_eq!(profile.typed_startup_screens().len(), 1);
+}
+
+/// What a shell shows for plain commands, around the agents' names.
+const SHELL_OUTPUT: &[&str] = &[
+    "PS C:\\work\\demo> git status\nOn branch main\nnothing to commit, working tree clean\nPS C:\\work\\demo> ",
+    "PS C:\\work\\demo> codex --version\ncodex-cli 0.167.2\nPS C:\\work\\demo> ",
+    "C:\\work\\demo>dir\n Volume in drive C has no label.\n 11/15/2026  10:00 AM    <DIR>          src\n               1 File(s)          1,024 bytes\nC:\\work\\demo>",
+    "$ claude --help\nUsage: claude [options] [command] [prompt]\n\nOptions:\n  -p, --print  Print response and exit\n$ ",
+    "PS C:\\work\\demo> npm install -g @openai/codex\nadded 1 package in 3s\nPS C:\\work\\demo> ",
+];
+
+#[test]
+fn rn_02_a_plain_command_s_output_never_matches_a_typed_agent_s_screens() {
+    for id in ["claude", "codex"] {
+        let rules = typed(id);
+        assert!(!rules.is_empty(), "{id}");
+        for text in SHELL_OUTPUT.iter().chain(ORDINARY) {
+            assert_eq!(
+                verdict(&rules, text),
+                ScreenVerdict::NoMatch,
+                "{id}: {text}"
+            );
+        }
     }
 }
