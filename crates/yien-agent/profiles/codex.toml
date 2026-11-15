@@ -12,7 +12,43 @@ sessions = "codex-sessions"
 # OSC 7501 since 0.163.0; run against 0.167.2.
 [[rules]]
 versions = ">=0.163, <1"
-sources = ["osc7501"]
+sources = ["osc7501", "screen"]
+
+# Startup screens, which send no OSC 7501 while they wait. Text from the
+# render snapshots in the 0.167.2 sources.
+
+# Folder trust in a git project not trusted yet.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 24
+pattern = '(?ms)^\W*Folder access\s*$.*^\W*1\. Trust and continue\s*$'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 24
+pattern = '(?ms)^\W*Hooks need review\s*$.*^\W*1\. Review hooks\s*$'
+
+# A narrow pane scrolls the choices, so any of them will do.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '(?ms)^\W*Update available\b.*^\W*(?:1\. Update now|2\. Skip|3\. Skip until next version)\b'
+
+# Sign-in.
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '(?m)^\W*1\. Sign in with ChatGPT\s*$'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 24
+pattern = '(?m)^\W*Finish signing in via your browser\s*$'
+
+[[rules.screen]]
+confirms = "needs_you"
+bottom_rows = 16
+pattern = '(?m)^\W*Use your own OpenAI API key for usage-based billing\s*$'
 
 # Older versions: OSC 9 alone never lights the red mark.
 [[rules]]

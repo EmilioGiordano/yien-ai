@@ -2237,4 +2237,35 @@ mod tests {
         );
         drop(pane.cmds);
     }
+
+    /// Claude Code's folder trust as the 2.1.325 binary lays it out.
+    const CLAUDE_TRUST: &str = " Accessing workspace:\r\n\r\n \u{276f} No, exit\r\n   \
+                                Yes, I trust this folder\r\n\r\n Enter to confirm";
+
+    #[test]
+    fn rf_atn_09_a_startup_screen_turns_the_pane_red_until_the_agent_reports() {
+        let pane = Solo::launch(Vec::new(), false, Some(RESUMED), None);
+        let child = pane.next_child();
+        child.output(CLAUDE_TRUST.as_bytes());
+        let events = pane.collect(SETTLE);
+        let red = AgentState::NeedsYou(yien_proto::NeedsReason::ScreenRule);
+        assert_eq!(last_state(&events), Some(red), "{events:?}");
+        child.output(b"\x1b[2J\x1b[H\x1b]7501;state=idle:app=claude-code\x1b\\> ");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_an_answered_startup_screen_clears_once_it_is_gone() {
+        let pane = Solo::launch(Vec::new(), false, Some(RESUMED), None);
+        let child = pane.next_child();
+        child.output(CLAUDE_TRUST.as_bytes());
+        let red = AgentState::NeedsYou(yien_proto::NeedsReason::ScreenRule);
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(red));
+        child.output(b"\x1b[2J\x1b[HLoading\xe2\x80\xa6");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
 }
