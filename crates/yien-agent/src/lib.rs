@@ -27,6 +27,7 @@
 
 mod hooks;
 mod machine;
+pub mod opencode;
 mod profile;
 mod question;
 mod signal;
