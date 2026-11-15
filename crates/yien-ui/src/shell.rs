@@ -21,7 +21,7 @@ use yien_proto::{
 };
 
 use crate::actions::*;
-use crate::assets::{self, state_icon};
+use crate::assets;
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, shortcut};
@@ -2182,8 +2182,7 @@ impl Shell {
         });
         let text = StyledText::new(shown.to_owned()).with_highlights(runs);
         let hint_color = match entry.state {
-            Some(AgentState::NeedsYou) => t.shu,
-            Some(AgentState::Error) => t.ochre,
+            Some(AgentState::NeedsYou | AgentState::Error) => t.word_red,
             _ => t.faint,
         };
         let label = if entry.hint.is_empty() {
@@ -2210,7 +2209,7 @@ impl Shell {
                 r.pl(px(PALETTE_INDENT))
                     .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
             })
-            .when_some(entry.state, |r, state| r.child(glyph(state, &t)))
+            .when_some(entry.state, |r, state| r.child(self.state_mark(state)))
             .child(
                 div()
                     .flex_1()
@@ -2265,7 +2264,7 @@ impl Shell {
                     pill.border_color(t.shu)
                         .bg(t.shu_wash)
                         .text_color(t.shu)
-                        .child(glyph(AgentState::NeedsYou, &t))
+                        .child(self.state_mark(AgentState::NeedsYou))
                 } else {
                     pill.border_color(t.line).text_color(t.faint)
                 }
@@ -2360,7 +2359,7 @@ impl Shell {
                             .pb(px(4.0))
                             .text_size(t.text(12.5))
                             .text_color(t.muted)
-                            .child(glyph(state, &t))
+                            .child(self.state_mark(state))
                             .child(
                                 div()
                                     .text_size(t.text(13.0))
@@ -2451,7 +2450,7 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(id, cx)))
             .child(chevron)
             .when(waiting > 0, |head| {
-                head.child(glyph(AgentState::NeedsYou, &t))
+                head.child(self.state_mark(AgentState::NeedsYou))
             })
             .child(
                 div()
@@ -2651,20 +2650,30 @@ impl Shell {
     /// while it works, nothing for a tab of shells only. No id, so screen
     /// readers hear the row's state word, never the frames.
     fn tab_mark(&self, mark: TabMark) -> Div {
+        // One line height for every glyph size, below the name's, so a row
+        // keeps its height when its state changes.
+        self.mark_glyph(mark)
+            .w(px(14.0))
+            .line_height(self.theme.text(18.0))
+    }
+
+    /// A state's mark outside the tab rows, the same glyph and colour as a
+    /// tab row's in a 14 px square, so every surface tells error from
+    /// "needs you" by shape (RN-01). No id, like the tab row's.
+    fn state_mark(&self, state: AgentState) -> Div {
+        self.mark_glyph(TabMark::State(state))
+            .size(px(14.0))
+            .line_height(self.theme.text(14.0))
+    }
+
+    /// A mark's glyph, centred in a slot the caller sizes.
+    fn mark_glyph(&self, mark: TabMark) -> Div {
         let t = self.theme;
-        let slot = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .w(px(14.0));
+        let slot = div().flex().flex_none().items_center().justify_center();
         let Some(glyph) = assets::tab_mark_glyph(mark, self.spinner.frame()) else {
             return slot;
         };
-        // One line height for every glyph size, below the name's, so a row
-        // keeps its height when its state changes.
-        slot.line_height(t.text(18.0))
-            .text_size(t.text(glyph.size))
+        slot.text_size(t.text(glyph.size))
             .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
             .text_color(t.tab_mark_color(mark))
             .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
@@ -2832,11 +2841,7 @@ impl Shell {
         let focused = pane.id == tab.focused;
         let needs = pane.state.needs_you();
         let (border, border_color) = t.pane_border(focused, needs);
-        let state_color = match pane.state {
-            AgentState::NeedsYou => t.shu,
-            AgentState::Error => t.ochre,
-            _ => t.term_muted,
-        };
+        let state_color = t.pane_word_color(pane.state);
         let id = pane.id;
         let folder = pane.cwd.as_deref().unwrap_or(&tab.dir);
         let folder_shown = folder_label(
@@ -2898,7 +2903,7 @@ impl Shell {
             .text_size(t.text(pane_head::TEXT_SIZE))
             .text_color(t.term_muted)
             .when(focused, |h| h.bg(t.term_raised))
-            .child(glyph(pane.state, &t))
+            .child(self.state_mark(pane.state))
             .when(separate && shows.name, |h| {
                 h.child(primary(pane.name.clone()))
             })
@@ -3806,23 +3811,6 @@ fn key_hint(keys: &'static str, t: &Theme) -> Div {
         .text_size(t.text(11.5))
         .text_color(t.faint)
         .child(keys)
-}
-
-/// The state glyph in its 14 px slot. The shape tells the state, the colour
-/// only reinforces it.
-fn glyph(state: AgentState, t: &Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(14.0))
-        .child(
-            svg()
-                .path(state_icon(state))
-                .size(px(12.0))
-                .text_color(t.state_color(state)),
-        )
 }
 
 /// The user's home folder from the environment, if set.

@@ -59,17 +59,6 @@ const OWN: [(&str, &[u8]); 18] = [
     ),
 ];
 
-/// The glyph for a state. Its shape tells the state apart, not only its colour.
-pub(crate) fn state_icon(state: AgentState) -> &'static str {
-    match state {
-        AgentState::NeedsYou => "yien/state-needs.svg",
-        AgentState::Error => "yien/state-error.svg",
-        AgentState::Done => "yien/state-done.svg",
-        AgentState::Working => "yien/state-working.svg",
-        AgentState::Idle => "yien/state-idle.svg",
-    }
-}
-
 pub(crate) const NEEDS_YOU_MARK: &str = "■";
 pub(crate) const ERROR_MARK: &str = "!";
 pub(crate) const DONE_MARK: &str = "●";
@@ -133,20 +122,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_state_has_its_own_embedded_glyph() {
-        let states = [
-            AgentState::NeedsYou,
-            AgentState::Error,
-            AgentState::Done,
-            AgentState::Working,
-            AgentState::Idle,
-        ];
-        let paths: std::collections::HashSet<_> = states.iter().map(|s| state_icon(*s)).collect();
-        for path in &paths {
+    fn every_own_asset_is_an_embedded_svg() {
+        for (path, _) in OWN {
             let bytes = YienAssets.load(path).unwrap().unwrap();
             assert!(bytes.starts_with(b"<svg"), "{path}");
         }
-        assert_eq!(paths.len(), states.len());
+    }
+
+    #[test]
+    fn rn_01_needs_you_and_error_share_the_red_and_differ_by_shape() {
+        use crate::theme::{Theme, ThemeKind};
+        let needs = TabMark::State(AgentState::NeedsYou);
+        let error = TabMark::State(AgentState::Error);
+        assert_eq!(tab_mark_text(needs, 0), NEEDS_YOU_MARK);
+        assert_eq!(tab_mark_text(error, 0), ERROR_MARK);
+        assert_ne!(NEEDS_YOU_MARK, ERROR_MARK);
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            assert_eq!(t.tab_mark_color(needs), t.tab_mark_color(error), "{kind:?}");
+        }
     }
 
     fn tab_mark_text(mark: TabMark, frame: usize) -> &'static str {

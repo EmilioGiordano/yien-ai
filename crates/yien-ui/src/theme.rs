@@ -161,13 +161,12 @@ impl Theme {
         }
     }
 
-    /// The glyph colour of a state in the pane head: red for "needs you" (RN-01).
-    pub(crate) fn state_color(&self, state: AgentState) -> Rgba {
+    /// The colour of a pane head's state word: red for "needs you" and an
+    /// error, told apart by the mark's shape (RN-01), muted otherwise.
+    pub(crate) fn pane_word_color(&self, state: AgentState) -> Rgba {
         match state {
-            AgentState::NeedsYou => self.shu,
-            AgentState::Error => self.ochre,
-            AgentState::Done | AgentState::Working => self.ai,
-            AgentState::Idle => self.faint,
+            AgentState::NeedsYou | AgentState::Error => self.word_red,
+            _ => self.term_muted,
         }
     }
 
@@ -221,7 +220,7 @@ impl Theme {
     }
 
     /// The ring around the region that holds the keyboard (RF-NAV-08).
-    /// Indigo, never red: red means an agent needs the user (RN-01).
+    /// Indigo, never red: red means an agent needs the user or failed (RN-01).
     pub(crate) fn focus_ring(&self) -> Rgba {
         self.ai
     }
@@ -299,6 +298,8 @@ mod tests {
                 ("red words on panel", t.word_red, t.panel),
                 ("red words on raised", t.word_red, t.raised),
                 ("red words on hover", t.word_red, t.hover),
+                ("red words on term bg", t.word_red, t.term_bg),
+                ("red words on term raised", t.word_red, t.term_raised),
                 ("term text on term bg", t.term_text, t.term_bg),
                 ("term muted on term raised", t.term_muted, t.term_raised),
                 ("term faint on term bg", t.term_faint, t.term_bg),
@@ -350,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn rn_01_only_needs_you_and_error_are_red_and_only_needs_you_has_the_bar() {
+    fn rn_01_only_needs_you_and_error_are_red_and_only_needs_you_has_bar_and_border() {
         for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
             let t = Theme::of(kind);
             for state in AgentState::BY_URGENCY {
@@ -363,9 +364,16 @@ mod tests {
                 }
                 let bar = t.tab_row_bar(state);
                 assert_eq!(bar.is_some(), state == AgentState::NeedsYou, "{state:?}");
-                // The pane head keeps red for "needs you" alone.
-                let head_red = t.state_color(state) == t.shu;
-                assert_eq!(head_red, state == AgentState::NeedsYou, "{state:?}");
+                let word = t.pane_word_color(state);
+                assert_eq!(word == t.word_red, red, "{kind:?} {state:?} pane word");
+                if !red {
+                    assert_ne!(word, t.shu, "{kind:?} {state:?}");
+                }
+                for focused in [false, true] {
+                    let (_, border) = t.pane_border(focused, state.needs_you());
+                    let red_border = border == t.shu;
+                    assert_eq!(red_border, state == AgentState::NeedsYou, "{state:?}");
+                }
             }
             assert_ne!(t.tab_mark_color(TabMark::Shell), t.mark_red);
             assert_ne!(t.tab_mark_color(TabMark::Shell), t.shu);
@@ -414,9 +422,10 @@ mod tests {
                 ("red", t.mark_red),
                 ("done", t.mark_done),
                 ("idle", t.mark_idle),
+                ("working", t.mark_dim),
             ];
             for (name, mark) in marks {
-                for bg in [t.panel, t.raised, t.hover] {
+                for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
                     let ratio = contrast(mark, bg);
                     assert!(ratio >= 3.0, "{:?}: {name} is {ratio:.2}:1", t.kind);
                 }
