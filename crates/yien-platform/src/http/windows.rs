@@ -5,16 +5,17 @@
 
 use std::ffi::c_void;
 use std::io::Write;
+use std::ops::ControlFlow;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
 use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP,
-    WINHTTP_OPTION_URL, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle,
-    WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpQueryOption,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-    WinHttpSetTimeouts,
+    WINHTTP_OPTION_REDIRECT_POLICY_NEVER, WINHTTP_OPTION_URL, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpQueryOption, WinHttpReadData,
+    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
 };
 
 use super::{HttpError, Options, Target, final_url_ok, take_chunk};
@@ -59,8 +60,74 @@ pub(super) fn get(
     options: &Options,
     sink: &mut dyn Write,
 ) -> Result<u64, HttpError> {
+    let request = open(target, options, true)?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut written = 0u64;
+    loop {
+        let read = read(&request.request, &mut buffer)?;
+        if read.is_empty() {
+            return Ok(written);
+        }
+        take_chunk(read, &mut written, options.limit, sink)?;
+    }
+}
+
+pub(super) fn get_stream(
+    target: &Target,
+    options: &Options,
+    on_chunk: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+) -> Result<(), HttpError> {
+    let request = open(target, options, false)?;
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        let mut available = 0u32;
+        // SAFETY: `request` is a live request whose response was received;
+        // `available` receives the byte count. In synchronous mode this
+        // waits, up to the receive timeout, until data or the end arrives.
+        check(
+            unsafe { WinHttpQueryDataAvailable(request.request.0, &mut available) },
+            "WinHttpQueryDataAvailable",
+        )?;
+        if available == 0 {
+            return Ok(());
+        }
+        // Reading no more than is available never blocks on the next piece.
+        let want = buffer.len().min(available as usize);
+        let read = read(&request.request, &mut buffer[..want])?;
+        if read.is_empty() {
+            return Ok(());
+        }
+        if on_chunk(read).is_break() {
+            return Ok(());
+        }
+    }
+}
+
+/// Reads the next piece of the body into `buffer`; empty at its end.
+fn read<'a>(request: &Handle, buffer: &'a mut [u8]) -> Result<&'a [u8], HttpError> {
+    let mut read = 0u32;
+    let len = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+    // SAFETY: `buffer` has at least `len` writable bytes and `read`
+    // receives how many WinHTTP wrote.
+    check(
+        unsafe { WinHttpReadData(request.0, buffer.as_mut_ptr().cast(), len, &mut read) },
+        "WinHttpReadData",
+    )?;
+    Ok(buffer.get(..read as usize).unwrap_or_default())
+}
+
+/// A request whose answer was received with a 2xx status. Fields drop in
+/// order, so the request closes before its connection and session.
+struct Request {
+    request: Handle,
+    _connection: Handle,
+    _session: Handle,
+}
+
+/// Sends the request and receives the answer's headers.
+fn open(target: &Target, options: &Options, redirects: bool) -> Result<Request, HttpError> {
     let agent = wide(&options.user_agent);
-    // The loopback test server must not go through a configured proxy.
+    // Loopback servers must not go through a configured proxy.
     let access = if target.secure {
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
     } else {
@@ -78,7 +145,12 @@ pub(super) fn get(
         unsafe { WinHttpSetTimeouts(session.0, ms, ms, ms, ms) },
         "WinHttpSetTimeouts",
     )?;
-    let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    // A stream carries credentials, which a redirect would send on.
+    let policy: u32 = if redirects {
+        WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
+    } else {
+        WINHTTP_OPTION_REDIRECT_POLICY_NEVER
+    };
     // SAFETY: the option takes a u32 by pointer, with its size.
     check(
         unsafe {
@@ -159,29 +231,11 @@ pub(super) fn get(
     if !(200..300).contains(&status) {
         return Err(HttpError::Status(status));
     }
-    let mut buffer = vec![0u8; 64 * 1024];
-    let mut written = 0u64;
-    loop {
-        let mut read = 0u32;
-        // SAFETY: `buffer` has `buffer.len()` writable bytes and `read`
-        // receives how many WinHTTP wrote.
-        check(
-            unsafe {
-                WinHttpReadData(
-                    request.0,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len() as u32,
-                    &mut read,
-                )
-            },
-            "WinHttpReadData",
-        )?;
-        if read == 0 {
-            return Ok(written);
-        }
-        let chunk = buffer.get(..read as usize).unwrap_or(&buffer);
-        take_chunk(chunk, &mut written, options.limit, sink)?;
-    }
+    Ok(Request {
+        request,
+        _connection: connection,
+        _session: session,
+    })
 }
 
 fn status(request: &Handle) -> Result<u32, HttpError> {
