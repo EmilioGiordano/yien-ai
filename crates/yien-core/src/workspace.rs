@@ -70,6 +70,13 @@ pub(crate) enum Effect {
         visible: bool,
         seen: bool,
     },
+    /// The known program running in the shell of the pane's launch number
+    /// `launch` changed, so its actor reads that program's startup screens.
+    Program {
+        pane: PaneId,
+        launch: u64,
+        program: Option<String>,
+    },
 }
 
 /// What a pane actor reports about its pane.
@@ -1197,7 +1204,12 @@ impl Workspace {
                     if p.program.is_some() {
                         p.title = None;
                     }
-                    p.program = program;
+                    p.program.clone_from(&program);
+                    fx.push(Effect::Program {
+                        pane,
+                        launch: p.launch,
+                        program,
+                    });
                     self.emit_pane(pane, &mut fx);
                 }
             }
@@ -1886,6 +1898,37 @@ mod tests {
         assert!(ws.on_pane_event(a, program(0, Some("claude"))).is_empty());
         let fx = ws.on_pane_event(a, program(0, None));
         assert_eq!(named(&fx, a).as_deref(), Some("sh"));
+    }
+
+    /// The program the pane's actor is told about, if any.
+    fn told(fx: &[Effect], pane: PaneId) -> Option<(u64, Option<String>)> {
+        fx.iter().find_map(|e| match e {
+            Effect::Program {
+                pane: p,
+                launch,
+                program,
+            } if *p == pane => Some((*launch, program.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn rf_age_05_the_pane_actor_is_told_each_change_of_the_detected_program() {
+        let mut ws = Workspace::new();
+        let (_, a) = project(&mut ws);
+        ws.on_pane_event(a, PaneEvent::Started);
+        let fx = ws.on_pane_event(a, program(0, Some("codex")));
+        assert_eq!(told(&fx, a), Some((0, Some("codex".to_owned()))));
+        let fx = ws.on_pane_event(a, program(0, Some("codex")));
+        assert_eq!(told(&fx, a), None, "only a change");
+        let fx = ws.on_pane_event(a, program(0, None));
+        assert_eq!(told(&fx, a), Some((0, None)));
+        run(&mut ws, Command::RelaunchPane { pane: a });
+        ws.on_pane_event(a, PaneEvent::Started);
+        let fx = ws.on_pane_event(a, program(0, Some("claude")));
+        assert_eq!(told(&fx, a), None, "a report of the launch before");
+        let fx = ws.on_pane_event(a, program(1, Some("claude")));
+        assert_eq!(told(&fx, a), Some((1, Some("claude".to_owned()))));
     }
 
     #[test]
