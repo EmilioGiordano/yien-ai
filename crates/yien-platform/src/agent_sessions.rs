@@ -221,7 +221,7 @@ fn unix_ms(time: SystemTime) -> u64 {
 
 /// Opens `path` for reading only, letting others read, write, delete and
 /// rename it meanwhile.
-fn open_shared(path: &Path) -> io::Result<File> {
+pub(crate) fn open_shared(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
