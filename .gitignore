@@ -18,3 +18,6 @@ REPORT-*.md
 
 # Machine-specific paths (see .yien-local.example)
 /.yien-local
+
+# Release notes drafts, used as the GitHub release body
+/RELEASE-NOTES-*.md
