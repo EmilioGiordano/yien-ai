@@ -143,7 +143,8 @@ pub(super) fn live_hints(keymap: &Keymap) -> Vec<String> {
 }
 
 /// A notice replaces the hints while it shows, so it is never squeezed out
-/// by them; an error differs by weight, never by red (RN-01).
+/// by them; an error notice differs by weight, never by red, which belongs
+/// to the agent states "needs you" and "error" (RN-01).
 pub(super) fn line(notice: Option<&Notice>, hints: &[String]) -> Option<Line> {
     match notice {
         Some(notice) => Some(Line::Notice {
