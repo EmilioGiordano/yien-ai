@@ -28,7 +28,7 @@ use crate::worktree::Question;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AgentState {
-    /// Waiting for the user: a permission, a question. The only red state (RN-01).
+    /// Waiting for the user: a permission, a question. The only state with the red bar (RN-01).
     NeedsYou,
     /// The program stopped with an error.
     Error,
@@ -1711,6 +1711,31 @@ mod tests {
         assert!(view.pane_state(PaneId::new(301), P::Idle));
         assert_eq!(mark(&view, 30), TabMark::Shell);
         assert_ne!(t.tab_mark_color(mark(&view, 30)), t.mark_red);
+    }
+
+    #[test]
+    fn rn_01_an_error_marks_its_tab_red_without_the_bar() {
+        let failed = P::Error(yien_proto::ErrorReason::TurnFailed);
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        let state = |v: &WorkspaceView, id| v.tab_state(v.tab(TabId::new(id)).unwrap());
+        for kind in [
+            crate::theme::ThemeKind::Sumi,
+            crate::theme::ThemeKind::Washi,
+        ] {
+            let t = crate::theme::Theme::of(kind);
+            let mut view = demo();
+            assert!(view.pane_state(PaneId::new(110), failed));
+            assert_eq!(mark(&view, 11), TabMark::State(AgentState::Error));
+            assert_eq!(t.tab_mark_color(mark(&view, 11)), t.mark_red, "{kind:?}");
+            assert_eq!(t.tab_row_bar(state(&view, 11)), None, "{kind:?}");
+            assert_eq!(view.needs_you_tabs(), 1, "an error is not counted");
+
+            // "Needs you" outranks the error and brings the bar.
+            view.tab_updated(&tab(11, 1, &[110, 111]));
+            view.pane_updated(&pane(111, 11, NEEDS));
+            assert_eq!(mark(&view, 11), TabMark::State(AgentState::NeedsYou));
+            assert_eq!(t.tab_row_bar(state(&view, 11)), Some(t.shu), "{kind:?}");
+        }
     }
 
     #[test]
