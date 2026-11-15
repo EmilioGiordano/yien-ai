@@ -678,6 +678,32 @@ impl Profile {
             verified: false,
         }
     }
+
+    /// The screen rules that read this agent's startup screens when it was
+    /// typed in a shell ([`crate::Signal::TypedAgent`]): those of the rule
+    /// [`Profile::select_rule`] picks for an unknown version, as a pane of
+    /// the profile runs it. Empty unless that rule reads startup screens and
+    /// reports over OSC 7501, the only record a shell pane hears that ends
+    /// them.
+    ///
+    /// ```
+    /// let profiles = yien_agent::builtin_profiles().unwrap();
+    /// let screens = |id: &str| {
+    ///     let profile = profiles.iter().find(|p| p.id == id).unwrap();
+    ///     profile.typed_startup_screens().len()
+    /// };
+    /// assert!(screens("codex") > 0);
+    /// assert_eq!(screens("opencode"), 0);
+    /// ```
+    pub fn typed_startup_screens(&self) -> &[ScreenRule] {
+        let rule = self.select_rule(None).rule;
+        let config = rule.machine_config();
+        if config.reads_startup_screens() && config.declares(Source::Osc7501) {
+            &rule.screen
+        } else {
+            &[]
+        }
+    }
 }
 
 fn lower_bound(rule: &Rule) -> Option<Version> {
