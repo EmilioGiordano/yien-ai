@@ -161,6 +161,9 @@ actions!(
         /// names, the home folder by default, adding it as a project when it
         /// is not one (RF-ESP-01, RF-ESP-03).
         NewDefaultTab,
+        /// Lists the installed shells and the agent profiles to open a tab
+        /// in the selected tab's project with one of them (RF-ESP-03).
+        NewTabMenu,
         /// Opens a tab with Claude Code in the selected tab's project
         /// (RF-PAN-18).
         NewClaudeTab,

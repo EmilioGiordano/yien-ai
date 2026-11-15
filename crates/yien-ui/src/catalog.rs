@@ -183,6 +183,7 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         NewClaudeTab,
         ["ctrl-shift-a"]
     ),
+    command!("tab.new_menu", "tab: new tab with…", NewTabMenu, []),
     command!(
         "tab.new_worktree",
         "tab: new worktree tab…",

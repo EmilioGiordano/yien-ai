@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
     LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
-    ProjectInfo, SHELL_PROFILE, SessionTitle, TabGit, TabId, TabInfo, same_folder,
+    ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile, same_folder,
 };
 
 use crate::layout::{Rect, pane_rects};
@@ -231,7 +231,7 @@ impl PaneView {
     /// assert!(claude.is_busy());
     /// ```
     pub fn is_busy(&self) -> bool {
-        let agent = self.profile_id.as_str() != SHELL_PROFILE;
+        let agent = !is_shell_profile(self.profile_id.as_str());
         let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
         active || (self.running && agent) || self.runs_typed_agent()
     }
@@ -261,7 +261,7 @@ pub(crate) enum TabMark {
 /// Whether `pane` runs a shell and no agent, typed in it or not. A pane whose
 /// profile is not known yet is not one.
 pub(crate) fn is_shell_pane(pane: &PaneView) -> bool {
-    pane.profile_id.as_str() == SHELL_PROFILE && !pane.runs_typed_agent()
+    is_shell_profile(pane.profile_id.as_str()) && !pane.runs_typed_agent()
 }
 
 /// The next step of closing a tab or a pane (RF-ESP-03, RF-ESP-07).
@@ -1159,7 +1159,7 @@ impl WorkspaceView {
         self.all_panes()
             .into_iter()
             .map(|p| self.pane(p))
-            .filter(|p| p.state == AgentState::Working && p.profile_id.as_str() == SHELL_PROFILE)
+            .filter(|p| p.state == AgentState::Working && is_shell_profile(p.profile_id.as_str()))
             .count()
     }
 
@@ -1693,6 +1693,21 @@ mod tests {
         unknown.profile_id = yien_proto::ProfileId::new("");
         view.pane_updated(&unknown);
         assert_eq!(mark(&view, 30), TabMark::State(AgentState::Idle));
+    }
+
+    #[test]
+    fn rf_pan_18_a_pane_started_on_a_chosen_shell_is_a_shell() {
+        let mut view = demo();
+        let mark = |v: &WorkspaceView, id| v.tab_mark(v.tab(TabId::new(id)).unwrap());
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&pane(300, 30, P::Idle));
+        for kind in yien_proto::ShellKind::ALL {
+            let mut chosen = pane(301, 30, P::Idle);
+            chosen.profile_id = kind.profile();
+            view.pane_updated(&chosen);
+            assert_eq!(mark(&view, 30), TabMark::Shell, "{kind:?}");
+            assert!(!view.pane(PaneId::new(301)).is_busy(), "{kind:?}");
+        }
     }
 
     #[test]

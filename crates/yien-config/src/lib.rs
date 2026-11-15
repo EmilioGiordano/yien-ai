@@ -73,6 +73,34 @@ pub enum TabGrouping {
     State,
 }
 
+/// The shell new tabs and plain shell panes run (`terminal.shell`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShellSetting {
+    /// YIEN's own pick: PowerShell 7 when it is installed, else Windows
+    /// PowerShell, else cmd.
+    #[default]
+    Auto,
+    /// `cmd.exe`.
+    Cmd,
+    /// Windows PowerShell 5.1.
+    PowerShell,
+    /// PowerShell 7.
+    Pwsh,
+    /// Git for Windows' bash.
+    GitBash,
+}
+
+impl ShellSetting {
+    /// Every value and how the file writes it.
+    pub const NAMES: [(Self, &'static str); 5] = [
+        (Self::Auto, "auto"),
+        (Self::Cmd, "cmd"),
+        (Self::PowerShell, "powershell"),
+        (Self::Pwsh, "pwsh"),
+        (Self::GitBash, "git-bash"),
+    ];
+}
+
 /// One font role: a family and a size in logical pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontSetting {
@@ -124,7 +152,10 @@ pub struct Config {
     /// opens a shell in, as written; `None` for the user's home folder.
     /// [`expand_dir`] turns it into a path.
     pub default_tab_dir: Option<String>,
-    /// `terminal.shell_integration`: PowerShell and cmd report their folder
+    /// `terminal.shell`: the shell new tabs and plain shell panes run
+    /// (RF-ESP-03). Applies to panes started after a change.
+    pub shell: ShellSetting,
+    /// `terminal.shell_integration`: PowerShell, cmd and Git Bash report their folder
     /// at each prompt, so a restored pane opens where the user left it
     /// (RF-SES-01). Applies to panes started after a change.
     pub shell_integration: bool,
@@ -147,6 +178,7 @@ impl Default for Config {
             editor: None,
             tab_grouping: TabGrouping::default(),
             default_tab_dir: None,
+            shell: ShellSetting::Auto,
             shell_integration: true,
             osc52_copy: true,
             update_check: true,

@@ -9,7 +9,7 @@ use toml::de::{DeTable, DeValue};
 use crate::schema::{self, KEYS_TABLE, TABLES};
 use crate::{
     KeyOverride, Loaded, MAX_FILE_BYTES, MAX_FONT_SIZE, MAX_UI_FONT_SIZE, MIN_FONT_SIZE, Problem,
-    TabGrouping, ThemeSetting,
+    ShellSetting, TabGrouping, ThemeSetting,
 };
 
 /// Parses and checks the file. An `Err` is the first problem that makes the
@@ -128,6 +128,28 @@ impl Walk<'_> {
             }
             "terminal.font.family" => {
                 self.loaded.config.terminal_font.family = non_empty(self.string(path, value)?);
+            }
+            "terminal.shell" => {
+                let name = self.string(path, value)?;
+                let found = ShellSetting::NAMES
+                    .iter()
+                    .find(|(_, n)| n.eq_ignore_ascii_case(name.trim()));
+                self.loaded.config.shell = match found {
+                    Some((setting, _)) => *setting,
+                    None => {
+                        let names: Vec<String> = ShellSetting::NAMES
+                            .iter()
+                            .map(|(_, n)| format!("\"{n}\""))
+                            .collect();
+                        return Err(self.problem(
+                            value.span(),
+                            format!(
+                                "terminal.shell must be one of {}, not \"{name}\"",
+                                names.join(", ")
+                            ),
+                        ));
+                    }
+                };
             }
             "terminal.shell_integration" => {
                 self.loaded.config.shell_integration = self.boolean(path, value)?;
@@ -407,6 +429,43 @@ group = \"project\"")
         let p = err("update.check = 1\n");
         assert!(
             p.message.contains("update.check must be true or false"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn rf_cfg_01_terminal_shell_is_auto_unless_set() {
+        assert_eq!(ok("").config.shell, ShellSetting::Auto);
+        for (setting, name) in ShellSetting::NAMES {
+            let loaded = ok(&format!("terminal.shell = \"{name}\""));
+            assert_eq!(loaded.config.shell, setting, "{name}");
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+        assert_eq!(
+            ok("[terminal]\nshell = \"Git-Bash\"").config.shell,
+            ShellSetting::GitBash,
+            "case does not matter"
+        );
+        assert_eq!(
+            ok("terminal.shell = \" cmd \"").config.shell,
+            ShellSetting::Cmd
+        );
+    }
+
+    #[test]
+    fn rf_cfg_01_an_unknown_shell_names_its_line_and_the_choices() {
+        let p = err("theme = \"sumi\"\n[terminal]\nshell = \"wsl\"\n");
+        assert_eq!((p.line, p.column), (3, 9));
+        assert_eq!(
+            p.message,
+            "terminal.shell must be one of \"auto\", \"cmd\", \"powershell\", \"pwsh\", \
+             \"git-bash\", not \"wsl\""
+        );
+        let p = err("\nterminal.shell = true\n");
+        assert_eq!(p.line, 2);
+        assert!(
+            p.message
+                .contains("terminal.shell must be a string, not boolean"),
             "{p}"
         );
     }
