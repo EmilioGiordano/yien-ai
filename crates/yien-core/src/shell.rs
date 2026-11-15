@@ -91,6 +91,11 @@ const POWERSHELL_HOOK: &str = "if ($function:prompt) { \
 /// cmd's prompt codes for the same report: `$E` is ESC, `$P` the folder.
 const CMD_CWD_PROMPT: &str = "$E]9;9;\"$P\"$E\\";
 
+/// cmd's prompt start mark (OSC 133 A). It only ends a working turn, which
+/// cmd never starts, and lets the terminal drop keyboard flags a killed
+/// program left behind.
+const CMD_PROMPT_MARK: &str = "$E]133;A$E\\";
+
 /// cmd's own prompt when `PROMPT` is not set.
 const CMD_DEFAULT_PROMPT: &str = "$P$G";
 
@@ -117,8 +122,9 @@ impl ShellCommand {
     /// command that wraps the prompt its profile left; the profile still
     /// loads. PowerShell also marks each command's start and end with
     /// OSC 133, so its pane is working while one runs (RF-AGE-05); cmd
-    /// cannot tell a command starts. cmd gets the report in front of
-    /// `inherited_prompt`, the `PROMPT` it would have used. A shell with arguments of its own, or
+    /// cannot tell a command starts. cmd gets the report and a prompt start
+    /// mark in front of `inherited_prompt`, the `PROMPT` it would have used.
+    /// A shell with arguments of its own, or
     /// any other shell, is returned unchanged. Nothing is written to disk.
     ///
     /// ```
@@ -142,15 +148,17 @@ impl ShellCommand {
                     .to_vec();
             }
             "cmd" => {
-                let own = inherited_prompt
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or(CMD_DEFAULT_PROMPT);
-                // A YIEN started from a YIEN pane inherits the report already.
-                let prompt = if own.starts_with(CMD_CWD_PROMPT) {
-                    own.to_owned()
+                // A YIEN started from a YIEN pane inherits the report already,
+                // with or without the mark (older YIENs sent none).
+                let own = inherited_prompt.unwrap_or_default();
+                let own = own.strip_prefix(CMD_CWD_PROMPT).unwrap_or(own);
+                let own = own.strip_prefix(CMD_PROMPT_MARK).unwrap_or(own);
+                let own = if own.is_empty() {
+                    CMD_DEFAULT_PROMPT
                 } else {
-                    format!("{CMD_CWD_PROMPT}{own}")
+                    own
                 };
+                let prompt = format!("{CMD_CWD_PROMPT}{CMD_PROMPT_MARK}{own}");
                 self.env.push(("PROMPT".to_owned(), prompt));
             }
             _ => {}
@@ -321,11 +329,17 @@ mod tests {
         assert!(cmd.args.is_empty());
         assert_eq!(
             cmd.env,
-            [("PROMPT".to_owned(), "$E]9;9;\"$P\"$E\\$P$G".to_owned())]
+            [(
+                "PROMPT".to_owned(),
+                "$E]9;9;\"$P\"$E\\$E]133;A$E\\$P$G".to_owned()
+            )]
         );
         let custom = ShellCommand::new("C:/Windows/System32/CMD.EXE")
             .reporting_cwd(Some("$T $P [it's \"mine\"]$G"));
-        assert_eq!(custom.env[0].1, "$E]9;9;\"$P\"$E\\$T $P [it's \"mine\"]$G");
+        assert_eq!(
+            custom.env[0].1,
+            "$E]9;9;\"$P\"$E\\$E]133;A$E\\$T $P [it's \"mine\"]$G"
+        );
         let empty = ShellCommand::new("cmd.exe").reporting_cwd(Some(""));
         assert!(empty.env[0].1.ends_with("$E\\$P$G"));
     }
@@ -337,6 +351,60 @@ mod tests {
         let inner = ShellCommand::new("cmd.exe").reporting_cwd(Some(&inherited));
         assert_eq!(inner.env[0].1, inherited);
         assert_eq!(inherited.matches("]9;9;").count(), 1);
+        assert_eq!(inherited.matches("]133;A").count(), 1);
+        // From a YIEN that sent the report without the mark.
+        let older = ShellCommand::new("cmd.exe").reporting_cwd(Some("$E]9;9;\"$P\"$E\\$T$G"));
+        assert_eq!(older.env[0].1, inherited);
+        // A prompt that was only the report keeps cmd's own after it.
+        let bare = ShellCommand::new("cmd.exe").reporting_cwd(Some("$E]9;9;\"$P\"$E\\"));
+        assert!(bare.env[0].1.ends_with("$E]133;A$E\\$P$G"));
+    }
+
+    /// cmd's prompt as it prints it in `C:\x`, twice: `$E` is ESC.
+    fn cmd_prompt_output() -> Vec<u8> {
+        let shell = ShellCommand::new("cmd.exe").reporting_cwd(None);
+        let once = shell.env[0]
+            .1
+            .replace("$E", "\x1b")
+            .replace("$P", "C:\\x")
+            .replace("$G", ">");
+        format!("{once}dir\r\n listing\r\n{once}").into_bytes()
+    }
+
+    #[test]
+    fn rf_age_02_cmd_marks_each_prompt_start() {
+        let found = yien_vt::osc_scan::OscScanner::new().scan(&cmd_prompt_output());
+        let starts = found
+            .iter()
+            .filter(|s| **s == yien_vt::OscSignal::Prompt(yien_vt::PromptMark::PromptStart))
+            .count();
+        assert_eq!(starts, 2);
+    }
+
+    #[test]
+    fn rf_age_05_the_cmd_prompt_mark_leaves_a_shell_pane_idle() {
+        use yien_agent::{AgentState, Effect, Machine, MachineConfig, Signal, Source};
+        let now = std::time::Duration::ZERO;
+        let mut machine = Machine::new(MachineConfig::new(&[Source::Osc133], None));
+        machine = machine.step(&Signal::Spawned, now).0;
+        for seen in [false, true] {
+            machine = machine.step(&Signal::Seen(seen), now).0;
+            for found in yien_vt::osc_scan::OscScanner::new().scan(&cmd_prompt_output()) {
+                let Some(osc) = crate::convert::osc_signal(&found) else {
+                    continue;
+                };
+                let (next, effects) = machine.step(&Signal::Osc(osc), now);
+                machine = next;
+                assert!(
+                    !effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::Transition { .. })),
+                    "{effects:?}"
+                );
+            }
+            assert_eq!(machine.state(), AgentState::Idle);
+            assert!(!machine.signal_lost());
+        }
     }
 
     #[test]

@@ -18,15 +18,16 @@ use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{AgentState, ClientMsg, CoreMsg, InputBytes, PaneId, PendingQuestion};
 use yien_pty::{PtyControl, PtyError, PtyEvent};
 use yien_vt::{
-    AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, TitleChange, VtConfig, VtEngine,
-    VtOutput,
+    AlacrittyEngine, DUMP_END, Palette, SYNC_UPDATE_TIMEOUT, VtConfig, VtEngine, VtOutput,
 };
 
 use crate::convert;
-use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::launch::{self, Fill, HookFill, LaunchPlan, SHELL_PROFILE};
+use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
 use crate::service::{Ctx, HookItem};
+use crate::titles::Titles;
 use crate::workspace::PaneEvent;
 
 /// How soon a write refused by a full input queue is tried again. Nothing
@@ -272,6 +273,8 @@ struct Session {
     control: PtyControl,
     reader: mpsc::Receiver<ReaderMsg>,
     exited: bool,
+    /// Its shell is looked under for a known program while it runs.
+    watched: Option<Watched>,
 }
 
 pub(crate) struct PaneSetup {
@@ -470,6 +473,8 @@ struct Actor {
     /// The restored line's row from the top of the scrollback, while this
     /// launch's screen starts with a restored one.
     restored_mark: Option<usize>,
+    /// The launch's terminal title and who set it.
+    titles: Titles,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -538,6 +543,7 @@ pub(crate) fn spawn(
         screen: setup.screen,
         restored: setup.restored,
         restored_mark: None,
+        titles: Titles::new(false),
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -816,10 +822,16 @@ impl Actor {
             ));
             return;
         }
+        let watched = control
+            .pid()
+            .filter(|_| runs_shell(&self.plan))
+            .map(|pid| self.ctx.shells.watch(self.id, pid, self.launch));
+        self.titles = Titles::new(runs_shell(&self.plan));
         self.session = Some(Session {
             control,
             reader,
             exited: false,
+            watched,
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
@@ -1035,6 +1047,7 @@ impl Actor {
             ReaderMsg::Exited(code) => {
                 if let Some(s) = &mut self.session {
                     s.exited = true;
+                    s.watched = None;
                 }
                 if let Some(failure) = self.resume_failure(code) {
                     self.failed_resume = Some(failure);
@@ -1149,11 +1162,8 @@ impl Actor {
         if let Some(len) = out.selection_write_refused {
             tracing::debug!(pane = self.id.get(), len, "primary selection write refused");
         }
-        if let Some(title) = out.title {
-            self.report(PaneEvent::Title(match title {
-                TitleChange::Set(t) => Some(t),
-                TitleChange::Reset => None,
-            }));
+        if let Some((title, from)) = self.titles.absorb(&out.signals, out.title.as_ref()) {
+            self.report(PaneEvent::Title(title, from));
         }
         for signal in &out.signals {
             if let yien_vt::OscSignal::Cwd(dir) = signal {
@@ -1351,6 +1361,13 @@ impl Actor {
     }
 }
 
+/// Whether a launch of `plan` runs a shell the user may type an agent CLI
+/// in. An agent profile's own program is not looked under: its tools would
+/// count as programs the user ran.
+fn runs_shell(plan: &LaunchPlan) -> bool {
+    plan.profile == SHELL_PROFILE
+}
+
 /// Longest panic message logged, in chars. Messages can quote runtime
 /// strings, so they are capped to limit what reaches the log (plan §5.4).
 const MAX_PANIC_CHARS: usize = 200;
@@ -1502,6 +1519,20 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_12_only_a_shell_is_looked_under_for_a_program() {
+        let config = crate::CoreConfig::default();
+        let resolve = |id: Option<&str>| {
+            let id = id.map(yien_proto::ProfileId::new);
+            launch::resolve(id.as_ref(), &config.profiles, &config.shell).unwrap()
+        };
+        assert!(runs_shell(&resolve(None)));
+        assert!(runs_shell(&resolve(Some(SHELL_PROFILE))));
+        for agent in ["claude", "codex", "opencode"] {
+            assert!(!runs_shell(&resolve(Some(agent))), "{agent}");
+        }
+    }
+
+    #[test]
     fn rf_pan_09_a_clipboard_write_over_one_mebibyte_is_dropped() {
         let at_limit = "a".repeat(MAX_CLIPBOARD_BYTES);
         assert_eq!(clipboard_text(at_limit.clone()), Ok(at_limit));
@@ -1618,6 +1649,7 @@ mod tests {
                 ui_size: Arc::new(watch::Sender::new(None)),
                 consoles: Arc::default(),
                 clipboards: Arc::default(),
+                shells: Arc::default(),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);

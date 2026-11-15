@@ -193,6 +193,7 @@ impl Shell {
         };
         // Dropped first, so its blur cannot close the menu opened now.
         self.menu = None;
+        self.tab_menu.forget();
         let maximized = tab.maximized == Some(pane);
         let alone = tab.layout.panes().len() == 1;
         let focused = tab.focused == pane;
@@ -429,6 +430,7 @@ mod tests {
             id: PaneId::new(1),
             name: "claude".into(),
             profile: "Claude Code".into(),
+            title: None,
             cwd: None,
             profile_id: ProfileId::new("claude"),
             state: AgentState::Idle,

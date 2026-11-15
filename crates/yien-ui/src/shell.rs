@@ -29,17 +29,18 @@ use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
 use crate::git::{ContextGit, FileMark};
+use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView, folder_label,
+    AgentState, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView, folder_label,
     frames_to_take, typed_tab_name,
 };
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, program_tag, runs_agent};
+use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, program_tag};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
@@ -58,9 +59,11 @@ mod files;
 mod menu;
 mod pane_menu;
 mod settings;
+mod spinner;
 mod status;
 mod tab_controls;
 mod tab_drag;
+mod tab_menu;
 mod tray;
 mod update;
 mod worktrees;
@@ -69,8 +72,10 @@ mod zoom;
 use dividers::{DividerGrab, PaneArea};
 use files::{ContextView, FilesPanel};
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
+use spinner::Spinner;
 use status::{Line, Notice};
 use tab_drag::{RowMark, TabDragState};
+use tab_menu::TabMenuState;
 use tray::Tray;
 
 /// The palette's width and its gap below the window top, as the prototype's.
@@ -97,6 +102,8 @@ const CLAUDE_PROFILE: &str = "claude";
 const PANE_FOLDER_CHARS: usize = 48;
 const SIGNAL_LOST: &str = "signal lost";
 const SHELL_NAME_SHRINK: f32 = 1000.0;
+/// A session title gives way before the agent's tag.
+const TITLE_SHRINK: f32 = 1000.0;
 
 pub(crate) struct Shell {
     workspace: WorkspaceView,
@@ -162,6 +169,8 @@ pub(crate) struct Shell {
     menu: Option<PaneMenu>,
     /// The menu a mouse-down outside it just closed, and when.
     menu_closed_at: Option<(PaneMenuKey, Instant)>,
+    /// The tab menu, while open (RF-ESP-16).
+    tab_menu: TabMenuState,
     /// Where each pane head was painted, for the menu opened by keyboard.
     pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
     /// The user's home folder, which pane heads show as `~`.
@@ -214,6 +223,8 @@ pub(crate) struct Shell {
     divider_focus: FocusHandle,
     divider_cursor: Option<DividerKey>,
     pane_area: PaneArea,
+    /// The working tab rows' spinner.
+    spinner: Spinner,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -323,6 +334,9 @@ impl Shell {
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
         });
+        let visibility = cx.observe_window_visibility(window, |shell, _, window, cx| {
+            shell.keep_spinning(window, cx);
+        });
         // Before any binding: Escape must end a tab drag without reaching
         // the pane, where it would interrupt the agent.
         let shell = cx.weak_entity();
@@ -381,6 +395,7 @@ impl Shell {
             menu_closed: None,
             menu: None,
             menu_closed_at: None,
+            tab_menu: TabMenuState::default(),
             pane_heads: Rc::default(),
             home: home_folder(),
             palette: None,
@@ -405,7 +420,8 @@ impl Shell {
             divider_focus: cx.focus_handle(),
             divider_cursor: None,
             pane_area: PaneArea::default(),
-            _subscriptions: vec![activation, appearance, escape],
+            spinner: Spinner::default(),
+            _subscriptions: vec![activation, appearance, visibility, escape],
         };
         shell.profiles_notice = profiles_notice(&settings.profile_problems);
         if let Some(text) = shell.profiles_notice.clone() {
@@ -638,6 +654,18 @@ impl Shell {
             self.terminal_events.insert(pane, events);
             self.terminals.insert(pane, view);
         }
+        self.sync_key_quirks(cx);
+    }
+
+    /// Each pane's key quirks follow the program its head names, which
+    /// changes after the view exists: details arrive, a program starts or ends.
+    fn sync_key_quirks(&self, cx: &mut Context<Self>) {
+        for (&pane, terminal) in &self.terminals {
+            let quirks = pane_key_quirks(&self.workspace.pane(pane));
+            if terminal.read(cx).quirks() != quirks {
+                terminal.update(cx, |t, _| t.set_quirks(quirks));
+            }
+        }
     }
 
     /// A question about a project that is gone no longer applies.
@@ -662,12 +690,14 @@ impl Shell {
         }
         self.drop_stale_worktree_question(window, cx);
         self.drop_stale_menu(window, cx);
+        self.drop_stale_tab_menu(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
         self.palette.is_some()
             || self.menu.is_some()
+            || self.tab_menu.is_open()
             || self.tray.is_some()
             || self.confirm.is_some()
             || self.renaming.is_some()
@@ -740,9 +770,10 @@ impl Shell {
                     }
                 });
                 // Wherever the button comes up, a tab drag ends there.
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(window, cx));
+                        let clicks = event.click_count;
+                        let _ = shell.update(cx, |this, cx| this.end_tab_drag(clicks, window, cx));
                     }
                 });
             },
@@ -2528,6 +2559,7 @@ impl Shell {
             }))
             .when(draggable, |row| self.draggable_row(row, tab, cx))
             .when(drop_target, |row| self.drop_target_row(row, tab, cx))
+            .map(|row| self.tab_menu_row(row, id, cx))
             .when(mark == Some(RowMark::Dragged), |row| row.opacity(0.45))
             .when_some(mark.filter(|m| *m != RowMark::Dragged), |row, mark| {
                 row.child(drop_line(mark == RowMark::LineAbove, &t))
@@ -2536,7 +2568,7 @@ impl Shell {
                 h_flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(glyph(state, &t))
+                    .child(self.tab_mark(self.workspace.tab_mark(tab)))
                     .when_some(project, |row, project| {
                         row.child(
                             div()
@@ -2573,7 +2605,7 @@ impl Shell {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(t.label_color(state))
+                                .text_color(t.tab_mark_color(TabMark::State(state)))
                                 .child(state.label()),
                         )
                         .child(
@@ -2601,6 +2633,23 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    /// A tab row's mark: a mono glyph in its 14 px slot, the spinner's frame
+    /// while it works. No id, so screen readers hear the row's state word,
+    /// never the frames.
+    fn tab_mark(&self, mark: TabMark) -> Div {
+        let t = self.theme;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(14.0))
+            .text_size(t.text(12.0))
+            .text_color(t.tab_mark_color(mark))
+            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+            .child(assets::tab_mark_text(mark, self.spinner.frame()))
     }
 
     /// The tab's name, or the field editing it.
@@ -2782,7 +2831,8 @@ impl Shell {
             name: &pane.name,
             profile: &pane.profile,
             tag,
-            agent: runs_agent(pane),
+            agent: names_agent(pane),
+            title: pane.title.as_ref(),
             folder_lead: &folder_shown.lead,
             folder_last: &folder_shown.last,
             state: pane.state.label(),
@@ -2834,6 +2884,11 @@ impl Shell {
                 h.child(primary(pane.name.clone()))
             })
             .child(who)
+            .when_some(text.title.filter(|_| shows.title), |h, title| {
+                let mut title = words(title.as_str().to_owned()).text_color(t.term_text);
+                title.style().flex_shrink = Some(TITLE_SHRINK);
+                h.child(title)
+            })
             .when(!separate && shows.profile, |h| {
                 h.child(words(pane.profile.clone()))
             })
@@ -2957,6 +3012,9 @@ impl Shell {
         let mut pane_label = format!("{} pane", pane.name);
         if separate {
             pane_label.push_str(&format!(", {tag}"));
+        }
+        if let Some(title) = text.title {
+            pane_label.push_str(&format!(", {}", title.as_str()));
         }
         pane_label.push_str(&format!(", {}", pane.state.label()));
         if pane.signal_lost && !shows.signal_lost {
@@ -3525,6 +3583,7 @@ impl Render for Shell {
         self.forget_ended_tab_drag(cx);
         self.finish_divider_drag(cx);
         self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
+        self.keep_spinning(window, cx);
         let t = self.theme;
         v_flex()
             .key_context(CONTEXT)
@@ -3604,6 +3663,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::tab_bar_down))
             .on_action(cx.listener(Self::tab_bar_select))
             .on_action(cx.listener(Self::tab_bar_leave))
+            .on_action(cx.listener(Self::tab_bar_menu))
             .on_action(cx.listener(Self::dismiss_notice))
             .on_action(cx.listener(Self::context_bar_leave))
             .on_action(cx.listener(Self::divider_left))
@@ -3658,6 +3718,7 @@ impl Render for Shell {
             .children(self.render_worktree_prompt(cx))
             .children(self.render_worktree_close(cx))
             .children(self.render_menu(cx))
+            .children(self.render_tab_menu(cx))
             .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))
     }
