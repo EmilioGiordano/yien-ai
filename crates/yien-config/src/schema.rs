@@ -63,11 +63,11 @@ pub const SCHEMA: &[Setting] = &[
     Setting {
         key: "terminal.shell",
         default: "\"auto\"",
-        doc: "The shell new tabs and panes run: \"auto\" (PowerShell 7 if installed, else \
-              Windows PowerShell), \"cmd\", \"powershell\" (Windows PowerShell), \"pwsh\" \
-              (PowerShell 7) or \"git-bash\". A shell that is not installed gives a notice \
-              and the auto pick. The split menu and the palette start any installed shell \
-              in one pane. A change applies to panes started after it. Windows only; \
+        doc: "The shell new tabs and panes run: \"auto\" (PowerShell 7 when pwsh is on \
+              PATH, else Windows PowerShell, else cmd), \"cmd\", \"powershell\" (Windows \
+              PowerShell), \"pwsh\" (PowerShell 7) or \"git-bash\". A shell that is not \
+              installed gives a notice and the auto pick. The split menu, the new tab menu \
+              and the palette start any installed shell in one pane. A change applies to panes started after it. Windows only; \
               elsewhere panes run $SHELL.",
     },
     Setting {
