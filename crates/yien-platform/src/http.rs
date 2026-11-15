@@ -293,6 +293,13 @@ mod tests {
                 }
                 seen.push(String::from_utf8_lossy(&request).into_owned());
                 stream.write_all(&response).unwrap();
+                // Close only after the client has: dropping the stream first
+                // races WinHTTP's read of the answer (error 12030 or 12152).
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                while matches!(stream.read(&mut byte), Ok(n) if n > 0) {}
             }
             seen
         });
