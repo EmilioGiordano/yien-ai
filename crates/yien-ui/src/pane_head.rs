@@ -4,12 +4,15 @@
 
 use yien_proto::{SessionTitle, is_shell_profile};
 
+use crate::agent_badge::AgentBadge;
 use crate::model::PaneView;
 
 /// The head's own horizontal padding, each side.
 pub(crate) const PADDING: f32 = 8.0;
 pub(crate) const GAP: f32 = 8.0;
-pub(crate) const GLYPH: f32 = 14.0;
+/// The slot of the head's first piece: the agent's badge with the state in
+/// its corner, or the state mark alone, the same width either way.
+pub(crate) const GLYPH: f32 = crate::agent_badge::SIDE;
 pub(crate) const BUTTON: f32 = 20.0;
 /// The text size of the name, profile and state label, and of the folder.
 pub(crate) const TEXT_SIZE: f32 = 12.5;
@@ -51,6 +54,25 @@ pub(crate) fn runs_agent(pane: &PaneView) -> bool {
 /// last: an agent profile's program, or an agent CLI typed in a shell.
 pub(crate) fn names_agent(pane: &PaneView) -> bool {
     runs_agent(pane) || pane.runs_typed_agent()
+}
+
+/// The badge of the agent CLI `pane` runs, from what [`program_tag`] names:
+/// an agent profile's program or an agent CLI typed in a shell. A shell, a
+/// stand-in shell or another program has none.
+///
+/// ```ignore
+/// assert_eq!(agent_badge(&claude_pane), Some(AgentBadge::Claude));
+/// ```
+pub(crate) fn agent_badge(pane: &PaneView) -> Option<AgentBadge> {
+    if !names_agent(pane) {
+        return None;
+    }
+    match program_tag(pane) {
+        "claude" => Some(AgentBadge::Claude),
+        "codex" => Some(AgentBadge::Codex),
+        "opencode" => Some(AgentBadge::OpenCode),
+        _ => None,
+    }
 }
 
 /// The text a pane head may show, as it would read in full.
@@ -214,8 +236,10 @@ mod tests {
     use yien_proto::{PaneId, ProfileId, SessionTitle};
 
     use super::{
-        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, names_agent, program_tag, runs_agent,
+        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, agent_badge, names_agent,
+        program_tag, runs_agent,
     };
+    use crate::agent_badge::AgentBadge;
     use crate::model::{AgentState, PaneView};
 
     const BIGGEST: f32 = 20.0 / 13.0;
@@ -593,5 +617,34 @@ mod tests {
         let shell = pane("shell", true);
         let text = head(&shell);
         assert!(!text.agent);
+    }
+
+    #[test]
+    fn rf_pan_12_each_agent_maps_to_its_own_badge() {
+        let want = [
+            ("claude", AgentBadge::Claude),
+            ("codex", AgentBadge::Codex),
+            ("opencode", AgentBadge::OpenCode),
+        ];
+        for (id, badge) in want {
+            assert_eq!(agent_badge(&pane(id, true)), Some(badge), "profile {id}");
+            assert_eq!(agent_badge(&typed(id)), Some(badge), "typed {id}");
+        }
+        let all: Vec<_> = want.iter().map(|(_, b)| *b).collect();
+        assert_eq!(all, AgentBadge::ALL);
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_a_stand_in_or_another_agent_has_no_badge() {
+        assert_eq!(agent_badge(&pane("shell", true)), None);
+        assert_eq!(agent_badge(&pane("claude", false)), None, "stand-in shell");
+        assert_eq!(agent_badge(&pane("", true)), None, "details not here yet");
+        assert_eq!(agent_badge(&pane("aider", true)), None, "no mark bundled");
+        assert_eq!(agent_badge(&typed("Claude")), None);
+        let exited = PaneView {
+            running: false,
+            ..typed("codex")
+        };
+        assert_eq!(agent_badge(&exited), None);
     }
 }

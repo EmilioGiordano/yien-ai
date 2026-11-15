@@ -11,8 +11,12 @@ use gpui_kit::{
     SvgRenderer, SvgSize, Window, div, img, px, rgb, size,
 };
 
-/// The badge's side, in px at any UI font size, like the tab row's mark slot.
-pub(crate) const SIDE: f32 = 16.0;
+/// The badge's side, in px at any UI font size.
+pub(crate) const SIDE: f32 = 18.0;
+/// The side of the disc a corner mark sits on.
+pub(crate) const CORNER: f32 = 10.0;
+/// How far the corner disc reaches past the badge's right and bottom edges.
+pub(crate) const CORNER_OVERHANG: f32 = 2.0;
 
 /// An agent CLI with an official mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,8 +81,8 @@ impl AgentBadge {
     pub(crate) fn art_side(self) -> f32 {
         match self {
             Self::Claude => SIDE,
-            Self::Codex => 20.0,
-            Self::OpenCode => 10.0,
+            Self::Codex => 22.0,
+            Self::OpenCode => 11.0,
         }
     }
 
@@ -89,17 +93,18 @@ impl AgentBadge {
     }
 }
 
-/// The badge slot: empty for `None`, keeping its width so names align.
-/// Decorative, so it carries no id or label; the row and head already name
-/// the program.
-pub(crate) fn badge_slot(badge: Option<AgentBadge>) -> Div {
-    let slot = div().flex_none().relative().size(px(SIDE));
-    let Some(badge) = badge else {
-        return slot;
-    };
+/// The badge, [`SIDE`] px and fixed, with `corner` on a [`CORNER`] px disc
+/// over its bottom-right edge. The caller fills the corner (its ground colour
+/// and its mark); this only places and rounds it. Decorative: no id or
+/// label, as the row and head name the program and state.
+pub(crate) fn badge(badge: AgentBadge, corner: Option<Div>) -> Div {
     let art = badge.art_side();
     let offset = (SIDE - art) / 2.0;
-    slot.rounded_full()
+    div()
+        .flex_none()
+        .relative()
+        .size(px(SIDE))
+        .rounded_full()
         .when_some(badge.ground(), |d, ground| d.bg(rgb(ground)))
         .child(
             img(move |window: &mut Window, cx: &mut App| Some(raster(badge, art, window, cx)))
@@ -109,6 +114,20 @@ pub(crate) fn badge_slot(badge: Option<AgentBadge>) -> Div {
                 .size(px(art))
                 .when(badge.clipped(), |i| i.rounded_full()),
         )
+        .when_some(corner, |d, corner| {
+            d.child(
+                corner
+                    .absolute()
+                    .right(px(-CORNER_OVERHANG))
+                    .bottom(px(-CORNER_OVERHANG))
+                    .size(px(CORNER))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden(),
+            )
+        })
 }
 
 /// Rasters at the window's scale, made once per badge and size.
@@ -177,7 +196,9 @@ mod tests {
         image
             .as_bytes(0)
             .unwrap()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|bgra| bgra[3] == 255)
             .map(|bgra| u32::from_be_bytes([0, bgra[2], bgra[1], bgra[0]]))
             .collect()
@@ -230,9 +251,20 @@ mod tests {
         let art = AgentBadge::OpenCode.art_side();
         let corner = ((0.4 * art).powi(2) + (0.5 * art).powi(2)).sqrt();
         assert!(corner <= SIDE / 2.0);
-        // The Blossom fills about 49% of its file, so it shows near 10 px.
+        // The Blossom fills about 49% of its file, so it shows near 11 px.
         let blossom = AgentBadge::Codex.art_side() * 348.5 / 716.0;
-        assert!((9.0..=11.0).contains(&blossom), "{blossom}");
+        assert!((10.0..=12.0).contains(&blossom), "{blossom}");
+    }
+
+    #[test]
+    fn the_corner_disc_stays_small_and_close_to_the_badge() {
+        // It covers the badge's corner, not its middle, and reaches past the
+        // badge less than the 8 px gap to the next piece and the 5 px a row or
+        // head pads above and below, so nothing clips or overlaps it.
+        let start = SIDE + CORNER_OVERHANG - CORNER;
+        assert!(start > SIDE / 2.0, "{start}");
+        const { assert!(CORNER_OVERHANG < 5.0) };
+        const { assert!(CORNER >= 9.0, "room for a mark glyph") };
     }
 
     #[test]
