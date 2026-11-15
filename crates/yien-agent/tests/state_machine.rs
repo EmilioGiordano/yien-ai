@@ -5,8 +5,8 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, AgentStatus, BlockedKind, Cause, Effect, ErrorReason, HookEvent, Machine,
     MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason, NotificationKind, OscSignal, PromptMark,
-    Reporter, STARTUP_SCREEN_SETTLE, ScreenVerdict, SessionEndReason, SessionStartSource, Signal,
-    Source,
+    Reporter, SERVICE_ERROR_GRACE, STARTUP_SCREEN_SETTLE, ScreenVerdict, SessionEndReason,
+    SessionStartSource, Signal, Source,
 };
 use yien_testkit::FakeClock;
 
@@ -1863,4 +1863,172 @@ fn rn_02_after_signal_lost_only_a_strong_signal_can_mark_red() {
         full.extend_from_slice(seq);
         assert!(!run(&config, &full), "red after signal lost: {seq:?}");
     });
+}
+
+const FAILED: AgentState = AgentState::Error(ErrorReason::TurnFailed);
+
+/// OpenCode in its own pane, mid-turn.
+fn working_opencode() -> Pane {
+    let mut p = Pane::spawned(codex());
+    p.send(idle(Reporter::OpenCode))
+        .send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    p
+}
+
+#[test]
+fn rf_age_05_a_service_error_inside_a_turn_fails_it() {
+    let mut p = working_opencode();
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: FAILED,
+        cause: Cause::Service,
+    }));
+    assert!(!p.m.is_red(), "an error is not red (RN-01)");
+    // OpenCode's own end of the turn comes after: the error stays.
+    p.send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), FAILED);
+}
+
+#[test]
+fn rf_age_05_a_service_error_while_blocked_fails_the_turn_and_clears_red() {
+    let mut p = working_opencode();
+    p.send(blocked(Some(BlockedKind::Permission))).confirm();
+    assert!(p.m.is_red());
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_atn_08_a_service_error_just_after_the_turn_ended_turns_done_into_error() {
+    let mut p = working_opencode();
+    let end = p.clock.now();
+    p.send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Done);
+    p.at(end + SERVICE_ERROR_GRACE).send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Done,
+        to: FAILED,
+        cause: Cause::Service,
+    }));
+}
+
+#[test]
+fn rn_02_a_service_error_after_the_grace_is_ignored() {
+    let mut p = working_opencode();
+    let end = p.clock.now();
+    p.send(idle(Reporter::OpenCode));
+    p.at(end + SERVICE_ERROR_GRACE + ms(1))
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Done);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rn_02_a_service_error_with_no_turn_is_ignored() {
+    // Spawned and idle, never worked: nothing to fail.
+    let mut p = Pane::spawned(codex());
+    p.send(idle(Reporter::OpenCode)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Done long since, and seen and gone idle.
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode)).send(Signal::Seen(true));
+    p.at(ms(60_000)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_atn_08_a_service_error_seen_goes_straight_to_idle() {
+    // Seen while it fails inside the turn.
+    let mut p = working_opencode();
+    p.send(Signal::Seen(true)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Seen when the turn ended, failing just after.
+    let mut p = working_opencode();
+    p.send(Signal::Seen(true)).send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Unseen when it failed: the error holds until the pane is seen.
+    let mut p = working_opencode();
+    p.send(Signal::ServiceError)
+        .at(ms(60_000))
+        .send(Signal::Tick);
+    assert_eq!(p.state(), FAILED);
+    p.send(Signal::Seen(true));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_atn_08_a_service_error_counts_once() {
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::ServiceError)
+        .send(Signal::Seen(true));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::Seen(false)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle, "the turn already failed");
+}
+
+#[test]
+fn rf_age_05_opencode_typed_in_a_shell_fails_on_a_service_error() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::OpenCode))
+        .send(status(AgentStatus::Working))
+        .send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Done);
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+}
+
+#[test]
+fn rn_02_a_service_error_needs_a_rule_that_reads_osc_7501() {
+    for config in [
+        MachineConfig::new(&[Source::Hooks, Source::Screen], None),
+        MachineConfig::new(&[Source::Osc133], None),
+        MachineConfig::new(&[Source::Bel], None),
+        MachineConfig::unprofiled(),
+    ] {
+        let mut p = Pane::spawned(config.clone());
+        p.send(mark(PromptMark::CommandStart))
+            .send(hook(HookEvent::UserPromptSubmit))
+            .send(Signal::ServiceError);
+        assert_ne!(p.state(), FAILED, "{config:?}");
+    }
+}
+
+#[test]
+fn rn_02_a_service_error_after_exit_or_on_a_new_launch_is_ignored() {
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::Exited { code: Some(0) })
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Done);
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::Spawned)
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rn_01_a_service_error_never_marks_red() {
+    let alphabet: Vec<Step> = vec![
+        (status(AgentStatus::Working), 0),
+        (idle(Reporter::OpenCode), 0),
+        (Signal::ServiceError, 0),
+        (Signal::Seen(true), 0),
+        (Signal::Seen(false), 0),
+        (Signal::Tick, 6_000),
+    ];
+    for config in [codex(), shell()] {
+        for_each_sequence(&alphabet, 5, &mut |seq| {
+            assert!(!run(&config, seq), "red from {seq:?}");
+        });
+    }
 }
