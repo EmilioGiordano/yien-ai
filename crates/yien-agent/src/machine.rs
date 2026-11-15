@@ -12,6 +12,15 @@ use crate::signal::{
 /// red mark goes on (04 §4.5, hysteresis). Leaving red is immediate.
 pub const NEEDS_YOU_CONFIRM: Duration = Duration::from_millis(300);
 
+/// How long a program must stay quiet before its screen is read for a
+/// startup screen, such as folder trust or sign-in, that waits for the user.
+pub const STARTUP_SCREEN_SETTLE: Duration = NEEDS_YOU_CONFIRM;
+
+/// The longest a startup screen goes unread while output keeps coming: an
+/// animated screen (Codex's sign-in shimmer redraws every 100 ms) never
+/// settles.
+pub const STARTUP_SCREEN_MAX_WAIT: Duration = Duration::from_secs(1);
+
 /// Why an agent needs the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeedsReason {
@@ -23,7 +32,7 @@ pub enum NeedsReason {
     Auth,
     /// OSC 7501 `blocked` with no kind.
     Blocked,
-    /// A screen rule confirmed it.
+    /// A screen rule confirmed it, or matched a startup screen.
     ScreenRule,
 }
 
@@ -148,6 +157,24 @@ impl MachineConfig {
     pub fn declares(&self, source: Source) -> bool {
         self.sources.contains(&source)
     }
+
+    /// Whether the screen rules may raise "needs you" on their own until
+    /// the agent's structured channel (hooks or OSC 7501) first speaks: the
+    /// screens an agent shows before it, such as folder trust, report
+    /// nothing. A rule without such a channel has no startup to end.
+    ///
+    /// ```
+    /// use yien_agent::{MachineConfig, Source};
+    ///
+    /// let codex = MachineConfig::new(&[Source::Osc7501, Source::Screen], None);
+    /// assert!(codex.reads_startup_screens());
+    /// let bell = MachineConfig::new(&[Source::Bel, Source::Screen], None);
+    /// assert!(!bell.reads_startup_screens());
+    /// ```
+    pub fn reads_startup_screens(&self) -> bool {
+        self.declares(Source::Screen)
+            && (self.declares(Source::Hooks) || self.declares(Source::Osc7501))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +218,12 @@ pub struct Machine {
     /// An agent reports over OSC 7501 in a rule that also reads OSC 133, so
     /// the shell's marks no longer drive the state.
     agent_reporting: bool,
+    /// When the startup screen is read next, once output settles.
+    settle_at: Option<Duration>,
+    /// The first output since the startup screen was last read.
+    unread_since: Option<Duration>,
+    /// The red mark is a startup screen's, not a turn's.
+    startup_red: bool,
 }
 
 impl Machine {
@@ -211,6 +244,9 @@ impl Machine {
             exited: false,
             reported_turn: false,
             agent_reporting: false,
+            settle_at: None,
+            unread_since: None,
+            startup_red: false,
         }
     }
 
@@ -255,9 +291,10 @@ impl Machine {
     }
 
     /// The earliest instant at which a [`Signal::Tick`] can change anything:
-    /// the pending "needs you" deadline or the watchdog, whichever comes
-    /// first. The caller needs a single timer, re-armed to this after every
-    /// step; [`Effect::WakeAt`] carries the same instants.
+    /// the pending "needs you" deadline, the watchdog or the read of a
+    /// startup screen, whichever comes first. The caller needs a single
+    /// timer, re-armed to this after every step; [`Effect::WakeAt`] carries
+    /// the same instants.
     ///
     /// ```
     /// use std::time::Duration;
@@ -271,14 +308,13 @@ impl Machine {
     /// assert_eq!(m.next_wake(), Some(ms(310)));
     /// ```
     pub fn next_wake(&self) -> Option<Duration> {
-        if self.state != AgentState::Working {
-            return None;
-        }
-        let pending = self.pending.map(|p| p.deadline);
-        match (pending, self.watchdog_at) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let working = self.state == AgentState::Working;
+        let pending = self.pending.map(|p| p.deadline).filter(|_| working);
+        let watchdog = self.watchdog_at.filter(|_| working);
+        [pending, watchdog, self.settle_at]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether an agent reporting over OSC 7501 has taken the pane over from
@@ -333,8 +369,13 @@ impl Machine {
             Signal::Tick => self.on_tick(now, fx),
             Signal::Exited { code } => {
                 self.exited = true;
+                self.settle_at = None;
+                self.unread_since = None;
                 match self.state {
-                    AgentState::Working | AgentState::NeedsYou(_) if !self.session_ended => {
+                    // Quitting a startup screen ends no turn.
+                    AgentState::Working | AgentState::NeedsYou(_)
+                        if !self.session_ended && !self.startup_red =>
+                    {
                         let to = AgentState::Error(ErrorReason::UnexpectedExit { code: *code });
                         self.set_state(to, Cause::Process, now, fx);
                     }
@@ -350,7 +391,15 @@ impl Machine {
                 }
             }
             Signal::Output => {
-                if self.state.is_red() && self.input_pending {
+                if self.reads_startup_screen() {
+                    // An answered startup screen is read again, not taken
+                    // for a turn going on.
+                    self.input_pending = false;
+                    let first = *self.unread_since.get_or_insert(now);
+                    let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
+                    self.settle_at = Some(at);
+                    fx.push(Effect::WakeAt(at));
+                } else if self.state.is_red() && self.input_pending {
                     self.set_state(AgentState::Working, Cause::User, now, fx);
                 } else if self.state == AgentState::Working {
                     self.last_activity = now;
@@ -382,6 +431,12 @@ impl Machine {
         self.top_rank = Some(rank);
         if rank >= Source::Osc7501.rank() {
             self.signal_lost = false;
+            // The agent got past its startup screens and speaks for itself.
+            self.settle_at = None;
+            self.unread_since = None;
+            if self.startup_red {
+                self.set_state(AgentState::Idle, Cause::Source(source), now, fx);
+            }
         }
         if self.state == AgentState::Working {
             self.last_activity = now;
@@ -543,6 +598,26 @@ impl Machine {
 
     fn on_screen(&mut self, verdict: ScreenVerdict, now: Duration, fx: &mut Vec<Effect>) {
         let asked = std::mem::take(&mut self.awaiting_screen);
+        if asked && self.reads_startup_screen() {
+            // Settled output already held for the confirmation window.
+            let cause = Cause::Source(Source::Screen);
+            match verdict {
+                ScreenVerdict::NeedsYou if !self.startup_red => {
+                    self.set_state(
+                        AgentState::NeedsYou(NeedsReason::ScreenRule),
+                        cause,
+                        now,
+                        fx,
+                    );
+                    self.startup_red = true;
+                }
+                ScreenVerdict::NoMatch if self.startup_red => {
+                    self.set_state(AgentState::Idle, cause, now, fx);
+                }
+                _ => {}
+            }
+            return;
+        }
         if asked
             && verdict == ScreenVerdict::NeedsYou
             && self.screen_allowed()
@@ -554,6 +629,18 @@ impl Machine {
     }
 
     fn on_tick(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        if let Some(at) = self.settle_at {
+            if now < at {
+                fx.push(Effect::WakeAt(at));
+            } else {
+                self.settle_at = None;
+                self.unread_since = None;
+                if self.reads_startup_screen() && !self.awaiting_screen {
+                    self.awaiting_screen = true;
+                    fx.push(Effect::CheckScreen);
+                }
+            }
+        }
         if let Some(pending) = self.pending
             && now >= pending.deadline
             && self.state == AgentState::Working
@@ -601,6 +688,17 @@ impl Machine {
             && !self.signal_lost
     }
 
+    /// Whether the screen is read for a startup screen: the rule allows it,
+    /// the agent has not spoken over its structured channel since it was
+    /// spawned, and no turn or end is on show.
+    fn reads_startup_screen(&self) -> bool {
+        self.config.reads_startup_screens()
+            && self.screen_allowed()
+            && self.top_rank.is_none_or(|top| top < Source::Osc7501.rank())
+            && !self.exited
+            && (self.state == AgentState::Idle || self.startup_red)
+    }
+
     fn start_turn(&mut self, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         if self.state == AgentState::Working {
             self.pending = None;
@@ -645,6 +743,8 @@ impl Machine {
         self.input_pending = false;
         self.pending = None;
         self.awaiting_screen = false;
+        self.settle_at = None;
+        self.unread_since = None;
         self.set_state(AgentState::Idle, cause, now, fx);
     }
 
@@ -662,6 +762,7 @@ impl Machine {
         self.state = to;
         fx.push(Effect::Transition { from, to, cause });
         if from.is_red() && !to.is_red() {
+            self.startup_red = false;
             fx.push(Effect::ClearRed);
         }
         if to.is_red() && !from.is_red() {
@@ -670,6 +771,8 @@ impl Machine {
             fx.push(Effect::Notify);
         }
         if to == AgentState::Working {
+            self.settle_at = None;
+            self.unread_since = None;
             self.last_activity = now;
             if let Some(period) = self.config.watchdog {
                 let at = now + period;
