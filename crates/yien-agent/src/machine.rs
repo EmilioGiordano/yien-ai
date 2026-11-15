@@ -246,6 +246,8 @@ pub struct Machine {
     /// An agent CLI typed in the shell runs and has not reported yet, so its
     /// startup screens are read.
     typed_agent: bool,
+    /// The shell has marked a command's start (OSC 133 C); cmd never does.
+    command_marks: bool,
 }
 
 impl Machine {
@@ -271,6 +273,7 @@ impl Machine {
             startup_red: false,
             startup_from: AgentState::Idle,
             typed_agent: false,
+            command_marks: false,
         }
     }
 
@@ -553,6 +556,9 @@ impl Machine {
     }
 
     fn on_osc(&mut self, osc: OscSignal, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
+        if osc == OscSignal::Prompt(PromptMark::CommandStart) {
+            self.command_marks = true;
+        }
         match osc {
             OscSignal::Status7501(status) => self.on_status(status, cause, now, fx),
             OscSignal::Prompt(mark) if self.agent_reporting => {
@@ -698,10 +704,15 @@ impl Machine {
             return;
         }
         let red_of_its_own = self.state.is_red() && !self.startup_red;
+        // A poll can land after the CLI exited: in a shell that marks its
+        // commands, a prompt mark since the last C means it is gone.
+        let at_prompt =
+            self.command_marks && self.state != AgentState::Working && !self.startup_red;
         if !self.config.reads_typed_startup_screens()
             || self.agent_reporting
             || self.signal_lost
             || red_of_its_own
+            || at_prompt
         {
             return;
         }
