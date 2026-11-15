@@ -265,6 +265,10 @@ pub enum Signal {
     Input,
     /// The pane produced output (coalesced by the caller).
     Output,
+    /// The agent's own service reported that a turn of a session this pane
+    /// shows failed (OpenCode's `session.execution.failed`). The caller sends
+    /// it only for a session the pane's program named over OSC 7501.
+    ServiceError,
     /// The structured channel cannot deliver (hook pipe down).
     SourceLost,
     /// A detection input that cannot be interpreted, such as a hook payload
