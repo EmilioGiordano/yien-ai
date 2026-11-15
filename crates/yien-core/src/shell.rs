@@ -1275,17 +1275,27 @@ mod live_bash {
         String::from_utf8_lossy(raw).matches(needle).count()
     }
 
-    /// Git Bash without the developer's rc files, with `prompt_command`,
-    /// typing each command once the previous prompt is drawn (`ready`
-    /// counts how many are), until it exits. `None` when this machine has
-    /// no Git Bash.
+    /// [`run_with`] on the prompt `B> `.
     fn run(prompt_command: Option<&str>, ready: &str, commands: &[&str]) -> Option<Vec<u8>> {
+        run_with("B> ", prompt_command, ready, commands)
+    }
+
+    /// Git Bash without the developer's rc files, with `ps1` and
+    /// `prompt_command`, typing each command once the previous prompt is
+    /// drawn (`ready` counts how many are), until it exits. `None` when this
+    /// machine has no Git Bash.
+    fn run_with(
+        ps1: &str,
+        prompt_command: Option<&str>,
+        ready: &str,
+        commands: &[&str],
+    ) -> Option<Vec<u8>> {
         let bash = InstalledShells::find().get(ShellKind::GitBash)?.clone();
         let mut spec = SpawnSpec::new(&bash.program)
             .args(["--noprofile", "--norc", "-i"])
             .cwd(r"C:\Windows")
             .size(100, 30)
-            .env("PS1", "B> ");
+            .env("PS1", ps1);
         if let Some(prompt_command) = prompt_command {
             spec = spec.env("PROMPT_COMMAND", prompt_command);
         }
@@ -1398,6 +1408,33 @@ mod live_bash {
             assert_eq!(marks(&raw, kind), 0, "{kind}");
         }
         assert!(reports(&raw).is_empty());
+    }
+
+    /// The digits after each `tag` in `raw`, in order.
+    fn statuses(raw: &[u8], tag: &str) -> Vec<String> {
+        let text = String::from_utf8_lossy(raw).into_owned();
+        text.split(tag)
+            .skip(1)
+            .map(|s| s.chars().take_while(char::is_ascii_digit).collect())
+            .collect()
+    }
+
+    #[test]
+    fn rf_ses_01_the_users_prompt_still_sees_each_commands_status() {
+        let commands = ["false", "true", "(exit 3)", "exit"];
+        // A PS1 that shows `$?`.
+        let Some(raw) = run_with("S[$?]> ", Some(BASH_HOOK), "\x1b]133;B", &commands) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert_eq!(statuses(&raw, "S["), ["0", "1", "0", "3"], "{text:?}");
+        // A PROMPT_COMMAND of the user's that runs after the hook.
+        let after = format!("{BASH_HOOK};printf 'U%s' \"$?\"");
+        let Some(raw) = run(Some(&after), "\x1b]133;B", &commands) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        assert_eq!(statuses(&raw, "U"), ["0", "1", "0", "3"], "{text:?}");
     }
 
     #[test]
