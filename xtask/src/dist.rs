@@ -22,6 +22,8 @@ pub const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
 pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
 /// Package name consumed by the portable archive and installer.
 pub const CONPTY_LICENSE_DEST: &str = "LICENSE-MIT-ConPTY.txt";
+/// The notice of the agent marks the UI embeds, appended to [`THIRD_PARTY`].
+pub const AGENT_ICONS_NOTICE: &str = "crates/yien-ui/assets/third-party/agents/NOTICE.md";
 
 /// PE optional-header subsystem of a GUI program.
 pub const SUBSYSTEM_GUI: u16 = 2;
@@ -265,6 +267,24 @@ pub fn third_party_notice(packages: &[Package]) -> String {
     out
 }
 
+/// `notice` followed by an embedded artwork notice, its headings one level
+/// down so they sit under the notice's own title.
+pub fn with_artwork(mut notice: String, artwork: &str) -> String {
+    notice.push('\n');
+    let mut fenced = false;
+    for line in artwork.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        }
+        if !fenced && line.starts_with('#') {
+            notice.push('#');
+        }
+        notice.push_str(line);
+        notice.push('\n');
+    }
+    notice
+}
+
 /// Builds, assembles and zips the portable build.
 pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     if !cfg!(windows) {
@@ -314,7 +334,9 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     }
 
     let packages = third_party_packages(&metadata, &BINARIES)?;
-    let notice = third_party_notice(&packages);
+    let artwork = std::fs::read_to_string(root.join(AGENT_ICONS_NOTICE))
+        .with_context(|| format!("reading {AGENT_ICONS_NOTICE}"))?;
+    let notice = with_artwork(third_party_notice(&packages), &artwork);
     let licence_texts = crate::licences::build(&packages)?;
 
     let dist = target.join("dist");
@@ -569,5 +591,29 @@ mod tests {
             "| Microsoft.Windows.Console.ConPTY | 1.24.261001001 | MIT | https://github.com/microsoft/terminal |\n"
         ));
         assert_eq!(notice.lines().filter(|l| l.starts_with("| ")).count(), 5);
+    }
+
+    #[test]
+    fn notice_carries_the_agent_marks_and_their_trademarks() {
+        let artwork =
+            std::fs::read_to_string(crate::workspace_root().join(AGENT_ICONS_NOTICE)).unwrap();
+        let notice = with_artwork(third_party_notice(&[]), &artwork);
+        assert!(notice.starts_with("# Third-party software\n"));
+        assert_eq!(notice.lines().filter(|l| l.starts_with("# ")).count(), 1);
+        assert!(notice.contains("\n## Agent icons\n"));
+        for line in [
+            "Claude and the Claude logo are trademarks of Anthropic PBC.",
+            "OpenAI and the OpenAI logo are trademarks of OpenAI.",
+            "OpenCode and the OpenCode logo are trademarks of Anomaly.",
+            "Copyright (c) 2025 opencode",
+        ] {
+            assert!(notice.contains(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn artwork_headings_drop_a_level_outside_code_fences() {
+        let notice = with_artwork("# Top\n".into(), "# A\n## B\n```\n# kept\n```\ntext\n");
+        assert_eq!(notice, "# Top\n\n## A\n### B\n```\n# kept\n```\ntext\n");
     }
 }
