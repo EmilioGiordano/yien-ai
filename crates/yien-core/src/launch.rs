@@ -207,6 +207,14 @@ pub(crate) fn resolve_in(
     if let Some(kind) = profile.and_then(|id| ShellKind::from_profile(id.as_str())) {
         let Some(shell) = config.shells.get(kind) else {
             let mut plan = shell_plan(kind, &config.shell, &config.profiles);
+            plan.profile_name = match config.shell.kind_name() {
+                Some(name) => name.to_owned(),
+                None => config
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == SHELL_PROFILE)
+                    .map_or_else(|| "Shell".to_owned(), |p| p.name.clone()),
+            };
             plan.notice = Some(format!(
                 "{} was not found; this pane runs {} instead.",
                 kind.name(),
@@ -751,5 +759,24 @@ mod tests {
             Some("PowerShell 7 was not found; this pane runs pwsh instead.")
         );
         assert!(plan.machine.declares(Source::Osc133));
+    }
+
+    #[test]
+    fn rf_pan_18_a_fallback_pane_is_named_after_the_shell_that_runs() {
+        let mut config = with_shells();
+        let missing = Some(ShellKind::PowerShell.profile());
+        let plan = resolve_in(missing.as_ref(), &config).unwrap();
+        assert_eq!(plan.profile, "shell:powershell", "the id is kept");
+        assert_eq!(
+            (plan.profile_name.as_str(), plan.default_name.as_str()),
+            ("PowerShell 7", "pwsh")
+        );
+        config.shell = ShellCommand::new("/bin/zsh");
+        let plan = resolve_in(missing.as_ref(), &config).unwrap();
+        assert_eq!(
+            (plan.profile_name.as_str(), plan.default_name.as_str()),
+            ("Shell", "zsh"),
+            "an unknown default is named as the shell profile"
+        );
     }
 }

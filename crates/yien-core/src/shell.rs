@@ -182,6 +182,20 @@ impl ShellCommand {
         }
     }
 
+    /// The menu name of the known shell it is (`PowerShell 7`), by its kind
+    /// or its program name; `None` for any other program.
+    pub(crate) fn kind_name(&self) -> Option<&'static str> {
+        let kind =
+            self.kind
+                .or_else(|| match self.display_name().to_ascii_lowercase().as_str() {
+                    "cmd" => Some(ShellKind::Cmd),
+                    "powershell" => Some(ShellKind::PowerShell),
+                    "pwsh" => Some(ShellKind::Pwsh),
+                    _ => None,
+                })?;
+        Some(kind.name())
+    }
+
     /// The name a pane shows for it: the file name without extension.
     pub(crate) fn display_name(&self) -> String {
         Path::new(&self.program)
