@@ -228,16 +228,19 @@ pub enum AgentState {
     Idle,
     /// A turn is running.
     Working,
-    /// The agent waits for the user; the only red state (RN-01).
+    /// The agent waits for the user: red, with the square, the bar and the
+    /// border (RN-01).
     NeedsYou(NeedsReason),
     /// A turn completed while the pane was not seen.
     Done,
-    /// The turn or the process failed.
+    /// The turn or the process failed: red, told apart by its `!` (RN-01).
     Error(ErrorReason),
 }
 
 impl AgentState {
-    /// Whether this state carries the red mark (RN-01).
+    /// Whether this state carries the red attention mark: the bar, the
+    /// border, the counter and the badge. Only "needs you" does; an error
+    /// is red too, but only in its own mark and words (RN-01).
     pub fn is_red(self) -> bool {
         matches!(self, AgentState::NeedsYou(_))
     }
@@ -1586,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn red_is_only_needs_you() {
+    fn rn_01_only_needs_you_carries_the_attention_mark() {
         assert!(AgentState::NeedsYou(NeedsReason::Question).is_red());
         for state in [
             AgentState::Idle,
