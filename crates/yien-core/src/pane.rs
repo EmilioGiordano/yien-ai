@@ -2406,6 +2406,31 @@ mod tests {
     }
 
     #[test]
+    fn rn_02_a_relaunched_shell_pane_starts_unread() {
+        let pane = Solo::shell();
+        let _old = codex_typed_on_its_trust_screen(&pane);
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(SCREEN_RED));
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 1 }).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        // The new shell shows the same screen; the old launch's report is stale.
+        let child = pane.next_child();
+        let trust = format!("\x1b[2J\x1b[H{}", CODEX_TRUST.replace('\n', "\r\n"));
+        child.output(trust.as_bytes());
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    #[test]
     fn rn_02_an_agent_pane_ignores_a_program_found_under_it() {
         let pane = Solo::start(Vec::new(), false);
         let child = pane.next_child();
