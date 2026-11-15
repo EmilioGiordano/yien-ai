@@ -5,7 +5,8 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, AgentStatus, BlockedKind, Cause, Effect, ErrorReason, HookEvent, Machine,
     MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason, NotificationKind, OscSignal, PromptMark,
-    Reporter, ScreenVerdict, SessionEndReason, SessionStartSource, Signal, Source,
+    Reporter, STARTUP_SCREEN_SETTLE, ScreenVerdict, SessionEndReason, SessionStartSource, Signal,
+    Source,
 };
 use yien_testkit::FakeClock;
 
@@ -1135,6 +1136,210 @@ fn rf_age_05_osc_7501_takes_nothing_over_without_osc_133() {
     let mut p = Pane::spawned(codex());
     p.send(idle(Reporter::Codex));
     assert!(!p.m.agent_reporting());
+}
+
+// ---- Startup screens ----------------------------------------------------------
+
+/// The Codex rule from 0.163: OSC 7501 and its startup screens.
+fn codex_with_screens() -> MachineConfig {
+    MachineConfig::new(&[Source::Osc7501, Source::Screen], None)
+}
+
+impl Pane {
+    /// Output that settles, then the screen read with `verdict`.
+    fn settled_screen(&mut self, verdict: ScreenVerdict) -> &mut Self {
+        let t = self.clock.now();
+        self.send(Signal::Output);
+        assert_eq!(self.fx, vec![Effect::WakeAt(t + STARTUP_SCREEN_SETTLE)]);
+        assert_eq!(self.m.next_wake(), Some(t + STARTUP_SCREEN_SETTLE));
+        self.at(t + STARTUP_SCREEN_SETTLE).send(Signal::Tick);
+        assert_eq!(self.fx, vec![Effect::CheckScreen]);
+        self.send(Signal::Screen(verdict))
+    }
+
+    /// Spawned and stopped on a startup screen.
+    fn on_startup_screen(config: MachineConfig) -> Self {
+        let mut p = Pane::spawned(config);
+        p.settled_screen(ScreenVerdict::NeedsYou);
+        assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+        p
+    }
+}
+
+#[test]
+fn rf_atn_09_a_startup_screen_marks_red_and_notifies() {
+    for config in [codex_with_screens(), claude()] {
+        let mut p = Pane::spawned(config);
+        p.at(ms(40)).settled_screen(ScreenVerdict::NeedsYou);
+        assert_eq!(
+            p.fx,
+            vec![
+                Effect::Transition {
+                    from: AgentState::Idle,
+                    to: AgentState::NeedsYou(NeedsReason::ScreenRule),
+                    cause: Cause::Source(Source::Screen),
+                },
+                Effect::MarkRed,
+                Effect::Notify,
+            ]
+        );
+    }
+}
+
+#[test]
+fn rf_age_05_an_animated_startup_screen_is_read_once_a_second() {
+    // Codex's "Finish signing in via your browser" shimmers every 100 ms.
+    let mut p = Pane::spawned(codex_with_screens());
+    let mut reads = Vec::new();
+    for t in (0..=2_500).step_by(100) {
+        p.at(ms(t)).send(Signal::Tick);
+        if p.fx.contains(&Effect::CheckScreen) {
+            reads.push(t);
+            p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+        }
+        p.send(Signal::Output);
+    }
+    assert_eq!(reads, [1_000, 2_000]);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    assert_eq!(p.m.next_wake(), Some(ms(2_500) + STARTUP_SCREEN_SETTLE));
+}
+
+#[test]
+fn rn_02_a_startup_screen_is_read_only_once_output_settles() {
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(Signal::Output);
+    p.at(ms(200)).send(Signal::Output);
+    p.at(ms(300)).send(Signal::Tick);
+    assert_eq!(
+        p.fx,
+        vec![Effect::WakeAt(ms(500))],
+        "output came in between"
+    );
+    p.at(ms(500)).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Screen(ScreenVerdict::NoMatch));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rn_02_an_unread_screen_never_marks_red() {
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    p.send(Signal::Output)
+        .send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_an_answered_startup_screen_clears_once_the_screen_moves_on() {
+    let mut p = Pane::on_startup_screen(codex_with_screens());
+    p.send(Signal::Input);
+    // Codex's update prompt, then its folder trust: still waiting.
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    assert!(p.fx.is_empty(), "the same red, no second notification");
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_age_05_the_first_structured_record_clears_a_startup_screen() {
+    let mut p = Pane::on_startup_screen(codex_with_screens());
+    p.send(idle(Reporter::Codex));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::NeedsYou(NeedsReason::ScreenRule),
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+
+    let mut p = Pane::on_startup_screen(claude());
+    p.send(hook(HookEvent::SessionStart {
+        session_id: None,
+        source: SessionStartSource::Startup,
+    }));
+    assert_eq!(p.state(), AgentState::Idle);
+
+    let mut p = Pane::on_startup_screen(codex_with_screens());
+    p.send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    p.send(blocked(Some(BlockedKind::Permission))).confirm();
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+}
+
+#[test]
+fn rn_02_once_the_agent_has_spoken_its_screen_is_never_read_at_rest() {
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(status(AgentStatus::Working))
+        .send(idle(Reporter::Codex));
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty());
+    assert_eq!(p.m.next_wake(), None);
+
+    // A wake armed before the agent spoke reads nothing.
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(Signal::Output).send(idle(Reporter::Codex));
+    assert_eq!(p.m.next_wake(), None);
+    p.at(ms(1000)).send(Signal::Tick);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rn_02_a_rule_without_a_structured_channel_reads_no_startup_screen() {
+    let config = MachineConfig::new(&[Source::Bel, Source::Screen], None);
+    let mut p = Pane::spawned(config);
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty());
+    p.at(ms(1000)).send(Signal::Tick);
+    assert!(p.fx.is_empty());
+    let mut p = Pane::spawned(codex());
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty(), "no screen rules declared");
+}
+
+#[test]
+fn rn_02_no_startup_screen_is_read_after_the_source_is_lost() {
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(Signal::Output).send(Signal::SourceLost);
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty());
+
+    let mut p = Pane::on_startup_screen(codex_with_screens());
+    p.send(Signal::SourceLost);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_age_05_quitting_a_startup_screen_is_not_an_error() {
+    let mut p = Pane::on_startup_screen(codex_with_screens());
+    p.send(Signal::Exited { code: Some(1) });
+    assert_eq!(p.state(), AgentState::Done);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert_eq!(p.m.next_wake(), None);
+
+    let mut p = Pane::on_startup_screen(claude());
+    p.send(Signal::Seen(true))
+        .send(Signal::Exited { code: Some(0) });
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_a_respawn_reads_startup_screens_again() {
+    let mut p = Pane::spawned(codex_with_screens());
+    p.send(idle(Reporter::Codex))
+        .send(Signal::Exited { code: Some(0) })
+        .send(Signal::Spawned);
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::ScreenRule));
+    p.send(Signal::Spawned);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
 }
 
 // ---- Exhaustive and random sequences ----------------------------------------

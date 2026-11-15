@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use yien_agent::{
-    AgentState, Effect, ErrorReason, Machine, MachineConfig, NeedsReason, Signal, builtin_profiles,
+    AgentState, Effect, ErrorReason, Machine, MachineConfig, NeedsReason, ScreenRule,
+    ScreenVerdict, Signal, builtin_profiles, evaluate_screen,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -246,6 +247,179 @@ fn rf_atn_08_opencode_turn_ends_on_idle_and_ignores_session_records() {
             AgentState::Idle,
         ]
     );
+}
+
+/// Codex's folder trust and update prompt as its 0.167.2 sources render them.
+const CODEX_TRUST: &str =
+    include_str!("../../yien-agent/tests/fixtures/startup-screens/codex-0.167.2-trust.txt");
+const CODEX_UPDATE: &str =
+    include_str!("../../yien-agent/tests/fixtures/startup-screens/codex-0.167.2-update.txt");
+
+/// Claude Code's folder trust, laid out from the 2.1.325 binary's strings.
+const CLAUDE_TRUST: &str = " Accessing workspace:
+
+ C:\\work\\new-project
+
+ Quick safety check: Is this a project you created or one you trust?
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ \u{276f} No, exit
+   Yes, I trust this folder
+
+ Enter to confirm \u{b7} Esc to cancel";
+
+const SCREEN_RED: AgentState = AgentState::NeedsYou(NeedsReason::ScreenRule);
+
+/// A screen drawn from the top, as a full-screen program draws it.
+fn drawn(text: &str) -> Vec<u8> {
+    format!("\x1b[2J\x1b[H{}", text.replace('\n', "\r\n")).into_bytes()
+}
+
+/// The screen rules of the newest rule of a built-in profile.
+fn screen_rules(profile: &str) -> Vec<ScreenRule> {
+    let profiles = builtin_profiles().unwrap();
+    let found = profiles.iter().find(|p| p.id == profile).unwrap();
+    found.select_rule(None).rule.screen.clone()
+}
+
+fn read_screen(engine: &AlacrittyEngine, rules: &[ScreenRule]) -> ScreenVerdict {
+    let frame = engine.frame();
+    let rows: Vec<String> = (0..frame.lines.len()).map(|r| frame.line_text(r)).collect();
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    evaluate_screen(rules, &rows)
+}
+
+/// A pane's machine, answering its screen reads from the engine.
+struct Settled {
+    machine: Machine,
+    engine: AlacrittyEngine,
+    rules: Vec<ScreenRule>,
+    now: Duration,
+    states: Vec<AgentState>,
+}
+
+impl Settled {
+    fn step(&mut self, signal: Signal) {
+        let mut queue = vec![signal];
+        while let Some(signal) = queue.pop() {
+            let (next, effects) = self.machine.clone().step(&signal, self.now);
+            self.machine = next;
+            for effect in effects {
+                match effect {
+                    Effect::Transition { to, .. } => self.states.push(to),
+                    Effect::CheckScreen => {
+                        queue.push(Signal::Screen(read_screen(&self.engine, &self.rules)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Like [`replay`], with the output of each read let settle and the screen
+/// read when the machine asks, as a pane does.
+fn replay_settled(parts: &[&[u8]], profile: &str) -> Vec<AgentState> {
+    let mut pane = Settled {
+        machine: Machine::new(config(profile)),
+        engine: AlacrittyEngine::new(VtConfig::default(), 120, 40),
+        rules: screen_rules(profile),
+        now: Duration::ZERO,
+        states: Vec::new(),
+    };
+    pane.step(Signal::Spawned);
+    for part in parts {
+        let out = pane.engine.feed(part);
+        for found in &out.signals {
+            let Some(osc) = convert::osc_signal(found) else {
+                continue;
+            };
+            for signal in [Signal::Osc(osc), Signal::Tick] {
+                pane.step(signal);
+                pane.now += Duration::from_secs(1);
+            }
+        }
+        pane.step(Signal::Output);
+        if let Some(at) = pane.machine.next_wake() {
+            pane.now = pane.now.max(at);
+            pane.step(Signal::Tick);
+        }
+    }
+    pane.states
+}
+
+#[test]
+fn rf_age_05_codex_folder_trust_needs_you_until_its_first_status() {
+    let trust = drawn(CODEX_TRUST);
+    assert_eq!(
+        replay_settled(&[&trust, CODEX_STARTUP], "codex"),
+        [
+            SCREEN_RED,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+}
+
+#[test]
+fn rf_age_05_codex_update_then_trust_stays_red_until_answered() {
+    let update = drawn(CODEX_UPDATE);
+    let trust = drawn(CODEX_TRUST);
+    let chat = drawn("\u{203a} Ask Codex to do anything");
+    assert_eq!(
+        replay_settled(&[&update, &trust, &chat], "codex"),
+        [SCREEN_RED, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rf_age_05_claude_folder_trust_needs_you_until_its_repl_reports() {
+    let trust = drawn(CLAUDE_TRUST);
+    assert_eq!(
+        replay_settled(&[&trust, CLAUDE_INTERRUPT], "claude"),
+        [
+            SCREEN_RED,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+}
+
+#[test]
+fn rn_02_real_sessions_never_show_a_startup_screen() {
+    for (capture, profile) in [
+        (CLAUDE_PERMISSION, "claude"),
+        (CLAUDE_QUESTION, "claude"),
+        (CLAUDE_ERROR, "claude"),
+        (CLAUDE_INTERRUPT, "claude"),
+        (CODEX_PERMISSION, "codex"),
+        (CODEX_ERROR, "codex"),
+        (CODEX_STARTUP, "codex"),
+    ] {
+        // Claude's first rule is its permission prompt, which a turn shows.
+        let skip = usize::from(profile == "claude");
+        let startup = &screen_rules(profile)[skip..];
+        let mut engine = AlacrittyEngine::new(VtConfig::default(), 120, 40);
+        for (i, bytes) in capture.chunks(64).enumerate() {
+            engine.feed(bytes);
+            assert_eq!(
+                read_screen(&engine, startup),
+                ScreenVerdict::NoMatch,
+                "{profile}, read {i}"
+            );
+        }
+        // Reading the screen as output settles changes none of their states.
+        let parts: Vec<&[u8]> = capture.chunks(64).collect();
+        assert_eq!(
+            replay_settled(&parts, profile),
+            states(capture, profile),
+            "{profile}"
+        );
+    }
 }
 
 #[test]

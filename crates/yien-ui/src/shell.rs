@@ -2617,7 +2617,7 @@ impl Shell {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(t.tab_mark_color(TabMark::State(state)))
+                                .text_color(t.tab_word_color(state))
                                 .child(state.label()),
                         )
                         .child(
@@ -2648,20 +2648,27 @@ impl Shell {
     }
 
     /// A tab row's mark: a mono glyph in its 14 px slot, the spinner's frame
-    /// while it works. No id, so screen readers hear the row's state word,
-    /// never the frames.
+    /// while it works, nothing for a tab of shells only. No id, so screen
+    /// readers hear the row's state word, never the frames.
     fn tab_mark(&self, mark: TabMark) -> Div {
         let t = self.theme;
-        div()
+        let slot = div()
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .w(px(14.0))
-            .text_size(t.text(12.0))
+            .w(px(14.0));
+        let Some(glyph) = assets::tab_mark_glyph(mark, self.spinner.frame()) else {
+            return slot;
+        };
+        // One line height for every glyph size, below the name's, so a row
+        // keeps its height when its state changes.
+        slot.line_height(t.text(18.0))
+            .text_size(t.text(glyph.size))
+            .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
             .text_color(t.tab_mark_color(mark))
             .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-            .child(assets::tab_mark_text(mark, self.spinner.frame()))
+            .child(glyph.text)
     }
 
     /// The tab's name, or the field editing it.
