@@ -26,25 +26,6 @@ pub(crate) enum AgentBadge {
     OpenCode,
 }
 
-/// The bundled marks, each with its file name in the notice.
-const ART: [(AgentBadge, &str, &[u8]); 3] = [
-    (
-        AgentBadge::Claude,
-        "ClaudeIcon-Rounded.svg",
-        include_bytes!("../assets/third-party/agents/ClaudeIcon-Rounded.svg"),
-    ),
-    (
-        AgentBadge::Codex,
-        "OAI_OpenAI-Blossom_White.svg",
-        include_bytes!("../assets/third-party/agents/OAI_OpenAI-Blossom_White.svg"),
-    ),
-    (
-        AgentBadge::OpenCode,
-        "opencode-logo-dark-square.svg",
-        include_bytes!("../assets/third-party/agents/opencode-logo-dark-square.svg"),
-    ),
-];
-
 #[cfg(test)]
 impl AgentBadge {
     pub(crate) const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::OpenCode];
@@ -56,12 +37,22 @@ impl AgentBadge {
 }
 
 impl AgentBadge {
+    /// The bundled mark: its file name in the notice and its bytes.
     fn art(self) -> (&'static str, &'static [u8]) {
-        let (_, name, bytes) = ART
-            .into_iter()
-            .find(|(badge, _, _)| *badge == self)
-            .unwrap_or(ART[0]);
-        (name, bytes)
+        match self {
+            Self::Claude => (
+                "ClaudeIcon-Rounded.svg",
+                include_bytes!("../assets/third-party/agents/ClaudeIcon-Rounded.svg"),
+            ),
+            Self::Codex => (
+                "OAI_OpenAI-Blossom_White.svg",
+                include_bytes!("../assets/third-party/agents/OAI_OpenAI-Blossom_White.svg"),
+            ),
+            Self::OpenCode => (
+                "opencode-logo-dark-square.svg",
+                include_bytes!("../assets/third-party/agents/opencode-logo-dark-square.svg"),
+            ),
+        }
     }
 
     /// The disc behind the mark, for a mark drawn without its own ground:
