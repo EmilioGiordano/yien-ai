@@ -11,12 +11,12 @@ use std::time::Instant;
 use gpui_kit::*;
 use yien_proto::{Command, ProfileId, ProfileInfo, ProjectId, SHELL_PROFILE, is_shell_profile};
 
-use super::Shell;
 use super::menu::{
     EDGE_MARGIN, Menu, MenuEntry, MenuEvent, MenuItem, MenuOutcome, OpenMenu, closed_by_this_click,
 };
 use super::pane_menu::menu_may_open;
 use super::tab_menu::menu_returns_to_bar;
+use super::{CLAUDE_PROFILE, Shell};
 use crate::actions::NewTabMenu;
 use crate::catalog::{shortcut, spec};
 
@@ -24,7 +24,7 @@ use crate::catalog::{shortcut, spec};
 fn keyed_command(profile: &str) -> Option<&'static str> {
     match profile {
         SHELL_PROFILE => Some("tab.new"),
-        "claude" => Some("tab.new_claude"),
+        CLAUDE_PROFILE => Some("tab.new_claude"),
         _ => None,
     }
 }
