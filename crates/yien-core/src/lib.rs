@@ -33,6 +33,7 @@ mod convert;
 mod git;
 mod hooks;
 mod launch;
+mod opencode;
 mod pane;
 mod persist;
 mod programs;
@@ -72,6 +73,7 @@ use crate::shell::ShellSetup;
 
 pub use git::GitConfig;
 pub use hooks::HookConfig;
+pub use opencode::OpenCodeService;
 pub use persist::{SAVE_DEBOUNCE, SessionSaveError, SessionStore};
 pub use programs::ProgramProbe;
 pub use screens::{SCREEN_INTERVAL, SCREEN_LIMITS, SCREENS_TOTAL_BYTES, ScreenFiles, ScreenStore};
@@ -218,6 +220,10 @@ pub struct CoreConfig {
     /// named after it while it runs (RF-PAN-12). `None`, the default, looks
     /// at no process.
     pub programs: Option<ProgramProbe>,
+    /// OpenCode's background service, read for the turns that failed, which
+    /// OpenCode never reports on the terminal. `None`, the default, reads
+    /// no file and opens no connection.
+    pub opencode: Option<OpenCodeService>,
 }
 
 impl Default for CoreConfig {
@@ -246,6 +252,7 @@ impl Default for CoreConfig {
             cli_dirs: CliDirs::default(),
             broken_profiles: BTreeMap::new(),
             programs: None,
+            opencode: None,
         }
     }
 }
@@ -422,6 +429,7 @@ impl Core {
             screens::Screens::start(store, config.screen_interval, Arc::clone(&config.clock))
         });
         let clipboards = Arc::<clipboards::Clipboards>::default();
+        let opencode = config.opencode.clone().map(opencode::OpenCodeWatch::new);
         let ctx = service::Ctx {
             backend,
             config: Arc::new(config),
@@ -434,6 +442,7 @@ impl Core {
             consoles: Arc::clone(&consoles),
             clipboards: Arc::clone(&clipboards),
             shells: Arc::default(),
+            opencode,
         };
         runtime.spawn(service::run(
             ctx,

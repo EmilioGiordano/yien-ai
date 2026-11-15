@@ -26,6 +26,7 @@ use yien_vt::{
 
 use crate::convert;
 use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::opencode::{OPENCODE, Sessions, Watching};
 use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
@@ -487,6 +488,12 @@ struct Actor {
     /// The startup screens of the agent CLI last found in the shell, read
     /// while the machine says so.
     typed_screen: Vec<ScreenRule>,
+    /// The OpenCode sessions this launch's program named over OSC 7501.
+    opencode_sessions: Sessions,
+    /// The shell poller finds OpenCode under this launch's shell.
+    typed_opencode: bool,
+    /// This pane's hold on the OpenCode watcher, while OpenCode runs here.
+    opencode: Option<Watching>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -557,6 +564,9 @@ pub(crate) fn spawn(
         restored_mark: None,
         titles: Titles::new(false),
         typed_screen: Vec::new(),
+        opencode_sessions: Sessions::default(),
+        typed_opencode: false,
+        opencode: None,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -575,7 +585,11 @@ enum Wake {
     Input(PaneInput),
     Hook(HookItem),
     Reader(Option<ReaderMsg>),
-    Noticed { owed: bool },
+    /// OpenCode's service says a turn of this session failed.
+    Failed(Arc<str>),
+    Noticed {
+        owed: bool,
+    },
     UiSize,
     Timer,
 }
@@ -592,6 +606,13 @@ async fn ui_size_reported(pending: &mut Option<Pending>) -> bool {
     match pending {
         Some(p) if p.ui_seen.is_none() => p.ui.changed().await.is_ok(),
         _ => std::future::pending().await,
+    }
+}
+
+async fn failed_session(opencode: &mut Option<Watching>) -> Arc<str> {
+    match opencode {
+        Some(watching) => watching.failed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -629,6 +650,7 @@ impl Actor {
                 Some(item) = hooks.recv() => Wake::Hook(item),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
+                session = failed_session(&mut self.opencode) => Wake::Failed(session),
                 true = ui_size_reported(&mut self.pending) => Wake::UiSize,
                 room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
                     owed: match room {
@@ -656,6 +678,7 @@ impl Actor {
                 Wake::Hook(item) => self.on_hook(item, &mut hooks),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
+                Wake::Failed(session) => self.on_failed(&session),
                 Wake::Noticed { owed } => self.notice_owed = owed,
                 Wake::UiSize => {
                     if let Some(p) = &mut self.pending {
@@ -722,6 +745,10 @@ impl Actor {
     /// feeding the old engine cannot reach this one.
     async fn start(&mut self) {
         self.session = None;
+        // Sessions of the program that ran before are not this one's.
+        self.opencode_sessions.clear();
+        self.typed_opencode = false;
+        self.sync_opencode();
         self.outbox.clear();
         self.retry_at = None;
         self.sync = None;
@@ -848,6 +875,35 @@ impl Actor {
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
+        self.sync_opencode();
+    }
+
+    /// Holds the OpenCode watcher while OpenCode runs in this launch: its
+    /// profile's program, the program found under the shell, or whatever
+    /// reports as OpenCode until it gives the terminal back.
+    fn sync_opencode(&mut self) {
+        let running = self.session.as_ref().is_some_and(|s| !s.exited);
+        let wanted = running
+            && (self.plan.profile == OPENCODE
+                || self.typed_opencode
+                || self.opencode_sessions.reported());
+        if wanted != self.opencode.is_some() {
+            self.opencode = self
+                .ctx
+                .opencode
+                .as_ref()
+                .filter(|_| wanted)
+                .map(|watch| watch.join());
+        }
+    }
+
+    /// A failure OpenCode's service reported, for any of its sessions: it
+    /// fails this pane's turn only if this pane's OpenCode named the session.
+    fn on_failed(&mut self, session: &str) {
+        if self.opencode_sessions.contains(session) {
+            tracing::debug!(pane = self.id.get(), "OpenCode reported a failed turn");
+            self.step(&Signal::ServiceError);
+        }
     }
 
     /// Spawns the plan filled with `fill`, off the runtime's threads, and
@@ -1045,6 +1101,13 @@ impl Actor {
             self.typed_screen = screens;
         }
         self.step(&Signal::TypedAgent(typed));
+        let opencode = program == Some(OPENCODE);
+        if self.typed_opencode && !opencode {
+            // It left, perhaps without the `clear` that forgets its sessions.
+            self.opencode_sessions.clear();
+        }
+        self.typed_opencode = opencode;
+        self.sync_opencode();
     }
 
     fn on_input(&mut self, input: PaneInput) {
@@ -1080,6 +1143,7 @@ impl Actor {
                     s.exited = true;
                     s.watched = None;
                 }
+                self.sync_opencode();
                 if let Some(failure) = self.resume_failure(code) {
                     self.failed_resume = Some(failure);
                     return;
@@ -1173,6 +1237,7 @@ impl Actor {
         let Some(session) = self.session.take() else {
             return;
         };
+        self.sync_opencode();
         self.outbox.clear();
         self.retry_at = None;
         if !session.exited {
@@ -1199,6 +1264,13 @@ impl Actor {
         for signal in &out.signals {
             if let yien_vt::OscSignal::Cwd(dir) = signal {
                 self.report(PaneEvent::Cwd(dir.clone()));
+            }
+            if let yien_vt::OscSignal::Status(status) = signal {
+                let learned = self.opencode_sessions.absorb(status);
+                self.sync_opencode();
+                if let (true, Some(watching)) = (learned, &self.opencode) {
+                    watching.poke();
+                }
             }
             if let Some(osc) = convert::osc_signal(signal) {
                 self.step(&Signal::Osc(osc));
@@ -1641,9 +1713,18 @@ mod tests {
         hooks_lost: Arc<AtomicBool>,
         _events: mpsc::Receiver<CoreMsg>,
         _input: mpsc::Sender<PaneInput>,
+        /// An OpenCode watcher with no service file: it never connects, and
+        /// the test hands the panes its failures.
+        opencode: Arc<crate::opencode::OpenCodeWatch>,
     }
 
     impl Solo {
+        /// An OpenCode pane.
+        fn opencode() -> Self {
+            let opencode = yien_proto::ProfileId::new(OPENCODE);
+            Self::run(Some(&opencode), Vec::new(), false, None, None)
+        }
+
         /// Starts the actor with `queued` already waiting in its hook queue.
         fn start(queued: Vec<HookItem>, lost: bool) -> Self {
             Self::launch(queued, lost, None, None)
@@ -1689,6 +1770,11 @@ mod tests {
             let backend = Arc::new(yien_pty::FakePty::new());
             let screen = Arc::new(ScreenSource::default());
             let (events, events_rx) = mpsc::channel(64);
+            let opencode = crate::opencode::OpenCodeWatch::new(crate::OpenCodeService {
+                files: Vec::new(),
+                retry: (Duration::from_secs(60), Duration::from_secs(60)),
+                idle_timeout: Duration::from_secs(5),
+            });
             let ctx = Ctx {
                 backend: backend.clone(),
                 config: Arc::new(config),
@@ -1701,6 +1787,7 @@ mod tests {
                 consoles: Arc::default(),
                 clipboards: Arc::default(),
                 shells: Arc::default(),
+                opencode: Some(Arc::clone(&opencode)),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
@@ -1743,6 +1830,7 @@ mod tests {
                 hooks_lost,
                 _events: events_rx,
                 _input: input,
+                opencode,
             }
         }
 
