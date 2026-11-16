@@ -431,6 +431,7 @@ mod tests {
             "Claude and the Claude logo are trademarks of Anthropic PBC.",
             "OpenAI and the OpenAI logo are trademarks of OpenAI.",
             "OpenCode and the OpenCode logo are trademarks of Anomaly.",
+            "Git and the Git logo are trademarks of Software Freedom Conservancy.",
             "Git Logo by Jason Long is licensed under the Creative Commons Attribution 3.0",
             "https://creativecommons.org/licenses/by/3.0/",
             "MIT License",
