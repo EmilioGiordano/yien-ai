@@ -227,9 +227,27 @@ fn within(path: &Path, root: &Path) -> bool {
     fn normalize(text: &str) -> String {
         text.to_string()
     }
+    // `..` must be resolved before the walk up: a missing `/a/..` has no file
+    // name, which would drop the rest of the path (Unix keeps it unresolved).
+    fn lexical(path: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for item in path.components() {
+            match item {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
     fn canonicalize_lenient(path: &Path) -> PathBuf {
         let mut suffix = Vec::new();
-        let mut current = path.to_path_buf();
+        let mut current = lexical(path);
         loop {
             if let Ok(mut base) = current.canonicalize() {
                 for part in suffix.iter().rev() {
