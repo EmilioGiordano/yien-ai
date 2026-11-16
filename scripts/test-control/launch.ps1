@@ -182,8 +182,8 @@ if ($MockOpenCode) {
     # A throwaway HOME: OpenCode's shared service and database land in the
     # run's folder and nothing of the real profile is read or written. The
     # global config there only disables update checks.
-    $home = Join-Path $Root 'home'
-    $configDir = Join-Path $home '.config\opencode'
+    $ocHome = Join-Path $Root 'home'
+    $configDir = Join-Path $ocHome '.config\opencode'
     $null = New-Item -ItemType Directory -Path $configDir
     $globalConfig = @{
         '$schema' = 'https://opencode.ai/config.json'
@@ -191,8 +191,8 @@ if ($MockOpenCode) {
     }
     Write-Utf8 (Join-Path $configDir 'opencode.json') ($globalConfig | ConvertTo-Json -Depth 10)
     # A dummy key; it never leaves the machine.
-    $env_.HOME = $home
-    $env_.USERPROFILE = $home
+    $env_.HOME = $ocHome
+    $env_.USERPROFILE = $ocHome
     $env_.MOCK_API_KEY = 'dummy-mock-key'
 }
 
