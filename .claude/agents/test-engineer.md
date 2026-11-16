@@ -40,7 +40,7 @@ Work only in the worktree you are given: every command uses `git -C <worktree>` 
 
 ## Report
 
-Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Tests`. Never commit it.
+Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Tests`, with a Bash append (`cat >> REPORT-<topic>.md <<'EOF'`); the Write tool is blocked for report files. Never commit it.
 
 ```
 Covered: <target>

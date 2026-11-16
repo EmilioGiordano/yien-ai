@@ -39,7 +39,7 @@ Push, create or switch branches, merge, `git clean`, `branch -D`, delete worktre
 
 ## Report
 
-Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Implementer` (a new `## Implementer, round <n>` for each fix round). Never commit it.
+Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Implementer` (a new `## Implementer, round <n>` for each fix round), with a Bash append (`cat >> REPORT-<topic>.md <<'EOF'`); the Write tool is blocked for report files. Never commit it.
 
 ```
 Branch: <name>   Worktree: <path>
