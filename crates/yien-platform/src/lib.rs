@@ -10,7 +10,8 @@
 //! on disk ([`config_file`]), the read-only listing of each agent CLI's
 //! past sessions ([`agent_sessions`]), the user's agent profile files
 //! ([`user_profiles`]), a tab's folder for the file tree ([`file_tree`]),
-//! and the agent CLI running under a shell ([`programs`]).
+//! the agent CLI running under a shell ([`programs`]), and the pipe a test
+//! script drives the window through ([`test_control`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -34,6 +35,7 @@ pub mod paths;
 pub mod programs;
 pub mod single_instance;
 pub mod state_store;
+pub mod test_control;
 pub mod user_profiles;
 
 pub use logging::{LogError, LogGuard, init_logging, init_logging_with};
