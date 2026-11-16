@@ -48,13 +48,17 @@ mkdir -p "$log_dir"
 log_file="$log_dir/$role-$(date +%Y%m%d-%H%M%S).jsonl"
 
 # Rule order matters: OpenCode applies the LAST matching rule, so "*" comes
-# first and the denies after it. The reviewer is read-only.
+# first and the specifics after it. The reviewer is read-only for the code
+# and may write only REPORT-<topic>.md (the brief says the same).
 if [ "$role" = "reviewer" ]; then
   cat > "$worktree/opencode.json" <<'EOF'
 {
   "$schema": "https://opencode.ai/config.json",
   "permission": {
-    "edit": "deny",
+    "edit": {
+      "*": "deny",
+      "REPORT-*.md": "allow"
+    },
     "bash": {
       "*": "allow",
       "git push*": "deny",
