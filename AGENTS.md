@@ -105,8 +105,9 @@ Every branch goes through the same loop: steps 1–7 with the `yien-branch` skil
 4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
    - Each re-review brief carries the previous findings with their resolution (fixed in a commit, argued against, deliberate). With that, the reviewer says whether a repeated fault is the patch or the design. A design problem is redesigned, not patched again.
    - A finding that contradicts the ERS or the plan is overridden by the orchestrator: it is recorded as deliberate in the REPORT and in the next brief, and it no longer counts toward the verdict. A finding that turns out wrong also goes into the reviewer's "Known false positives", committed on the branch being reviewed.
+   - A Low finding whose fix is a one- or two-line change that touches no behaviour covered by another finding is verified by the orchestrator, with no new reviewer round: it reads the diff and runs fmt, clippy and the touched crate's tests through `scripts/cargo.sh`. A Medium or higher finding, or any fix that touches logic, goes back to `quality-reviewer`.
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
-6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution.
+6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and a Low fix verified by the orchestrator as in step 4.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
 8. The branch goes through integration and UI validation. Then the orchestrator merges it.
 
