@@ -196,43 +196,62 @@ if ($MockOpenCode) {
 }
 
 # Start-Process passes this process's environment on; set it for the start
-# only and put the old values back.
+# only and put the old values back. A failed launch stops what it started.
 $saved = @{}
 foreach ($k in $env_.Keys) {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
     [Environment]::SetEnvironmentVariable($k, $env_[$k], 'Process')
 }
+$yien = $null
 try {
-    $yien = Start-Process -FilePath $Exe -WorkingDirectory $work -PassThru `
-        -ArgumentList @('--test-control', $Name)
-}
-finally {
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
-}
-
-$run = [ordered]@{
-    name      = $Name
-    pid       = $yien.Id
-    exe       = $Exe
-    root      = $Root
-    data      = $data
-    work      = $work
-    mock_pid  = if ($mock) { $mock.Id } else { $null }
-    mock_port = $mockPort
-}
-Write-Utf8 (Join-Path $Root 'run.json') ($run | ConvertTo-Json)
-
-$deadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSec)
-$ready = $false
-while (-not $ready -and [DateTime]::UtcNow -lt $deadline) {
-    if ($yien.HasExited) { throw "yien exited with code $($yien.ExitCode) before test control was ready; see $data\logs" }
     try {
-        $state = Get-YienState -Name $Name -ServerPid $yien.Id
-        $ready = $state.tabs.Count -gt 0
+        $yien = Start-Process -FilePath $Exe -WorkingDirectory $work -PassThru `
+            -ArgumentList @('--test-control', $Name)
     }
-    catch { $ready = $false }
-    if (-not $ready) { Start-Sleep -Milliseconds 250 }
+    finally {
+        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+    }
+
+    $run = [ordered]@{
+        name      = $Name
+        pid       = $yien.Id
+        exe       = $Exe
+        root      = $Root
+        data      = $data
+        work      = $work
+        mock_pid  = if ($mock) { $mock.Id } else { $null }
+        mock_port = $mockPort
+    }
+    Write-Utf8 (Join-Path $Root 'run.json') ($run | ConvertTo-Json)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSec)
+    $ready = $false
+    while (-not $ready -and [DateTime]::UtcNow -lt $deadline) {
+        if ($yien.HasExited) { throw "yien exited with code $($yien.ExitCode) before test control was ready; see $data\logs" }
+        try {
+            $state = Get-YienState -Name $Name -ServerPid $yien.Id
+            $ready = $state.tabs.Count -gt 0
+        }
+        catch { $ready = $false }
+        if (-not $ready) { Start-Sleep -Milliseconds 250 }
+    }
+    if (-not $ready) { throw "test control '$Name' did not answer with a tab within $ReadyTimeoutSec s" }
 }
-if (-not $ready) { throw "test control '$Name' did not answer with a tab within $ReadyTimeoutSec s" }
+catch {
+    # Stop what this run started, so a failed launch leaves no processes
+    # behind; the folder stays for inspection.
+    if ($mock) {
+        $node = Get-Process -Id $mock.Id -ErrorAction SilentlyContinue
+        if ($node) { Stop-Process -Id $mock.Id -Force -ErrorAction SilentlyContinue }
+    }
+    if ($yien -and -not $yien.HasExited) {
+        try { $yien.CloseMainWindow() | Out-Null } catch { }
+        if (-not $yien.WaitForExit(5000)) {
+            Stop-Process -Id $yien.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Host "launch failed; $Root is kept for inspection (stop with stop.ps1 -Root $Root)"
+    throw
+}
 
 [pscustomobject]$run
