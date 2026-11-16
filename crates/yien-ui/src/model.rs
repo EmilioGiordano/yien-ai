@@ -1753,6 +1753,9 @@ mod tests {
     fn shell_pane(id: u64, tab: u64, profile: &str, name: &str, state: P) -> PaneInfo {
         PaneInfo {
             name: name.into(),
+            // The core names a `shell:<kind>` pane's profile after its kind.
+            profile: yien_proto::ShellKind::from_profile(profile)
+                .map_or_else(|| "Shell".into(), |kind| kind.name().into()),
             profile_id: yien_proto::ProfileId::new(profile),
             ..pane(id, tab, state)
         }
