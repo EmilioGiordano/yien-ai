@@ -14,10 +14,12 @@ trusted), opens the Claude pane through test control, prints PASS or FAIL
 per step, stops the run with stop.ps1 unless -Keep, and exits with the
 number of failed steps.
 
-    1. trust    the trust screen shows and YIEN reads the pane as Needs you:
-                pane and tab, the tab's red mark and the title bar counter
-    2. answer   picking "Yes, I trust this folder" clears it: the pane and
-                the tab leave Needs you and the counter drops to zero
+    1. trust       the trust screen shows and YIEN reads the pane as Needs you:
+                    pane and tab, the tab's red mark and the title bar counter
+    2. unselected  another tab selected: the Claude tab still shows Needs you,
+                    its mark and the counter (RF-ATN-15)
+    3. answer      picking "Yes, I trust this folder" clears it: the pane and
+                    the tab leave Needs you and the counter drops to zero
 
 The answer step reads the screen to find which choice is under the cursor,
 so it works whichever option the build defaults to.
@@ -104,6 +106,22 @@ function Key([int]$Pane, [string]$Key) {
     $null = Send-YienKey -Name $name -ServerPid $serverPid -Pane $Pane -Key $Key
 }
 
+# The launch tab, the one that is not the Claude tab.
+function Shell-Tab-Id([int]$ClaudeTab) {
+    $s = State
+    $other = $s.tabs | Where-Object { $_.id -ne $ClaudeTab } | Select-Object -First 1
+    if (-not $other) { throw 'no other tab to select' }
+    return $other.id
+}
+
+function Select-Tab([int]$Tab) {
+    Invoke-YienCommand -Name $name -ServerPid $serverPid -Id 'tab.select' -Arguments @{ tab = $Tab }
+    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec 10 -Until {
+        param($s) $s.selected_tab -eq $Tab
+    }
+    if (-not $state) { throw "tab $Tab was not selected" }
+}
+
 try {
     $before = @((State).panes | ForEach-Object { $_.id })
     $claude = $null
@@ -132,6 +150,21 @@ try {
             "pane and tab Needs you, counter $($s.waiting), tab mark $($tab.mark)"
         }
         if ($ok) {
+            $claudeTab = (Get-YienPane (State) $claude.id).tab
+            $shellTab = Shell-Tab-Id $claudeTab
+            $ok = Step 'claude' 'unselected' {
+                Select-Tab $shellTab
+                $s = State
+                $tab = $s.tabs | Where-Object { $_.id -eq $claudeTab }
+                if ($tab.state -ne 'Needs you') { throw "the unselected tab's state is '$($tab.state)'" }
+                if ($tab.mark -ne 'needs_you') { throw "the unselected tab's mark is '$($tab.mark)'" }
+                if (-not $tab.needs_you) { throw 'the unselected tab lost its red mark' }
+                if ($s.waiting -ne 1) { throw "the counter counts $($s.waiting), not one" }
+                Select-Tab $claudeTab
+                "the unselected tab still Needs you, mark $($tab.mark), counter $($s.waiting)"
+            }
+        }
+        if ($ok) {
             $null = Step 'claude' 'answer' {
                 # The trust screen lists two choices with the cursor on one of
                 # them; read which, move to "Yes, I trust this folder" if it is
@@ -141,7 +174,7 @@ try {
                 }
                 Focus-Pane $claude.id
                 $text = Get-YienPaneText $p
-                $onYes = $text -match '(?m)(\u276f|>)[^\S\r\n]*\s*Yes, I trust this folder'
+                $onYes = $text -match '(?m)[\u276f>]\s*Yes, I trust this folder'
                 if (-not $onYes) { Key $claude.id 'down' }
                 Key $claude.id 'enter'
                 $p = Wait-Pane $claude.id -What 'leaving Needs you' -Until {
