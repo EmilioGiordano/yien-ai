@@ -51,15 +51,18 @@ fn rf_age_02_the_opencode_start_up_bytes_are_answered_and_tracked_per_screen() {
 fn rf_age_02_the_opencode_start_up_bytes_give_the_pane_kitty_disambiguate() {
     let engine = startup_engine();
     let key_modes = pane_key_modes(&engine);
-    // Esc and Ctrl+C are the keys this build reacts to mid-turn; both must
-    // be CSI u, not the legacy bytes it ignores.
+    // Esc and Ctrl+C are the keys this build reacts to mid-turn. Round 2:
+    // Ctrl+C is the console's interrupt key (0x03 -> CTRL_C_EVENT); the
+    // integration scenario stayed Working mid-turn on CSI 99;5u, while 0x03
+    // had always passed. Esc keeps its CSI u form (the CLI handles it; the
+    // capture shows no difference between 0x1b and CSI 27u).
     assert_eq!(
         encode_with(&Key::Escape, Mods::NONE, key_modes).as_deref(),
         Some(b"\x1b[27u".as_slice())
     );
     assert_eq!(
         encode_with(&Key::Char('c'), Mods::CTRL, key_modes).as_deref(),
-        Some(b"\x1b[99;5u".as_slice())
+        Some(vec![0x03].as_slice())
     );
 }
 
