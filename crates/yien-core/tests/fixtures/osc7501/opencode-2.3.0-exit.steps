@@ -1,0 +1,6 @@
+# OpenCode 2.3.0: Ctrl+C at an idle prompt quits at once; the records say
+# state=clear and the CLI exits with code 0.
+wait-for 60000 Ask anything
+wait 2000
+key ctrl-c
+wait-exit 15000

@@ -1,0 +1,14 @@
+# OpenCode 2.3.0: a slow turn (the mock streams "slow please" for about
+# 40 s), stopped with Esc. This build ignores the first Esc and aborts on
+# the second; the records say state=clear then state=idle.
+wait-for 60000 Ask anything
+wait 2000
+text slow please
+wait 300
+key enter
+wait-for 60000 esc interrupt
+wait 1000
+key esc
+wait 1000
+key esc
+wait 6000

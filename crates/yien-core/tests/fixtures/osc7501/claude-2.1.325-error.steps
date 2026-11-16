@@ -1,0 +1,8 @@
+# Claude Code 2.1.325, trusted folder, mock Messages API: the mock answers
+# this turn with a 400. Claude retries the failing call for about a minute
+# before it gives up and reports state=error.
+wait-for 30000 effort
+text mockerror
+key enter
+wait-for 120000 API Error
+wait 1000

@@ -1,0 +1,8 @@
+# Claude Code 2.1.325, trusted folder, mock Messages API: a turn against a
+# slow mock stream, stopped with Esc.
+wait-for 30000 effort
+text slow please
+key enter
+wait-for 30000 esc to interrupt
+key esc
+wait 4000
