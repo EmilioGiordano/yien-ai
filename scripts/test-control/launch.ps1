@@ -4,7 +4,7 @@ Starts a YIEN build with test control on and a throwaway profile.
 
 .DESCRIPTION
 Usage:
-    ./scripts/test-control/launch.ps1 -Exe <path to yien.exe> [-Root <folder>] [-Name <name>] [-MockClaude] [-NoTrust]
+    ./scripts/test-control/launch.ps1 -Exe <path to yien.exe> [-Root <folder>] [-Name <name>] [-MockClaude] [-NoTrust] [-MockOpenCode]
 
 Everything the run writes goes under -Root, a new folder made for it:
     data/     YIEN's data and config (YIEN_DATA_DIR): session, settings, logs
@@ -25,6 +25,12 @@ No real account or quota is used.
 -NoTrust (with -MockClaude) pre-trusts nothing: Claude Code shows its folder
 trust screen in work/, for the scenarios that drive the red mark through it.
 
+-MockOpenCode starts mock-openai-api.js with Node on a free loopback port and
+makes a project-level opencode.json in work/ point at it: a custom provider
+on the built-in OpenAI-compatible runtime with a dummy credential, so no
+account or quota is used. HOME and USERPROFILE are redirected to the run's
+home/ folder, so OpenCode's shared service and database stay throwaway.
+
 Writes the run's facts as an object, and as JSON to <Root>/run.json. Stop the
 run with stop.ps1. Never run this against a profile or a YIEN you did not
 start for the test.
@@ -36,6 +42,7 @@ param(
     [string]$Name,
     [switch]$MockClaude,
     [switch]$NoTrust,
+    [switch]$MockOpenCode,
     [double]$ReadyTimeoutSec = 30
 )
 
@@ -85,6 +92,7 @@ function Write-Utf8([string]$Path, [string]$Text) {
 }
 
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
+if ($MockClaude -and $MockOpenCode) { throw 'pick one of -MockClaude and -MockOpenCode' }
 if (-not $Name) { $Name = "tc-$(New-Nonce)" }
 if ($Name -cnotmatch '^[A-Za-z0-9_-]{1,64}$') { throw "not a test control name: '$Name'" }
 if (-not $Root) { $Root = Join-Path (Join-Path (Get-SlotDir) 'run') $Name }
@@ -140,6 +148,51 @@ if ($MockClaude) {
     $env_.DISABLE_TELEMETRY = '1'
     $env_.DISABLE_ERROR_REPORTING = '1'
     $env_.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+}
+if ($MockOpenCode) {
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) { throw 'node is not on PATH; it runs the mock OpenAI-compatible API' }
+    $mockPort = Get-FreePort
+    $mockLog = Join-Path $Root 'mock.log'
+    $script = Join-Path $PSScriptRoot 'mock-openai-api.js'
+    $mock = Start-Process -FilePath $node.Source -PassThru -WindowStyle Hidden `
+        -ArgumentList @("`"$script`"", '--port', $mockPort, '--log', "`"$mockLog`"")
+    if (-not (Wait-Port $mockPort 10)) {
+        Stop-Process -Id $mock.Id -ErrorAction SilentlyContinue
+        throw "the mock API did not listen on port $mockPort"
+    }
+    # A project-level opencode.json in work/ points at the mock: a custom
+    # provider on the built-in OpenAI-compatible runtime, a dummy credential
+    # from MOCK_API_KEY, and the model listed, so no discovery call is made.
+    $workConfig = @{
+        '$schema' = 'https://opencode.ai/config.json'
+        model     = 'oai/mock'
+        providers = @{
+            oai = @{
+                name     = 'Mock'
+                env      = @('MOCK_API_KEY')
+                package  = '@opencode/ai/providers/openai-compatible'
+                settings = @{ baseURL = "http://127.0.0.1:$mockPort/v1" }
+                models   = @{ mock = @{ name = 'Mock' } }
+            }
+        }
+    }
+    Write-Utf8 (Join-Path $work 'opencode.json') ($workConfig | ConvertTo-Json -Depth 10)
+    # A throwaway HOME: OpenCode's shared service and database land in the
+    # run's folder and nothing of the real profile is read or written. The
+    # global config there only disables update checks.
+    $home = Join-Path $Root 'home'
+    $configDir = Join-Path $home '.config\opencode'
+    $null = New-Item -ItemType Directory -Path $configDir
+    $globalConfig = @{
+        '$schema' = 'https://opencode.ai/config.json'
+        update    = 'disable'
+    }
+    Write-Utf8 (Join-Path $configDir 'opencode.json') ($globalConfig | ConvertTo-Json -Depth 10)
+    # A dummy key; it never leaves the machine.
+    $env_.HOME = $home
+    $env_.USERPROFILE = $home
+    $env_.MOCK_API_KEY = 'dummy-mock-key'
 }
 
 # Start-Process passes this process's environment on; set it for the start
