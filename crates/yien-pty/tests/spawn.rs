@@ -283,18 +283,18 @@ fn env_clear_starts_the_child_from_an_empty_environment() {
     let command = if cfg!(windows) { "set" } else { "env" };
     let mut spec = run(command)
         .env_clear()
-        .env("YIEN_CAPTURE_PROBE", "present");
+        .env("YIEN_CAPTURE_PROBE", "present")
+        // Without PATH the program is not found on any system.
+        .env(
+            "PATH",
+            std::env::var_os("PATH").expect("the test host has PATH"),
+        );
     if cfg!(windows) {
-        // What the empty start still needs to find and run a program.
-        spec = spec
-            .env(
-                "PATH",
-                std::env::var_os("PATH").expect("the test host has PATH"),
-            )
-            .env(
-                "SYSTEMROOT",
-                std::env::var_os("SYSTEMROOT").expect("the test host has SystemRoot"),
-            );
+        // What the empty start still needs to run a program.
+        spec = spec.env(
+            "SYSTEMROOT",
+            std::env::var_os("SYSTEMROOT").expect("the test host has SystemRoot"),
+        );
     }
     // cmd.exe itself defaults COMSPEC, PROMPT and PATHEXT; anything else in
     // the output would have to have come from us or the registry.

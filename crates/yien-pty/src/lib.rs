@@ -84,7 +84,8 @@ pub trait PtyBackend: Send + Sync {
 
 /// What to run and in what terminal size.
 ///
-/// The child inherits YIEN's environment; `env` adds or overrides variables.
+/// The child inherits YIEN's environment unless `env_clear` is set; `env`
+/// adds or overrides variables.
 ///
 /// ```
 /// use yien_pty::SpawnSpec;
