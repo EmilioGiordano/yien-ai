@@ -5,7 +5,7 @@
 use yien_proto::{SessionTitle, ShellKind, is_shell_profile};
 
 use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
-use crate::model::PaneView;
+use crate::model::{AgentState, PaneView, TabMark};
 
 /// The head's own horizontal padding, each side.
 pub(crate) const PADDING: f32 = 8.0;
@@ -94,6 +94,16 @@ pub(crate) fn pane_badge(pane: &PaneView) -> Option<Badge> {
     let stand_in = !id.is_empty() && !pane.runs_session && pane.running;
     (is_shell_profile(id) || stand_in)
         .then(|| Badge::Shell(ShellBadge::of_program(&pane.name, cfg!(windows))))
+}
+
+/// The state mark a pane head draws in its lead slot: none for an idle
+/// shell, as an idle shell tab row has none; the state's mark otherwise,
+/// Idle's orange dot included for agents and panes with nothing known.
+pub(crate) fn head_mark(pane: &PaneView) -> TabMark {
+    match (pane.state, pane_badge(pane)) {
+        (AgentState::Idle, Some(Badge::Shell(_))) => TabMark::Shell,
+        (state, _) => TabMark::State(state),
+    }
 }
 
 /// The text a pane head may show, as it would read in full.
@@ -257,11 +267,11 @@ mod tests {
     use yien_proto::{PaneId, ProfileId, SessionTitle};
 
     use super::{
-        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, agent_badge, names_agent,
+        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, agent_badge, head_mark, names_agent,
         pane_badge, program_tag, runs_agent,
     };
     use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
-    use crate::model::{AgentState, PaneView};
+    use crate::model::{AgentState, PaneView, TabMark};
 
     const BIGGEST: f32 = 20.0 / 13.0;
     const SCALES: [f32; 4] = [1.0, 1.25, 1.5, BIGGEST];
@@ -727,5 +737,30 @@ mod tests {
             ..pane("claude", false)
         };
         assert_eq!(pane_badge(&exited), None, "an ended agent is not a shell");
+    }
+
+    #[test]
+    fn rf_pan_12_an_idle_shell_head_has_no_corner_mark_like_its_tab_row() {
+        let idle = |p: PaneView| head_mark(&p);
+        assert_eq!(idle(named("shell", "pwsh", true)), TabMark::Shell);
+        assert_eq!(idle(named("shell:cmd", "cmd", true)), TabMark::Shell);
+        assert_eq!(
+            idle(named("claude", "pwsh", false)),
+            TabMark::Shell,
+            "stand-in"
+        );
+        // Agents keep Idle's orange dot; so does a pane with nothing known.
+        let idle_dot = TabMark::State(AgentState::Idle);
+        assert_eq!(idle(pane("claude", true)), idle_dot);
+        assert_eq!(idle(named("shell", "codex", true)), idle_dot, "typed agent");
+        assert_eq!(idle(pane("", true)), idle_dot);
+        // A shell's other states keep their marks.
+        for state in [AgentState::Working, AgentState::Done, AgentState::NeedsYou] {
+            let busy = PaneView {
+                state,
+                ..named("shell", "pwsh", true)
+            };
+            assert_eq!(head_mark(&busy), TabMark::State(state), "{state:?}");
+        }
     }
 }

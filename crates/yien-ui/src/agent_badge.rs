@@ -62,10 +62,10 @@ impl ShellBadge {
     }
 
     /// The badge of the default shell by its program's name, as the core
-    /// names the pane. `bash` is Git Bash only on Windows, the only bash
-    /// YIEN starts there.
+    /// names the pane, in any case. `bash` is Git Bash only on Windows, the
+    /// only bash YIEN starts there.
     pub(crate) fn of_program(name: &str, windows: bool) -> Self {
-        match name {
+        match name.to_ascii_lowercase().as_str() {
             "pwsh" | "powershell" => Self::PowerShell,
             "cmd" => Self::Cmd,
             "bash" if windows => Self::GitBash,
@@ -438,6 +438,9 @@ mod tests {
         }
         assert_eq!(ShellBadge::of_program("bash", true), ShellBadge::GitBash);
         assert_eq!(ShellBadge::of_program("bash", false), ShellBadge::Other);
+        assert_eq!(ShellBadge::of_program("PWSH", true), ShellBadge::PowerShell);
+        assert_eq!(ShellBadge::of_program("Cmd", true), ShellBadge::Cmd);
+        assert_eq!(ShellBadge::of_program("Bash", true), ShellBadge::GitBash);
     }
 
     #[test]

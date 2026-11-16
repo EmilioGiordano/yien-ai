@@ -41,7 +41,9 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, pane_badge, program_tag};
+use crate::pane_head::{
+    self, HeadText, PaneHeadLayout, head_mark, names_agent, pane_badge, program_tag,
+};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn, TAB_LIST_PAD, TAB_ROW_BRANCH, TAB_ROW_GAP, TAB_ROW_PAD};
@@ -2654,8 +2656,9 @@ impl Shell {
 
     /// The first piece of a tab row or pane head, in a fixed square: the
     /// agent's or shell's badge with `mark` on a disc of `ground` in its
-    /// corner (the row's hover colour under `hover_group`; none for idle
-    /// shells), or `mark` alone when nothing is known of the program. The
+    /// corner (the row's hover colour under `hover_group`), or `mark` alone
+    /// when nothing is known of the program. `TabMark::Shell`, which tab rows
+    /// and pane heads pass for idle shells, draws no corner mark. The
     /// spinner's frame while it works. No id, so screen readers hear the
     /// label's state word, never the frames.
     fn lead_mark(
@@ -2940,7 +2943,7 @@ impl Shell {
             .when(focused, |h| h.bg(t.term_raised))
             .child(self.lead_mark(
                 pane_badge(pane),
-                TabMark::State(pane.state),
+                head_mark(pane),
                 if focused { t.term_raised } else { t.term_bg },
                 None,
             ))
