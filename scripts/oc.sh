@@ -102,7 +102,7 @@ if [ -n "$session_id" ]; then cmd+=(-s "$session_id"); fi
 cmd+=("$prompt")
 
 rc=0
-( cd "$worktree" && "${cmd[@]}" ) > "$log_file" 2>&1 || rc=$?
+( cd "$worktree" && "${cmd[@]}" < /dev/null ) > "$log_file" 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then
   echo "oc.sh: opencode exited with $rc; full log at $log_file" >&2
   exit "$rc"
