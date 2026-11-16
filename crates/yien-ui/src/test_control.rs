@@ -605,8 +605,11 @@ mod tests {
         "agent.next_needs_you",
     ];
 
+    /// A name for one args-carrying case, and how to build it.
+    type ArgCase = (&'static str, fn() -> CommandArgs);
+
     /// Each way a request can carry args: one arg set, every field set.
-    const ARG_VARIANTS: &[(&str, fn() -> CommandArgs)] = &[
+    const ARG_VARIANTS: &[ArgCase] = &[
         ("profile", || CommandArgs {
             profile: Some(ProfileId::new("claude")),
             ..CommandArgs::default()
