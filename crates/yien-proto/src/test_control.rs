@@ -418,6 +418,10 @@ pub struct TabState {
     pub branch: Option<String>,
     /// It was opened on a linked worktree.
     pub worktree: bool,
+    /// Which badge the row shows: its agent's (`claude`, `codex`,
+    /// `opencode`), else its shell's (`powershell`, `cmd`, `git_bash`,
+    /// `other`), `None` when nothing is known.
+    pub badge: Option<String>,
     /// The state word of its most urgent pane: `Working`, `Needs you`.
     pub state: String,
     /// The row's mark: the snake case state (`needs_you`, `working`), or
@@ -446,6 +450,10 @@ pub struct PaneState {
     pub name: String,
     /// The profile's name: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The badge the head shows: its agent's (`claude`, `codex`, `opencode`),
+    /// else its shell's (`powershell`, `cmd`, `git_bash`, `other`), `None`
+    /// when nothing is known.
+    pub badge: Option<String>,
     /// The profile's id: `claude`, `shell`.
     pub profile_id: String,
     /// The program tag the head shows next to the name.
@@ -524,6 +532,7 @@ mod tests {
             name: "pwsh".into(),
             profile: "Shell".into(),
             profile_id: "shell".into(),
+            badge: Some("powershell".into()),
             tag: "pwsh".into(),
             state: "Idle".into(),
             signal_lost: false,
@@ -695,6 +704,7 @@ mod tests {
                 dir: "C:/work".into(),
                 branch: None,
                 worktree: false,
+                badge: Some("claude".into()),
                 state: "Needs you".into(),
                 mark: "needs_you".into(),
                 needs_you: true,
@@ -715,10 +725,40 @@ mod tests {
         assert_eq!(json["ok"], true);
         assert_eq!(json["state"]["keyboard_pane"], 3);
         assert_eq!(json["state"]["tabs"][0]["mark"], "needs_you");
+        assert_eq!(json["state"]["tabs"][0]["badge"], "claude");
+        assert_eq!(json["state"]["panes"][0]["badge"], "powershell");
         assert_eq!(json["state"]["panes"][0]["rows"][0], "> hi");
         assert_eq!(json["state"]["panes"][0]["size"][0], 80);
         let back: Reply = serde_json::from_value(json).unwrap();
         assert_eq!(back.state.as_deref(), Some(&state));
+    }
+
+    #[test]
+    fn a_badge_comes_out_as_null_when_none_is_known() {
+        let pane = PaneState {
+            badge: None,
+            ..pane()
+        };
+        let json = serde_json::to_value(&pane).unwrap();
+        assert!(json["badge"].is_null());
+        let tab = TabState {
+            id: TabId::new(2),
+            project: ProjectId::new(1),
+            name: "Tab 2".into(),
+            dir: "C:/work".into(),
+            branch: None,
+            worktree: false,
+            badge: None,
+            state: "Idle".into(),
+            mark: "shell".into(),
+            needs_you: false,
+            muted: false,
+            focused: PaneId::new(3),
+            maximized: None,
+            panes: vec![PaneId::new(3)],
+        };
+        let json = serde_json::to_value(&tab).unwrap();
+        assert!(json["badge"].is_null());
     }
 
     #[test]
