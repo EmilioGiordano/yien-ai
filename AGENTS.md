@@ -50,7 +50,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
-| Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | no | — |
+| Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | `implementer` only, by "Tidying unpushed history" | — |
 
 "Not explicitly forbidden" is not permission.
 
@@ -179,6 +179,14 @@ test/cover layout swap invariants
 ```
 
 Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`, `build`. The type must match what the diff does. These are commit types; branch types are listed under "Branches" and need not match.
+
+### Tidying unpushed history
+
+The implementer may tidy its own branch before it is pushed. Pushed commits are never touched; pushed history stays Emilio's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
+
+1. Save the tip: `git rev-parse HEAD`.
+2. Squash fix-ups into the commits they fix, and reorder so every commit builds and the docs commit is last. The rebase must be non-interactive: `git commit --fixup=<hash>` then `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash $(git merge-base HEAD origin/main)`, or a `GIT_SEQUENCE_EDITOR` script that rewrites the todo list to reorder.
+3. `git rev-parse HEAD^{tree}` must equal `git rev-parse <saved tip>^{tree}`. If it does not, or the rebase fails, run `git rebase --abort` or `git reset --hard <saved tip>`, and report it.
 
 A new dependency, or a change that makes the ERS or the plan wrong, goes in the report and the PR body: for a dependency, its purpose, the alternative rejected and its licence. The orchestrator records it in `docs/` (dependency registry, ERS, plan), which is not in git.
 
