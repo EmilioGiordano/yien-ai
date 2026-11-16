@@ -10,10 +10,13 @@
 // A turn whose last user message contains "slow" streams for about 40 s;
 // anything else answers at once. A turn whose last user message contains
 // "mockerror" answers with an API error after a few seconds, so a scenario
-// can select the other tab first and watch the pane fail while unseen. Only
-// the main turn is slowed or failed: Claude Code's side requests (titles,
-// topic checks) carry no tools and always answer at once. Ctrl+C in Claude
-// closes the stream; the mock stops writing then.
+// can select the other tab first and watch the pane fail while unseen. A
+// turn whose last user message contains "mocktool" answers with a Bash tool
+// call instead, so the permission flow can run; the turn after the tool
+// result answers with plain text. Only the main turn is slowed, failed or
+// given a tool: Claude Code's side requests (titles, topic checks) carry no
+// tools and always answer at once. Ctrl+C in Claude closes the stream; the
+// mock stops writing then.
 
 'use strict';
 
@@ -55,6 +58,19 @@ function lastUserText(body) {
   return '';
 }
 
+// A tool result comes back as a user message with a tool_result block; a
+// turn after one is the wrap-up, never a new tool call.
+function hasToolResult(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  return messages.some(
+    (message) =>
+      message &&
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.some((block) => block && block.type === 'tool_result')
+  );
+}
+
 function sendJson(res, status, value) {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(value));
@@ -79,9 +95,11 @@ function answer(req, res, raw) {
     return;
   }
   const tools = Array.isArray(body.tools) ? body.tools.length : 0;
-  const slow = tools > 0 && /slow/.test(lastUserText(body));
-  const fail = tools > 0 && /mockerror/.test(lastUserText(body));
-  note(`messages stream=${Boolean(body.stream)} tools=${tools} slow=${slow} fail=${fail}`);
+  const main = tools > 0 && !hasToolResult(body);
+  const slow = main && /slow/.test(lastUserText(body));
+  const fail = main && /mockerror/.test(lastUserText(body));
+  const tool = main && /mocktool/.test(lastUserText(body));
+  note(`messages stream=${Boolean(body.stream)} tools=${tools} slow=${slow} fail=${fail} tool=${tool}`);
   if (fail) {
     // A non-retryable error, like an invalid key: Claude Code gives up at
     // once and ends the turn with StopFailure. The wait lets a scenario
@@ -110,6 +128,42 @@ function answer(req, res, raw) {
     stop_sequence: null,
     usage: { input_tokens: 10, output_tokens: 1 },
   };
+  // Not on the safe-command list, so the CLI asks first. Port 9 discards;
+  // the call fails fast and nothing reaches the network.
+  const toolInput = { command: 'curl -s http://127.0.0.1:9/yien-permission-probe' };
+  if (tool) {
+    // A Bash tool call, so Claude wants to run it and asks for approval.
+    if (!body.stream) {
+      message.content = [
+        { type: 'tool_use', id: 'toolu_mock', name: 'Bash', input: toolInput },
+      ];
+      message.stop_reason = 'tool_use';
+      sendJson(res, 200, message);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    const event = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+    event('message_start', { type: 'message_start', message: { ...message, stop_reason: null } });
+    event('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'toolu_mock', name: 'Bash', input: {} },
+    });
+    event('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolInput) },
+    });
+    event('content_block_stop', { type: 'content_block_stop', index: 0 });
+    event('message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: 'tool_use', stop_sequence: null },
+      usage: { output_tokens: 20 },
+    });
+    event('message_stop', { type: 'message_stop' });
+    res.end();
+    return;
+  }
   if (!body.stream) {
     message.content = [{ type: 'text', text: 'ok' }];
     message.stop_reason = 'end_turn';
