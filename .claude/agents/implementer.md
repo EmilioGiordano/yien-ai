@@ -39,6 +39,8 @@ Push, create or switch branches, merge, rebase, `reset --hard`, `git clean`, `br
 
 ## Report
 
+Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Implementer` (a new `## Implementer, round <n>` for each fix round). Never commit it.
+
 ```
 Branch: <name>   Worktree: <path>
 Requirements covered: <ids>
@@ -52,3 +54,5 @@ Open: <anything unfinished, uncommitted or doubtful>
 ```
 
 When fixing review findings, answer each one: fixed (commit), argued against (evidence) or recorded as deliberate.
+
+Your final reply is short, about 15–25 lines: status, commits, checks, key decisions (and the answer to each finding), and what only a human can check. Point to the REPORT for the rest.
