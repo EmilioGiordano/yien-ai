@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use yien_agent::{
-    AgentState, Effect, ErrorReason, Machine, MachineConfig, NeedsReason, ScreenRule,
-    ScreenVerdict, Signal, builtin_profiles, evaluate_screen,
+    AgentState, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason, ScreenRule,
+    ScreenVerdict, SessionEndReason, SessionStartSource, Signal, builtin_profiles, evaluate_screen,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -22,6 +22,11 @@ const CLAUDE_INTERRUPT: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.323-interrupt.bin");
 const CLAUDE_IN_POWERSHELL: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-typed-in-powershell.bin");
+/// A slow turn stopped by Ctrl+C, then Ctrl+C twice more to exit.
+const CLAUDE_CTRL_C: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c.bin");
+/// The same typed in PowerShell with YIEN's prompt marks.
+const CLAUDE_CTRL_C_IN_POWERSHELL: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c-typed-in-powershell.bin");
 const CODEX_PERMISSION: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/codex-0.167.2-permission.bin");
 const CODEX_ERROR: &[u8] = include_bytes!("../tests/fixtures/osc7501/codex-0.167.2-error.bin");
@@ -192,6 +197,110 @@ fn rf_age_05_claude_typed_in_powershell_reports_and_hands_back_on_exit() {
         CLAUDE_IN_POWERSHELL.len(),
     );
     assert!(!end.machine.agent_reporting());
+}
+
+#[test]
+fn rf_age_05_claude_ctrl_c_interrupt_is_idle_and_its_exit_changes_nothing() {
+    assert_query_answered_in_order(CLAUDE_CTRL_C, "claude");
+    // Ctrl+C mid-turn gives `idle`; two more exit with `clear`.
+    assert_eq!(
+        states(CLAUDE_CTRL_C, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rf_age_05_claude_ctrl_c_typed_in_powershell_goes_idle_then_hands_back() {
+    assert_query_answered_in_order(CLAUDE_CTRL_C_IN_POWERSHELL, "shell");
+    assert_eq!(
+        states(CLAUDE_CTRL_C_IN_POWERSHELL, "shell"),
+        [
+            // The shell runs `claude`, which settles at rest.
+            AgentState::Working,
+            AgentState::Idle,
+            // The turn, and its interrupt.
+            AgentState::Working,
+            AgentState::Idle,
+        ]
+    );
+    let end = replay(
+        CLAUDE_CTRL_C_IN_POWERSHELL,
+        config("shell"),
+        CLAUDE_CTRL_C_IN_POWERSHELL.len(),
+    );
+    assert!(!end.machine.agent_reporting());
+    assert_eq!(end.machine.state(), AgentState::Idle);
+}
+
+/// Replays `capture` into a Claude profile pane with its hooks alive, as
+/// they came in the same run: `SessionStart` before the REPL reported,
+/// `UserPromptSubmit` with the turn's `working`, no `Stop` for the
+/// interrupt, and `SessionEnd` before the process exited.
+/// Returns every state, and the state the capture left before the exit.
+fn replay_hooked(capture: &[u8], chunk: usize, seen: bool) -> (Vec<AgentState>, AgentState) {
+    let turn = position(capture, b"\x1b]7501;state=working").expect("a turn");
+    let mut machine = Machine::new(config("claude"));
+    let mut states = Vec::new();
+    let mut now = Duration::ZERO;
+    let mut step = |machine: &mut Machine, signal: Signal| {
+        let (next, effects) = machine.clone().step(&signal, now);
+        *machine = next;
+        states.extend(effects.into_iter().filter_map(|e| match e {
+            Effect::Transition { to, .. } => Some(to),
+            _ => None,
+        }));
+        now += Duration::from_secs(1);
+    };
+    let mut engine = AlacrittyEngine::new(VtConfig::default(), 120, 40);
+    step(&mut machine, Signal::Spawned);
+    step(&mut machine, Signal::Seen(seen));
+    step(
+        &mut machine,
+        Signal::Hook(HookEvent::SessionStart {
+            session_id: Some("4f1c-9a".into()),
+            source: SessionStartSource::Startup,
+        }),
+    );
+    for (i, part) in [&capture[..turn], &capture[turn..]].into_iter().enumerate() {
+        if i == 1 {
+            step(&mut machine, Signal::Hook(HookEvent::UserPromptSubmit));
+        }
+        for bytes in part.chunks(chunk) {
+            for found in &engine.feed(bytes).signals {
+                if let Some(osc) = convert::osc_signal(found) {
+                    step(&mut machine, Signal::Osc(osc));
+                    step(&mut machine, Signal::Tick);
+                }
+            }
+        }
+    }
+    let before_exit = machine.state();
+    let end = HookEvent::SessionEnd(SessionEndReason::PromptInputExit);
+    step(&mut machine, Signal::Hook(end));
+    step(&mut machine, Signal::Exited { code: Some(0) });
+    (states, before_exit)
+}
+
+#[test]
+fn rf_age_05_claude_ctrl_c_in_a_hooked_pane_goes_idle_then_ends_cleanly() {
+    for chunk in [1, 7, 64, CLAUDE_CTRL_C.len()] {
+        // The hooks outrank OSC 7501, yet no hook tells the interrupt.
+        let (states, before_exit) = replay_hooked(CLAUDE_CTRL_C, chunk, false);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads");
+        // An unseen pane whose program ended shows it ended.
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle, AgentState::Done],
+            "{chunk}-byte reads"
+        );
+        let (states, before_exit) = replay_hooked(CLAUDE_CTRL_C, chunk, true);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads, seen");
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle],
+            "{chunk}-byte reads, seen"
+        );
+    }
 }
 
 #[test]
@@ -412,6 +521,7 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_ERROR, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
+        (CLAUDE_CTRL_C, "claude"),
         (CODEX_PERMISSION, "codex"),
         (CODEX_ERROR, "codex"),
         (CODEX_STARTUP, "codex"),
@@ -446,6 +556,7 @@ fn rf_age_05_agents_typed_in_a_shell_report_as_in_their_own_pane() {
         (OPENCODE_PERMISSION, "opencode"),
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
+        (CLAUDE_CTRL_C, "claude"),
     ] {
         assert_eq!(
             states(capture, "shell"),
@@ -495,6 +606,7 @@ fn rf_age_05_codex_typed_in_a_shell_needs_you_on_its_trust_screen_once_found() {
 fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
     for (capture, program) in [
         (CLAUDE_IN_POWERSHELL, "claude"),
+        (CLAUDE_CTRL_C_IN_POWERSHELL, "claude"),
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CODEX_PERMISSION, "codex"),

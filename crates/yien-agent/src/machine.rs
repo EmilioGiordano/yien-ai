@@ -482,6 +482,7 @@ impl Machine {
         }
         let rank = source.rank();
         if self.top_rank.is_some_and(|top| rank < top) {
+            self.outranked_interrupt(signal, now, fx);
             return;
         }
         self.top_rank = Some(rank);
@@ -511,6 +512,18 @@ impl Machine {
             Signal::Hook(event) => self.on_hook(event, cause, now, fx),
             Signal::Osc(osc) => self.on_osc(*osc, cause, now, fx),
             _ => {}
+        }
+    }
+
+    /// An interrupted turn told by a source the pane's hooks outrank: Claude
+    /// Code (2.1.325) fires no hook when Esc or Ctrl+C stops a turn and only
+    /// reports it as OSC 7501 `idle`, so that record still ends the turn.
+    fn outranked_interrupt(&mut self, signal: &Signal, now: Duration, fx: &mut Vec<Effect>) {
+        let Signal::Osc(OscSignal::Status7501(AgentStatus::Idle(reporter))) = signal else {
+            return;
+        };
+        if !reporter.ends_turns_with_idle() && self.in_turn() {
+            self.set_state(AgentState::Idle, Cause::Source(Source::Osc7501), now, fx);
         }
     }
 
