@@ -161,6 +161,8 @@ pub(crate) struct Shell {
     terminal_events: HashMap<PaneId, Subscription>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
+    /// Test control is on: frames get a wall-clock stamp for its dump.
+    test_control_on: bool,
     /// What the status bar shows in place of the key hints, if anything.
     notice: Option<Notice>,
     /// A standing notice a passing one covers, shown again when it goes.
@@ -339,6 +341,7 @@ impl Shell {
         })
         .detach();
         Self::listen_to_settings(settings.updates, window, cx);
+        let test_control_on = test_control.is_some();
         if let Some(control) = test_control {
             Self::listen_to_test_control(control, window, cx);
         }
@@ -400,6 +403,7 @@ impl Shell {
             terminals: HashMap::new(),
             terminal_events: HashMap::new(),
             keyboard_on: None,
+            test_control_on,
             notice: None,
             behind: None,
             notice_generation: 0,
@@ -659,7 +663,9 @@ impl Shell {
             let family = self.fonts.terminal.clone();
             let size = self.terminal_size;
             let theme = self.theme;
-            let view = cx.new(|cx| TerminalPane::new(pane, link, family, size, theme, window, cx));
+            let view = cx.new(|cx| {
+                TerminalPane::new(pane, link, family, size, theme, self.test_control_on, window, cx)
+            });
             let events = cx.subscribe_in(&view, window, move |this, _, event, window, cx| {
                 let TerminalEvent::ContextMenu { at, has_selection } = *event;
                 this.open_menu(pane, MenuKind::Terminal, at, has_selection, window, cx);

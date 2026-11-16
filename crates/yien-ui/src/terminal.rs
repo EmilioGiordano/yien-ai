@@ -61,6 +61,8 @@ pub(crate) struct TerminalPane {
     /// Millis since the UNIX epoch when `frame` was taken in, for the
     /// test control dump.
     frame_at_ms: Option<u64>,
+    /// Test control is on: frames get a wall-clock stamp for its dump.
+    test_control: bool,
     /// IME composition not yet committed (RF-PAN-15).
     preedit: Option<String>,
     /// The grid's bounds and cell size at the last paint.
@@ -87,6 +89,7 @@ impl TerminalPane {
         family: Option<SharedString>,
         font_size: f32,
         theme: Theme,
+        test_control: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -104,6 +107,7 @@ impl TerminalPane {
             theme,
             frame: None,
             frame_at_ms: None,
+            test_control,
             preedit: None,
             grid: None,
             sent_size: None,
@@ -131,7 +135,7 @@ impl TerminalPane {
     /// The single place frames enter the view, so a change in how the core
     /// delivers them touches only this.
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
-        self.frame_at_ms = Some(unix_millis());
+        self.frame_at_ms = stamp_frame(self.test_control);
         self.frame = Some(frame);
         cx.notify();
     }
@@ -1076,4 +1080,35 @@ fn unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// The frame stamp for the test control dump: `None` unless test control is
+/// on, so frames outside `--test-control` cost one branch.
+fn stamp_frame(test_control: bool) -> Option<u64> {
+    if test_control { Some(unix_millis()) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_frame;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn stamp_frame_is_none_without_test_control() {
+        assert_eq!(stamp_frame(false), None);
+    }
+
+    #[test]
+    fn stamp_frame_is_now_with_test_control() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let stamp = stamp_frame(true).expect("test control stamps frames");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((before..=after).contains(&stamp));
+    }
 }
