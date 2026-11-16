@@ -10,6 +10,7 @@ mod panic_log;
 mod profiles;
 mod settings;
 mod shell_switch;
+mod test_control;
 mod update;
 
 use std::process::ExitCode;
@@ -76,12 +77,33 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    let test_control_name = match test_control::requested(std::env::args_os().skip(1)) {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::error!("{error}");
+            eprintln!("yien: {error}");
+            drop(log);
+            return ExitCode::FAILURE;
+        }
+    };
     // Before the core loads or saves anything: a second start on the same
     // data dir only asks the running YIEN for its window (RF-SES-14).
     let window = Arc::new(AtomicIsize::new(0));
     let Some(_instance) = claim_data_dir(&window) else {
         drop(log);
         return ExitCode::SUCCESS;
+    };
+    let (_test_control_server, test_control) = match test_control_name.as_deref() {
+        None => (None, None),
+        Some(name) => match test_control::start(name) {
+            Ok((server, control)) => (Some(server), Some(control)),
+            Err(error) => {
+                tracing::error!("test control did not start: {error}");
+                eprintln!("yien: test control did not start: {error}");
+                drop(log);
+                return ExitCode::FAILURE;
+            }
+        },
     };
     let hooks = hook_config();
     let settings_file = hooks.as_ref().map(HookConfig::settings_file);
@@ -136,7 +158,7 @@ fn main() -> ExitCode {
         settings,
         files,
         updates,
-        None,
+        test_control,
         move || {
             tracing::info!("yien exiting");
             if let Some(watcher) = &settings_watcher {
