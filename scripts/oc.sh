@@ -59,6 +59,8 @@ if [ "$role" = "reviewer" ]; then
       "*": "deny",
       "REPORT-*.md": "allow"
     },
+    "webfetch": "allow",
+    "websearch": "allow",
     "bash": {
       "*": "allow",
       "git push*": "deny",
@@ -81,6 +83,8 @@ else
   "$schema": "https://opencode.ai/config.json",
   "permission": {
     "edit": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
     "bash": {
       "*": "allow",
       "git push*": "deny",
