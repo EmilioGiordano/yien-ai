@@ -260,9 +260,7 @@ pub struct KeyModes {
 }
 
 /// The console's interrupt key: 0x03, the byte ConPTY turns into
-/// CTRL_C_EVENT for console apps. Round 2 (REPORT-kitty-keys.md): the
-/// integration scenario stayed Working mid-turn on CSI 99;5u, while 0x03
-/// had always passed; Claude treats Ctrl+C as the console signal, not a key.
+/// CTRL_C_EVENT for console apps; a CSI u Ctrl+C is not one.
 fn is_console_ctrl_c(key: &Key, mods: Mods) -> bool {
     matches!(key, Key::Char('c' | 'C')) && mods == Mods::CTRL
 }
@@ -1022,10 +1020,7 @@ mod tests {
 
     #[test]
     fn rf_age_02_ctrl_c_is_the_console_interrupt_byte_in_every_mode() {
-        // Round 2, scenario-claude-ctrl-c.ps1: the branch sent CSI 99;5u
-        // (kitty disambiguate reads it fine, but ConPTY does not turn a
-        // CSI u sequence into CTRL_C_EVENT); the integration scenario
-        // stayed Working mid-turn for 20 s. 0x03 had always passed on main.
+        // ConPTY turns 0x03 into CTRL_C_EVENT; a CSI u sequence is not one.
         for flags in [
             0,
             KITTY_DISAMBIGUATE,

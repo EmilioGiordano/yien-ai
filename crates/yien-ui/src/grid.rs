@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn rf_age_02_ctrl_and_alt_combinations_follow_the_pane_s_kitty_flags() {
         // OpenCode 2.3.0 pushes kitty flags 5 (disambiguate | alternate
-        // keys) on the alternate screen; it ignores legacy Ctrl+C mid-turn.
+        // keys) on the alternate screen.
         let kitty = Modes {
             kitty_keyboard: 5,
             ..modes()
