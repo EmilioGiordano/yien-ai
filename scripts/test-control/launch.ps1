@@ -93,6 +93,7 @@ function Write-Utf8([string]$Path, [string]$Text) {
 
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 if ($MockClaude -and $MockOpenCode) { throw 'pick one of -MockClaude and -MockOpenCode' }
+if ($NoTrust -and -not $MockClaude) { throw '-NoTrust needs -MockClaude (the trust screen is Claude Code''s)' }
 if (-not $Name) { $Name = "tc-$(New-Nonce)" }
 if ($Name -cnotmatch '^[A-Za-z0-9_-]{1,64}$') { throw "not a test control name: '$Name'" }
 if (-not $Root) { $Root = Join-Path (Join-Path (Get-SlotDir) 'run') $Name }
