@@ -31,7 +31,7 @@ Machine-specific paths are never in git. They live in `.yien-local`, a gitignore
 
 Without a build root or lock, `scripts/cargo.sh` stops and says to create `.yien-local`; it never guesses a drive.
 
-`ROADMAP.md` (in git) says where the project stands and what comes next. Each branch updates its own row and any decision it took, as its last commit, so the roadmap reaches `main` with the merge.
+`ROADMAP.md` (in git) says where the project stands and what comes next. Branches do not edit it: a branch records its decisions in its PR body, and its REPORT keeps the detail. After a batch is merged, the orchestrator updates `ROADMAP.md` once, on a `docs/roadmap-<batch>` branch with its own PR, merged when CI is green.
 
 Behaviour comes from the ERS. Engineering choices come from the plan (05), which overrides 04 where they differ. If the code needs to contradict either, stop and report; do not silently diverge.
 
@@ -66,7 +66,7 @@ Everything else: decide, do it, report the decision and its reason.
 
 One branch per thing: one feature, fix or improvement. Never two topics in one branch. Cut from `main`.
 
-Name: `<type>/<topic>`, English, self-explanatory. Types: `feat`, `fix`, `improve`, `refactor`, `perf`, `test`, `chore`, `build`, `spike`.
+Name: `<type>/<topic>`, English, self-explanatory. Types: `feat`, `fix`, `improve`, `refactor`, `perf`, `test`, `chore`, `build`, `docs`, `spike`.
 
 ```
 feat/pane-layout-drag    fix/conpty-startup-deadlock    spike/s2-conpty-host
@@ -106,7 +106,7 @@ Every branch goes through the same loop: steps 1–7 with the `yien-branch` skil
    - Each re-review brief carries the previous findings with their resolution (fixed in a commit, argued against, deliberate). With that, the reviewer says whether a repeated fault is the patch or the design. A design problem is redesigned, not patched again.
    - A finding that contradicts the ERS or the plan is overridden by the orchestrator: it is recorded as deliberate in the REPORT and in the next brief, and it no longer counts toward the verdict. A finding that turns out wrong also goes into the reviewer's "Known false positives", committed on the branch being reviewed.
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
-6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and the branch's `ROADMAP.md` update.
+6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
 8. The branch goes through integration and UI validation. Then the orchestrator merges it.
 
