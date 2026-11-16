@@ -48,21 +48,32 @@ and the reply is synthetic.
    true`, a dummy `ANTHROPIC_API_KEY` (`sk-ant-api03-` + 80 `y` + `-MOCKAA`),
    `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, `DISABLE_AUTOUPDATER=1`,
    `DISABLE_TELEMETRY=1`, `DISABLE_ERROR_REPORTING=1`,
-   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `YIEN_AGENT_HOME` under
-   the root; the `CLAUDECODE`, `CLAUDE_CODE_*` markers never need passing,
-   the tool drops them. Trust the work folder in `.claude.json` (projects
-   map) unless the case is the trust screen itself. For the permission
-   case, launch with `--permission-mode manual`. Pass the variables with
-   `--env` (see below), never through a parent shell.
+   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `YIEN_AGENT_HOME`,
+   `HOMEDRIVE`, `HOMEPATH`, `APPDATA` and `LOCALAPPDATA` under the root.
+   Trust the work folder in `.claude.json` (projects map) unless the case
+   is the trust screen itself. For the permission case, launch with
+   `--permission-mode manual`. Pass the variables with `--env` (see below),
+   never through a parent shell.
 
-   **OpenCode** — a fresh `HOME`/`USERPROFILE` and `XDG_*` under the root, a
-   project-level `opencode.json` with an `oai` provider on the built-in
-   OpenAI-compatible runtime pointing at `http://127.0.0.1:<port>/v1` (model
-   `oai/mock`, dummy `MOCK_API_KEY`), a global config that only sets
-   `update: disable`, and `YIEN_AGENT_HOME` under the root. Launch with
-   `--standalone`: the managed service defaults to port 28894, which another
-   instance on the machine may hold. For the permission case the project
-   config needs `permission: { bash: "ask" }`, or nothing asks.
+   **OpenCode** — a fresh `HOME`/`USERPROFILE`, `HOMEDRIVE`/`HOMEPATH` and
+   `XDG_*` under the root, a project-level `opencode.json` with an `oai`
+   provider on the built-in OpenAI-compatible runtime pointing at
+   `http://127.0.0.1:<port>/v1` (model `oai/mock`, dummy `MOCK_API_KEY`), a
+   global config that only sets `update: disable`, `YIEN_AGENT_HOME` and
+   `APPDATA`/`LOCALAPPDATA` under the root. Launch with `--standalone`: the
+   managed service defaults to port 28894, which another instance on the
+   machine may hold. For the permission case the project config needs
+   `permission: { bash: "ask" }`, or nothing asks.
+
+   Windows cannot fully isolate a CLI from the user's profile: Node's
+   `os.homedir()` and Bun resolve it from the OS, not from any variable.
+   Captures must therefore run only with throwaway config dirs and the
+   mocks; treat every capture as if the OS profile is reachable for
+   anything that reads it directly. `HOMEPATH` is the absolute path of the
+   home folder without its drive letter (`C:` + `\yien-compiled\slot-N\…`);
+   `APPDATA`/`LOCALAPPDATA` are the usual `Roaming`/`Local` folders under
+   it, made fresh under the root. `HOMEDRIVE` is the drive letter of the
+   root.
 
    The mocks are `scripts/test-control/mock-messages-api.js` and
    `mock-openai-api.js`; start one with `node <mock> --port 0 --log
@@ -78,11 +89,14 @@ and the reply is synthetic.
        -- <cli> [args...]
    ```
 
-   `--cwd` is required, and the child does not inherit the parent
-   environment: anything matching `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_*`,
-   `OPENCODE_*`, `*_API_KEY` or `*_TOKEN` is dropped, as are `HOME`,
-   `USERPROFILE`, `CLAUDE_CONFIG_DIR` and `XDG_*` (they would point at a
-   real profile). Those may come only from `--env`, and then they must be
+   `--cwd` is required, and the child starts from an empty environment plus
+   what `--env` passes: only an allowlist of the caller's environment
+   (`PATH`, `PATHEXT`, `SystemRoot`, temp and processor variables, `OS`,
+   `TERM`/`COLORTERM`) crosses over, and the platform's registry merge at
+   spawn is suppressed, so credentials from the session and the registry
+   never reach the child. `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`,
+   `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH` and `XDG_*` are
+   likewise never passed unless `--env` names them, and then they must be
    absolute paths inside `--cwd` or the slot in `.yien-slot`; anything
    else is refused. Pass every throwaway variable with `--env`, not with a
    parent shell. The `.bin` is written only on success; a failure keeps a
