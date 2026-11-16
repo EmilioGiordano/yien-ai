@@ -59,7 +59,7 @@ On `PASS`:
 
    No attribution lines.
 3. Record new dependencies and spec impact in `docs/` (absolute paths in `AGENTS.md`).
-4. Write `REPORT-<topic>.md` in the worktree (gitignored): verdict, commits, checks, findings and their resolution, risks, manual checks.
+4. Complete `REPORT-<topic>.md` in the worktree (gitignored), which already holds the subagents' full reports: add the verdict, the findings and their resolution, risks and manual checks.
 5. Report to Emilio in Spanish: the PR link and what changed.
 
 The branch is now ready for `yien-integrate`. Never delete the branch or the worktree, never push to `main` directly.
