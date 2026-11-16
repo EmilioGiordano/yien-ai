@@ -16,5 +16,6 @@ Invoke as `/yien-integrate [branch...]`; with no argument, every branch with a P
 7. `git pull --ff-only` on `main`, then check that `git diff staging/<date> main` is empty. If it is not, find out why before doing anything else.
 8. Update `ROADMAP.md` once for the whole batch: cut `docs/roadmap-<batch>` from `origin/main`, take each row and decision from the merged PR bodies, open its own PR and merge it when CI is green. Branches never edit `ROADMAP.md`.
 9. Report to Emilio in Spanish: what was merged, what was held out and why, and what only a human can check.
+10. Write or overwrite `<specs>/docs/handoff.md` as `AGENTS.md` "Sessions and handoff" says. The batch is closed; the next one starts in a new session.
 
 Never push `staging/*`, never delete a branch. A breakage that only exists when branches are combined gets its own `fix/<topic>` branch through `yien-branch`.
