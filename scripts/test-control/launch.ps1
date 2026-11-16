@@ -4,7 +4,7 @@ Starts a YIEN build with test control on and a throwaway profile.
 
 .DESCRIPTION
 Usage:
-    ./scripts/test-control/launch.ps1 -Exe <path to yien.exe> [-Root <folder>] [-Name <name>] [-MockClaude]
+    ./scripts/test-control/launch.ps1 -Exe <path to yien.exe> [-Root <folder>] [-Name <name>] [-MockClaude] [-NoTrust]
 
 Everything the run writes goes under -Root, a new folder made for it:
     data/     YIEN's data and config (YIEN_DATA_DIR): session, settings, logs
@@ -22,6 +22,9 @@ points Claude Code at it: a throwaway CLAUDE_CONFIG_DIR that has finished
 onboarding and trusts work/, a dummy API key, ANTHROPIC_BASE_URL on the mock.
 No real account or quota is used.
 
+-NoTrust (with -MockClaude) pre-trusts nothing: Claude Code shows its folder
+trust screen in work/, for the scenarios that drive the red mark through it.
+
 Writes the run's facts as an object, and as JSON to <Root>/run.json. Stop the
 run with stop.ps1. Never run this against a profile or a YIEN you did not
 start for the test.
@@ -32,6 +35,7 @@ param(
     [string]$Root,
     [string]$Name,
     [switch]$MockClaude,
+    [switch]$NoTrust,
     [double]$ReadyTimeoutSec = 30
 )
 
@@ -112,10 +116,13 @@ if ($MockClaude) {
     }
     # A dummy key in the shape Claude Code expects; it never leaves the machine.
     $key = 'sk-ant-api03-' + ('y' * 80) + '-MOCKAA'
-    $trusted = @{ hasTrustDialogAccepted = $true; hasCompletedProjectOnboarding = $true; allowedTools = @() }
+    # -NoTrust leaves the folder untrusted so the trust screen shows.
     $projects = @{}
-    $projects[$work] = $trusted
-    $projects[$work.Replace('\', '/')] = $trusted
+    if (-not $NoTrust) {
+        $trusted = @{ hasTrustDialogAccepted = $true; hasCompletedProjectOnboarding = $true; allowedTools = @() }
+        $projects[$work] = $trusted
+        $projects[$work.Replace('\', '/')] = $trusted
+    }
     $config = @{
         hasCompletedOnboarding         = $true
         theme                          = 'dark'
