@@ -221,6 +221,14 @@ The brief is the only context it gets.
 - Ask for reasoning in the report, and say it does not belong in the code.
 - Ask for a short final reply, about 15–25 lines: verdict or status, commits, checks, key decisions or findings, and what only a human can check. The full detail goes in `REPORT-<topic>.md` in the worktree, under the role's own heading.
 
+## Delegating to OpenCode
+
+- Opus orchestrates; OpenCode (via `scripts/oc.sh`) is implementer, reviewer and test-engineer by default.
+- Escalate to a Claude subagent for: unsafe code, concurrency, security, or a branch that fails review two rounds in a row.
+- Opus always reads the final diff and runs the branch checks itself before the PR; it trusts the diff, not the reply.
+- Free model: never pass secrets or personal data in briefs.
+- One build at a time: OpenCode also builds only through `scripts/cargo.sh`.
+
 ---
 
 # Part 2 — The code
