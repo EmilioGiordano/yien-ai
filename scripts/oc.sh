@@ -107,12 +107,9 @@ cmd+=("$prompt")
 
 rc=0
 ( cd "$worktree" && "${cmd[@]}" < /dev/null ) > "$log_file" 2>&1 || rc=$?
-if [ "$rc" -ne 0 ]; then
-  echo "oc.sh: opencode exited with $rc; full log at $log_file" >&2
-  exit "$rc"
-fi
 
-node - "$log_file" <<'NODE'
+parse_rc=0
+node - "$log_file" <<'NODE' || parse_rc=$?
 const fs = require('fs');
 const file = process.argv[2];
 const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
@@ -143,3 +140,8 @@ const text = lastKey ? (textByMessage.get(lastKey) || '') : '';
 process.stdout.write(text);
 if (text && !text.endsWith('\n')) process.stdout.write('\n');
 NODE
+
+if [ "$rc" -ne 0 ]; then
+  echo "oc.sh: opencode exited with $rc; full log at $log_file" >&2
+  exit "$rc"
+fi
