@@ -224,6 +224,7 @@ The brief is the only context it gets.
 ## Delegating to OpenCode
 
 - Opus orchestrates; OpenCode (via `scripts/oc.sh`) is implementer, reviewer and test-engineer by default.
+- Call form: `scripts/oc.sh <worktree> <role> <task-file> [session-id]`; fix rounds pass the previous session id.
 - Escalate to a Claude subagent for: unsafe code, concurrency, security, or a branch that fails review two rounds in a row.
 - Opus always reads the final diff and runs the branch checks itself before the PR; it trusts the diff, not the reply.
 - Free model: never pass secrets or personal data in briefs.
