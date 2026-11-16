@@ -180,7 +180,10 @@ fn scrubbed_env(
     Ok(ScrubbedEnv { remove: drop, set })
 }
 
-/// Whether `path` sits inside `root` or equals it, compared lexically.
+/// Whether `path` sits inside `root` or equals it. Both sides are
+/// canonicalized first (with their deepest existing ancestor standing in for
+/// not-yet-created throwaway dirs), so junctions, symlinks and `..` cannot
+/// smuggle the real profile in through a path that looks safe.
 fn within(path: &Path, root: &Path) -> bool {
     fn part(part: &std::path::Component<'_>) -> String {
         match part {
@@ -200,13 +203,33 @@ fn within(path: &Path, root: &Path) -> bool {
     fn normalize(text: &str) -> String {
         text.to_string()
     }
+    fn canonicalize_lenient(path: &Path) -> PathBuf {
+        let mut suffix = Vec::new();
+        let mut current = path.to_path_buf();
+        loop {
+            if let Ok(mut base) = current.canonicalize() {
+                for part in suffix.iter().rev() {
+                    base.push(part);
+                }
+                return base;
+            }
+            match current.file_name() {
+                Some(name) => suffix.push(name.to_os_string()),
+                None => return current,
+            }
+            current = match current.parent() {
+                Some(parent) => parent.to_path_buf(),
+                None => return current,
+            };
+        }
+    }
     let wrap = |path: &Path| {
         path.components()
             .map(|item| part(&item))
             .collect::<Vec<_>>()
     };
-    let parts = wrap(path);
-    let root = wrap(root);
+    let parts = wrap(&canonicalize_lenient(path));
+    let root = wrap(&canonicalize_lenient(root));
     root.len() <= parts.len() && parts[..root.len()] == root[..]
 }
 
@@ -889,6 +912,33 @@ mod tests {
         assert!(!within(&root("a/bc"), &root("a/b")));
         assert!(within(&root(""), &root("")));
         assert!(!within(&root("a"), &root("a/b")));
+    }
+
+    #[test]
+    fn within_canonicalizes_junctions_and_dot_dot() {
+        // A path through a junction resolves to the target, not the link.
+        let base = std::env::temp_dir().join(format!("yien-within-{}", std::process::id()));
+        let target = base.join("target");
+        let link = base.join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "junction creates: {:?}", status);
+            assert!(within(&link.join("home"), &target));
+            assert!(within(&link, &target));
+            assert!(!within(&link, &base.join("elsewhere")));
+            std::fs::remove_dir(&link).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        // `..` inside a path cannot escape the root.
+        assert!(!within(&root("a/../evil"), &root("a")));
+        assert!(within(&root("a/../inside"), &root("")));
     }
 
     #[test]
