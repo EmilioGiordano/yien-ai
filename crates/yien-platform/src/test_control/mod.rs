@@ -157,7 +157,10 @@ impl std::fmt::Debug for TestControlServer {
 
 /// Why a connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "only the Windows transport serves connections")
+)]
 pub(crate) enum Ended {
     /// The client closed its end.
     Closed,
@@ -171,7 +174,10 @@ pub(crate) enum Ended {
 
 /// Serves one client: answers each line in order until it closes, stalls or
 /// sends a line too long.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "only the Windows transport serves connections")
+)]
 pub(crate) fn serve_connection<C: Read + Write>(
     conn: &mut C,
     handler: &dyn Fn(Request) -> Reply,

@@ -100,7 +100,10 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// let (client, events) = connect();
 /// yien_ui::run(client, events, os(), settings(), files(), updates(), None, || println!("bye"));
 /// ```
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate service the binary wires in"
+)]
 pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
