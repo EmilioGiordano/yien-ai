@@ -21,6 +21,11 @@ pub const STARTUP_SCREEN_SETTLE: Duration = NEEDS_YOU_CONFIRM;
 /// settles.
 pub const STARTUP_SCREEN_MAX_WAIT: Duration = Duration::from_secs(1);
 
+/// How long after a turn ended a failure its agent's service reports still
+/// belongs to it: OpenCode ends a failed turn with `idle` on the terminal,
+/// and the service's event can come before or after that.
+pub const SERVICE_ERROR_GRACE: Duration = Duration::from_secs(5);
+
 /// Why an agent needs the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeedsReason {
@@ -86,6 +91,8 @@ pub enum Cause {
     Process,
     /// The user: the pane was seen, or input was followed by output.
     User,
+    /// The agent's own service reported a failed turn.
+    Service,
     /// The structured channel was lost.
     SignalLost,
     /// A signal could not be interpreted.
@@ -248,6 +255,8 @@ pub struct Machine {
     typed_agent: bool,
     /// The shell has marked a command's start (OSC 133 C); cmd never does.
     command_marks: bool,
+    /// When the last turn ended in Done or Idle.
+    turn_ended_at: Option<Duration>,
 }
 
 impl Machine {
@@ -274,6 +283,7 @@ impl Machine {
             startup_from: AgentState::Idle,
             typed_agent: false,
             command_marks: false,
+            turn_ended_at: None,
         }
     }
 
@@ -437,6 +447,7 @@ impl Machine {
                 }
             }
             Signal::TypedAgent(running) => self.on_typed_agent(*running, now, fx),
+            Signal::ServiceError => self.on_service_error(now, fx),
             Signal::Output => {
                 if self.reads_startup_screen() {
                     // An answered startup screen is read again, not taken
@@ -721,6 +732,24 @@ impl Machine {
         self.arm_startup_read(now, fx);
     }
 
+    /// A turn the agent's service says failed: the running one, or the one
+    /// that ended within [`SERVICE_ERROR_GRACE`]. Only a rule that reads OSC
+    /// 7501 hears it, as the pane learns its sessions there.
+    fn on_service_error(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        if !self.config.declares(Source::Osc7501) || self.startup_red {
+            return;
+        }
+        let just_ended = matches!(self.state, AgentState::Done | AgentState::Idle)
+            && self
+                .turn_ended_at
+                .is_some_and(|at| now.saturating_sub(at) <= SERVICE_ERROR_GRACE);
+        if self.in_turn() || just_ended {
+            self.turn_ended_at = None;
+            let to = AgentState::Error(ErrorReason::TurnFailed);
+            self.set_state(to, Cause::Service, now, fx);
+        }
+    }
+
     /// Stops reading a typed agent's startup screens; a red mark one of them
     /// raised goes, back to the state it interrupted.
     fn end_typed_startup(&mut self, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
@@ -870,6 +899,10 @@ impl Machine {
         let from = self.state;
         if from == to {
             return;
+        }
+        let in_turn = matches!(from, AgentState::Working | AgentState::NeedsYou(_));
+        if in_turn && !self.startup_red && matches!(to, AgentState::Done | AgentState::Idle) {
+            self.turn_ended_at = Some(now);
         }
         self.state = to;
         fx.push(Effect::Transition { from, to, cause });

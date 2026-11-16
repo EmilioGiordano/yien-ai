@@ -10,7 +10,8 @@
 //! on disk ([`config_file`]), the read-only listing of each agent CLI's
 //! past sessions ([`agent_sessions`]), the user's agent profile files
 //! ([`user_profiles`]), a tab's folder for the file tree ([`file_tree`]),
-//! and the agent CLI running under a shell ([`programs`]).
+//! the agent CLI running under a shell ([`programs`]), and where
+//! OpenCode's background service registers ([`opencode_service`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -30,6 +31,7 @@ pub mod file_tree;
 pub mod hook_pipe;
 pub mod http;
 mod logging;
+pub mod opencode_service;
 pub mod paths;
 pub mod programs;
 pub mod single_instance;
