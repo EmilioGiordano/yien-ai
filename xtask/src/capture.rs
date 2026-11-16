@@ -19,18 +19,23 @@
 //! The terminal's startup queries (cursor position, device attributes and
 //! the rest the engine answers) are answered the way YIEN answers them:
 //! the output feeds a fresh [`AlacrittyEngine`] and its replies go back to
-//! the child. Capturing never touches a real profile dir: `--cwd` is
-//! required, and the child's environment is scrubbed of credentials and of
-//! the variables that would point at a real profile (`HOME`,
-//! `USERPROFILE`, `CLAUDE_CONFIG_DIR`, `XDG_*`); those may only be passed
-//! explicitly with `--env` and must then sit under `--cwd` or the slot
-//! named in the repository's `.yien-slot`. Variables matching
-//! `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_*`, `OPENCODE_*`, `*_API_KEY`,
-//! `*_TOKEN` are dropped unless passed explicitly with `--env`. When the
-//! steps are done and the child is still running, the child is terminated;
-//! the exit status is reported. Only on success the bytes are written to
-//! the output file; on failure a `.partial` file next to it holds what was
-//! captured so far.
+//! the child. The child starts from an allowlist of its caller's environment
+//! (`PATH`, `PATHEXT`, `SystemRoot`, temp and processor variables, `OS`,
+//! `TERM`/`COLORTERM`) plus whatever `--env` passes, and the platform's
+//! registry merge at spawn is suppressed with an empty start: credentials
+//! from the session or the registry never reach it. `HOME`, `USERPROFILE`,
+//! `CLAUDE_CONFIG_DIR`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`
+//! and `XDG_*` are likewise only passed when `--env` names them, and then
+//! only with a throwaway location under `--cwd` or the slot named in the
+//! repository's `.yien-slot`. Windows cannot fully isolate a CLI from the
+//! user's profile: Node's `os.homedir()` and Bun resolve it from the OS,
+//! not from any variable. Captures must therefore run only with throwaway
+//! config dirs and the mocks; treat a capture as if the OS profile is
+//! reachable for anything that reads it directly.
+//! When the steps are done and the child is still running, the child is
+//! terminated; the exit status is reported. Only on success the bytes are
+//! written to the output file; on failure a `.partial` file next to it
+//! holds what was captured so far.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -88,19 +93,36 @@ struct Options {
 /// `Instant` overflows far beyond any capture; refuse the input instead.
 const TAIL_MS_MAX: u64 = 3_600_000;
 
-/// Variables matching these are dropped from the inherited environment
-/// unless the caller passes them explicitly with `--env`.
-const ENV_PREFIX_DENY: &[&str] = &["ANTHROPIC_", "OPENAI_", "CLAUDE_", "OPENCODE_"];
-const ENV_SUFFIX_DENY: &[&str] = &["_API_KEY", "_TOKEN"];
-/// Variables that would point the child at a real profile; never inherited,
-/// and from `--env` only with a throwaway location.
-const ENV_PROTECTED_EXACT: &[&str] = &["HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR"];
+/// What the child gets from the caller's environment: what starting a CLI
+/// needs, nothing else. Matched case-insensitively.
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+    "TERM",
+    "COLORTERM",
+];
+/// Variables that would point the child at a real user location. They are
+/// never inherited; from `--env` they are allowed only with a throwaway
+/// location.
+const ENV_PROTECTED_EXACT: &[&str] = &[
+    "HOME",
+    "USERPROFILE",
+    "CLAUDE_CONFIG_DIR",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+];
 const ENV_PROTECTED_PREFIX: &[&str] = &["XDG_"];
-
-fn is_denylisted(key: &str) -> bool {
-    ENV_PREFIX_DENY.iter().any(|prefix| key.starts_with(prefix))
-        || ENV_SUFFIX_DENY.iter().any(|suffix| key.ends_with(suffix))
-}
 
 fn is_protected(key: &str) -> bool {
     ENV_PROTECTED_EXACT.contains(&key)
@@ -113,71 +135,73 @@ fn env_key(key: &std::ffi::OsStr) -> String {
     key.to_string_lossy().to_ascii_uppercase()
 }
 
-/// The child's environment after the credential scrub: the names to drop
-/// from the inherited one, and the pairs to set on top.
+/// The child's environment: the allowlisted variables from the caller's
+/// environment, overlaid with whatever `--env` passed (their value wins).
 #[derive(Debug)]
-struct ScrubbedEnv {
-    remove: Vec<std::ffi::OsString>,
+struct ChildEnv {
     set: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
-/// Credentials and profile pointers never cross into the child by
-/// accident. The inherited environment loses every variable matching the
-/// denylist or the protected set; the caller can keep one with an explicit
-/// `--env KEY=VALUE` (their value wins). A protected variable passed with
-/// `--env` must be an absolute path inside `--cwd` or the slot named in the
-/// repository's `.yien-slot`, which is the throwaway tree every recapture
-/// lives in; anything else is refused before the child spawns.
-fn scrubbed_env(
+/// The child does not inherit the caller's environment and is not merged
+/// with the registry's: it starts from an allowlist plus whatever `--env`
+/// passes. A protected variable passed with `--env` must be an absolute
+/// path inside `--cwd` or the slot named in the repository's `.yien-slot`,
+/// which is the throwaway tree every recapture lives in; anything else is
+/// refused before the child spawns.
+fn child_env(
     inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
     explicit: &[(String, String)],
     remove: &[String],
     cwd: &Path,
     slot: Option<&Path>,
-) -> Result<ScrubbedEnv, String> {
-    let explicit_keys: Vec<String> = explicit
-        .iter()
-        .map(|(key, _)| key.to_ascii_uppercase())
-        .collect();
-    let mut drop = Vec::new();
-    for (key, _) in inherited {
+) -> Result<ChildEnv, String> {
+    let explicit_of = |name: &str| {
+        explicit
+            .iter()
+            .find(|(key, _)| key.to_ascii_uppercase() == name)
+    };
+    let mut out: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    for (key, value) in inherited {
         let upper = env_key(&key);
-        if explicit_keys.contains(&upper) {
+        if !ENV_ALLOWLIST.contains(&upper.as_str()) {
             continue;
         }
-        if is_denylisted(&upper) || is_protected(&upper) {
-            drop.push(key);
+        if explicit_of(&upper).is_some() {
+            continue;
         }
+        out.push((key, value));
     }
-    drop.extend(remove.iter().map(std::ffi::OsString::from));
     for (key, value) in explicit {
         let upper = key.to_ascii_uppercase();
-        if !is_protected(&upper) {
-            continue;
+        if is_protected(&upper) {
+            let path = Path::new(value);
+            if value.is_empty() || !path.is_absolute() {
+                return Err(format!(
+                    "--env {upper} wants an absolute path inside --cwd or the slot"
+                ));
+            }
+            if !within(path, cwd) && slot.is_none_or(|slot| !within(path, slot)) {
+                return Err(format!(
+                    "--env {upper} points at {}; use a throwaway folder under --cwd or the slot",
+                    path.display()
+                ));
+            }
         }
-        let path = Path::new(value);
-        if value.is_empty() || !path.is_absolute() {
-            return Err(format!(
-                "--env {upper} wants an absolute path inside --cwd or the slot"
-            ));
-        }
-        if !within(path, cwd) && slot.is_none_or(|slot| !within(path, slot)) {
-            return Err(format!(
-                "--env {upper} points at {}; use a throwaway folder under --cwd or the slot",
-                path.display()
-            ));
+        let entry = (
+            std::ffi::OsString::from(key),
+            std::ffi::OsString::from(value),
+        );
+        if let Some(at) = out.iter().position(|(k, _)| env_key(k) == upper) {
+            out[at] = entry;
+        } else {
+            out.push(entry);
         }
     }
-    let set = explicit
-        .iter()
-        .map(|(key, value)| {
-            (
-                std::ffi::OsString::from(key),
-                std::ffi::OsString::from(value),
-            )
-        })
-        .collect();
-    Ok(ScrubbedEnv { remove: drop, set })
+    for remove in remove {
+        let upper = remove.to_ascii_uppercase();
+        out.retain(|(key, _)| env_key(key) != upper);
+    }
+    Ok(ChildEnv { set: out })
 }
 
 /// Whether `path` sits inside `root` or equals it. Both sides are
@@ -476,7 +500,7 @@ fn capture(options: &Options) -> Result<Summary, Failure> {
         message: format!("--cwd {}: {err}", options.cwd.display()),
         partial: None,
     })?;
-    let env = match scrubbed_env(
+    let env = match child_env(
         std::env::vars_os(),
         &options.env,
         &options.env_remove,
@@ -495,10 +519,8 @@ fn capture(options: &Options) -> Result<Summary, Failure> {
     let mut spec = SpawnSpec::new(&options.program)
         .args(options.args.iter())
         .size(options.cols, options.rows)
-        .cwd(cwd.clone());
-    for key in &env.remove {
-        spec = spec.env_remove(key);
-    }
+        .cwd(cwd.clone())
+        .env_clear();
     for (key, value) in &env.set {
         spec = spec.env(key, value);
     }
@@ -765,120 +787,156 @@ mod tests {
         }
     }
 
-    fn keep(env: &ScrubbedEnv, inherited: &[(&str, &str)]) -> Vec<String> {
-        inherited
+    fn set_names(env: &ChildEnv) -> Vec<String> {
+        env.set
             .iter()
-            .map(|(key, _)| *key)
-            .filter(|key| {
-                !env.remove
-                    .iter()
-                    .any(|removed| removed.to_string_lossy().eq_ignore_ascii_case(key))
-            })
-            .map(str::to_string)
+            .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect()
     }
 
     #[test]
-    fn scrub_drops_credentials() {
+    fn child_starts_from_an_empty_environment() {
         let inherited = &[
             ("ANTHROPIC_API_KEY", "sk-ant-real"),
-            ("ANTHROPIC_AUTH_TOKEN", "tok"),
-            ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-            ("OPENAI_API_KEY", "sk-openai-real"),
-            ("OPENAI_BASE_URL", "https://api.openai.com"),
-            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
-            ("OPENCODE_API_KEY", "k"),
+            ("AWS_SECRET_ACCESS_KEY", "aws-real"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "gcloud.json"),
+            ("AZURE_CLIENT_SECRET", "azure-real"),
             ("MY_API_KEY", "k"),
             ("MY_TOKEN", "t"),
-            ("TERM", "xterm"),
-            ("PATH", "C:/Windows"),
-        ];
-        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
-        let kept = keep(&env, inherited);
-        assert_eq!(kept, ["TERM", "PATH"]);
-        assert!(env.set.is_empty());
-    }
-
-    #[test]
-    fn scrub_is_case_insensitive() {
-        let inherited = &[("anthropic_api_key", "sk-real"), ("x_token", "t")];
-        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
-        assert!(keep(&env, inherited).is_empty());
-    }
-
-    #[test]
-    fn explicit_env_overrides_the_denylist() {
-        let inherited = &[("ANTHROPIC_API_KEY", "sk-real")];
-        let explicit = vec![("ANTHROPIC_API_KEY".to_string(), "sk-dummy".to_string())];
-        let env = scrubbed_env(pairs(inherited), &explicit, &[], &root("work"), None).unwrap();
-        assert!(
-            keep(&env, inherited).contains(&"ANTHROPIC_API_KEY".to_string()),
-            "the parent name is kept for the explicit pair to override"
-        );
-        // The explicit pair lands on top of the inherited value (SpawnSpec
-        // overrides by key), so the child sees the dummy, never the real one.
-        assert_eq!(
-            env.set,
-            vec![(
-                OsString::from("ANTHROPIC_API_KEY"),
-                OsString::from("sk-dummy")
-            )]
-        );
-        assert_eq!(env.remove, Vec::<OsString>::new());
-    }
-
-    #[test]
-    fn protected_inherited_variables_are_dropped() {
-        let inherited = &[
             ("HOME", "/home/real"),
             ("USERPROFILE", "C:/Users/real"),
+            ("APPDATA", "C:/Users/real/AppData/Roaming"),
+            ("LOCALAPPDATA", "C:/Users/real/AppData/Local"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", "/home/real"),
             ("CLAUDE_CONFIG_DIR", "/home/real/.claude"),
             ("XDG_CONFIG_HOME", "/home/real/.config"),
-            ("XDG_DATA_HOME", "/home/real/.local/share"),
+            ("USERNAME", "real"),
+            ("PATH", "C:/Windows"),
+            ("PATHEXT", ".EXE"),
+            ("SYSTEMROOT", "C:/WINDOWS"),
+            ("SYSTEMDRIVE", "C:"),
+            ("WINDIR", "C:/WINDOWS"),
+            ("COMSPEC", "C:/WINDOWS/system32/cmd.exe"),
+            ("TEMP", "C:/Temp"),
+            ("TMP", "C:/Temp"),
+            ("NUMBER_OF_PROCESSORS", "16"),
+            ("PROCESSOR_ARCHITECTURE", "AMD64"),
+            ("OS", "Windows_NT"),
+            ("TERM", "xterm"),
+            ("COLORTERM", "truecolor"),
         ];
-        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
-        assert!(keep(&env, inherited).is_empty());
+        let env = child_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
+        let mut kept = set_names(&env);
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                "COLORTERM",
+                "COMSPEC",
+                "NUMBER_OF_PROCESSORS",
+                "OS",
+                "PATH",
+                "PATHEXT",
+                "PROCESSOR_ARCHITECTURE",
+                "SYSTEMDRIVE",
+                "SYSTEMROOT",
+                "TEMP",
+                "TERM",
+                "TMP",
+                "WINDIR",
+            ]
+        );
+    }
+
+    #[test]
+    fn allowlist_matches_case_insensitively() {
+        let inherited = &[("path", "C:/x"), ("systemroot", "C:/WINDOWS")];
+        let env = child_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
+        let mut kept = set_names(&env);
+        kept.sort();
+        assert_eq!(kept, ["path", "systemroot"]);
+    }
+
+    #[test]
+    fn explicit_env_wins_over_the_allowlist_and_adds() {
+        let inherited = &[("PATH", "C:/parent"), ("TERM", "xterm")];
+        let explicit = vec![
+            ("PATH".to_string(), "C:/custom".to_string()),
+            ("MY_TOKEN".to_string(), "t".to_string()),
+        ];
+        let env = child_env(pairs(inherited), &explicit, &[], &root("work"), None).unwrap();
+        let path = env
+            .set
+            .iter()
+            .find(|(key, _)| env_key(key) == "PATH")
+            .expect("PATH present");
+        assert_eq!(path.1, OsString::from("C:/custom"));
+        assert_eq!(
+            env.set
+                .iter()
+                .filter(|(key, _)| env_key(key) == "PATH")
+                .count(),
+            1
+        );
+        assert!(env.set.iter().any(|(key, _)| env_key(key) == "MY_TOKEN"));
+        assert!(set_names(&env).contains(&"TERM".to_string()));
+    }
+
+    #[test]
+    fn env_remove_drops_from_the_final_set() {
+        let explicit = vec![("PATH".to_string(), "C:/custom".to_string())];
+        let env = child_env(
+            pairs(&[("PATH", "C:/parent")]),
+            &explicit,
+            &["PATH".to_string()],
+            &root("work"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !set_names(&env)
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case("PATH"))
+        );
     }
 
     #[test]
     fn protected_env_under_cwd_is_accepted() {
         let explicit = vec![(
-            "HOME".to_string(),
-            format!("{}/home", root("work").display()),
+            "APPDATA".to_string(),
+            format!("{}/appdata", root("work").display()),
         )];
-        let env = scrubbed_env(vec![], &explicit, &[], &root("work"), None).unwrap();
-        assert_eq!(
-            env.set,
-            vec![(
-                OsString::from("HOME"),
-                OsString::from(format!("{}/home", root("work").display()))
-            )]
-        );
+        let env = child_env(vec![], &explicit, &[], &root("work"), None).unwrap();
+        assert_eq!(env.set.len(), 1);
     }
 
     #[test]
     fn protected_env_under_slot_is_accepted() {
         let slot = root("slot-4");
         let explicit = vec![(
-            "HOME".to_string(),
+            "HOMEPATH".to_string(),
             format!("{}/run/capture/home", slot.display()),
         )];
-        let env = scrubbed_env(vec![], &explicit, &[], &root("work"), Some(&slot)).unwrap();
+        let env = child_env(vec![], &explicit, &[], &root("work"), Some(&slot)).unwrap();
         assert_eq!(env.set.len(), 1);
     }
 
     #[test]
     fn protected_env_outside_cwd_and_slot_is_refused() {
-        let explicit = vec![("HOME".to_string(), "C:/Users/real".to_string())];
+        let explicit = vec![(
+            "LOCALAPPDATA".to_string(),
+            "C:/Users/real/AppData/Local".to_string(),
+        )];
         let err =
-            scrubbed_env(vec![], &explicit, &[], &root("work"), Some(&root("slot-4"))).unwrap_err();
-        assert!(err.contains("HOME"), "{err}");
+            child_env(vec![], &explicit, &[], &root("work"), Some(&root("slot-4"))).unwrap_err();
+        assert!(err.contains("LOCALAPPDATA"), "{err}");
     }
 
     #[test]
     fn protected_env_relative_is_refused() {
         let explicit = vec![("XDG_DATA_HOME".to_string(), "throwaway".to_string())];
-        let err = scrubbed_env(vec![], &explicit, &[], &root("work"), None).unwrap_err();
+        let err = child_env(vec![], &explicit, &[], &root("work"), None).unwrap_err();
         assert!(err.contains("XDG_DATA_HOME"), "{err}");
     }
 
@@ -889,7 +947,7 @@ mod tests {
             "CLAUDE_CONFIG_DIR".to_string(),
             root("a/bc").to_string_lossy().into_owned(),
         )];
-        let err = scrubbed_env(vec![], &explicit, &[], &cwd, None).unwrap_err();
+        let err = child_env(vec![], &explicit, &[], &cwd, None).unwrap_err();
         assert!(err.contains("CLAUDE_CONFIG_DIR"), "{err}");
     }
 
@@ -897,12 +955,12 @@ mod tests {
     fn without_a_slot_only_cwd_counts() {
         let cwd = root("work");
         let outside = vec![(
-            "HOME".to_string(),
+            "HOMEDRIVE".to_string(),
             root("elsewhere").to_string_lossy().into_owned(),
         )];
-        assert!(scrubbed_env(vec![], &outside, &[], &cwd, None).is_err());
-        let inside = vec![("HOME".to_string(), format!("{}/home", cwd.display()))];
-        assert!(scrubbed_env(vec![], &inside, &[], &cwd, None).is_ok());
+        assert!(child_env(vec![], &outside, &[], &cwd, None).is_err());
+        let inside = vec![("HOMEDRIVE".to_string(), format!("{}/drive", cwd.display()))];
+        assert!(child_env(vec![], &inside, &[], &cwd, None).is_ok());
     }
 
     #[test]
