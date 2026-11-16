@@ -977,10 +977,10 @@ mod tests {
         // A path through a junction resolves to the target, not the link.
         let base = std::env::temp_dir().join(format!("yien-within-{}", std::process::id()));
         let target = base.join("target");
-        let link = base.join("link");
         std::fs::create_dir_all(&target).unwrap();
         #[cfg(windows)]
         {
+            let link = base.join("link");
             let status = std::process::Command::new("cmd")
                 .args(["/c", "mklink", "/J"])
                 .arg(&link)
