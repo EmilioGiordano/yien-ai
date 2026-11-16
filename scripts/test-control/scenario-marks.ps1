@@ -2,7 +2,8 @@
 .SYNOPSIS
 Checks the agent/shell badge and the state of each tab row and pane head,
 as test control reports them, for a Claude profile pane, a PowerShell pane
-and a cmd pane (RF-PAN-12, RF-ATN-15).
+and a cmd pane (RF-PAN-12). The needs-you mark is scenario-needs-you.ps1's
+subject.
 
 .DESCRIPTION
 Usage:
