@@ -317,35 +317,51 @@ impl Settled {
             }
         }
     }
-}
 
-/// Like [`replay`], with the output of each read let settle and the screen
-/// read when the machine asks, as a pane does.
-fn replay_settled(parts: &[&[u8]], profile: &str) -> Vec<AgentState> {
-    let mut pane = Settled {
-        machine: Machine::new(config(profile)),
-        engine: AlacrittyEngine::new(VtConfig::default(), 120, 40),
-        rules: screen_rules(profile),
-        now: Duration::ZERO,
-        states: Vec::new(),
-    };
-    pane.step(Signal::Spawned);
-    for part in parts {
-        let out = pane.engine.feed(part);
+    /// A spawned pane running `config`, reading the screen with `rules`.
+    fn spawned(config: MachineConfig, rules: Vec<ScreenRule>) -> Self {
+        let mut pane = Settled {
+            machine: Machine::new(config),
+            engine: AlacrittyEngine::new(VtConfig::default(), 120, 40),
+            rules,
+            now: Duration::ZERO,
+            states: Vec::new(),
+        };
+        pane.step(Signal::Spawned);
+        pane
+    }
+
+    /// One read of output, let settle.
+    fn feed(&mut self, part: &[u8]) {
+        let out = self.engine.feed(part);
         for found in &out.signals {
             let Some(osc) = convert::osc_signal(found) else {
                 continue;
             };
             for signal in [Signal::Osc(osc), Signal::Tick] {
-                pane.step(signal);
-                pane.now += Duration::from_secs(1);
+                self.step(signal);
+                self.now += Duration::from_secs(1);
             }
         }
-        pane.step(Signal::Output);
-        if let Some(at) = pane.machine.next_wake() {
-            pane.now = pane.now.max(at);
-            pane.step(Signal::Tick);
+        self.step(Signal::Output);
+        self.wait();
+    }
+
+    /// Lets the wake the machine asked for come.
+    fn wait(&mut self) {
+        if let Some(at) = self.machine.next_wake() {
+            self.now = self.now.max(at);
+            self.step(Signal::Tick);
         }
+    }
+}
+
+/// Like [`replay`], with the output of each read let settle and the screen
+/// read when the machine asks, as a pane does.
+fn replay_settled(parts: &[&[u8]], profile: &str) -> Vec<AgentState> {
+    let mut pane = Settled::spawned(config(profile), screen_rules(profile));
+    for part in parts {
+        pane.feed(part);
     }
     pane.states
 }
@@ -436,5 +452,60 @@ fn rf_age_05_agents_typed_in_a_shell_report_as_in_their_own_pane() {
             states(capture, profile),
             "{profile}"
         );
+    }
+}
+
+/// The patterns a shell pane reads for `program` typed in it.
+fn typed_rules(program: &str) -> Vec<ScreenRule> {
+    let profiles = builtin_profiles().unwrap();
+    let found = profiles.iter().find(|p| p.id == program).unwrap();
+    found.typed_startup_screens().to_vec()
+}
+
+/// PowerShell's prompt and the `codex` typed at it, with its marks.
+const CODEX_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> codex\r\n\x1b]133;C\x07";
+
+#[test]
+fn rf_age_05_codex_typed_in_a_shell_needs_you_on_its_trust_screen_once_found() {
+    let mut pane = Settled::spawned(config("shell"), typed_rules("codex"));
+    pane.feed(CODEX_TYPED);
+    pane.feed(&drawn(CODEX_TRUST));
+    assert_eq!(pane.states, [AgentState::Working], "not read before found");
+    // The poll finds `codex` under the shell a second later.
+    pane.now += Duration::from_secs(1);
+    pane.step(Signal::TypedAgent(true));
+    pane.wait();
+    assert_eq!(pane.states, [AgentState::Working, SCREEN_RED]);
+    // Trusted: Codex starts and reports.
+    pane.feed(CODEX_STARTUP);
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            SCREEN_RED,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+    assert!(!pane.machine.reads_typed_agent());
+}
+
+#[test]
+fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
+    for (capture, program) in [
+        (CLAUDE_IN_POWERSHELL, "claude"),
+        (CLAUDE_QUESTION, "claude"),
+        (CLAUDE_INTERRUPT, "claude"),
+        (CODEX_PERMISSION, "codex"),
+        (CODEX_STARTUP, "codex"),
+    ] {
+        // Found at once, so every read until its first record is made.
+        let mut pane = Settled::spawned(config("shell"), typed_rules(program));
+        pane.step(Signal::TypedAgent(true));
+        for part in capture.chunks(64) {
+            pane.feed(part);
+        }
+        assert_eq!(pane.states, states(capture, "shell"), "{program}");
     }
 }

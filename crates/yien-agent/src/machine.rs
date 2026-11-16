@@ -175,6 +175,23 @@ impl MachineConfig {
         self.declares(Source::Screen)
             && (self.declares(Source::Hooks) || self.declares(Source::Osc7501))
     }
+
+    /// Whether an agent CLI typed in this shell can have its startup screens
+    /// read, with its own patterns, until it first reports over OSC 7501
+    /// ([`Signal::TypedAgent`]). Only a shell rule hears both the prompt
+    /// marks and the record that end that window.
+    ///
+    /// ```
+    /// use yien_agent::{MachineConfig, Source};
+    ///
+    /// let shell = MachineConfig::new(&[Source::Osc133, Source::Osc7501], None);
+    /// assert!(shell.reads_typed_startup_screens());
+    /// let codex = MachineConfig::new(&[Source::Osc7501, Source::Screen], None);
+    /// assert!(!codex.reads_typed_startup_screens());
+    /// ```
+    pub fn reads_typed_startup_screens(&self) -> bool {
+        self.declares(Source::Osc133) && self.declares(Source::Osc7501)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +241,13 @@ pub struct Machine {
     unread_since: Option<Duration>,
     /// The red mark is a startup screen's, not a turn's.
     startup_red: bool,
+    /// The state a startup screen's red mark returns to once it is gone.
+    startup_from: AgentState,
+    /// An agent CLI typed in the shell runs and has not reported yet, so its
+    /// startup screens are read.
+    typed_agent: bool,
+    /// The shell has marked a command's start (OSC 133 C); cmd never does.
+    command_marks: bool,
 }
 
 impl Machine {
@@ -247,6 +271,9 @@ impl Machine {
             settle_at: None,
             unread_since: None,
             startup_red: false,
+            startup_from: AgentState::Idle,
+            typed_agent: false,
+            command_marks: false,
         }
     }
 
@@ -336,6 +363,24 @@ impl Machine {
         self.agent_reporting
     }
 
+    /// Whether the screen is read for the startup screens of an agent CLI
+    /// typed in the shell: the caller answers [`Effect::CheckScreen`] with
+    /// that agent's patterns instead of the rule's own.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{Machine, MachineConfig, Signal, Source};
+    ///
+    /// let m = Machine::new(MachineConfig::new(&[Source::Osc133, Source::Osc7501], None));
+    /// let (m, _) = m.step(&Signal::TypedAgent(true), Duration::ZERO);
+    /// assert!(m.reads_typed_agent());
+    /// let (m, _) = m.step(&Signal::TypedAgent(false), Duration::ZERO);
+    /// assert!(!m.reads_typed_agent());
+    /// ```
+    pub fn reads_typed_agent(&self) -> bool {
+        self.typed_agent
+    }
+
     /// The rule this machine runs with.
     pub fn config(&self) -> &MachineConfig {
         &self.config
@@ -369,6 +414,7 @@ impl Machine {
             Signal::Tick => self.on_tick(now, fx),
             Signal::Exited { code } => {
                 self.exited = true;
+                self.typed_agent = false;
                 self.settle_at = None;
                 self.unread_since = None;
                 match self.state {
@@ -390,15 +436,13 @@ impl Machine {
                     self.input_pending = true;
                 }
             }
+            Signal::TypedAgent(running) => self.on_typed_agent(*running, now, fx),
             Signal::Output => {
                 if self.reads_startup_screen() {
                     // An answered startup screen is read again, not taken
                     // for a turn going on.
                     self.input_pending = false;
-                    let first = *self.unread_since.get_or_insert(now);
-                    let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
-                    self.settle_at = Some(at);
-                    fx.push(Effect::WakeAt(at));
+                    self.arm_startup_read(now, fx);
                 } else if self.state.is_red() && self.input_pending {
                     self.set_state(AgentState::Working, Cause::User, now, fx);
                 } else if self.state == AgentState::Working {
@@ -417,7 +461,8 @@ impl Machine {
         let Some(source) = signal.source() else {
             return;
         };
-        if !self.config.declares(source) {
+        let typed_screen = source == Source::Screen && self.typed_agent;
+        if !self.config.declares(source) && !typed_screen {
             return;
         }
         if let Signal::Screen(verdict) = signal {
@@ -429,6 +474,15 @@ impl Machine {
             return;
         }
         self.top_rank = Some(rank);
+        if self.typed_agent {
+            match source {
+                // The agent speaks for itself; a startup red is cleared below.
+                Source::Osc7501 => self.typed_agent = false,
+                // The shell's prompt is back: the agent is gone.
+                Source::Osc133 => self.end_typed_startup(Cause::Source(source), now, fx),
+                _ => {}
+            }
+        }
         if rank >= Source::Osc7501.rank() {
             self.signal_lost = false;
             // The agent got past its startup screens and speaks for itself.
@@ -502,6 +556,9 @@ impl Machine {
     }
 
     fn on_osc(&mut self, osc: OscSignal, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
+        if osc == OscSignal::Prompt(PromptMark::CommandStart) {
+            self.command_marks = true;
+        }
         match osc {
             OscSignal::Status7501(status) => self.on_status(status, cause, now, fx),
             OscSignal::Prompt(mark) if self.agent_reporting => {
@@ -603,6 +660,7 @@ impl Machine {
             let cause = Cause::Source(Source::Screen);
             match verdict {
                 ScreenVerdict::NeedsYou if !self.startup_red => {
+                    self.startup_from = self.state;
                     self.set_state(
                         AgentState::NeedsYou(NeedsReason::ScreenRule),
                         cause,
@@ -612,7 +670,7 @@ impl Machine {
                     self.startup_red = true;
                 }
                 ScreenVerdict::NoMatch if self.startup_red => {
-                    self.set_state(AgentState::Idle, cause, now, fx);
+                    self.set_state(self.startup_from, cause, now, fx);
                 }
                 _ => {}
             }
@@ -625,6 +683,55 @@ impl Machine {
         {
             let cause = Cause::Source(Source::Screen);
             self.needs(NeedsReason::ScreenRule, cause, now, fx);
+        }
+    }
+
+    /// Reads the screen once output settles, and at least every
+    /// [`STARTUP_SCREEN_MAX_WAIT`] while it keeps coming.
+    fn arm_startup_read(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        let first = *self.unread_since.get_or_insert(now);
+        let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
+        self.settle_at = Some(at);
+        fx.push(Effect::WakeAt(at));
+    }
+
+    /// An agent CLI with startup screens was found running in the shell, or
+    /// it no longer runs there. Its screens are read from then until it first
+    /// reports; one that reported already is past them.
+    fn on_typed_agent(&mut self, running: bool, now: Duration, fx: &mut Vec<Effect>) {
+        if !running {
+            self.end_typed_startup(Cause::Process, now, fx);
+            return;
+        }
+        let red_of_its_own = self.state.is_red() && !self.startup_red;
+        // A poll can land after the CLI exited: in a shell that marks its
+        // commands, a prompt mark since the last C means it is gone.
+        let at_prompt =
+            self.command_marks && self.state != AgentState::Working && !self.startup_red;
+        if !self.config.reads_typed_startup_screens()
+            || self.agent_reporting
+            || self.signal_lost
+            || red_of_its_own
+            || at_prompt
+        {
+            return;
+        }
+        self.typed_agent = true;
+        // The screen may have settled long before the program was found.
+        self.arm_startup_read(now, fx);
+    }
+
+    /// Stops reading a typed agent's startup screens; a red mark one of them
+    /// raised goes, back to the state it interrupted.
+    fn end_typed_startup(&mut self, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
+        if !std::mem::take(&mut self.typed_agent) {
+            return;
+        }
+        self.settle_at = None;
+        self.unread_since = None;
+        self.awaiting_screen = false;
+        if self.startup_red {
+            self.set_state(self.startup_from, cause, now, fx);
         }
     }
 
@@ -690,8 +797,12 @@ impl Machine {
 
     /// Whether the screen is read for a startup screen: the rule allows it,
     /// the agent has not spoken over its structured channel since it was
-    /// spawned, and no turn or end is on show.
+    /// spawned, and no turn or end is on show. A typed agent's screens are
+    /// read over the shell's running command too.
     fn reads_startup_screen(&self) -> bool {
+        if self.typed_agent {
+            return !self.exited && !self.signal_lost && (!self.state.is_red() || self.startup_red);
+        }
         self.config.reads_startup_screens()
             && self.screen_allowed()
             && self.top_rank.is_none_or(|top| top < Source::Osc7501.rank())
@@ -740,6 +851,7 @@ impl Machine {
 
     fn lose(&mut self, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         self.signal_lost = true;
+        self.typed_agent = false;
         self.input_pending = false;
         self.pending = None;
         self.awaiting_screen = false;

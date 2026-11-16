@@ -727,6 +727,14 @@ impl Service {
                     }
                     self.to_pane(pane, PaneCmd::View { visible, seen }).await;
                 }
+                Effect::Program {
+                    pane,
+                    launch,
+                    program,
+                } => {
+                    self.to_pane(pane, PaneCmd::Program { launch, program })
+                        .await
+                }
             }
         }
     }

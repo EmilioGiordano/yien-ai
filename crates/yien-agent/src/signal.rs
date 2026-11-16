@@ -255,6 +255,10 @@ pub enum Signal {
     },
     /// Whether the pane is seen: focused in a focused window (RN-07).
     Seen(bool),
+    /// An agent CLI whose startup screens the caller can read runs under the
+    /// shell (`true`), or it no longer does (`false`). The caller sends it
+    /// only for a shell pane, on the change.
+    TypedAgent(bool),
     /// The user sent input to the pane. The caller sends it only for the
     /// user's own keys and pastes, never for focus or mouse reports that YIEN
     /// itself generates.

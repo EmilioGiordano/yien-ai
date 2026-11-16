@@ -1342,6 +1342,246 @@ fn rf_age_05_a_respawn_reads_startup_screens_again() {
     assert!(p.fx.contains(&Effect::ClearRed));
 }
 
+// ---- Startup screens of an agent typed in a shell ------------------------------
+
+const SCREEN_RED: AgentState = AgentState::NeedsYou(NeedsReason::ScreenRule);
+
+impl Pane {
+    /// A PowerShell pane whose `codex` was typed and found running.
+    fn typed_in_powershell() -> Self {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::PromptStart))
+            .send(mark(PromptMark::CommandStart))
+            .send(Signal::Output);
+        assert_eq!(p.state(), AgentState::Working);
+        p.send(Signal::TypedAgent(true));
+        assert!(p.m.reads_typed_agent());
+        p
+    }
+
+    /// As [`Pane::typed_in_powershell`], stopped on a startup screen.
+    fn typed_on_startup_screen() -> Self {
+        let mut p = Pane::typed_in_powershell();
+        p.settled_screen(ScreenVerdict::NeedsYou);
+        assert_eq!(p.state(), SCREEN_RED);
+        p
+    }
+}
+
+#[test]
+fn rn_02_a_shell_reads_no_screen_before_an_agent_is_found() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart));
+    for t in (0..3_000).step_by(100) {
+        p.at(ms(t)).send(Signal::Output);
+        assert!(p.fx.is_empty(), "at {t} ms");
+        p.send(Signal::Tick);
+        assert!(p.fx.is_empty(), "at {t} ms");
+    }
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn rf_atn_09_a_typed_agent_s_startup_screen_marks_red_and_notifies() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .at(ms(1_200))
+        .send(Signal::TypedAgent(true));
+    // A screen that settled before the program was found is still read.
+    assert_eq!(
+        p.fx,
+        vec![Effect::WakeAt(ms(1_200) + STARTUP_SCREEN_SETTLE)]
+    );
+    p.at(ms(1_200) + STARTUP_SCREEN_SETTLE).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(
+        p.fx,
+        vec![
+            Effect::Transition {
+                from: AgentState::Working,
+                to: SCREEN_RED,
+                cause: Cause::Source(Source::Screen),
+            },
+            Effect::MarkRed,
+            Effect::Notify,
+        ]
+    );
+}
+
+#[test]
+fn rf_age_05_a_typed_agent_s_screen_that_does_not_match_leaves_the_command_running() {
+    let mut p = Pane::typed_in_powershell();
+    p.settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rf_age_05_an_answered_typed_startup_screen_returns_to_the_running_command() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    // Read again until the agent reports: a second screen turns red again.
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+}
+
+#[test]
+fn rf_age_05_the_first_osc_7501_record_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(idle(Reporter::Codex));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: SCREEN_RED,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+    assert!(!p.m.reads_typed_agent() && p.m.agent_reporting());
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty(), "no read once the agent reported");
+    assert_eq!(p.m.next_wake(), None);
+
+    // Before any red, too: its record ends the reads.
+    let mut p = Pane::typed_in_powershell();
+    p.send(status(AgentStatus::Working)).send(Signal::Output);
+    assert!(!p.m.reads_typed_agent());
+    assert_eq!(p.m.next_wake(), None);
+}
+
+#[test]
+fn rf_age_05_the_program_going_away_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::TypedAgent(false));
+    assert_eq!(
+        p.state(),
+        AgentState::Working,
+        "back to the shell's command"
+    );
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: SCREEN_RED,
+        to: AgentState::Working,
+        cause: Cause::Process,
+    }));
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty());
+    assert_eq!(p.m.next_wake(), None);
+
+    // A pending read is dropped with it.
+    let mut p = Pane::typed_in_powershell();
+    p.send(Signal::TypedAgent(false));
+    assert_eq!(p.m.next_wake(), None);
+    p.at(ms(2_000)).send(Signal::Tick);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rf_age_05_the_shell_s_prompt_mark_ends_a_typed_agent_s_startup() {
+    for end in [PromptMark::CommandEnd, PromptMark::PromptStart] {
+        let mut p = Pane::typed_on_startup_screen();
+        p.send(mark(end));
+        assert!(p.fx.contains(&Effect::ClearRed), "{end:?}");
+        assert_eq!(p.state(), AgentState::Done, "{end:?}: the command ended");
+        assert!(!p.m.reads_typed_agent());
+        p.send(Signal::Output);
+        assert!(p.fx.is_empty(), "{end:?}");
+    }
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Seen(true))
+        .send(mark(PromptMark::CommandEnd));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_cmd_without_prompt_marks_reads_a_typed_agent_s_startup() {
+    let mut p = Pane::spawned(shell());
+    p.send(Signal::Output).send(Signal::TypedAgent(true));
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Idle);
+    p.settled_screen(ScreenVerdict::NeedsYou)
+        .send(Signal::TypedAgent(false));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_atn_08_seeing_a_typed_agent_s_startup_screen_does_not_clear_it() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Seen(true));
+    assert_eq!(p.state(), SCREEN_RED);
+    p.send(Signal::Seen(false));
+    assert_eq!(p.state(), SCREEN_RED);
+}
+
+#[test]
+fn rn_02_a_report_landing_after_the_prompt_came_back_reads_nothing() {
+    // The CLI exited between the poll's snapshot and its report.
+    for end in [PromptMark::CommandEnd, PromptMark::PromptStart] {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::CommandStart))
+            .send(mark(end))
+            .send(Signal::TypedAgent(true));
+        assert!(p.fx.is_empty(), "{end:?}");
+        assert!(!p.m.reads_typed_agent(), "{end:?}");
+        assert_eq!(p.m.next_wake(), None, "{end:?}");
+        p.send(Signal::Output).at(ms(2_000)).send(Signal::Tick);
+        assert!(p.fx.is_empty(), "{end:?}");
+        p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+        assert!(!p.state().is_red(), "{end:?}");
+    }
+}
+
+#[test]
+fn rn_02_an_agent_that_already_reported_gets_no_startup_reads() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::ClaudeCode))
+        .send(Signal::TypedAgent(true));
+    assert!(p.fx.is_empty());
+    assert!(!p.m.reads_typed_agent());
+}
+
+#[test]
+fn rn_02_only_a_shell_rule_reads_a_typed_agent_s_startup() {
+    for config in [
+        codex(),
+        codex_with_screens(),
+        claude(),
+        MachineConfig::unprofiled(),
+    ] {
+        let mut p = Pane::spawned(config.clone());
+        p.send(Signal::TypedAgent(true));
+        assert!(p.fx.is_empty(), "{config:?}");
+        assert!(!p.m.reads_typed_agent(), "{config:?}");
+    }
+}
+
+#[test]
+fn rn_02_a_lost_source_or_an_exit_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Ambiguous);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.reads_typed_agent());
+    p.send(Signal::TypedAgent(true));
+    assert!(!p.m.reads_typed_agent(), "not while the mark is lost");
+
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Exited { code: Some(0) });
+    assert!(!p.m.reads_typed_agent());
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Spawned);
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty(), "a new shell starts unread");
+}
+
 // ---- Exhaustive and random sequences ----------------------------------------
 
 /// One step of a generated sequence: a signal and how far the clock moves
@@ -1384,6 +1624,8 @@ fn other_signals() -> Vec<Step> {
         (Signal::Output, 0),
         (Signal::SourceLost, 0),
         (Signal::Ambiguous, 0),
+        (Signal::TypedAgent(true), 0),
+        (Signal::TypedAgent(false), 0),
         (Signal::Tick, 300),
         (Signal::Tick, 31_000),
         (
