@@ -21,6 +21,7 @@ use yien_proto::{
 };
 
 use crate::actions::*;
+use crate::agent_badge::{self, Badge};
 use crate::assets;
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
@@ -40,10 +41,12 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, program_tag};
+use crate::pane_head::{
+    self, HeadText, PaneHeadLayout, head_mark, names_agent, pane_badge, program_tag,
+};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
-use crate::sidebars::{self, Bar, Drawn};
+use crate::sidebars::{self, Bar, Drawn, TAB_LIST_PAD, TAB_ROW_BRANCH, TAB_ROW_GAP, TAB_ROW_PAD};
 use crate::terminal::{TerminalEvent, TerminalPane};
 use crate::theme::{Theme, ThemeKind};
 use crate::title_bar::{
@@ -2324,7 +2327,7 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(6.0))
+                    .px(px(TAB_LIST_PAD))
                     .pb(px(10.0))
                     .children(groups),
             )
@@ -2542,7 +2545,7 @@ impl Shell {
             .flex_col()
             .gap(px(1.0))
             .w_full()
-            .px(px(8.0))
+            .px(px(TAB_ROW_PAD))
             .py(px(5.0))
             .rounded(px(6.0))
             .border_1()
@@ -2578,12 +2581,17 @@ impl Shell {
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(8.0))
-                    .child(self.tab_mark(self.workspace.tab_mark(tab)))
+                    .gap(px(TAB_ROW_GAP))
+                    .child(self.lead_mark(
+                        self.workspace.tab_badge(tab),
+                        self.workspace.tab_mark(tab),
+                        if active { t.raised } else { t.panel },
+                        (!active).then(|| tab_controls::row_group(id)),
+                    ))
                     .when_some(project, |row, project| {
                         row.child(
                             div()
-                                .flex_none()
+                                .min_w_0()
                                 .max_w(px(90.0))
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -2598,7 +2606,7 @@ impl Shell {
                             svg()
                                 .flex_none()
                                 .path(assets::BRANCH)
-                                .size(px(12.0))
+                                .size(px(TAB_ROW_BRANCH))
                                 .text_color(t.ai),
                         )
                     })
@@ -2607,7 +2615,7 @@ impl Shell {
             .when(second_line, |row| {
                 row.child(
                     h_flex()
-                        .pl(px(22.0))
+                        .pl(px(agent_badge::SIDE + TAB_ROW_GAP))
                         .gap(px(8.0))
                         .min_w_0()
                         .whitespace_nowrap()
@@ -2646,15 +2654,45 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A tab row's mark: a mono glyph in its 14 px slot, the spinner's frame
-    /// while it works, nothing for a tab of shells only. No id, so screen
-    /// readers hear the row's state word, never the frames.
-    fn tab_mark(&self, mark: TabMark) -> Div {
-        // One line height for every glyph size, below the name's, so a row
-        // keeps its height when its state changes.
-        self.mark_glyph(mark)
-            .w(px(14.0))
-            .line_height(self.theme.text(18.0))
+    /// The first piece of a tab row or pane head, in a fixed square: the
+    /// agent's or shell's badge with `mark` on a disc of `ground` in its
+    /// corner (the row's hover colour under `hover_group`), or `mark` alone
+    /// when nothing is known of the program. `TabMark::Shell`, which tab rows
+    /// and pane heads pass for idle shells, draws no corner mark. The
+    /// spinner's frame while it works. No id, so screen readers hear the
+    /// label's state word, never the frames.
+    fn lead_mark(
+        &self,
+        badge: Option<Badge>,
+        mark: TabMark,
+        ground: Rgba,
+        hover_group: Option<SharedString>,
+    ) -> Div {
+        let t = self.theme;
+        let Some(badge) = badge else {
+            return self
+                .mark_glyph(mark)
+                .size(px(agent_badge::SIDE))
+                .line_height(px(agent_badge::SIDE));
+        };
+        let corner = assets::corner_mark_glyph(mark, self.spinner.frame()).map(|glyph| {
+            div()
+                .bg(ground)
+                .when_some(hover_group, |d, group| {
+                    d.group_hover(group, move |s| s.bg(t.hover))
+                })
+                .text_size(px(glyph.size))
+                .line_height(px(agent_badge::CORNER))
+                .font_weight(if glyph.bold {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(t.tab_mark_color(mark))
+                .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                .child(glyph.text)
+        });
+        agent_badge::badge(badge, corner, self.fonts.mono.clone())
     }
 
     /// A state's mark outside the tab rows, the same glyph and colour as a
@@ -2903,7 +2941,12 @@ impl Shell {
             .text_size(t.text(pane_head::TEXT_SIZE))
             .text_color(t.term_muted)
             .when(focused, |h| h.bg(t.term_raised))
-            .child(self.state_mark(pane.state))
+            .child(self.lead_mark(
+                pane_badge(pane),
+                head_mark(pane),
+                if focused { t.term_raised } else { t.term_bg },
+                None,
+            ))
             .when(separate && shows.name, |h| {
                 h.child(primary(pane.name.clone()))
             })

@@ -76,6 +76,15 @@ pub(crate) fn tab_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
     }
 }
 
+/// A state mark in an agent badge's corner: the tab row's glyph, scaled from
+/// its 14 px slot to the corner disc, in fixed px so it never outgrows it.
+pub(crate) fn corner_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
+    tab_mark_glyph(mark, frame).map(|glyph| MarkGlyph {
+        size: glyph.size * crate::agent_badge::CORNER / 14.0,
+        ..glyph
+    })
+}
+
 pub(crate) struct YienAssets;
 
 impl AssetSource for YienAssets {
@@ -146,6 +155,22 @@ mod tests {
             );
             assert!(got.size <= 14.0, "{state:?} fits its 14 px slot");
         }
+    }
+
+    #[test]
+    fn rn_01_a_corner_mark_keeps_the_glyph_and_fits_its_disc() {
+        use crate::agent_badge::CORNER;
+        for state in AgentState::BY_URGENCY {
+            let mark = TabMark::State(state);
+            let (full, corner) = (
+                tab_mark_glyph(mark, 3).unwrap(),
+                corner_mark_glyph(mark, 3).unwrap(),
+            );
+            assert_eq!((corner.text, corner.bold), (full.text, full.bold));
+            assert!(corner.size < CORNER, "{state:?} fits the {CORNER} px disc");
+            assert!(corner.size >= 7.5, "{state:?} stays legible");
+        }
+        assert_eq!(corner_mark_glyph(TabMark::Shell, 0), None);
     }
 
     #[test]
