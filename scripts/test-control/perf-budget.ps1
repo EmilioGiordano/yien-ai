@@ -171,6 +171,10 @@ function Get-KeyboardPane($State) {
     return $State.panes | Where-Object { $_.id -eq $State.keyboard_pane } | Select-Object -First 1
 }
 
+function Test-YienAlive($Run) {
+    return [bool](Get-Process -Id $Run.Pid -ErrorAction SilentlyContinue)
+}
+
 function Get-PaneFrameAtMs($Pane) {
     $p = $Pane.PSObject.Properties['frame_at_ms']
     if ($null -ne $p) { return $p.Value }
@@ -191,6 +195,7 @@ function Test-PaneText($Pane, [string]$Needle) {
 function Wait-Prompt($Run, [double]$TimeoutSec) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
     do {
+        if (-not (Test-YienAlive $Run)) { return $null }
         $state = $null
         try { $state = Get-YienState -Name $Run.Name -Text -ServerPid $Run.Pid } catch { $state = $null }
         if ($state) {
@@ -210,6 +215,7 @@ function Wait-Prompt($Run, [double]$TimeoutSec) {
 function Wait-Marker($Run, [string]$Text, [double]$TimeoutSec) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
     do {
+        if (-not (Test-YienAlive $Run)) { return $null }
         $state = $null
         try { $state = Get-YienState -Name $Run.Name -Text -ServerPid $Run.Pid } catch { $state = $null }
         if ($state) {
@@ -307,6 +313,7 @@ if (-not $promptPane) {
         $deadline = [DateTime]::UtcNow.AddSeconds($KeyTimeoutSec)
         $observed = $false
         while (-not $observed -and [DateTime]::UtcNow -lt $deadline) {
+            if (-not (Test-YienAlive $run)) { throw 'yien exited during RNF-02' }
             $state = $null
             try { $state = Get-YienState -Name $run.Name -Text -ServerPid $run.Pid } catch { $state = $null }
             if ($state) {
