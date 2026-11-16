@@ -183,11 +183,12 @@ Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`,
 
 ### Tidying unpushed history
 
-The implementer may tidy its own branch before it is pushed. Pushed commits are never touched; pushed history stays Emilio's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
+The implementer may tidy the commits on its own branch that are not pushed. Pushed commits are never touched; pushed history stays Emilio's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
 
 1. Save the tip: `git rev-parse HEAD`.
-2. Squash fix-ups into the commits they fix, and reorder so every commit builds and the docs commit is last. The rebase must be non-interactive: `git commit --fixup=<hash>` then `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash $(git merge-base HEAD origin/main)`, or a `GIT_SEQUENCE_EDITOR` script that rewrites the todo list to reorder.
-3. `git rev-parse HEAD^{tree}` must equal `git rev-parse <saved tip>^{tree}`. If it does not, or the rebase fails, run `git rebase --abort` or `git reset --hard <saved tip>`, and report it.
+2. Pick the base: `@{u}` when `git rev-parse --verify -q @{u}` succeeds, so only commits after the upstream are rewritten; otherwise `git merge-base HEAD origin/main`. If `git rev-list --merges <base>..HEAD` is not empty, do not tidy: never rebase across a merge commit.
+3. Squash fix-ups into the commits they fix, and reorder so every commit builds and passes the branch checks. The rebase must be non-interactive: `git commit --fixup=<hash>` then `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <base>`, or a `GIT_SEQUENCE_EDITOR` script that rewrites the todo list to reorder.
+4. `git rev-parse HEAD^{tree}` must equal `git rev-parse <saved tip>^{tree}`. If it does not, or the rebase fails, run `git rebase --abort` or `git reset --hard <saved tip>`, and report it.
 
 A new dependency, or a change that makes the ERS or the plan wrong, goes in the report and the PR body: for a dependency, its purpose, the alternative rejected and its licence. The orchestrator records it in `docs/` (dependency registry, ERS, plan), which is not in git.
 
