@@ -30,6 +30,7 @@ Write `TASK-<topic>.md` in the worktree root (gitignored):
 - **Files:** where the change goes, found by reading the code.
 - **Steps:** implementation order.
 - **Out of scope:** what must not be touched, including other worktrees.
+- **Design:** for visual work (new marks, layouts, colours, icons), the option Emilio picked from a canvas or mockup of the options. Do not start the branch before he picks one.
 - **Done when:** observable criteria, the tests that must exist (named with requirement ids), the UI validation script (test-control state and actions it checks), and what only a human can check.
 
 ## 3. Implement
