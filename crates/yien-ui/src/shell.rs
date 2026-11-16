@@ -699,16 +699,25 @@ impl Shell {
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
     fn overlay_has_keyboard(&self) -> bool {
-        self.palette.is_some()
-            || self.menu.is_some()
-            || self.tab_menu.is_open()
-            || self.new_tab_menu.is_open()
-            || self.tray.is_some()
-            || self.confirm.is_some()
-            || self.renaming.is_some()
-            || self.worktree_prompt.is_some()
-            || self.worktree_close.is_some()
-            || self.updates.notes_open()
+        self.overlay().is_some()
+    }
+
+    /// The overlay that holds the keyboard, by name.
+    fn overlay(&self) -> Option<&'static str> {
+        [
+            (self.palette.is_some(), "palette"),
+            (self.menu.is_some(), "pane_menu"),
+            (self.tab_menu.is_open(), "tab_menu"),
+            (self.new_tab_menu.is_open(), "new_tab_menu"),
+            (self.tray.is_some(), "tray"),
+            (self.confirm.is_some(), "confirm"),
+            (self.renaming.is_some(), "rename"),
+            (self.worktree_prompt.is_some(), "worktree_prompt"),
+            (self.worktree_close.is_some(), "worktree_close"),
+            (self.updates.notes_open(), "release_notes"),
+        ]
+        .into_iter()
+        .find_map(|(open, name)| open.then_some(name))
     }
 
     /// Moves the keyboard to the selected tab's focused pane when that
@@ -1367,6 +1376,12 @@ impl Shell {
             return;
         };
         self.close_palette(window, cx);
+        self.run_target(target, window, cx);
+    }
+
+    /// Does what a palette row does. The test control runs its commands
+    /// here too, so what it proves holds for the palette.
+    fn run_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         match target {
             Target::Command(at) => {
                 if let Some(spec) = CATALOG.get(at) {

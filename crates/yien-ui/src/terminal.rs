@@ -130,6 +130,17 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Text the layout or the IME typed, as the input handler delivers it.
+    /// The test control types through here too.
+    pub(crate) fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.preedit = None;
+        // IME text skips the key handler, so the paste question is held here too.
+        if self.pending_paste.is_none() {
+            self.write_input(text.as_bytes().to_vec(), cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn quirks(&self) -> KeyQuirks {
         self.quirks
     }
@@ -988,12 +999,7 @@ impl EntityInputHandler for TerminalPane {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.preedit = None;
-        // IME text skips the key handler, so the paste question is held here too.
-        if self.pending_paste.is_none() {
-            self.write_input(text.as_bytes().to_vec(), cx);
-        }
-        cx.notify();
+        self.commit_text(text, cx);
     }
 
     fn replace_and_mark_text_in_range(
