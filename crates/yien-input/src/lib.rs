@@ -263,14 +263,23 @@ pub struct KeyModes {
     pub quirks: KeyQuirks,
 }
 
+/// The console's interrupt key: 0x03, the byte ConPTY turns into
+/// CTRL_C_EVENT for console apps. Round 2 (REPORT-kitty-keys.md): the
+/// integration scenario stayed Working mid-turn on CSI 99;5u, while 0x03
+/// had always passed; Claude treats Ctrl+C as the console signal, not a key.
+fn is_console_ctrl_c(key: &Key, mods: Mods) -> bool {
+    matches!(key, Key::Char('c' | 'C')) && mods == Mods::CTRL
+}
+
 /// Like [`encode_in`], but the keys the legacy bytes lose keep their
 /// modifiers where the program can see them. With the kitty protocol asking
 /// to disambiguate (or report all keys, which implies it), Esc and every
 /// Ctrl/Alt combination on an ASCII key go as `CSI u` instead of their
-/// legacy byte, Enter, Tab and Backspace keep theirs, and Shift+Enter is
-/// `CSI 13;2u`. Otherwise, with win32-input-mode on, Shift+Enter,
-/// Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as Windows
-/// Terminal sends them. Ctrl+Delete is `ESC d` when the quirks say
+/// legacy byte, except Ctrl+C, which is the console's interrupt key and
+/// always goes as 0x03. Enter, Tab and Backspace keep theirs, and
+/// Shift+Enter is `CSI 13;2u`. Otherwise, with win32-input-mode on,
+/// Shift+Enter, Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as
+/// Windows Terminal sends them. Ctrl+Delete is `ESC d` when the quirks say
 /// so. Every other key, and these keys in any other case, are encoded
 /// exactly as [`encode_in`] does.
 ///
@@ -282,12 +291,15 @@ pub struct KeyModes {
 /// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, KeyModes::default()), Some(b"\r".to_vec()));
 /// assert_eq!(encode_with(&Key::Enter, Mods::NONE, kitty), Some(b"\r".to_vec()));
 /// assert_eq!(encode_with(&Key::Escape, Mods::NONE, kitty), Some(b"\x1b[27u".to_vec()));
-/// assert_eq!(encode_with(&Key::Char('c'), Mods::CTRL, kitty), Some(b"\x1b[99;5u".to_vec()));
+/// assert_eq!(encode_with(&Key::Char('c'), Mods::CTRL, kitty), Some(vec![0x03]));
 /// let quirks = KeyQuirks { ctrl_delete_as_meta_d: true };
 /// let meta_d = KeyModes { quirks, ..KeyModes::default() };
 /// assert_eq!(encode_with(&Key::Delete, Mods::CTRL, meta_d), Some(b"\x1bd".to_vec()));
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
+    if is_console_ctrl_c(key, mods) {
+        return Some(vec![0x03]);
+    }
     if let Some(bytes) = kitty_encode(key, mods, modes.kitty_flags) {
         return Some(bytes);
     }
@@ -888,9 +900,10 @@ mod tests {
                 kitty_flags: flags,
                 ..KITTY
             };
+            // ctrl+d is CSI 100;5u; ctrl+c is the console signal, see below.
             assert_eq!(
-                encode_with(&Key::Char('c'), Mods::CTRL, modes).unwrap(),
-                b"\x1b[99;5u",
+                encode_with(&Key::Char('d'), Mods::CTRL, modes).unwrap(),
+                b"\x1b[100;5u",
                 "{modes:?}"
             );
             // The codepoint is the unshifted, lower-case one.
@@ -1012,6 +1025,52 @@ mod tests {
     }
 
     #[test]
+    fn rf_age_02_ctrl_c_is_the_console_interrupt_byte_in_every_mode() {
+        // Round 2, scenario-claude-ctrl-c.ps1: the branch sent CSI 99;5u
+        // (kitty disambiguate reads it fine, but ConPTY does not turn a
+        // CSI u sequence into CTRL_C_EVENT); the integration scenario
+        // stayed Working mid-turn for 20 s. 0x03 had always passed on main.
+        for flags in [
+            0,
+            KITTY_DISAMBIGUATE,
+            0b1_1111,
+            0b0_0101,
+            0b0_0110,
+            KITTY_ALL_AS_ESCAPE,
+            0b0_1010,
+            0b0_10000,
+        ] {
+            let kitty = KeyModes {
+                kitty_flags: flags,
+                win32_input: true,
+                ..KeyModes::default()
+            };
+            for key in [Key::Char('c'), Key::Char('C')] {
+                assert_eq!(
+                    encode_with(&key, Mods::CTRL, kitty).unwrap(),
+                    vec![0x03],
+                    "{key:?} {kitty:?}"
+                );
+            }
+        }
+        // Ctrl+Shift+C is not the signal (and YIEN's copy chord); it keeps
+        // the kitty encoding.
+        let ctrl_shift = Mods {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        let modes = KeyModes {
+            kitty_flags: 0b1_0101,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_with(&Key::Char('c'), ctrl_shift, modes).unwrap(),
+            b"\x1b[99:67;6u"
+        );
+    }
+
+    #[test]
     fn rf_age_02_report_all_implies_disambiguation() {
         // Flag 3 alone turns Esc into CSI 27u (the protocol implies
         // disambiguation); the same holds for report events | report-all.
@@ -1025,9 +1084,10 @@ mod tests {
                 b"\x1b[27u",
                 "{modes:?}"
             );
+            // Ctrl+C is the console's interrupt key, never CSI u.
             assert_eq!(
                 encode_with(&Key::Char('c'), Mods::CTRL, modes).unwrap(),
-                b"\x1b[99;5u",
+                vec![0x03],
                 "{modes:?}"
             );
         }
