@@ -202,5 +202,31 @@ function Get-YienPaneText($Pane) {
     return ($rows.Value -join "`n")
 }
 
+<# The worktree's build slot, from the untracked .yien-slot file; throws
+   outside a git worktree. #>
+function Get-YienSlotDir {
+    $top = & git -C $PSScriptRoot rev-parse --show-toplevel 2>$null
+    if (-not $top) { throw 'not inside a git worktree; pass the run folder explicitly' }
+    $slotFile = Join-Path $top '.yien-slot'
+    if (-not (Test-Path -LiteralPath $slotFile)) { throw "$slotFile is missing; pass the run folder explicitly" }
+    $slot = (Get-Content -LiteralPath $slotFile -TotalCount 1).Trim()
+    if (-not $slot) { throw "$slotFile is empty; pass the run folder explicitly" }
+    return $slot
+}
+
+<# A random 8-hex-digit token. #>
+function New-YienNonce {
+    $bytes = New-Object byte[] 8
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+<# Writes -Text as UTF-8 without a BOM. #>
+function Write-YienUtf8([string]$Path, [string]$Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 Export-ModuleMember -Function Send-YienRequest, Get-YienState, Invoke-YienCommand, Send-YienText,
-    Send-YienKey, Set-YienWindowSize, Wait-YienState, Get-YienPane, Get-YienPaneText
+    Send-YienKey, Set-YienWindowSize, Wait-YienState, Get-YienPane, Get-YienPaneText,
+    Get-YienSlotDir, New-YienNonce, Write-YienUtf8

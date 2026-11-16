@@ -87,17 +87,7 @@ $BudgetRnf01Ms = 1000
 $BudgetRnf02Ms = 50
 $BudgetRnf03Mb = 300
 
-function Get-SlotDir {
-    $top = & git -C $PSScriptRoot rev-parse --show-toplevel 2>$null
-    if (-not $top) { throw 'not inside a git worktree; pass -OutDir' }
-    $slotFile = Join-Path $top '.yien-slot'
-    if (-not (Test-Path -LiteralPath $slotFile)) { throw "$slotFile is missing; pass -OutDir" }
-    $slot = (Get-Content -LiteralPath $slotFile -TotalCount 1).Trim()
-    if (-not $slot) { throw "$slotFile is empty; pass -OutDir" }
-    return $slot
-}
-
-if (-not $OutDir) { $OutDir = Join-Path (Get-SlotDir) 'run' }
+if (-not $OutDir) { $OutDir = Join-Path (Get-YienSlotDir) 'run' }
 $OutDir = (Resolve-Path -LiteralPath $OutDir -ErrorAction SilentlyContinue).Path
 if (-not $OutDir) {
     $null = New-Item -ItemType Directory -Path $OutDir
@@ -107,17 +97,6 @@ $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $WorkDir = Join-Path $OutDir "perf-budget-$Stamp"
 $null = New-Item -ItemType Directory -Path $WorkDir
 $JsonPath = Join-Path $OutDir "perf-budget-$Stamp.json"
-
-function New-Nonce {
-    $bytes = New-Object byte[] 8
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
-}
-
-function Write-Utf8([string]$Path, [string]$Text) {
-    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
-}
 
 function UtcMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 
@@ -131,7 +110,7 @@ function Stop-YienRun([string]$Root) {
    Returns a run object with the pipe name, pid and the stopwatch that started
    just before the process did. #>
 function Start-ThrowawayRun([string]$Tag) {
-    $name = "tc-$(New-Nonce)"
+    $name = "tc-$(New-YienNonce)"
     $root = Join-Path $WorkDir $Tag
     $data = Join-Path $root 'data'
     $work = Join-Path $root 'work'
@@ -162,7 +141,7 @@ function Start-ThrowawayRun([string]$Tag) {
         mock_pid  = $null
         mock_port = $null
     }
-    Write-Utf8 (Join-Path $root 'run.json') ($run | ConvertTo-Json)
+    Write-YienUtf8 (Join-Path $root 'run.json') ($run | ConvertTo-Json)
     $script:CurrentRun = [pscustomobject]@{
         Name      = $name
         Pid       = $yien.Id
@@ -311,7 +290,7 @@ if (-not $promptPane) {
         # Clear the line, then inject one unique 8-hex marker; the needle is
         # random, so it can only match what this key echoed.
         $null = Send-YienKey -Name $run.Name -ServerPid $run.Pid -Key 'ctrl-c'
-        $marker = New-Nonce
+        $marker = New-YienNonce
         $sw = New-Object System.Diagnostics.Stopwatch
         $t0ms = UtcMs
         $sw.Start()
@@ -520,7 +499,7 @@ $results.machine = [ordered]@{
     powershell = $PSVersionTable.PSVersion.ToString()
 }
 
-Write-Utf8 $JsonPath (($results | ConvertTo-Json -Depth 10))
+Write-YienUtf8 $JsonPath (($results | ConvertTo-Json -Depth 10))
 
 Write-Host ""
 Write-Host "+-------+-------------------------+----------------+--------+"

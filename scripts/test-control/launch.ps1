@@ -39,23 +39,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'YienTestControl.psm1') -Force
 
-function New-Nonce {
-    $bytes = New-Object byte[] 8
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
-}
-
-function Get-SlotDir {
-    $top = & git -C $PSScriptRoot rev-parse --show-toplevel 2>$null
-    if (-not $top) { throw 'not inside a git worktree; pass -Root' }
-    $slotFile = Join-Path $top '.yien-slot'
-    if (-not (Test-Path -LiteralPath $slotFile)) { throw "$slotFile is missing; pass -Root" }
-    $slot = (Get-Content -LiteralPath $slotFile -TotalCount 1).Trim()
-    if (-not $slot) { throw "$slotFile is empty; pass -Root" }
-    return $slot
-}
-
 function Get-FreePort {
     $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -76,14 +59,10 @@ function Wait-Port([int]$Port, [double]$TimeoutSec) {
     return $false
 }
 
-function Write-Utf8([string]$Path, [string]$Text) {
-    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
-}
-
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
-if (-not $Name) { $Name = "tc-$(New-Nonce)" }
+if (-not $Name) { $Name = "tc-$(New-YienNonce)" }
 if ($Name -cnotmatch '^[A-Za-z0-9_-]{1,64}$') { throw "not a test control name: '$Name'" }
-if (-not $Root) { $Root = Join-Path (Join-Path (Get-SlotDir) 'run') $Name }
+if (-not $Root) { $Root = Join-Path (Join-Path (Get-YienSlotDir) 'run') $Name }
 if (Test-Path -LiteralPath $Root) { throw "$Root exists; every run gets a new folder" }
 
 $data = Join-Path $Root 'data'
@@ -125,7 +104,7 @@ if ($MockClaude) {
         projects                       = $projects
         bypassPermissionsModeAccepted  = $true
     }
-    Write-Utf8 (Join-Path $claudeDir '.claude.json') ($config | ConvertTo-Json -Depth 10)
+    Write-YienUtf8 (Join-Path $claudeDir '.claude.json') ($config | ConvertTo-Json -Depth 10)
     $env_.CLAUDE_CONFIG_DIR = $claudeDir
     $env_.ANTHROPIC_API_KEY = $key
     $env_.ANTHROPIC_BASE_URL = "http://127.0.0.1:$mockPort"
@@ -160,7 +139,7 @@ $run = [ordered]@{
     mock_pid  = if ($mock) { $mock.Id } else { $null }
     mock_port = $mockPort
 }
-Write-Utf8 (Join-Path $Root 'run.json') ($run | ConvertTo-Json)
+Write-YienUtf8 (Join-Path $Root 'run.json') ($run | ConvertTo-Json)
 
 $deadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSec)
 $ready = $false
