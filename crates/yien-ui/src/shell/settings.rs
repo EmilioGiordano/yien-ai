@@ -71,6 +71,13 @@ impl Shell {
             self.workspace.set_group_by_state(grouped);
             self.tab_cursor = None;
         }
+        let close_to_tray = self.settings.config().close_to_tray;
+        if !close_to_tray && !self.os_window.visible() {
+            // The icon is going away; a hidden window would have no way back.
+            self.os_window.show();
+            window.activate_window();
+        }
+        self.os_tray.set_enabled(close_to_tray);
         let before = self.notice.as_ref().map(|n| n.text.clone());
         let (text, settings_notice) = after_reading(
             before.as_deref(),

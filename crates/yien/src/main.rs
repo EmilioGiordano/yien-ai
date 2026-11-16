@@ -11,7 +11,9 @@ mod profiles;
 mod settings;
 mod shell_switch;
 mod test_control;
+mod tray;
 mod update;
+mod window;
 
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -149,7 +151,9 @@ fn main() -> ExitCode {
     let to_core = core.clone();
     shell_switch.attach(Box::new(move |wanted| deliver_shell(&to_core, wanted)));
     // Before the window opens, so its taskbar button carries the toasts' app id.
-    let attention = Rc::new(attention::Attention::new(window));
+    let attention = Rc::new(attention::Attention::new(Arc::clone(&window)));
+    let tray = Rc::new(tray::TrayOs::new());
+    let os_window = Rc::new(window::WindowOs::new(Arc::clone(&window)));
     let files = files::start();
     let quitting = core.clone();
     // gpui may exit the process from inside `run` (Windows end session),
@@ -158,6 +162,8 @@ fn main() -> ExitCode {
         Box::new(Client(core)),
         events,
         attention,
+        tray,
+        os_window,
         settings,
         files,
         updates,

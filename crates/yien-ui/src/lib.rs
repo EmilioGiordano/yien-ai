@@ -40,6 +40,7 @@ mod theme;
 mod title_bar;
 mod tray;
 mod update;
+mod window_close;
 mod worktree;
 mod zoom;
 
@@ -75,11 +76,20 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Opens the main window and runs until it closes. `client` carries messages
-/// to the core and `events` brings its events back; closing the window quits,
-/// which drops `client` and lets the core end its panes.
+/// to the core and `events` brings its events back. Closing the window hides
+/// it to the notification area and YIEN keeps running when `window.close_to_tray`
+/// is on (the default; RF-SES-09); otherwise closing quits, which drops
+/// `client` and lets the core end its panes.
 ///
 /// `attention` shows toasts and the taskbar badge when an agent needs the
 /// user while the window is in the background (RF-ATN-09, -10).
+///
+/// `tray` shows the icon in the notification area, with the count of panes
+/// that need the user in its tooltip, and gives the user `Open YIEN` and
+/// `Quit YIEN` (RF-SES-09).
+///
+/// `os_window` hides and shows the window, which GPUI cannot do itself
+/// (RF-SES-09).
 ///
 /// `settings` brings the settings file's readings, applied live
 /// (RF-CFG-01), and opens the file.
@@ -99,11 +109,13 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// ```no_run
 /// # fn connect() -> (Box<dyn yien_ui::CoreClient>, tokio::sync::mpsc::Receiver<yien_proto::CoreMsg>) { unimplemented!() }
 /// # fn os() -> std::rc::Rc<dyn yien_ui::OsAttention> { unimplemented!() }
+/// # fn tray() -> std::rc::Rc<dyn yien_ui::OsTray> { unimplemented!() }
+/// # fn os_window() -> std::rc::Rc<dyn yien_ui::OsWindow> { unimplemented!() }
 /// # fn settings() -> yien_ui::Settings { unimplemented!() }
 /// # fn files() -> yien_ui::Files { unimplemented!() }
 /// # fn updates() -> yien_ui::Updates { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, os(), settings(), files(), updates(), None, || println!("bye"));
+/// yien_ui::run(client, events, os(), tray(), os_window(), settings(), files(), updates(), None, || println!("bye"));
 /// ```
 #[allow(
     clippy::too_many_arguments,
@@ -113,6 +125,8 @@ pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
     attention: Rc<dyn OsAttention>,
+    tray: Rc<dyn OsTray>,
+    os_window: Rc<dyn OsWindow>,
     settings: Settings,
     files: Files,
     updates: Updates,
@@ -151,6 +165,8 @@ pub fn run(
                         link,
                         events,
                         attention,
+                        tray,
+                        os_window,
                         settings,
                         files,
                         updates,

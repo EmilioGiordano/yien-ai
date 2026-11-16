@@ -114,7 +114,14 @@ impl Shell {
                 window.resize(size(px(width), px(height)));
                 Reply::done()
             }
-            Request::WindowClose {} => Reply::error("window.close is not implemented yet"),
+            Request::WindowClose {} => {
+                // The X path hands the true to GPUI, which closes the window;
+                // this path has no hook, so a real quit needs the removal.
+                if self.window_close_requested(window, cx) {
+                    window.remove_window();
+                }
+                Reply::done()
+            }
             Request::Key { .. } => Reply::error("keys are dispatched outside the shell"),
         }
     }
@@ -159,7 +166,7 @@ impl Shell {
                 width: viewport.width.as_f32(),
                 height: viewport.height.as_f32(),
                 active: window.is_window_active(),
-                window_visible: false,
+                window_visible: self.os_window.visible(),
                 region: region_name(self.region(window, cx)).to_owned(),
                 overlay: self.overlay().map(str::to_owned),
             },
