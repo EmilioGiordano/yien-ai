@@ -16,6 +16,9 @@ REPORT-*.md
 # Per-worktree build slot
 /.yien-slot
 
+# Per-worktree OpenCode worker permissions (written by scripts/oc.sh)
+/opencode.json
+
 # Machine-specific paths (see .yien-local.example)
 /.yien-local
 
