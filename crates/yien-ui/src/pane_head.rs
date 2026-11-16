@@ -89,7 +89,20 @@ pub(crate) fn pane_badge(pane: &PaneView) -> Option<Badge> {
     }
     let id = pane.profile_id.as_str();
     if let Some(kind) = ShellKind::from_profile(id) {
-        return Some(Badge::Shell(ShellBadge::of_kind(kind)));
+        // A kind not installed runs the default shell under the kind's id;
+        // the profile name then names the shell that runs, not the kind.
+        let runs = if pane.profile.is_empty() || pane.profile == kind.name() {
+            ShellBadge::of_kind(kind)
+        } else {
+            match ShellKind::ALL
+                .into_iter()
+                .find(|k| k.name() == pane.profile)
+            {
+                Some(other) => ShellBadge::of_kind(other),
+                None => ShellBadge::of_program(&pane.name, cfg!(windows)),
+            }
+        };
+        return Some(Badge::Shell(runs));
     }
     let stand_in = !id.is_empty() && !pane.runs_session && pane.running;
     (is_shell_profile(id) || stand_in)
@@ -762,5 +775,77 @@ mod tests {
             };
             assert_eq!(head_mark(&busy), TabMark::State(state), "{state:?}");
         }
+    }
+
+    /// A pane as the core reports it: the profile id it started with, the
+    /// profile's display name and the pane's name.
+    fn started(profile_id: &str, profile: &str, name: &str) -> PaneView {
+        PaneView {
+            profile: profile.into(),
+            ..named(profile_id, name, true)
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_every_way_to_start_git_bash_shows_the_git_bash_badge() {
+        let git_bash = Some(Badge::Shell(ShellBadge::GitBash));
+        // The new tab menu, the palette's "new tab with Git Bash", the split
+        // menu and a restored pane all start `shell:git-bash`, which the core
+        // reports as "Git Bash", named `bash`, or by the user's name.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "bash")),
+            git_bash
+        );
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "work")),
+            git_bash
+        );
+        // Before its details arrive, the id alone tells it.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "", "terminal")),
+            git_bash
+        );
+        // `terminal.shell = "git-bash"`: the default shell, named `bash`.
+        let default = pane_badge(&started("shell", "Shell", "bash"));
+        if cfg!(windows) {
+            assert_eq!(default, git_bash);
+        } else {
+            assert_eq!(default, Some(Badge::Shell(ShellBadge::Other)));
+        }
+        // Never the cmd badge.
+        let cmd = Some(Badge::Shell(ShellBadge::Cmd));
+        assert_ne!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "bash")),
+            cmd
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_a_missing_shell_shows_the_shell_that_runs_instead() {
+        // Git Bash not installed: the core runs the default shell under the
+        // `shell:git-bash` id and names that shell in the profile.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Command Prompt", "cmd")),
+            Some(Badge::Shell(ShellBadge::Cmd))
+        );
+        assert_eq!(
+            pane_badge(&started("shell:pwsh", "Windows PowerShell", "powershell")),
+            Some(Badge::Shell(ShellBadge::PowerShell))
+        );
+        // A default shell YIEN cannot name ("Shell") goes by its program.
+        assert_eq!(
+            pane_badge(&started("shell:cmd", "Shell", "zsh")),
+            Some(Badge::Shell(ShellBadge::Other))
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_bash_typed_inside_another_shell_keeps_the_outer_badge() {
+        // The core names a shell pane after a CLI it runs only for agent
+        // CLIs, so `bash` typed in cmd leaves the pane named `cmd`.
+        assert_eq!(
+            pane_badge(&started("shell:cmd", "Command Prompt", "cmd")),
+            Some(Badge::Shell(ShellBadge::Cmd))
+        );
     }
 }
