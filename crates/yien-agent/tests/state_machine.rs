@@ -998,6 +998,100 @@ fn adr_08_hooks_outrank_osc_7501_in_a_claude_pane() {
 }
 
 #[test]
+fn rf_age_05_claude_interrupt_ends_a_hook_ranked_turn_in_idle() {
+    // Esc or Ctrl+C: Claude fires no Stop hook, only OSC 7501 `idle`.
+    let mut p = Pane::working_claude();
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle, "an interrupt is not a Done");
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+    // The hooks still outrank 7501 for the next turn.
+    p.send(hook(HookEvent::UserPromptSubmit));
+    assert_eq!(p.state(), AgentState::Working);
+    p.send(status(AgentStatus::Done));
+    assert_eq!(p.state(), AgentState::Working);
+    p.send(hook(HookEvent::Stop));
+    assert_eq!(p.state(), AgentState::Done);
+}
+
+#[test]
+fn rf_age_05_claude_interrupt_at_a_permission_prompt_clears_the_red() {
+    let mut p = Pane::needs_you_claude();
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rn_02_claude_interrupt_cancels_a_pending_red() {
+    let mut p = Pane::working_claude();
+    let t = p.clock.now();
+    p.send(hook(HookEvent::PermissionRequest))
+        .send(idle(Reporter::ClaudeCode));
+    p.at(t + NEEDS_YOU_CONFIRM * 2).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.needs_you_pending());
+}
+
+#[test]
+fn rf_atn_08_claude_idle_outside_a_turn_leaves_a_hook_ranked_pane_alone() {
+    let mut p = Pane::working_claude();
+    p.send(hook(HookEvent::Stop))
+        .send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Done, "an unseen Done stays");
+    let mut p = Pane::working_claude();
+    p.send(hook(HookEvent::StopFailure))
+        .send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Error(ErrorReason::TurnFailed));
+}
+
+#[test]
+fn rf_age_05_claude_interrupt_then_exit_in_a_profile_pane_is_not_an_error() {
+    for seen in [false, true] {
+        let mut p = Pane::working_claude();
+        p.send(Signal::Seen(seen))
+            .send(idle(Reporter::ClaudeCode))
+            .send(status(AgentStatus::Clear))
+            .send(status(AgentStatus::Clear))
+            .send(hook(HookEvent::SessionEnd(
+                SessionEndReason::PromptInputExit,
+            )))
+            .send(Signal::Exited { code: Some(0) });
+        let ended = if seen {
+            AgentState::Idle
+        } else {
+            AgentState::Done
+        };
+        assert_eq!(p.state(), ended, "seen: {seen}");
+        assert!(!p.m.is_red());
+    }
+}
+
+#[test]
+fn rf_age_05_claude_typed_in_a_shell_interrupt_goes_idle_then_exit_hands_back() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::ClaudeCode))
+        .send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    // Ctrl+C once.
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle, "an interrupt is not a Done");
+    assert!(p.m.agent_reporting());
+    // Ctrl+C until it exits: clear, then the shell's prompt.
+    for _ in 0..3 {
+        p.send(status(AgentStatus::Clear));
+    }
+    assert!(!p.m.agent_reporting());
+    p.send(mark(PromptMark::CommandEnd))
+        .send(mark(PromptMark::PromptStart));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
 fn rf_age_05_a_shell_without_an_agent_follows_its_marks() {
     let mut p = Pane::spawned(shell());
     p.send(mark(PromptMark::CommandStart));
