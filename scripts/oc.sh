@@ -113,33 +113,29 @@ const fs = require('fs');
 const file = process.argv[2];
 const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
 let session = '';
-const seen = new Set();
-const textParts = [];
-function walk(o) {
-  if (!o || typeof o !== 'object') return;
-  if (Array.isArray(o)) { for (const v of o) walk(v); return; }
-  for (const k of Object.keys(o)) {
-    const v = o[k];
-    if (/^session[_-]?id$/i.test(k) && typeof v === 'string' && !session) session = v;
-    if (k === 'text' && typeof v === 'string' && v.length) {
-      const t = typeof o.type === 'string' ? o.type : '';
-      if (!t || t === 'text' || t === 'message') {
-        if (!seen.has(v)) { seen.add(v); textParts.push(v); }
-      }
-    }
-    if (v && typeof v === 'object') walk(v);
-  }
-}
+const textByMessage = new Map();
+let lastKey = '';
 for (const line of lines) {
   const t = line.trim();
   if (!t) continue;
   let obj;
   try { obj = JSON.parse(t); } catch { continue; }
-  walk(obj);
+  if (!session && obj && typeof obj === 'object') {
+    if (typeof obj.sessionID === 'string' && obj.sessionID) session = obj.sessionID;
+    else if (typeof obj.session_id === 'string' && obj.session_id) session = obj.session_id;
+    else if (typeof obj.sessionId === 'string' && obj.sessionId) session = obj.sessionId;
+  }
+  const part = obj && typeof obj === 'object' ? obj.part : null;
+  if (!part || typeof part !== 'object') continue;
+  if (part.type !== 'text' || typeof part.text !== 'string' || !part.text) continue;
+  const key = typeof part.messageID === 'string' && part.messageID ? part.messageID
+    : (typeof part.message_id === 'string' && part.message_id ? part.message_id : '\0');
+  textByMessage.set(key, (textByMessage.get(key) || '') + part.text);
+  lastKey = key;
 }
 if (!session) console.error('oc.sh: no session id found in ' + file);
 process.stdout.write('session: ' + (session || 'unknown') + '\n');
-const text = textParts.join('');
+const text = lastKey ? (textByMessage.get(lastKey) || '') : '';
 process.stdout.write(text);
 if (text && !text.endsWith('\n')) process.stdout.write('\n');
 NODE
