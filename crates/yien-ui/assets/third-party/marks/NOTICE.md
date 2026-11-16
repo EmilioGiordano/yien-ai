@@ -1,24 +1,28 @@
-# Agent icons
+# Agent and shell marks
 
-YIEN shows these marks beside a tab or pane running the agent CLI they name. The files are
-the publishers' own, unmodified. They are not covered by YIEN's GPL licence: each stays under
-its publisher's terms and trademarks.
+YIEN shows these marks beside a tab or pane running the agent CLI or shell they name. The
+files are the publishers' own, unmodified. They are not covered by YIEN's GPL licence: each
+stays under its publisher's terms and trademarks.
 
 | File | Mark | Source |
 |---|---|---|
 | `ClaudeIcon-Rounded.svg` | Claude app icon (spark on clay) | Anthropic press kit, https://www.anthropic.com/press-kit |
 | `OAI_OpenAI-Blossom_White.svg` | OpenAI Blossom, white | OpenAI brand guidelines, https://openai.com/brand/ (`openai-logos.zip`) |
 | `opencode-logo-dark-square.svg` | OpenCode mark, dark variant | OpenCode brand page, https://opencode.ai/brand |
+| `Git-Icon-1788C.svg` | Git logo, for Git Bash | Git logos page, https://git-scm.com/downloads/logos |
 
 YIEN draws each inside an 18 px round badge: the Claude icon clipped to a circle, the white
 Blossom on black, the OpenCode dark mark on #1F1F1F, the dark grey of OpenCode's own light
-variant. The marks are not recoloured.
+variant, and the Git logo on its own. The marks are not recoloured.
 
 Claude and the Claude logo are trademarks of Anthropic PBC.
 
 OpenAI and the OpenAI logo are trademarks of OpenAI.
 
 OpenCode and the OpenCode logo are trademarks of Anomaly.
+
+Git Logo by Jason Long is licensed under the Creative Commons Attribution 3.0 Unported
+License (https://creativecommons.org/licenses/by/3.0/).
 
 ## OpenCode licence
 

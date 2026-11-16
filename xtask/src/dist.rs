@@ -22,8 +22,8 @@ pub const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
 pub const CONPTY_LICENSE_SOURCE: &str = "third-party/conpty/LICENSE.txt";
 /// Package name consumed by the portable archive and installer.
 pub const CONPTY_LICENSE_DEST: &str = "LICENSE-MIT-ConPTY.txt";
-/// The notice of the agent marks the UI embeds, appended to [`THIRD_PARTY`].
-pub const AGENT_ICONS_NOTICE: &str = "crates/yien-ui/assets/third-party/agents/NOTICE.md";
+/// The notice of the third-party marks the UI embeds, appended to [`THIRD_PARTY`].
+pub const MARKS_NOTICE: &str = "crates/yien-ui/assets/third-party/marks/NOTICE.md";
 
 /// PE optional-header subsystem of a GUI program.
 pub const SUBSYSTEM_GUI: u16 = 2;
@@ -334,8 +334,8 @@ pub fn run(root: &Path) -> anyhow::Result<ExitCode> {
     }
 
     let packages = third_party_packages(&metadata, &BINARIES)?;
-    let artwork = std::fs::read_to_string(root.join(AGENT_ICONS_NOTICE))
-        .with_context(|| format!("reading {AGENT_ICONS_NOTICE}"))?;
+    let artwork = std::fs::read_to_string(root.join(MARKS_NOTICE))
+        .with_context(|| format!("reading {MARKS_NOTICE}"))?;
     let notice = with_artwork(third_party_notice(&packages), &artwork);
     let licence_texts = crate::licences::build(&packages)?;
 
@@ -594,18 +594,18 @@ mod tests {
     }
 
     #[test]
-    fn notice_carries_the_agent_marks_and_their_trademarks() {
-        let artwork =
-            std::fs::read_to_string(crate::workspace_root().join(AGENT_ICONS_NOTICE)).unwrap();
+    fn notice_carries_the_bundled_marks_and_their_trademarks() {
+        let artwork = std::fs::read_to_string(crate::workspace_root().join(MARKS_NOTICE)).unwrap();
         let notice = with_artwork(third_party_notice(&[]), &artwork);
         assert!(notice.starts_with("# Third-party software\n"));
         assert_eq!(notice.lines().filter(|l| l.starts_with("# ")).count(), 1);
-        assert!(notice.contains("\n## Agent icons\n"));
+        assert!(notice.contains("\n## Agent and shell marks\n"));
         for line in [
             "Claude and the Claude logo are trademarks of Anthropic PBC.",
             "OpenAI and the OpenAI logo are trademarks of OpenAI.",
             "OpenCode and the OpenCode logo are trademarks of Anomaly.",
             "Copyright (c) 2025 opencode",
+            "Git Logo by Jason Long is licensed under the Creative Commons Attribution 3.0",
         ] {
             assert!(notice.contains(line), "{line}");
         }
