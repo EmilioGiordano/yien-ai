@@ -112,14 +112,19 @@ pub(crate) enum Run {
 }
 
 /// Which command `id` runs with `args`, checked against what the window
-/// knows: the profile must be one the palette lists, the pane, tab or
-/// project must exist.
+/// knows: the catalog's ids take no arguments, so a request carrying any
+/// is refused; the palette's argument rows must have the ones they read,
+/// and the profile must be one the palette lists, the pane, tab or project
+/// must exist.
 pub(crate) fn resolve_command(
     id: &str,
     args: &CommandArgs,
     ws: &WorkspaceView,
 ) -> Result<Run, String> {
     if let Some(spec) = spec(id) {
+        if *args != CommandArgs::default() {
+            return Err(format!("{id} takes no args"));
+        }
         return Ok(Run::Catalog(spec.id));
     }
     let profile = || {
@@ -570,6 +575,68 @@ mod tests {
     }
 
     #[test]
+    fn adr_21_catalog_ids_refuse_args_they_would_ignore() {
+        let ws = workspace();
+        for id in CATALOG_ID_SAMPLE {
+            for (what, args) in ARG_VARIANTS {
+                assert_eq!(
+                    resolve_command(id, &args(), &ws),
+                    Err(format!("{id} takes no args")),
+                    "{id} with {what}"
+                );
+            }
+        }
+        // The same ids from the existing test still resolve without args.
+        for id in ["tab.new_claude", "app.quit"] {
+            assert_eq!(
+                resolve_command(id, &CommandArgs::default(), &ws),
+                Ok(Run::Catalog(spec(id).unwrap().id))
+            );
+        }
+    }
+
+    const CATALOG_ID_SAMPLE: &[&str] = &[
+        "tab.new",
+        "tab.new_claude",
+        "app.quit",
+        "pane.split_right",
+        "pane.close",
+        "terminal.copy",
+        "agent.next_needs_you",
+    ];
+
+    /// Each way a request can carry args: one arg set, every field set.
+    const ARG_VARIANTS: &[(&str, fn() -> CommandArgs)] = &[
+        ("profile", || CommandArgs {
+            profile: Some(ProfileId::new("claude")),
+            ..CommandArgs::default()
+        }),
+        ("direction", || CommandArgs {
+            direction: Some(SplitWay::Down),
+            ..CommandArgs::default()
+        }),
+        ("pane", || CommandArgs {
+            pane: Some(PaneId::new(3)),
+            ..CommandArgs::default()
+        }),
+        ("tab", || CommandArgs {
+            tab: Some(TabId::new(2)),
+            ..CommandArgs::default()
+        }),
+        ("project", || CommandArgs {
+            project: Some(ProjectId::new(1)),
+            ..CommandArgs::default()
+        }),
+        ("everything", || CommandArgs {
+            profile: Some(ProfileId::new("shell")),
+            direction: Some(SplitWay::Right),
+            pane: Some(PaneId::new(3)),
+            tab: Some(TabId::new(2)),
+            project: Some(ProjectId::new(1)),
+        }),
+    ];
+
+    #[test]
     fn adr_19_catalog_ids_run_their_catalog_entry() {
         let ws = workspace();
         for id in [
@@ -583,6 +650,21 @@ mod tests {
                 Ok(Run::Catalog(spec(id).unwrap().id))
             );
         }
+    }
+
+    #[test]
+    fn adr_21_argument_ids_keep_ignoring_the_args_they_do_not_read() {
+        let ws = workspace();
+        // tab.new_with reads only profile: a stray pane beside it still runs.
+        let stray = CommandArgs {
+            profile: Some(ProfileId::new("claude")),
+            pane: Some(PaneId::new(4)),
+            ..CommandArgs::default()
+        };
+        assert_eq!(
+            resolve_command("tab.new_with", &stray, &ws),
+            Ok(Run::Target(Target::NewTab(ProfileId::new("claude"))))
+        );
     }
 
     #[test]
