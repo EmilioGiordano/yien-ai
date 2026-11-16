@@ -20,6 +20,29 @@ pub(crate) const REVIEW_SHARE: f32 = 0.62;
 /// The pane area keeps at least this width; the bars give way first.
 pub(crate) const PANES_MIN: f32 = 320.0;
 
+/// A tab row's fixed geometry, which the shell draws with: the tab list's
+/// padding each side, the row's padding each side, the gap between pieces,
+/// and the fixed pieces (the worktree mark, the close button) beside the
+/// badge or mark slot.
+pub(crate) const TAB_LIST_PAD: f32 = 6.0;
+pub(crate) const TAB_ROW_PAD: f32 = 8.0;
+pub(crate) const TAB_ROW_GAP: f32 = 8.0;
+pub(crate) const TAB_ROW_BRANCH: f32 = 12.0;
+pub(crate) const TAB_ROW_CLOSE: f32 = 18.0;
+
+/// What a tab row leaves its name (and a project prefix, which shrinks
+/// with it) in a tab bar `bar` px wide; the fixed pieces never shrink.
+#[cfg(test)]
+pub(crate) fn tab_name_room(bar: f32, worktree: bool) -> f32 {
+    // The bar's right border and the row's border, each side.
+    let borders = 1.0 + 2.0;
+    let mut fixed = crate::agent_badge::SIDE + TAB_ROW_GAP + TAB_ROW_GAP + TAB_ROW_CLOSE;
+    if worktree {
+        fixed += TAB_ROW_GAP + TAB_ROW_BRANCH;
+    }
+    bar - borders - 2.0 * TAB_LIST_PAD - 2.0 * TAB_ROW_PAD - fixed
+}
+
 /// One of the two side bars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bar {
@@ -228,6 +251,19 @@ mod tests {
     use crate::region::{Region, next_region};
 
     const WINDOW: f32 = 1440.0;
+
+    #[test]
+    fn rf_nav_10_the_narrowest_tab_bar_leaves_a_tab_name_room() {
+        // The badge, the worktree mark and the close button never shrink;
+        // at the narrowest bar the name still shows several letters.
+        let letters = 6.0 * 0.6 * 13.0;
+        assert!(tab_name_room(TAB_BAR_MIN, true) >= letters);
+        assert!(tab_name_room(TAB_BAR_MIN, false) > tab_name_room(TAB_BAR_MIN, true));
+        assert_eq!(
+            tab_name_room(TAB_BAR_DEFAULT, true) - tab_name_room(TAB_BAR_MIN, true),
+            TAB_BAR_DEFAULT - TAB_BAR_MIN
+        );
+    }
 
     fn sized(tab: Option<f32>, context: Option<f32>) -> SideBars {
         SideBars {

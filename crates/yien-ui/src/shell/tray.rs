@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::{Command, PaneId};
 
-use super::{Shell, TITLE_BAR_HEIGHT, glyph};
+use super::{Shell, TITLE_BAR_HEIGHT};
 use crate::actions::*;
 use crate::model::AgentState;
 use crate::tray::{TrayRow, keep_cursor, list_index, move_cursor, tray_rows};
@@ -299,7 +299,7 @@ impl Shell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.go_to_tray_pane(pane, window, cx);
             }))
-            .child(div().pt(px(2.0)).child(glyph(row.state, &t)))
+            .child(div().pt(px(2.0)).child(self.state_mark(row.state)))
             .child(
                 v_flex()
                     .flex_1()

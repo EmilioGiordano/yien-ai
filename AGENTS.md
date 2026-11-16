@@ -31,7 +31,7 @@ Machine-specific paths are never in git. They live in `.yien-local`, a gitignore
 
 Without a build root or lock, `scripts/cargo.sh` stops and says to create `.yien-local`; it never guesses a drive.
 
-`ROADMAP.md` (in git) says where the project stands and what comes next. Each branch updates its own row and any decision it took, as its last commit, so the roadmap reaches `main` with the merge.
+`ROADMAP.md` (in git) says where the project stands and what comes next. Branches do not edit it: a branch records its decisions in its PR body, and its REPORT keeps the detail. After a batch is merged, the orchestrator updates `ROADMAP.md` once, on a `docs/roadmap-<batch>` branch with its own PR, merged when CI is green.
 
 Behaviour comes from the ERS. Engineering choices come from the plan (05), which overrides 04 where they differ. If the code needs to contradict either, stop and report; do not silently diverge.
 
@@ -50,7 +50,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
-| Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | no | — |
+| Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | `implementer` only, by "Tidying unpushed history" | — |
 
 "Not explicitly forbidden" is not permission.
 
@@ -59,6 +59,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 - Anything Emilio cannot undo from his side: deleting, force-pushing, merging a PR that does not meet the merge criteria, touching files he has not committed.
 - A design trade-off with two reasonable outcomes that the ERS and the plan do not settle.
 - A requirement that turns out wrong or impossible.
+- A branch whose result is visual (new marks, layouts, colours, icons): it starts only after Emilio picks a design from a canvas or mockup that shows the options.
 
 Everything else: decide, do it, report the decision and its reason.
 
@@ -66,7 +67,7 @@ Everything else: decide, do it, report the decision and its reason.
 
 One branch per thing: one feature, fix or improvement. Never two topics in one branch. Cut from `main`.
 
-Name: `<type>/<topic>`, English, self-explanatory. Types: `feat`, `fix`, `improve`, `refactor`, `perf`, `test`, `chore`, `build`, `spike`.
+Name: `<type>/<topic>`, English, self-explanatory. Types: `feat`, `fix`, `improve`, `refactor`, `perf`, `test`, `chore`, `build`, `docs`, `spike`.
 
 ```
 feat/pane-layout-drag    fix/conpty-startup-deadlock    spike/s2-conpty-host
@@ -99,14 +100,15 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 
 Every branch goes through the same loop: steps 1–7 with the `yien-branch` skill, step 8 with `yien-integrate`.
 
-1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
+1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria. For visual work, the TASK names the design option Emilio picked (see "When to stop and ask").
 2. `implementer` implements and runs the branch checks, committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
 4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
    - Each re-review brief carries the previous findings with their resolution (fixed in a commit, argued against, deliberate). With that, the reviewer says whether a repeated fault is the patch or the design. A design problem is redesigned, not patched again.
    - A finding that contradicts the ERS or the plan is overridden by the orchestrator: it is recorded as deliberate in the REPORT and in the next brief, and it no longer counts toward the verdict. A finding that turns out wrong also goes into the reviewer's "Known false positives", committed on the branch being reviewed.
+   - A Low finding whose fix is a one- or two-line change that touches no behaviour covered by another finding is verified by the orchestrator, with no new reviewer round: it reads the diff and runs fmt, clippy and the touched crate's tests through `scripts/cargo.sh`. A Medium or higher finding, or any fix that touches logic, goes back to `quality-reviewer`.
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
-6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and the branch's `ROADMAP.md` update.
+6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and a Low fix verified by the orchestrator as in step 4.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
 8. The branch goes through integration and UI validation. Then the orchestrator merges it.
 
@@ -118,6 +120,8 @@ A PR is ready to merge only when all of these hold:
 - GitHub CI is green on Windows, Linux and macOS.
 
 A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet) counts as met when the PR says so and why.
+
+The batch `docs/roadmap-<batch>` PR is ready to merge when GitHub CI is green on the three systems; the other criteria do not apply to it.
 
 ## Integration and merge
 
@@ -135,6 +139,20 @@ On a failure:
 - The only commits on staging are merge commits, including their conflict resolutions. A breakage that only shows up when branches are combined gets its own `fix/<topic>` branch.
 - A held-out branch drops out of the batch, and the branches that depend on it wait.
 
+## Sessions and handoff
+
+One orchestrator session per batch. A batch is the branches integrated together, up to their merge or release.
+
+When a batch closes, or work pauses, the orchestrator writes or overwrites `<specs>/docs/handoff.md` (not in git), in Spanish:
+
+- state: each branch and PR with its status;
+- what is next, in order;
+- decisions taken in the session that are not yet in the ERS or the plan;
+- local setup notes;
+- the exact phrase that starts the next session.
+
+The next session starts with: "Leé docs/handoff.md y seguí con la tanda."
+
 ## Validating in the UI
 
 Every feature is checked in the running app, driven by tools, not only by unit tests.
@@ -146,7 +164,7 @@ Every feature is checked in the running app, driven by tools, not only by unit t
 - Copy the release exe to the slot's `run/` folder before starting it. If the file is locked, report it; never kill a process you did not start.
 - What still needs a human (a real screen reader, feel, look) goes in the PR as a short checklist.
 
-No branch is handed over without a PASS, including docs-only or comment-only branches. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
+No branch is handed over without a PASS, including docs-only or comment-only branches. The one exception is the batch `docs/roadmap-<batch>` PR: it only summarises decisions already reviewed on their branches, so it needs no reviewer PASS and merges when CI is green on the three systems. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
 
 `TASK-*.md` and `REPORT-*.md` are gitignored and never committed.
 
@@ -164,6 +182,15 @@ test/cover layout swap invariants
 ```
 
 Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`, `build`. The type must match what the diff does. These are commit types; branch types are listed under "Branches" and need not match.
+
+### Tidying unpushed history
+
+The implementer may tidy the commits on its own branch that are not pushed. Pushed commits are never touched; pushed history stays Emilio's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
+
+1. Save the tip: `git rev-parse HEAD`.
+2. Pick the base: `@{u}` when `git rev-parse --verify -q @{u}` succeeds, so only commits after the upstream are rewritten; otherwise `git merge-base HEAD origin/main`. If `git rev-list --merges <base>..HEAD` is not empty, do not tidy: never rebase across a merge commit.
+3. Squash fix-ups into the commits they fix, and reorder so every commit builds and passes the branch checks. The rebase must be non-interactive: `git commit --fixup=<hash>` then `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <base>`, or a `GIT_SEQUENCE_EDITOR` script that rewrites the todo list to reorder.
+4. `git rev-parse HEAD^{tree}` must equal `git rev-parse <saved tip>^{tree}`. If it does not, or the rebase fails, run `git rebase --abort` or `git reset --hard <saved tip>`, and report it.
 
 A new dependency, or a change that makes the ERS or the plan wrong, goes in the report and the PR body: for a dependency, its purpose, the alternative rejected and its licence. The orchestrator records it in `docs/` (dependency registry, ERS, plan), which is not in git.
 
@@ -192,6 +219,7 @@ The brief is the only context it gets.
 - Give it the facts already established with `file:line`, and say which ones it must verify.
 - Name what is out of scope, including other agents' worktrees.
 - Ask for reasoning in the report, and say it does not belong in the code.
+- Ask for a short final reply, about 15–25 lines: verdict or status, commits, checks, key decisions or findings, and what only a human can check. The full detail goes in `REPORT-<topic>.md` in the worktree, under the role's own heading.
 
 ---
 

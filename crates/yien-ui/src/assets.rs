@@ -23,7 +23,7 @@ pub(crate) const FOLDER: &str = "yien/folder.svg";
 pub(crate) const DOTS: &str = "yien/dots.svg";
 pub(crate) const TERMINAL: &str = "yien/terminal.svg";
 
-const OWN: [(&str, &[u8]); 18] = [
+const OWN: [(&str, &[u8]); 13] = [
     (MARK, include_bytes!("../assets/mark.svg")),
     (CHEVRON, include_bytes!("../assets/chevron.svg")),
     (PANEL_LEFT, include_bytes!("../assets/panel-left.svg")),
@@ -37,38 +37,7 @@ const OWN: [(&str, &[u8]); 18] = [
     (FOLDER, include_bytes!("../assets/folder.svg")),
     (DOTS, include_bytes!("../assets/dots.svg")),
     (TERMINAL, include_bytes!("../assets/terminal.svg")),
-    (
-        "yien/state-needs.svg",
-        include_bytes!("../assets/state-needs.svg"),
-    ),
-    (
-        "yien/state-error.svg",
-        include_bytes!("../assets/state-error.svg"),
-    ),
-    (
-        "yien/state-done.svg",
-        include_bytes!("../assets/state-done.svg"),
-    ),
-    (
-        "yien/state-working.svg",
-        include_bytes!("../assets/state-working.svg"),
-    ),
-    (
-        "yien/state-idle.svg",
-        include_bytes!("../assets/state-idle.svg"),
-    ),
 ];
-
-/// The glyph for a state. Its shape tells the state apart, not only its colour.
-pub(crate) fn state_icon(state: AgentState) -> &'static str {
-    match state {
-        AgentState::NeedsYou => "yien/state-needs.svg",
-        AgentState::Error => "yien/state-error.svg",
-        AgentState::Done => "yien/state-done.svg",
-        AgentState::Working => "yien/state-working.svg",
-        AgentState::Idle => "yien/state-idle.svg",
-    }
-}
 
 pub(crate) const NEEDS_YOU_MARK: &str = "■";
 pub(crate) const ERROR_MARK: &str = "!";
@@ -107,6 +76,15 @@ pub(crate) fn tab_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
     }
 }
 
+/// A state mark in an agent badge's corner: the tab row's glyph, scaled from
+/// its 14 px slot to the corner disc, in fixed px so it never outgrows it.
+pub(crate) fn corner_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
+    tab_mark_glyph(mark, frame).map(|glyph| MarkGlyph {
+        size: glyph.size * crate::agent_badge::CORNER / 14.0,
+        ..glyph
+    })
+}
+
 pub(crate) struct YienAssets;
 
 impl AssetSource for YienAssets {
@@ -133,20 +111,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_state_has_its_own_embedded_glyph() {
-        let states = [
-            AgentState::NeedsYou,
-            AgentState::Error,
-            AgentState::Done,
-            AgentState::Working,
-            AgentState::Idle,
-        ];
-        let paths: std::collections::HashSet<_> = states.iter().map(|s| state_icon(*s)).collect();
-        for path in &paths {
+    fn every_own_asset_is_an_embedded_svg() {
+        for (path, _) in OWN {
             let bytes = YienAssets.load(path).unwrap().unwrap();
             assert!(bytes.starts_with(b"<svg"), "{path}");
         }
-        assert_eq!(paths.len(), states.len());
+    }
+
+    #[test]
+    fn rn_01_needs_you_and_error_share_the_red_and_differ_by_shape() {
+        use crate::theme::{Theme, ThemeKind};
+        let needs = TabMark::State(AgentState::NeedsYou);
+        let error = TabMark::State(AgentState::Error);
+        assert_eq!(tab_mark_text(needs, 0), NEEDS_YOU_MARK);
+        assert_eq!(tab_mark_text(error, 0), ERROR_MARK);
+        assert_ne!(NEEDS_YOU_MARK, ERROR_MARK);
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            assert_eq!(t.tab_mark_color(needs), t.tab_mark_color(error), "{kind:?}");
+        }
     }
 
     fn tab_mark_text(mark: TabMark, frame: usize) -> &'static str {
@@ -172,6 +155,22 @@ mod tests {
             );
             assert!(got.size <= 14.0, "{state:?} fits its 14 px slot");
         }
+    }
+
+    #[test]
+    fn rn_01_a_corner_mark_keeps_the_glyph_and_fits_its_disc() {
+        use crate::agent_badge::CORNER;
+        for state in AgentState::BY_URGENCY {
+            let mark = TabMark::State(state);
+            let (full, corner) = (
+                tab_mark_glyph(mark, 3).unwrap(),
+                corner_mark_glyph(mark, 3).unwrap(),
+            );
+            assert_eq!((corner.text, corner.bold), (full.text, full.bold));
+            assert!(corner.size < CORNER, "{state:?} fits the {CORNER} px disc");
+            assert!(corner.size >= 7.5, "{state:?} stays legible");
+        }
+        assert_eq!(corner_mark_glyph(TabMark::Shell, 0), None);
     }
 
     #[test]

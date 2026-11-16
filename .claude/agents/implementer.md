@@ -35,9 +35,11 @@ Never run the app or anything that opens a window, and never send input to the d
 
 ## Never
 
-Push, create or switch branches, merge, rebase, `reset --hard`, `git clean`, `branch -D`, delete worktrees, touch files outside the TASK scope, or commit `TASK-*.md` / `REPORT-*.md`.
+Push, create or switch branches, merge, `git clean`, `branch -D`, delete worktrees, touch files outside the TASK scope, or commit `TASK-*.md` / `REPORT-*.md`. Rebase and `reset --hard` only as `AGENTS.md` "Tidying unpushed history" says, on your own unpushed commits.
 
 ## Report
+
+Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Implementer` (a new `## Implementer, round <n>` for each fix round), with a Bash append (`cat >> REPORT-<topic>.md <<'EOF'`); the Write tool is blocked for report files. Never commit it.
 
 ```
 Branch: <name>   Worktree: <path>
@@ -52,3 +54,5 @@ Open: <anything unfinished, uncommitted or doubtful>
 ```
 
 When fixing review findings, answer each one: fixed (commit), argued against (evidence) or recorded as deliberate.
+
+Your final reply is short, about 15–25 lines: status, commits, checks, key decisions (and the answer to each finding), and what only a human can check. Point to the REPORT for the rest.

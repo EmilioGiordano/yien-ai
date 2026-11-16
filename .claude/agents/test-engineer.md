@@ -40,6 +40,8 @@ Work only in the worktree you are given: every command uses `git -C <worktree>` 
 
 ## Report
 
+Append the full report below to `REPORT-<topic>.md` in the worktree root, under `## Tests`, with a Bash append (`cat >> REPORT-<topic>.md <<'EOF'`); the Write tool is blocked for report files. Never commit it.
+
 ```
 Covered: <target>
 Behaviours: <behaviour -> test name | none>
@@ -49,3 +51,5 @@ Results: <n passed / n failed>, with failing output
 Bugs found: <test, input, expected, actual>
 Untestable headless: <what needs a window or a real keyboard>
 ```
+
+Your final reply is short, about 15–25 lines: what you covered, tests added, results, bugs found, and what is untestable headless. Point to the REPORT for the rest.
