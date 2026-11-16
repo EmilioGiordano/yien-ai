@@ -25,6 +25,7 @@ pub mod hook_frame;
 mod msg;
 mod path;
 mod shell;
+pub mod test_control;
 mod title;
 
 use serde::{Deserialize, Serialize};
