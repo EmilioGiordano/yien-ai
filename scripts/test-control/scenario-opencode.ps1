@@ -40,7 +40,7 @@ Import-Module (Join-Path $PSScriptRoot 'YienTestControl.psm1') -Force
 
 # The prerequisite check runs before anything is launched.
 $opencode = Get-Command opencode -ErrorAction SilentlyContinue
-$versionText = if ($opencode) { (& $opencode.Source --version) -join "`n" } else { '' }
+$versionText = if ($opencode) { (& $opencode.Source --version 2>&1 | Out-String) } else { '' }
 $version = $null
 if ($versionText -match '(\d+)\.(\d+)\.(\d+)') { $version = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])" }
 if (-not $opencode -or -not $version -or $version -lt [version]'2.2.7') {
