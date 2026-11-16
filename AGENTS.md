@@ -59,6 +59,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 - Anything Emilio cannot undo from his side: deleting, force-pushing, merging a PR that does not meet the merge criteria, touching files he has not committed.
 - A design trade-off with two reasonable outcomes that the ERS and the plan do not settle.
 - A requirement that turns out wrong or impossible.
+- A branch whose result is visual (new marks, layouts, colours, icons): it starts only after Emilio picks a design from a canvas or mockup that shows the options.
 
 Everything else: decide, do it, report the decision and its reason.
 
@@ -99,7 +100,7 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 
 Every branch goes through the same loop: steps 1–7 with the `yien-branch` skill, step 8 with `yien-integrate`.
 
-1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria.
+1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria. For visual work, the TASK names the design option Emilio picked (see "When to stop and ask").
 2. `implementer` implements and runs the branch checks, committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
 4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
