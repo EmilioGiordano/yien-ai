@@ -21,7 +21,7 @@ use crate::{PaneId, ProfileId, ProjectId, TabId};
 /// ```
 /// assert!(yien_proto::test_control::TEST_CONTROL_VERSION >= 1);
 /// ```
-pub const TEST_CONTROL_VERSION: u32 = 1;
+pub const TEST_CONTROL_VERSION: u32 = 2;
 
 /// The longest request line, in bytes, without its newline.
 ///
@@ -104,6 +104,11 @@ pub enum Request {
         /// The new height.
         height: f32,
     },
+    /// Closes the window the way its close button does: with the default
+    /// settings it hides the window and YIEN keeps running (RF-SES-09);
+    /// otherwise it quits, asking first while agents work (RF-SES-13).
+    #[serde(rename = "window.close")]
+    WindowClose {},
 }
 
 impl Request {
@@ -120,6 +125,7 @@ impl Request {
             Self::Text { .. } => "text",
             Self::Key { .. } => "key",
             Self::Resize { .. } => "resize",
+            Self::WindowClose {} => "window.close",
         }
     }
 
@@ -170,6 +176,7 @@ impl Request {
                 }
                 Ok(())
             }
+            Self::WindowClose {} => Ok(()),
         }
     }
 }
@@ -382,6 +389,11 @@ pub struct WindowState {
     pub height: f32,
     /// The OS says the window is the active one.
     pub active: bool,
+    /// The window is shown on the screen. Closing the window with the new
+    /// default settings hides it, so this is what a script reads to tell
+    /// hidden from open (RF-SES-09).
+    #[serde(default)]
+    pub window_visible: bool,
     /// Where the keyboard is: `panes`, `tab_bar`, `context_bar`, `dividers`.
     pub region: String,
     /// The overlay that holds the keyboard, if any: `palette`, `confirm`.
@@ -593,6 +605,10 @@ mod tests {
                 height: 800.0
             }
         );
+        assert_eq!(
+            parse(r#"{"op":"window.close"}"#).unwrap(),
+            Request::WindowClose {}
+        );
     }
 
     #[test]
@@ -675,6 +691,7 @@ mod tests {
                 width: 1440.0,
                 height: 900.0,
                 active: false,
+                window_visible: false,
                 region: "panes".into(),
                 overlay: None,
             },

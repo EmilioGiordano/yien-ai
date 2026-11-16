@@ -114,6 +114,7 @@ impl Shell {
                 window.resize(size(px(width), px(height)));
                 Reply::done()
             }
+            Request::WindowClose {} => Reply::error("window.close is not implemented yet"),
             Request::Key { .. } => Reply::error("keys are dispatched outside the shell"),
         }
     }
@@ -158,6 +159,7 @@ impl Shell {
                 width: viewport.width.as_f32(),
                 height: viewport.height.as_f32(),
                 active: window.is_window_active(),
+                window_visible: false,
                 region: region_name(self.region(window, cx)).to_owned(),
                 overlay: self.overlay().map(str::to_owned),
             },
