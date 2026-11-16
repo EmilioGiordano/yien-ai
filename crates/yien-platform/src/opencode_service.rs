@@ -94,22 +94,28 @@ mod tests {
 
     #[test]
     fn xdg_state_comes_first_then_the_home_folder() {
-        let home = Some(PathBuf::from("C:/Users/me"));
-        let both = service_files_from(None, Some("C:/state".into()), home.clone());
+        // "C:/state" is relative on Unix, so the absolute paths follow the host.
+        let abs = |p: &str| {
+            PathBuf::from(if cfg!(windows) {
+                format!("C:{p}")
+            } else {
+                p.to_owned()
+            })
+        };
+        let home = Some(abs("/Users/me"));
+        let both = service_files_from(None, Some(abs("/state").into()), home.clone());
         assert_eq!(
             both,
             vec![
-                PathBuf::from("C:/state/opencode/service.json"),
-                PathBuf::from("C:/Users/me/.local/state/opencode/service.json"),
+                abs("/state/opencode/service.json"),
+                abs("/Users/me/.local/state/opencode/service.json"),
             ]
         );
         // A relative XDG_STATE_HOME is ignored, as the XDG rules say.
         let relative = service_files_from(None, Some("state".into()), home);
         assert_eq!(
             relative,
-            vec![PathBuf::from(
-                "C:/Users/me/.local/state/opencode/service.json"
-            )]
+            vec![abs("/Users/me/.local/state/opencode/service.json")]
         );
         assert!(service_files_from(None, None, None).is_empty());
     }

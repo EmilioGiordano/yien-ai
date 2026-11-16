@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use yien_vt::{AlacrittyEngine, OscSignal, VtConfig, VtEngine};
@@ -191,6 +190,7 @@ fn the_watcher_runs_only_while_a_pane_holds_it() {
 mod stream {
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::Arc;
 
     use super::*;
 
