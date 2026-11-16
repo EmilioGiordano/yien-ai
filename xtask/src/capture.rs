@@ -722,3 +722,317 @@ fn timeout_error(index: usize, step: &Step, timeout: Duration) -> String {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        list.iter()
+            .map(|(key, value)| (OsString::from(*key), OsString::from(*value)))
+            .collect()
+    }
+
+    fn root(label: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:/{label}"))
+        } else {
+            PathBuf::from(format!("/{label}"))
+        }
+    }
+
+    fn keep(env: &ScrubbedEnv, inherited: &[(&str, &str)]) -> Vec<String> {
+        inherited
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| {
+                !env.remove
+                    .iter()
+                    .any(|removed| removed.to_string_lossy().eq_ignore_ascii_case(key))
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn scrub_drops_credentials() {
+        let inherited = &[
+            ("ANTHROPIC_API_KEY", "sk-ant-real"),
+            ("ANTHROPIC_AUTH_TOKEN", "tok"),
+            ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            ("OPENAI_API_KEY", "sk-openai-real"),
+            ("OPENAI_BASE_URL", "https://api.openai.com"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("OPENCODE_API_KEY", "k"),
+            ("MY_API_KEY", "k"),
+            ("MY_TOKEN", "t"),
+            ("TERM", "xterm"),
+            ("PATH", "C:/Windows"),
+        ];
+        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
+        let kept = keep(&env, inherited);
+        assert_eq!(kept, ["TERM", "PATH"]);
+        assert!(env.set.is_empty());
+    }
+
+    #[test]
+    fn scrub_is_case_insensitive() {
+        let inherited = &[("anthropic_api_key", "sk-real"), ("x_token", "t")];
+        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
+        assert!(keep(&env, inherited).is_empty());
+    }
+
+    #[test]
+    fn explicit_env_overrides_the_denylist() {
+        let inherited = &[("ANTHROPIC_API_KEY", "sk-real")];
+        let explicit = vec![("ANTHROPIC_API_KEY".to_string(), "sk-dummy".to_string())];
+        let env = scrubbed_env(pairs(inherited), &explicit, &[], &root("work"), None).unwrap();
+        assert!(
+            keep(&env, inherited).contains(&"ANTHROPIC_API_KEY".to_string()),
+            "the parent name is kept for the explicit pair to override"
+        );
+        // The explicit pair lands on top of the inherited value (SpawnSpec
+        // overrides by key), so the child sees the dummy, never the real one.
+        assert_eq!(
+            env.set,
+            vec![(
+                OsString::from("ANTHROPIC_API_KEY"),
+                OsString::from("sk-dummy")
+            )]
+        );
+        assert_eq!(env.remove, Vec::<OsString>::new());
+    }
+
+    #[test]
+    fn protected_inherited_variables_are_dropped() {
+        let inherited = &[
+            ("HOME", "/home/real"),
+            ("USERPROFILE", "C:/Users/real"),
+            ("CLAUDE_CONFIG_DIR", "/home/real/.claude"),
+            ("XDG_CONFIG_HOME", "/home/real/.config"),
+            ("XDG_DATA_HOME", "/home/real/.local/share"),
+        ];
+        let env = scrubbed_env(pairs(inherited), &[], &[], &root("work"), None).unwrap();
+        assert!(keep(&env, inherited).is_empty());
+    }
+
+    #[test]
+    fn protected_env_under_cwd_is_accepted() {
+        let explicit = vec![(
+            "HOME".to_string(),
+            format!("{}/home", root("work").display()),
+        )];
+        let env = scrubbed_env(vec![], &explicit, &[], &root("work"), None).unwrap();
+        assert_eq!(
+            env.set,
+            vec![(
+                OsString::from("HOME"),
+                OsString::from(format!("{}/home", root("work").display()))
+            )]
+        );
+    }
+
+    #[test]
+    fn protected_env_under_slot_is_accepted() {
+        let slot = root("slot-4");
+        let explicit = vec![(
+            "HOME".to_string(),
+            format!("{}/run/capture/home", slot.display()),
+        )];
+        let env = scrubbed_env(vec![], &explicit, &[], &root("work"), Some(&slot)).unwrap();
+        assert_eq!(env.set.len(), 1);
+    }
+
+    #[test]
+    fn protected_env_outside_cwd_and_slot_is_refused() {
+        let explicit = vec![("HOME".to_string(), "C:/Users/real".to_string())];
+        let err =
+            scrubbed_env(vec![], &explicit, &[], &root("work"), Some(&root("slot-4"))).unwrap_err();
+        assert!(err.contains("HOME"), "{err}");
+    }
+
+    #[test]
+    fn protected_env_relative_is_refused() {
+        let explicit = vec![("XDG_DATA_HOME".to_string(), "throwaway".to_string())];
+        let err = scrubbed_env(vec![], &explicit, &[], &root("work"), None).unwrap_err();
+        assert!(err.contains("XDG_DATA_HOME"), "{err}");
+    }
+
+    #[test]
+    fn protected_env_sibling_prefix_is_refused() {
+        let cwd = root("a/b");
+        let explicit = vec![(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            root("a/bc").to_string_lossy().into_owned(),
+        )];
+        let err = scrubbed_env(vec![], &explicit, &[], &cwd, None).unwrap_err();
+        assert!(err.contains("CLAUDE_CONFIG_DIR"), "{err}");
+    }
+
+    #[test]
+    fn without_a_slot_only_cwd_counts() {
+        let cwd = root("work");
+        let outside = vec![(
+            "HOME".to_string(),
+            root("elsewhere").to_string_lossy().into_owned(),
+        )];
+        assert!(scrubbed_env(vec![], &outside, &[], &cwd, None).is_err());
+        let inside = vec![("HOME".to_string(), format!("{}/home", cwd.display()))];
+        assert!(scrubbed_env(vec![], &inside, &[], &cwd, None).is_ok());
+    }
+
+    #[test]
+    fn within_matches_prefixes_not_names() {
+        assert!(within(&root("a/b"), &root("a/b")));
+        assert!(within(&root("a/b/c"), &root("a/b")));
+        assert!(!within(&root("a/bc"), &root("a/b")));
+        assert!(within(&root(""), &root("")));
+        assert!(!within(&root("a"), &root("a/b")));
+    }
+
+    #[test]
+    fn steps_skip_comments_and_blanks() {
+        let steps = parse_steps("# comment\n\nwait 10\n   \n# another\ntext hi\r\n").unwrap();
+        assert!(matches!(&steps[0], Step::Wait(d) if d.as_millis() == 10));
+        assert!(matches!(&steps[1], Step::Text(b) if b == b"hi"));
+        assert_eq!(steps.len(), 2);
+    }
+
+    #[test]
+    fn steps_report_the_line_number_on_error() {
+        let err = parse_steps("wait 10\nnope 20\n").unwrap_err();
+        assert!(format!("{err:#}").contains("step 2"), "{err:#}");
+    }
+
+    #[test]
+    fn wait_for_parses_timeout_then_text() {
+        let steps = parse_steps("wait-for 30000 esc to interrupt\n").unwrap();
+        assert!(matches!(
+            &steps[0],
+            Step::WaitFor { timeout, needle }
+                if timeout.as_millis() == 30_000 && needle == "esc to interrupt"
+        ));
+    }
+
+    #[test]
+    fn wait_for_needs_a_timeout_and_text() {
+        assert!(parse_steps("wait-for 30000\n").is_err());
+        assert!(parse_steps("wait-for 30000   \n").is_err());
+        assert!(parse_steps("wait-for nope text\n").is_err());
+    }
+
+    #[test]
+    fn wait_and_wait_exit_parse_milliseconds() {
+        let steps = parse_steps("wait 1500\nwait-exit 30000\n").unwrap();
+        assert!(matches!(&steps[0], Step::Wait(d) if d.as_millis() == 1500));
+        assert!(matches!(&steps[1], Step::WaitExit(d) if d.as_millis() == 30_000));
+        assert!(parse_steps("wait soon\n").is_err());
+    }
+
+    #[test]
+    fn ctrl_letter_and_function_keys() {
+        assert!(matches!(
+            parse_step("key ctrl-a").unwrap(),
+            Step::Key(Key::Char('a'), Mods::CTRL)
+        ));
+        assert!(parse_step("key ctrl-A").is_err());
+        assert!(matches!(
+            parse_step("key f1").unwrap(),
+            Step::Key(Key::F(1), _)
+        ));
+        assert!(matches!(
+            parse_step("key f12").unwrap(),
+            Step::Key(Key::F(12), _)
+        ));
+        assert!(parse_step("key f0").is_err());
+        assert!(parse_step("key f13").is_err());
+    }
+
+    #[test]
+    fn plain_keys_fall_back_to_the_legacy_encoder() {
+        let modes = KeyModes::default();
+        assert_eq!(
+            encode_key(&Key::Escape, Mods::NONE, modes).unwrap(),
+            vec![0x1b]
+        );
+        assert_eq!(encode_key(&Key::Enter, Mods::NONE, modes).unwrap(), b"\r");
+        assert_eq!(
+            encode_key(&Key::Tab, Mods::SHIFT, modes).unwrap(),
+            b"\x1b[Z"
+        );
+        assert_eq!(
+            encode_key(&Key::F(5), Mods::NONE, modes).unwrap(),
+            b"\x1b[15~"
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_encodes_escape_and_ctrl_keys() {
+        let modes = KeyModes {
+            kitty_flags: 1,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key(&Key::Escape, Mods::NONE, modes).unwrap(),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            encode_key(&Key::Escape, Mods::SHIFT, modes).unwrap(),
+            b"\x1b[27;2u"
+        );
+        assert_eq!(
+            encode_key(&Key::Char('c'), Mods::CTRL, modes).unwrap(),
+            b"\x1b[99;5u"
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Char('a'),
+                Mods {
+                    ctrl: true,
+                    shift: true,
+                    alt: false
+                },
+                modes
+            )
+            .unwrap(),
+            b"\x1b[97;6u"
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Char('x'),
+                Mods {
+                    ctrl: false,
+                    alt: true,
+                    shift: false
+                },
+                modes
+            )
+            .unwrap(),
+            b"\x1b[120;3u"
+        );
+        // Unmodified text is not remapped by disambiguation.
+        assert_eq!(
+            encode_key(&Key::Char('x'), Mods::NONE, modes).unwrap(),
+            b"x"
+        );
+    }
+
+    #[test]
+    fn kitty_shift_tab_stays_legacy() {
+        let modes = KeyModes {
+            kitty_flags: 1,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key(&Key::Tab, Mods::SHIFT, modes).unwrap(),
+            b"\x1b[Z"
+        );
+    }
+
+    #[test]
+    fn steps_report_line_number_on_wait_for_error() {
+        let err = parse_steps("text hi\nwait-for nope x\n").unwrap_err();
+        assert!(format!("{err:#}").contains("step 2"), "{err:#}");
+    }
+}
