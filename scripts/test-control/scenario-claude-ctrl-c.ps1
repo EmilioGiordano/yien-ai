@@ -44,7 +44,7 @@ Write-Host "run $name, yien pid $serverPid, folder $($run.root)"
 
 $results = New-Object System.Collections.Generic.List[object]
 
-function Step([string]$Pane, [string]$Step, [scriptblock]$Check) {
+function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
     $started = [DateTime]::UtcNow
     try {
         $detail = & $Check
@@ -55,14 +55,14 @@ function Step([string]$Pane, [string]$Step, [scriptblock]$Check) {
         $ok = $false
     }
     $result = [pscustomobject]@{
-        pane   = $Pane
-        step   = $Step
+        pane   = $StepPane
+        step   = $StepName
         result = if ($ok) { 'PASS' } else { 'FAIL' }
         secs   = [math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 1)
         detail = "$detail"
     }
     $results.Add($result)
-    Write-Host ("{0,-4} {1,-7} {2,-8} {3}" -f $result.result, $Pane, $Step, $result.detail)
+    Write-Host ("{0,-4} {1,-7} {2,-8} {3}" -f $result.result, $StepPane, $StepName, $result.detail)
     return $ok
 }
 
@@ -97,7 +97,7 @@ function Wait-Prompt([int]$Pane) {
     # Claude's input box is drawn once its prompt is ready for typing.
     $null = Wait-Pane $Pane -Text -What "Claude's prompt" -Until {
         param($p)
-        (Get-YienPaneText $p) -match '(?m)(\? for shortcuts|^\s*>\s|\u2502\s*>)'
+        (Get-YienPaneText $p) -match '(?m)(\? for shortcuts|^\s*[>\u276F](\s|$)|\u2502\s*>)'
     }
     Start-Sleep -Milliseconds 1500
 }
