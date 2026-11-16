@@ -664,7 +664,16 @@ impl Shell {
             let size = self.terminal_size;
             let theme = self.theme;
             let view = cx.new(|cx| {
-                TerminalPane::new(pane, link, family, size, theme, self.test_control_on, window, cx)
+                TerminalPane::new(
+                    pane,
+                    link,
+                    family,
+                    size,
+                    theme,
+                    self.test_control_on,
+                    window,
+                    cx,
+                )
             });
             let events = cx.subscribe_in(&view, window, move |this, _, event, window, cx| {
                 let TerminalEvent::ContextMenu { at, has_selection } = *event;

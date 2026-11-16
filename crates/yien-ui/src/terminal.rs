@@ -1085,7 +1085,11 @@ fn unix_millis() -> u64 {
 /// The frame stamp for the test control dump: `None` unless test control is
 /// on, so frames outside `--test-control` cost one branch.
 fn stamp_frame(test_control: bool) -> Option<u64> {
-    if test_control { Some(unix_millis()) } else { None }
+    if test_control {
+        Some(unix_millis())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
