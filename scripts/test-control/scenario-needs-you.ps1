@@ -198,19 +198,42 @@ try {
         }
         if ($ok) {
             $null = Step 'claude' 'answer' {
-                # The trust screen lists two choices with the cursor on one of
-                # them; read which, move to "Yes, I trust this folder" if it is
-                # not there, and confirm.
+                # The trust screen offers two choices, one under the cursor.
+                # Read which line the cursor is on and move it onto the Yes
+                # line by its own line, whichever order the build shows them in.
                 $p = Wait-Pane $claude.id -Text -What "the trust screen's choices" -Until {
                     param($p) (Get-YienPaneText $p) -match 'I trust this folder'
                 }
                 Focus-Pane $claude.id
                 $text = Get-YienPaneText $p
-                $onYes = $text -match '(?m)[\u276f>]\s*Yes, I trust this folder'
-                if (-not $onYes) { Key $claude.id 'down' }
-                Key $claude.id 'enter'
+                $rows = $text -split "`n"
+                $yes = -1; $cursor = -1
+                for ($i = 0; $i -lt $rows.Count; $i++) {
+                    if ($yes -lt 0 -and $rows[$i] -match 'Yes, I trust this folder') { $yes = $i }
+                    if ($rows[$i] -match '^\s*[>\u276f]') { $cursor = $i }
+                }
+                if ($yes -lt 0 -or $cursor -lt 0) { throw "could not find the choices or the cursor; screen: $text" }
+                if ($cursor -eq $yes) {
+                    Key $claude.id 'enter'
+                }
+                else {
+                    $arrow = if ($yes -gt $cursor) { 'down' } else { 'up' }
+                    foreach ($step in 1..[Math]::Abs($yes - $cursor)) { Key $claude.id $arrow }
+                    Start-Sleep -Milliseconds 300
+                    $s2 = State -Text
+                    $rows = (Get-YienPaneText (Get-YienPane $s2 $claude.id)) -split "`n"
+                    $onYes = $false
+                    foreach ($row in $rows) {
+                        if ($row -match '^\s*[>\u276f].*Yes, I trust this folder') { $onYes = $true }
+                    }
+                    if (-not $onYes) { throw "the cursor did not land on Yes after $arrow; screen: $($rows -join "`n")" }
+                    Key $claude.id 'enter'
+                }
                 $p = Wait-Pane $claude.id -What 'leaving Needs you' -Until {
                     param($p) $p.state -ne 'Needs you'
+                }
+                if ($p.exited) {
+                    throw "Claude exited with code $($p.exit_code) instead of trusting the folder; the answer chose No"
                 }
                 $s = State
                 if ($s.waiting -ne 0) { throw "the counter counts $($s.waiting) after the answer" }
