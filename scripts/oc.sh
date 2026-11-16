@@ -154,4 +154,4 @@ if [ "$rc" -ne 0 ]; then
   echo "oc.sh: opencode exited with $rc; full log at $log_file" >&2
   exit "$rc"
 fi
-[ "$parse_rc" -ne 0 ] && exit 1
+if [ "$parse_rc" -ne 0 ]; then exit 1; fi
