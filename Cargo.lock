@@ -8904,6 +8904,7 @@ dependencies = [
  "dirs 6.0.0",
  "getrandom 0.4.3",
  "ignore",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",

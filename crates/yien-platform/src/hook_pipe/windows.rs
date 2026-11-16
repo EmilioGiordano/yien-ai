@@ -155,24 +155,28 @@ fn accept_loop(
 }
 
 /// Waits [`BACKOFF_MS`]; returns whether `stop` was set meanwhile.
-fn backoff(stop: &OwnedHandle) -> bool {
+pub(crate) fn backoff(stop: &OwnedHandle) -> bool {
     // SAFETY: `stop` is a live event handle.
     unsafe { WaitForSingleObject(stop.as_raw_handle(), BACKOFF_MS) == WAIT_OBJECT_0 }
 }
 
 /// Drops the client of `pipe`, leaving the instance ready for the next one.
-fn disconnect(pipe: &OwnedHandle) {
+pub(crate) fn disconnect(pipe: &OwnedHandle) {
     // SAFETY: `pipe` is a live pipe instance with no I/O in flight.
     unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) };
 }
 
-enum Connect {
+pub(crate) enum Connect {
     Client,
     Failed,
     Stopped,
 }
 
-fn wait_for_client(pipe: &OwnedHandle, connected: &OwnedHandle, stop: &OwnedHandle) -> Connect {
+pub(crate) fn wait_for_client(
+    pipe: &OwnedHandle,
+    connected: &OwnedHandle,
+    stop: &OwnedHandle,
+) -> Connect {
     let handle = pipe.as_raw_handle();
     // SAFETY: OVERLAPPED is plain data; all zeroes is its documented initial state.
     let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
@@ -214,7 +218,7 @@ fn serve(pipe: &OwnedHandle, stop: &OwnedHandle, shared: &Shared) {
 }
 
 /// How an overlapped operation ended.
-enum Wait {
+pub(crate) enum Wait {
     Done(io::Result<u32>),
     TimedOut,
     Stopped,
@@ -223,7 +227,7 @@ enum Wait {
 /// Waits for the operation on `ov` (whose event is `done`), for `stop` or for
 /// `ms`. Unless it returns [`Wait::Done`], the operation has been cancelled,
 /// and in every case the OS no longer references `ov` or its buffer.
-fn wait_io(
+pub(crate) fn wait_io(
     handle: HANDLE,
     ov: &OVERLAPPED,
     done: &OwnedHandle,
@@ -382,7 +386,7 @@ fn create_instance(
 }
 
 /// A manual-reset event, initially unset.
-fn event() -> io::Result<OwnedHandle> {
+pub(crate) fn event() -> io::Result<OwnedHandle> {
     // SAFETY: null attributes and name are allowed.
     let handle = unsafe { CreateEventW(null(), 1, 0, null()) };
     if handle.is_null() {
@@ -512,11 +516,11 @@ fn token_sid(class: TOKEN_INFORMATION_CLASS) -> Result<String, HookPipeError> {
     Ok(sid_text)
 }
 
-fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     OsStr::new(text).encode_wide().chain(Some(0)).collect()
 }
 
-fn last_error() -> u32 {
+pub(crate) fn last_error() -> u32 {
     io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32
 }
 
