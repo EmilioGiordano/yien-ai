@@ -35,7 +35,7 @@ Never run the app or anything that opens a window, and never send input to the d
 
 ## Never
 
-Push, create or switch branches, merge, rebase, `reset --hard`, `git clean`, `branch -D`, delete worktrees, touch files outside the TASK scope, or commit `TASK-*.md` / `REPORT-*.md`.
+Push, create or switch branches, merge, `git clean`, `branch -D`, delete worktrees, touch files outside the TASK scope, or commit `TASK-*.md` / `REPORT-*.md`. Rebase and `reset --hard` only as `AGENTS.md` "Tidying unpushed history" says, on your own unpushed commits.
 
 ## Report
 
