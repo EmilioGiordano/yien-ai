@@ -43,6 +43,7 @@ branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD) \
 slot_file="$worktree/.yien-slot"
 [ -f "$slot_file" ] || { echo "oc.sh: $slot_file is missing; ask the orchestrator for a slot" >&2; exit 2; }
 slot=$(tr -d '\r\n' < "$slot_file")
+[ -n "$slot" ] || { echo "oc.sh: $slot_file is empty; ask the orchestrator for a slot" >&2; exit 2; }
 log_dir="$slot/oc-logs"
 mkdir -p "$log_dir"
 log_file="$log_dir/$role-$(date +%Y%m%d-%H%M%S).jsonl"
