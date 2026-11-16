@@ -875,7 +875,8 @@ mod tests {
         );
         assert_eq!(
             key_bytes(&press("c", None, Mods::CTRL), &kitty).unwrap(),
-            b"\x1b[99;5u"
+            // Ctrl+C is the console's CTRL_C_EVENT (0x03), never CSI u.
+            vec![0x03]
         );
         assert_eq!(
             key_bytes(&press("b", Some("b"), ALT), &kitty).unwrap(),
