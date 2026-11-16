@@ -19,11 +19,18 @@
 //! The terminal's startup queries (cursor position, device attributes and
 //! the rest the engine answers) are answered the way YIEN answers them:
 //! the output feeds a fresh [`AlacrittyEngine`] and its replies go back to
-//! the child. Capturing never touches a real profile dir; the caller points
-//! the program at throwaway ones. When the steps are done and the child is
-//! still running, the child is terminated; the exit status is reported.
-//! Only on success the bytes are written to the output file; on failure a
-//! `.partial` file next to it holds what was captured so far.
+//! the child. Capturing never touches a real profile dir: `--cwd` is
+//! required, and the child's environment is scrubbed of credentials and of
+//! the variables that would point at a real profile (`HOME`,
+//! `USERPROFILE`, `CLAUDE_CONFIG_DIR`, `XDG_*`); those may only be passed
+//! explicitly with `--env` and must then sit under `--cwd` or the slot
+//! named in the repository's `.yien-slot`. Variables matching
+//! `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_*`, `OPENCODE_*`, `*_API_KEY`,
+//! `*_TOKEN` are dropped unless passed explicitly with `--env`. When the
+//! steps are done and the child is still running, the child is terminated;
+//! the exit status is reported. Only on success the bytes are written to
+//! the output file; on failure a `.partial` file next to it holds what was
+//! captured so far.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -35,7 +42,7 @@ use yien_pty::{ExitStatus, PortablePty, PtyBackend, PtyEvent, SpawnSpec};
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
 
 const USAGE: &str = "usage: cargo xtask capture --steps <file> --out <file.bin> \\
-    [--cwd <dir>] [--size <cols>x<rows>] [--env KEY=VALUE]... [--env-remove KEY]... \\
+    --cwd <dir> [--size <cols>x<rows>] [--env KEY=VALUE]... [--env-remove KEY]... \\
     [--tail-ms <ms>] -- <program> [args...]";
 
 pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
@@ -68,7 +75,7 @@ pub fn run(args: &[String]) -> anyhow::Result<ExitCode> {
 struct Options {
     steps: PathBuf,
     out: PathBuf,
-    cwd: Option<PathBuf>,
+    cwd: PathBuf,
     cols: u16,
     rows: u16,
     env: Vec<(String, String)>,
@@ -76,6 +83,148 @@ struct Options {
     tail_ms: u64,
     program: String,
     args: Vec<String>,
+}
+
+/// `Instant` overflows far beyond any capture; refuse the input instead.
+const TAIL_MS_MAX: u64 = 3_600_000;
+
+/// Variables matching these are dropped from the inherited environment
+/// unless the caller passes them explicitly with `--env`.
+const ENV_PREFIX_DENY: &[&str] = &["ANTHROPIC_", "OPENAI_", "CLAUDE_", "OPENCODE_"];
+const ENV_SUFFIX_DENY: &[&str] = &["_API_KEY", "_TOKEN"];
+/// Variables that would point the child at a real profile; never inherited,
+/// and from `--env` only with a throwaway location.
+const ENV_PROTECTED_EXACT: &[&str] = &["HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR"];
+const ENV_PROTECTED_PREFIX: &[&str] = &["XDG_"];
+
+fn is_denylisted(key: &str) -> bool {
+    ENV_PREFIX_DENY.iter().any(|prefix| key.starts_with(prefix))
+        || ENV_SUFFIX_DENY.iter().any(|suffix| key.ends_with(suffix))
+}
+
+fn is_protected(key: &str) -> bool {
+    ENV_PROTECTED_EXACT.contains(&key)
+        || ENV_PROTECTED_PREFIX
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
+fn env_key(key: &std::ffi::OsStr) -> String {
+    key.to_string_lossy().to_ascii_uppercase()
+}
+
+/// The child's environment after the credential scrub: the names to drop
+/// from the inherited one, and the pairs to set on top.
+#[derive(Debug)]
+struct ScrubbedEnv {
+    remove: Vec<std::ffi::OsString>,
+    set: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+/// Credentials and profile pointers never cross into the child by
+/// accident. The inherited environment loses every variable matching the
+/// denylist or the protected set; the caller can keep one with an explicit
+/// `--env KEY=VALUE` (their value wins). A protected variable passed with
+/// `--env` must be an absolute path inside `--cwd` or the slot named in the
+/// repository's `.yien-slot`, which is the throwaway tree every recapture
+/// lives in; anything else is refused before the child spawns.
+fn scrubbed_env(
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    explicit: &[(String, String)],
+    remove: &[String],
+    cwd: &Path,
+    slot: Option<&Path>,
+) -> Result<ScrubbedEnv, String> {
+    let explicit_keys: Vec<String> = explicit
+        .iter()
+        .map(|(key, _)| key.to_ascii_uppercase())
+        .collect();
+    let mut drop = Vec::new();
+    for (key, _) in inherited {
+        let upper = env_key(&key);
+        if explicit_keys.contains(&upper) {
+            continue;
+        }
+        if is_denylisted(&upper) || is_protected(&upper) {
+            drop.push(key);
+        }
+    }
+    drop.extend(remove.iter().map(std::ffi::OsString::from));
+    for (key, value) in explicit {
+        let upper = key.to_ascii_uppercase();
+        if !is_protected(&upper) {
+            continue;
+        }
+        let path = Path::new(value);
+        if value.is_empty() || !path.is_absolute() {
+            return Err(format!(
+                "--env {upper} wants an absolute path inside --cwd or the slot"
+            ));
+        }
+        if !within(path, cwd) && slot.is_none_or(|slot| !within(path, slot)) {
+            return Err(format!(
+                "--env {upper} points at {}; use a throwaway folder under --cwd or the slot",
+                path.display()
+            ));
+        }
+    }
+    let set = explicit
+        .iter()
+        .map(|(key, value)| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        })
+        .collect();
+    Ok(ScrubbedEnv { remove: drop, set })
+}
+
+/// Whether `path` sits inside `root` or equals it, compared lexically.
+fn within(path: &Path, root: &Path) -> bool {
+    fn part(part: &std::path::Component<'_>) -> String {
+        match part {
+            std::path::Component::Prefix(prefix) => {
+                normalize(&prefix.as_os_str().to_string_lossy())
+            }
+            std::path::Component::RootDir => String::new(),
+            std::path::Component::Normal(part) => normalize(&part.to_string_lossy()),
+            std::path::Component::CurDir | std::path::Component::ParentDir => String::new(),
+        }
+    }
+    #[cfg(windows)]
+    fn normalize(text: &str) -> String {
+        text.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    fn normalize(text: &str) -> String {
+        text.to_string()
+    }
+    let wrap = |path: &Path| {
+        path.components()
+            .map(|item| part(&item))
+            .collect::<Vec<_>>()
+    };
+    let parts = wrap(path);
+    let root = wrap(root);
+    root.len() <= parts.len() && parts[..root.len()] == root[..]
+}
+
+/// The slot named in the repository's `.yien-slot`, if it can be read.
+fn slot_dir() -> Option<PathBuf> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.parent()?;
+    let text = std::fs::read_to_string(root.join(".yien-slot")).ok()?;
+    let slot = text.lines().next()?.trim();
+    if slot.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(slot);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
 }
 
 impl Options {
@@ -115,9 +264,13 @@ impl Options {
                 }
                 "--env-remove" => env_remove.push(value(&mut at)?),
                 "--tail-ms" => {
-                    tail_ms = value(&mut at)?
+                    let tail: u64 = value(&mut at)?
                         .parse()
-                        .map_err(|_| "--tail-ms wants milliseconds".to_string())?
+                        .map_err(|_| "--tail-ms wants milliseconds".to_string())?;
+                    if tail > TAIL_MS_MAX {
+                        return Err(format!("--tail-ms wants at most {TAIL_MS_MAX}"));
+                    }
+                    tail_ms = tail;
                 }
                 _ => return Err(format!("unknown flag '{flag}'")),
             }
@@ -134,7 +287,7 @@ impl Options {
         Ok(Self {
             steps: steps.ok_or("--steps is required")?,
             out: out.ok_or("--out is required")?,
-            cwd,
+            cwd: cwd.ok_or("--cwd is required")?,
             cols,
             rows,
             env,
@@ -290,22 +443,40 @@ fn capture(options: &Options) -> Result<Summary, Failure> {
         partial: None,
     })?;
 
-    let mut spec = SpawnSpec::new(&options.program)
-        .args(options.args.iter())
-        .size(options.cols, options.rows);
-    if let Some(cwd) = &options.cwd {
-        if !cwd.is_dir() {
+    if !options.cwd.is_dir() {
+        return Err(Failure {
+            message: format!("--cwd {} is not a directory", options.cwd.display()),
+            partial: None,
+        });
+    }
+    let cwd = std::path::absolute(&options.cwd).map_err(|err| Failure {
+        message: format!("--cwd {}: {err}", options.cwd.display()),
+        partial: None,
+    })?;
+    let env = match scrubbed_env(
+        std::env::vars_os(),
+        &options.env,
+        &options.env_remove,
+        &cwd,
+        slot_dir().as_deref(),
+    ) {
+        Ok(env) => env,
+        Err(message) => {
             return Err(Failure {
-                message: format!("--cwd {} is not a directory", cwd.display()),
+                message,
                 partial: None,
             });
         }
-        spec = spec.cwd(cwd);
-    }
-    for key in &options.env_remove {
+    };
+
+    let mut spec = SpawnSpec::new(&options.program)
+        .args(options.args.iter())
+        .size(options.cols, options.rows)
+        .cwd(cwd.clone());
+    for key in &env.remove {
         spec = spec.env_remove(key);
     }
-    for (key, value) in &options.env {
+    for (key, value) in &env.set {
         spec = spec.env(key, value);
     }
 
@@ -550,3 +721,4 @@ fn timeout_error(index: usize, step: &Step, timeout: Duration) -> String {
         timeout.as_millis()
     )
 }
+
