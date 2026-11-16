@@ -136,6 +136,20 @@ On a failure:
 - The only commits on staging are merge commits, including their conflict resolutions. A breakage that only shows up when branches are combined gets its own `fix/<topic>` branch.
 - A held-out branch drops out of the batch, and the branches that depend on it wait.
 
+## Sessions and handoff
+
+One orchestrator session per batch. A batch is the branches integrated together, up to their merge or release.
+
+When a batch closes, or work pauses, the orchestrator writes or overwrites `<specs>/docs/handoff.md` (not in git), in Spanish:
+
+- state: each branch and PR with its status;
+- what is next, in order;
+- decisions taken in the session that are not yet in the ERS or the plan;
+- local setup notes;
+- the exact phrase that starts the next session.
+
+The next session starts with: "Leé docs/handoff.md y seguí con la tanda."
+
 ## Validating in the UI
 
 Every feature is checked in the running app, driven by tools, not only by unit tests.
