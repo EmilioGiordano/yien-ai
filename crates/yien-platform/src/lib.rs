@@ -13,7 +13,8 @@
 //! the agent CLI running under a shell ([`programs`]), where OpenCode's
 //! background service registers ([`opencode_service`]), and the pipe a test
 //! script drives the window through ([`test_control`]), and the
-//! notification-area icon the background mode needs ([`tray`]).
+//! notification-area icon and the window's show and hide the background
+//! mode needs ([`tray`], [`window`]).
 //!
 //! ```no_run
 //! let dir = yien_platform::paths::logs_dir()?;
@@ -41,5 +42,6 @@ pub mod state_store;
 pub mod test_control;
 pub mod tray;
 pub mod user_profiles;
+pub mod window;
 
 pub use logging::{LogError, LogGuard, init_logging, init_logging_with};
