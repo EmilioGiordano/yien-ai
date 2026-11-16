@@ -56,13 +56,14 @@ if [ "$role" = "reviewer" ]; then
   cat > "$worktree/opencode.json" <<'EOF'
 {
   "$schema": "https://opencode.ai/config.json",
+  "tools": { "websearch": false },
   "permission": {
     "edit": {
       "*": "deny",
       "REPORT-*.md": "allow"
     },
     "webfetch": "allow",
-    "websearch": "allow",
+    "websearch": "deny",
     "bash": {
       "*": "allow",
       "git push*": "deny",
@@ -83,10 +84,11 @@ else
   cat > "$worktree/opencode.json" <<'EOF'
 {
   "$schema": "https://opencode.ai/config.json",
+  "tools": { "websearch": false },
   "permission": {
     "edit": "allow",
     "webfetch": "allow",
-    "websearch": "allow",
+    "websearch": "deny",
     "bash": {
       "*": "allow",
       "git push*": "deny",
