@@ -8,7 +8,8 @@
 # permissions, and saves the full JSON log to <slot>/oc-logs/<role>-<ts>.jsonl,
 # where the slot comes from <worktree>/.yien-slot.
 # stdout: one "session: <id>" line, then the final assistant text. Nothing else.
-# Exit codes: 2 setup error; otherwise the opencode exit code (or 0 on success).
+# Exit codes: 2 setup error; 1 no session id found in the log (after printing
+# what was found); otherwise the opencode exit code (or 0 on success).
 set -euo pipefail
 
 usage() {
@@ -139,7 +140,10 @@ for (const line of lines) {
   textByMessage.set(key, (textByMessage.get(key) || '') + part.text);
   lastKey = key;
 }
-if (!session) console.error('oc.sh: no session id found in ' + file);
+if (!session) {
+  console.error('oc.sh: no session id found in ' + file);
+  process.exitCode = 1;
+}
 process.stdout.write('session: ' + (session || 'unknown') + '\n');
 const text = lastKey ? (textByMessage.get(lastKey) || '') : '';
 process.stdout.write(text);
@@ -150,3 +154,4 @@ if [ "$rc" -ne 0 ]; then
   echo "oc.sh: opencode exited with $rc; full log at $log_file" >&2
   exit "$rc"
 fi
+[ "$parse_rc" -ne 0 ] && exit 1
