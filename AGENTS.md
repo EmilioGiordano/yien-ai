@@ -193,6 +193,7 @@ The brief is the only context it gets.
 - Give it the facts already established with `file:line`, and say which ones it must verify.
 - Name what is out of scope, including other agents' worktrees.
 - Ask for reasoning in the report, and say it does not belong in the code.
+- Ask for a short final reply, about 15–25 lines: verdict or status, commits, checks, key decisions or findings, and what only a human can check. The full detail goes in `REPORT-<topic>.md` in the worktree, under the role's own heading.
 
 ---
 
