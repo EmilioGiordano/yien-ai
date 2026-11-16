@@ -21,7 +21,7 @@ use yien_proto::{
 };
 
 use crate::actions::*;
-use crate::agent_badge::{self, AgentBadge};
+use crate::agent_badge::{self, Badge};
 use crate::assets;
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
@@ -41,7 +41,7 @@ use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
 };
-use crate::pane_head::{self, HeadText, PaneHeadLayout, agent_badge, names_agent, program_tag};
+use crate::pane_head::{self, HeadText, PaneHeadLayout, names_agent, pane_badge, program_tag};
 use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn, TAB_LIST_PAD, TAB_ROW_BRANCH, TAB_ROW_GAP, TAB_ROW_PAD};
@@ -2653,13 +2653,14 @@ impl Shell {
     }
 
     /// The first piece of a tab row or pane head, in a fixed square: the
-    /// agent's badge with `mark` on a disc of `ground` in its corner (the
-    /// row's hover colour under `hover_group`), or `mark` alone for shells,
-    /// nothing for a tab of idle shells. The spinner's frame while it works.
-    /// No id, so screen readers hear the label's state word, never the frames.
+    /// agent's or shell's badge with `mark` on a disc of `ground` in its
+    /// corner (the row's hover colour under `hover_group`; none for idle
+    /// shells), or `mark` alone when nothing is known of the program. The
+    /// spinner's frame while it works. No id, so screen readers hear the
+    /// label's state word, never the frames.
     fn lead_mark(
         &self,
-        badge: Option<AgentBadge>,
+        badge: Option<Badge>,
         mark: TabMark,
         ground: Rgba,
         hover_group: Option<SharedString>,
@@ -2679,12 +2680,16 @@ impl Shell {
                 })
                 .text_size(px(glyph.size))
                 .line_height(px(agent_badge::CORNER))
-                .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
+                .font_weight(if glyph.bold {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
                 .text_color(t.tab_mark_color(mark))
                 .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                 .child(glyph.text)
         });
-        agent_badge::badge(badge, corner)
+        agent_badge::badge(badge, corner, self.fonts.mono.clone())
     }
 
     /// A state's mark outside the tab rows, the same glyph and colour as a
@@ -2934,7 +2939,7 @@ impl Shell {
             .text_color(t.term_muted)
             .when(focused, |h| h.bg(t.term_raised))
             .child(self.lead_mark(
-                agent_badge(pane),
+                pane_badge(pane),
                 TabMark::State(pane.state),
                 if focused { t.term_raised } else { t.term_bg },
                 None,

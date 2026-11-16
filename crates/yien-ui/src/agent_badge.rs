@@ -1,15 +1,17 @@
-//! The round badge of the agent CLI a tab or pane runs, in the publisher's
-//! own colours: never tinted, the same in both themes. The marks and their
-//! notice are in `assets/third-party/agents/`.
+//! The round badge of the program a tab or pane runs. An agent CLI's is its
+//! publisher's mark in its own colours: never tinted, the same in both
+//! themes; the marks and their notice are in `assets/third-party/agents/`.
+//! A shell's is a disc in its colour with a short glyph, drawn by YIEN.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, DevicePixels, Div, Global, ImageCacheError, ParentElement, RenderImage, Styled,
-    SvgRenderer, SvgSize, Window, div, img, px, rgb, size,
+    App, DevicePixels, Div, FontWeight, Global, ImageCacheError, ParentElement, RenderImage,
+    SharedString, Styled, SvgRenderer, SvgSize, Window, div, img, px, rgb, size,
 };
+use yien_proto::ShellKind;
 
 /// The badge's side, in px at any UI font size.
 pub(crate) const SIDE: f32 = 18.0;
@@ -17,6 +19,77 @@ pub(crate) const SIDE: f32 = 18.0;
 pub(crate) const CORNER: f32 = 10.0;
 /// How far the corner disc reaches past the badge's right and bottom edges.
 pub(crate) const CORNER_OVERHANG: f32 = 2.0;
+
+/// What a tab row or pane head badge shows: an agent's official mark or a
+/// shell's mark that YIEN draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Badge {
+    Agent(AgentBadge),
+    Shell(ShellBadge),
+}
+
+/// A shell's badge: a disc in the shell's colour with a short glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ShellBadge {
+    /// Windows PowerShell and PowerShell 7.
+    PowerShell,
+    Cmd,
+    GitBash,
+    /// A shell not recognised, such as `$SHELL` off Windows.
+    Other,
+}
+
+/// How a shell badge is drawn: its disc, an optional inset ring, the glyph,
+/// its colour, weight and size in px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ShellLook {
+    pub(crate) disc: u32,
+    pub(crate) ring: Option<u32>,
+    pub(crate) glyph: &'static str,
+    pub(crate) ink: u32,
+    pub(crate) bold: bool,
+    pub(crate) size: f32,
+}
+
+impl ShellBadge {
+    /// The badge of a shell started by its own profile.
+    pub(crate) fn of_kind(kind: ShellKind) -> Self {
+        match kind {
+            ShellKind::PowerShell | ShellKind::Pwsh => Self::PowerShell,
+            ShellKind::Cmd => Self::Cmd,
+            ShellKind::GitBash => Self::GitBash,
+        }
+    }
+
+    /// The badge of the default shell by its program's name, as the core
+    /// names the pane. `bash` is Git Bash only on Windows, the only bash
+    /// YIEN starts there.
+    pub(crate) fn of_program(name: &str, windows: bool) -> Self {
+        match name {
+            "pwsh" | "powershell" => Self::PowerShell,
+            "cmd" => Self::Cmd,
+            "bash" if windows => Self::GitBash,
+            _ => Self::Other,
+        }
+    }
+
+    pub(crate) fn look(self) -> ShellLook {
+        let look = |disc, ring, glyph, ink, bold, size| ShellLook {
+            disc,
+            ring,
+            glyph,
+            ink,
+            bold,
+            size,
+        };
+        match self {
+            Self::PowerShell => look(0x2671BE, None, ">_", 0xFFFFFF, true, 9.0),
+            Self::Cmd => look(0x0C0C0C, Some(0x3A3631), "C:", 0xE6E6E6, false, 9.0),
+            Self::GitBash => look(0xF05033, None, "$", 0xFFFFFF, true, 11.0),
+            Self::Other => look(0x2B2A28, None, ">_", 0xE6E6E6, true, 9.0),
+        }
+    }
+}
 
 /// An agent CLI with an official mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,39 +159,56 @@ impl AgentBadge {
 
 /// The badge, [`SIDE`] px and fixed, with `corner` on a [`CORNER`] px disc
 /// over its bottom-right edge. The caller fills the corner (its ground colour
-/// and its mark); this only places and rounds it. Decorative: no id or
-/// label, as the row and head name the program and state.
-pub(crate) fn badge(badge: AgentBadge, corner: Option<Div>) -> Div {
-    let art = badge.art_side();
-    let offset = (SIDE - art) / 2.0;
-    div()
-        .flex_none()
-        .relative()
-        .size(px(SIDE))
-        .rounded_full()
-        .when_some(badge.ground(), |d, ground| d.bg(rgb(ground)))
-        .child(
-            img(move |window: &mut Window, cx: &mut App| Some(raster(badge, art, window, cx)))
-                .absolute()
-                .left(px(offset))
-                .top(px(offset))
-                .size(px(art))
-                .when(badge.clipped(), |i| i.rounded_full()),
-        )
-        .when_some(corner, |d, corner| {
-            d.child(
-                corner
+/// and its mark); this only places and rounds it. A shell's glyph is set in
+/// `mono`. Decorative: no id or label, as the row and head name the program
+/// and state.
+pub(crate) fn badge(badge: Badge, corner: Option<Div>, mono: Option<SharedString>) -> Div {
+    let disc = div().flex_none().relative().size(px(SIDE)).rounded_full();
+    let disc = match badge {
+        Badge::Agent(agent) => {
+            let art = agent.art_side();
+            let offset = (SIDE - art) / 2.0;
+            disc.when_some(agent.ground(), |d, ground| d.bg(rgb(ground)))
+                .child(
+                    img(move |window: &mut Window, cx: &mut App| {
+                        Some(raster(agent, art, window, cx))
+                    })
                     .absolute()
-                    .right(px(-CORNER_OVERHANG))
-                    .bottom(px(-CORNER_OVERHANG))
-                    .size(px(CORNER))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .overflow_hidden(),
-            )
-        })
+                    .left(px(offset))
+                    .top(px(offset))
+                    .size(px(art))
+                    .when(agent.clipped(), |i| i.rounded_full()),
+                )
+        }
+        Badge::Shell(shell) => {
+            let look = shell.look();
+            disc.bg(rgb(look.disc))
+                .when_some(look.ring, |d, ring| d.border_1().border_color(rgb(ring)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(look.size))
+                .line_height(px(SIDE))
+                .text_color(rgb(look.ink))
+                .when(look.bold, |d| d.font_weight(FontWeight::BOLD))
+                .when_some(mono, |d, family| d.font_family(family))
+                .child(look.glyph)
+        }
+    };
+    disc.when_some(corner, |d, corner| {
+        d.child(
+            corner
+                .absolute()
+                .right(px(-CORNER_OVERHANG))
+                .bottom(px(-CORNER_OVERHANG))
+                .size(px(CORNER))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden(),
+        )
+    })
 }
 
 /// Rasters at the window's scale, made once per badge and size.
@@ -309,6 +399,106 @@ mod tests {
             for banned in ["<style", "<script", "<image", "data:"] {
                 assert!(!text.contains(banned), "{badge:?} has {banned}");
             }
+        }
+    }
+
+    const SHELLS: [ShellBadge; 4] = [
+        ShellBadge::PowerShell,
+        ShellBadge::Cmd,
+        ShellBadge::GitBash,
+        ShellBadge::Other,
+    ];
+
+    #[test]
+    fn rf_pan_12_each_shell_kind_and_program_has_its_badge() {
+        let kinds = [
+            (ShellKind::PowerShell, ShellBadge::PowerShell),
+            (ShellKind::Pwsh, ShellBadge::PowerShell),
+            (ShellKind::Cmd, ShellBadge::Cmd),
+            (ShellKind::GitBash, ShellBadge::GitBash),
+        ];
+        for (kind, badge) in kinds {
+            assert_eq!(ShellBadge::of_kind(kind), badge, "{kind:?}");
+        }
+        for windows in [true, false] {
+            assert_eq!(
+                ShellBadge::of_program("pwsh", windows),
+                ShellBadge::PowerShell
+            );
+            assert_eq!(
+                ShellBadge::of_program("powershell", windows),
+                ShellBadge::PowerShell
+            );
+            assert_eq!(ShellBadge::of_program("cmd", windows), ShellBadge::Cmd);
+            assert_eq!(ShellBadge::of_program("zsh", windows), ShellBadge::Other);
+            assert_eq!(
+                ShellBadge::of_program("my-pane", windows),
+                ShellBadge::Other
+            );
+        }
+        assert_eq!(ShellBadge::of_program("bash", true), ShellBadge::GitBash);
+        assert_eq!(ShellBadge::of_program("bash", false), ShellBadge::Other);
+    }
+
+    #[test]
+    fn each_shell_badge_has_the_chosen_look() {
+        let got: Vec<_> = SHELLS
+            .iter()
+            .map(|s| {
+                let l = s.look();
+                (l.disc, l.ring, l.glyph, l.ink)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0x2671BE, None, ">_", 0xFFFFFF),
+                (0x0C0C0C, Some(0x3A3631), "C:", 0xE6E6E6),
+                (0xF05033, None, "$", 0xFFFFFF),
+                (0x2B2A28, None, ">_", 0xE6E6E6),
+            ]
+        );
+    }
+
+    /// WCAG relative luminance of `0xRRGGBB`.
+    fn luminance(rgb: u32) -> f32 {
+        let [_, r, g, b] = rgb.to_be_bytes();
+        let lin = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn rnf_17_a_shell_glyph_stands_out_from_its_disc() {
+        for shell in SHELLS {
+            let look = shell.look();
+            let ratio = contrast(look.ink, look.disc);
+            assert!(ratio >= 3.0, "{shell:?}: {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn a_shell_glyph_fits_inside_its_disc() {
+        // A mono advance is about 0.6 em; the glyph's box, with its line,
+        // stays inside the circle's inscribed square.
+        let inscribed = SIDE / std::f32::consts::SQRT_2;
+        for shell in SHELLS {
+            let look = shell.look();
+            let width = look.glyph.chars().count() as f32 * 0.6 * look.size;
+            assert!(width <= inscribed, "{shell:?} is {width} px wide");
+            assert!(look.size <= inscribed, "{shell:?} is {} px tall", look.size);
+            assert!(look.size >= 9.0, "{shell:?} stays legible");
         }
     }
 }

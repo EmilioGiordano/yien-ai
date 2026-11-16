@@ -2,9 +2,9 @@
 //! Flex ellipsizes the text and keeps the buttons whole; this only drops the
 //! pieces that would not fit at their full width.
 
-use yien_proto::{SessionTitle, is_shell_profile};
+use yien_proto::{SessionTitle, ShellKind, is_shell_profile};
 
-use crate::agent_badge::AgentBadge;
+use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
 use crate::model::PaneView;
 
 /// The head's own horizontal padding, each side.
@@ -73,6 +73,27 @@ pub(crate) fn agent_badge(pane: &PaneView) -> Option<AgentBadge> {
         "opencode" => Some(AgentBadge::OpenCode),
         _ => None,
     }
+}
+
+/// The badge a pane's head and tab row show: its agent's ([`agent_badge`]),
+/// else its shell's: the kind of a `shell:<kind>` profile, or the default
+/// shell's or a stand-in shell's program by name. `None` when nothing is
+/// known: details not arrived, or an agent without a bundled mark.
+///
+/// ```ignore
+/// assert_eq!(pane_badge(&cmd_pane), Some(Badge::Shell(ShellBadge::Cmd)));
+/// ```
+pub(crate) fn pane_badge(pane: &PaneView) -> Option<Badge> {
+    if let Some(agent) = agent_badge(pane) {
+        return Some(Badge::Agent(agent));
+    }
+    let id = pane.profile_id.as_str();
+    if let Some(kind) = ShellKind::from_profile(id) {
+        return Some(Badge::Shell(ShellBadge::of_kind(kind)));
+    }
+    let stand_in = !id.is_empty() && !pane.runs_session && pane.running;
+    (is_shell_profile(id) || stand_in)
+        .then(|| Badge::Shell(ShellBadge::of_program(&pane.name, cfg!(windows))))
 }
 
 /// The text a pane head may show, as it would read in full.
@@ -237,9 +258,9 @@ mod tests {
 
     use super::{
         BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, agent_badge, names_agent,
-        program_tag, runs_agent,
+        pane_badge, program_tag, runs_agent,
     };
-    use crate::agent_badge::AgentBadge;
+    use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
     use crate::model::{AgentState, PaneView};
 
     const BIGGEST: f32 = 20.0 / 13.0;
@@ -646,5 +667,65 @@ mod tests {
             ..typed("codex")
         };
         assert_eq!(agent_badge(&exited), None);
+    }
+
+    fn named(profile: &str, name: &str, runs_session: bool) -> PaneView {
+        PaneView {
+            name: name.into(),
+            ..pane(profile, runs_session)
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_pane_shows_its_shell_badge() {
+        let shell = |b| Some(Badge::Shell(b));
+        // A one-pane shell profile names its kind, whatever the pane's name.
+        assert_eq!(
+            pane_badge(&named("shell:pwsh", "work", true)),
+            shell(ShellBadge::PowerShell)
+        );
+        assert_eq!(
+            pane_badge(&named("shell:cmd", "cmd", true)),
+            shell(ShellBadge::Cmd)
+        );
+        assert_eq!(
+            pane_badge(&named("shell:git-bash", "bash", true)),
+            shell(ShellBadge::GitBash)
+        );
+        // The default shell goes by its program.
+        assert_eq!(
+            pane_badge(&named("shell", "powershell", true)),
+            shell(ShellBadge::PowerShell)
+        );
+        assert_eq!(
+            pane_badge(&named("shell", "cmd", true)),
+            shell(ShellBadge::Cmd)
+        );
+        assert_eq!(
+            pane_badge(&named("shell", "fish", true)),
+            shell(ShellBadge::Other)
+        );
+        // A stand-in shell after a failed resume is a shell too.
+        assert_eq!(
+            pane_badge(&named("claude", "pwsh", false)),
+            shell(ShellBadge::PowerShell)
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_an_agent_outranks_its_shell_and_nothing_known_has_no_badge() {
+        let agent = |b| Some(Badge::Agent(b));
+        assert_eq!(
+            pane_badge(&named("shell:cmd", "codex", true)),
+            agent(AgentBadge::Codex)
+        );
+        assert_eq!(pane_badge(&pane("claude", true)), agent(AgentBadge::Claude));
+        assert_eq!(pane_badge(&pane("", true)), None, "details not here yet");
+        assert_eq!(pane_badge(&pane("aider", true)), None, "no mark bundled");
+        let exited = PaneView {
+            running: false,
+            ..pane("claude", false)
+        };
+        assert_eq!(pane_badge(&exited), None, "an ended agent is not a shell");
     }
 }

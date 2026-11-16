@@ -11,9 +11,9 @@ use yien_proto::{
     ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile, same_folder,
 };
 
-use crate::agent_badge::AgentBadge;
+use crate::agent_badge::Badge;
 use crate::layout::{Rect, pane_rects};
-use crate::pane_head::agent_badge;
+use crate::pane_head::pane_badge;
 use crate::worktree::Question;
 
 /// What the agent in a pane is doing, as the window shows it (RF-AGE-05).
@@ -1123,10 +1123,10 @@ impl WorkspaceView {
         }
     }
 
-    /// The agent badge a tab's row shows: that of the pane deciding its
-    /// state, the focused one among equally urgent panes, or else the
-    /// focused pane's. A tab of shells only has none.
-    pub(crate) fn tab_badge(&self, tab: &TabView) -> Option<AgentBadge> {
+    /// The badge a tab's row shows: that of the pane deciding its state, the
+    /// focused one among equally urgent panes; its agent's, else its
+    /// shell's. The focused pane's when nothing is known of that pane.
+    pub(crate) fn tab_badge(&self, tab: &TabView) -> Option<Badge> {
         let urgency = self.tab_state(tab).urgency();
         let panes = tab.layout.panes();
         let focused = panes.contains(&tab.focused).then(|| self.pane(tab.focused));
@@ -1140,8 +1140,8 @@ impl WorkspaceView {
                     .find(|p| p.state.urgency() == urgency)
             });
         decider
-            .and_then(|p| agent_badge(&p))
-            .or_else(|| focused.and_then(|p| agent_badge(&p)))
+            .and_then(|p| pane_badge(&p))
+            .or_else(|| focused.and_then(|p| pane_badge(&p)))
     }
 
     /// Whether a tab row the tab bar draws is working, so its mark spins.
@@ -1366,6 +1366,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::agent_badge::{AgentBadge, ShellBadge};
 
     fn layout(panes: &[u64]) -> LayoutNode {
         match panes {
@@ -1734,64 +1735,84 @@ mod tests {
         view.tab_updated(&tab(30, 1, &[300, 301]));
         view.pane_updated(&agent_pane(300, 30, "claude", P::Idle));
         view.pane_updated(&agent_pane(301, 30, "codex", P::Idle));
+        let agent = |b| Some(Badge::Agent(b));
         assert_eq!(
             badge(&view),
-            Some(AgentBadge::Claude),
+            agent(AgentBadge::Claude),
             "a tie goes to focus"
         );
 
         assert!(view.pane_state(PaneId::new(301), P::Working));
-        assert_eq!(badge(&view), Some(AgentBadge::Codex));
+        assert_eq!(badge(&view), agent(AgentBadge::Codex));
         assert!(view.pane_state(PaneId::new(300), NEEDS));
-        assert_eq!(badge(&view), Some(AgentBadge::Claude));
+        assert_eq!(badge(&view), agent(AgentBadge::Claude));
         assert!(view.pane_state(PaneId::new(300), P::Idle));
-        assert_eq!(badge(&view), Some(AgentBadge::Codex));
+        assert_eq!(badge(&view), agent(AgentBadge::Codex));
+    }
+
+    fn shell_pane(id: u64, tab: u64, profile: &str, name: &str, state: P) -> PaneInfo {
+        PaneInfo {
+            name: name.into(),
+            profile_id: yien_proto::ProfileId::new(profile),
+            ..pane(id, tab, state)
+        }
     }
 
     #[test]
-    fn rf_atn_15_a_shell_deciding_the_state_yields_to_the_focused_agent() {
+    fn rf_atn_15_a_shell_deciding_the_state_shows_its_shell_badge() {
         let mut view = demo();
         let badge = |v: &WorkspaceView| v.tab_badge(v.tab(TabId::new(30)).unwrap());
         view.tab_updated(&tab(30, 1, &[300, 301]));
         view.pane_updated(&agent_pane(300, 30, "opencode", P::Idle));
-        view.pane_updated(&pane(301, 30, P::Idle));
-        // The shell's command works, so it decides the state; it has no agent.
+        view.pane_updated(&shell_pane(301, 30, "shell:cmd", "cmd", P::Idle));
+        assert_eq!(badge(&view), Some(Badge::Agent(AgentBadge::OpenCode)));
+        // The shell's command works, so it decides the state and its badge.
         assert!(view.pane_state(PaneId::new(301), P::Working));
-        assert_eq!(badge(&view), Some(AgentBadge::OpenCode));
+        assert_eq!(badge(&view), Some(Badge::Shell(ShellBadge::Cmd)));
         // An agent CLI typed in the shell is that agent.
-        let mut typed = pane(301, 30, P::Working);
-        typed.name = "codex".into();
-        view.pane_updated(&typed);
-        assert_eq!(badge(&view), Some(AgentBadge::Codex));
-        // Focus on the shell running no agent: no agent pane decides, none
-        // is focused.
-        let mut shell = pane(301, 30, P::Working);
-        shell.name = "pwsh".into();
-        view.pane_updated(&shell);
-        let mut on_shell = tab(30, 1, &[300, 301]);
-        on_shell.focused = PaneId::new(301);
-        view.tab_updated(&on_shell);
-        assert_eq!(badge(&view), None);
+        view.pane_updated(&shell_pane(301, 30, "shell:cmd", "codex", P::Working));
+        assert_eq!(badge(&view), Some(Badge::Agent(AgentBadge::Codex)));
     }
 
     #[test]
-    fn a_tab_of_shells_only_has_no_badge() {
+    fn a_tab_of_shells_shows_the_deciding_shell_badge() {
         let mut view = demo();
         let badge = |v: &WorkspaceView| v.tab_badge(v.tab(TabId::new(30)).unwrap());
+        let shell = |b| Some(Badge::Shell(b));
         view.tab_updated(&tab(30, 1, &[300, 301]));
-        view.pane_updated(&pane(300, 30, P::Idle));
-        view.pane_updated(&pane(301, 30, P::Idle));
-        assert_eq!(badge(&view), None);
+        view.pane_updated(&shell_pane(300, 30, "shell", "pwsh", P::Idle));
+        view.pane_updated(&shell_pane(301, 30, "shell:git-bash", "bash", P::Idle));
+        assert_eq!(
+            badge(&view),
+            shell(ShellBadge::PowerShell),
+            "a tie goes to focus"
+        );
         assert!(view.pane_state(PaneId::new(301), NEEDS));
-        assert_eq!(badge(&view), None, "a shell asking has no badge either");
-        // A stand-in shell after a failed resume is not claimed as the agent.
+        assert_eq!(badge(&view), shell(ShellBadge::GitBash));
+        assert!(view.pane_state(PaneId::new(301), P::Idle));
+        // A stand-in shell after a failed resume shows its shell, not Claude.
         let stand_in = PaneInfo {
-            name: "pwsh".into(),
+            name: "cmd".into(),
             runs_session: false,
             ..agent_pane(300, 30, "claude", P::Idle)
         };
         view.pane_updated(&stand_in);
-        assert_eq!(badge(&view), None);
+        assert_eq!(badge(&view), shell(ShellBadge::Cmd));
+    }
+
+    #[test]
+    fn a_pane_with_nothing_known_falls_back_to_the_focused_badge() {
+        let mut view = demo();
+        let badge = |v: &WorkspaceView| v.tab_badge(v.tab(TabId::new(30)).unwrap());
+        view.tab_updated(&tab(30, 1, &[300, 301]));
+        view.pane_updated(&shell_pane(300, 30, "shell", "cmd", P::Idle));
+        view.pane_updated(&shell_pane(301, 30, "", "pane-301", P::Idle));
+        assert!(view.pane_state(PaneId::new(301), P::Working));
+        assert_eq!(badge(&view), Some(Badge::Shell(ShellBadge::Cmd)));
+        let mut on_unknown = tab(30, 1, &[300, 301]);
+        on_unknown.focused = PaneId::new(301);
+        view.tab_updated(&on_unknown);
+        assert_eq!(badge(&view), None, "nothing known: the plain mark");
     }
 
     #[test]
