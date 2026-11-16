@@ -5,8 +5,8 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, AgentStatus, BlockedKind, Cause, Effect, ErrorReason, HookEvent, Machine,
     MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason, NotificationKind, OscSignal, PromptMark,
-    Reporter, STARTUP_SCREEN_SETTLE, ScreenVerdict, SessionEndReason, SessionStartSource, Signal,
-    Source,
+    Reporter, SERVICE_ERROR_GRACE, STARTUP_SCREEN_SETTLE, ScreenVerdict, SessionEndReason,
+    SessionStartSource, Signal, Source,
 };
 use yien_testkit::FakeClock;
 
@@ -998,6 +998,100 @@ fn adr_08_hooks_outrank_osc_7501_in_a_claude_pane() {
 }
 
 #[test]
+fn rf_age_05_claude_interrupt_ends_a_hook_ranked_turn_in_idle() {
+    // Esc or Ctrl+C: Claude fires no Stop hook, only OSC 7501 `idle`.
+    let mut p = Pane::working_claude();
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle, "an interrupt is not a Done");
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+    // The hooks still outrank 7501 for the next turn.
+    p.send(hook(HookEvent::UserPromptSubmit));
+    assert_eq!(p.state(), AgentState::Working);
+    p.send(status(AgentStatus::Done));
+    assert_eq!(p.state(), AgentState::Working);
+    p.send(hook(HookEvent::Stop));
+    assert_eq!(p.state(), AgentState::Done);
+}
+
+#[test]
+fn rf_age_05_claude_interrupt_at_a_permission_prompt_clears_the_red() {
+    let mut p = Pane::needs_you_claude();
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rn_02_claude_interrupt_cancels_a_pending_red() {
+    let mut p = Pane::working_claude();
+    let t = p.clock.now();
+    p.send(hook(HookEvent::PermissionRequest))
+        .send(idle(Reporter::ClaudeCode));
+    p.at(t + NEEDS_YOU_CONFIRM * 2).send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.needs_you_pending());
+}
+
+#[test]
+fn rf_atn_08_claude_idle_outside_a_turn_leaves_a_hook_ranked_pane_alone() {
+    let mut p = Pane::working_claude();
+    p.send(hook(HookEvent::Stop))
+        .send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Done, "an unseen Done stays");
+    let mut p = Pane::working_claude();
+    p.send(hook(HookEvent::StopFailure))
+        .send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Error(ErrorReason::TurnFailed));
+}
+
+#[test]
+fn rf_age_05_claude_interrupt_then_exit_in_a_profile_pane_is_not_an_error() {
+    for seen in [false, true] {
+        let mut p = Pane::working_claude();
+        p.send(Signal::Seen(seen))
+            .send(idle(Reporter::ClaudeCode))
+            .send(status(AgentStatus::Clear))
+            .send(status(AgentStatus::Clear))
+            .send(hook(HookEvent::SessionEnd(
+                SessionEndReason::PromptInputExit,
+            )))
+            .send(Signal::Exited { code: Some(0) });
+        let ended = if seen {
+            AgentState::Idle
+        } else {
+            AgentState::Done
+        };
+        assert_eq!(p.state(), ended, "seen: {seen}");
+        assert!(!p.m.is_red());
+    }
+}
+
+#[test]
+fn rf_age_05_claude_typed_in_a_shell_interrupt_goes_idle_then_exit_hands_back() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::ClaudeCode))
+        .send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    // Ctrl+C once.
+    p.send(idle(Reporter::ClaudeCode));
+    assert_eq!(p.state(), AgentState::Idle, "an interrupt is not a Done");
+    assert!(p.m.agent_reporting());
+    // Ctrl+C until it exits: clear, then the shell's prompt.
+    for _ in 0..3 {
+        p.send(status(AgentStatus::Clear));
+    }
+    assert!(!p.m.agent_reporting());
+    p.send(mark(PromptMark::CommandEnd))
+        .send(mark(PromptMark::PromptStart));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
 fn rf_age_05_a_shell_without_an_agent_follows_its_marks() {
     let mut p = Pane::spawned(shell());
     p.send(mark(PromptMark::CommandStart));
@@ -1342,6 +1436,246 @@ fn rf_age_05_a_respawn_reads_startup_screens_again() {
     assert!(p.fx.contains(&Effect::ClearRed));
 }
 
+// ---- Startup screens of an agent typed in a shell ------------------------------
+
+const SCREEN_RED: AgentState = AgentState::NeedsYou(NeedsReason::ScreenRule);
+
+impl Pane {
+    /// A PowerShell pane whose `codex` was typed and found running.
+    fn typed_in_powershell() -> Self {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::PromptStart))
+            .send(mark(PromptMark::CommandStart))
+            .send(Signal::Output);
+        assert_eq!(p.state(), AgentState::Working);
+        p.send(Signal::TypedAgent(true));
+        assert!(p.m.reads_typed_agent());
+        p
+    }
+
+    /// As [`Pane::typed_in_powershell`], stopped on a startup screen.
+    fn typed_on_startup_screen() -> Self {
+        let mut p = Pane::typed_in_powershell();
+        p.settled_screen(ScreenVerdict::NeedsYou);
+        assert_eq!(p.state(), SCREEN_RED);
+        p
+    }
+}
+
+#[test]
+fn rn_02_a_shell_reads_no_screen_before_an_agent_is_found() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart));
+    for t in (0..3_000).step_by(100) {
+        p.at(ms(t)).send(Signal::Output);
+        assert!(p.fx.is_empty(), "at {t} ms");
+        p.send(Signal::Tick);
+        assert!(p.fx.is_empty(), "at {t} ms");
+    }
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn rf_atn_09_a_typed_agent_s_startup_screen_marks_red_and_notifies() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .at(ms(1_200))
+        .send(Signal::TypedAgent(true));
+    // A screen that settled before the program was found is still read.
+    assert_eq!(
+        p.fx,
+        vec![Effect::WakeAt(ms(1_200) + STARTUP_SCREEN_SETTLE)]
+    );
+    p.at(ms(1_200) + STARTUP_SCREEN_SETTLE).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+    assert_eq!(
+        p.fx,
+        vec![
+            Effect::Transition {
+                from: AgentState::Working,
+                to: SCREEN_RED,
+                cause: Cause::Source(Source::Screen),
+            },
+            Effect::MarkRed,
+            Effect::Notify,
+        ]
+    );
+}
+
+#[test]
+fn rf_age_05_a_typed_agent_s_screen_that_does_not_match_leaves_the_command_running() {
+    let mut p = Pane::typed_in_powershell();
+    p.settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rf_age_05_an_answered_typed_startup_screen_returns_to_the_running_command() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    // Read again until the agent reports: a second screen turns red again.
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+}
+
+#[test]
+fn rf_age_05_the_first_osc_7501_record_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(idle(Reporter::Codex));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: SCREEN_RED,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Osc7501),
+    }));
+    assert!(!p.m.reads_typed_agent() && p.m.agent_reporting());
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty(), "no read once the agent reported");
+    assert_eq!(p.m.next_wake(), None);
+
+    // Before any red, too: its record ends the reads.
+    let mut p = Pane::typed_in_powershell();
+    p.send(status(AgentStatus::Working)).send(Signal::Output);
+    assert!(!p.m.reads_typed_agent());
+    assert_eq!(p.m.next_wake(), None);
+}
+
+#[test]
+fn rf_age_05_the_program_going_away_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::TypedAgent(false));
+    assert_eq!(
+        p.state(),
+        AgentState::Working,
+        "back to the shell's command"
+    );
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.contains(&Effect::Transition {
+        from: SCREEN_RED,
+        to: AgentState::Working,
+        cause: Cause::Process,
+    }));
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty());
+    assert_eq!(p.m.next_wake(), None);
+
+    // A pending read is dropped with it.
+    let mut p = Pane::typed_in_powershell();
+    p.send(Signal::TypedAgent(false));
+    assert_eq!(p.m.next_wake(), None);
+    p.at(ms(2_000)).send(Signal::Tick);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rf_age_05_the_shell_s_prompt_mark_ends_a_typed_agent_s_startup() {
+    for end in [PromptMark::CommandEnd, PromptMark::PromptStart] {
+        let mut p = Pane::typed_on_startup_screen();
+        p.send(mark(end));
+        assert!(p.fx.contains(&Effect::ClearRed), "{end:?}");
+        assert_eq!(p.state(), AgentState::Done, "{end:?}: the command ended");
+        assert!(!p.m.reads_typed_agent());
+        p.send(Signal::Output);
+        assert!(p.fx.is_empty(), "{end:?}");
+    }
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Seen(true))
+        .send(mark(PromptMark::CommandEnd));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_cmd_without_prompt_marks_reads_a_typed_agent_s_startup() {
+    let mut p = Pane::spawned(shell());
+    p.send(Signal::Output).send(Signal::TypedAgent(true));
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+    p.send(Signal::Input).settled_screen(ScreenVerdict::NoMatch);
+    assert_eq!(p.state(), AgentState::Idle);
+    p.settled_screen(ScreenVerdict::NeedsYou)
+        .send(Signal::TypedAgent(false));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_atn_08_seeing_a_typed_agent_s_startup_screen_does_not_clear_it() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Seen(true));
+    assert_eq!(p.state(), SCREEN_RED);
+    p.send(Signal::Seen(false));
+    assert_eq!(p.state(), SCREEN_RED);
+}
+
+#[test]
+fn rn_02_a_report_landing_after_the_prompt_came_back_reads_nothing() {
+    // The CLI exited between the poll's snapshot and its report.
+    for end in [PromptMark::CommandEnd, PromptMark::PromptStart] {
+        let mut p = Pane::spawned(shell());
+        p.send(mark(PromptMark::CommandStart))
+            .send(mark(end))
+            .send(Signal::TypedAgent(true));
+        assert!(p.fx.is_empty(), "{end:?}");
+        assert!(!p.m.reads_typed_agent(), "{end:?}");
+        assert_eq!(p.m.next_wake(), None, "{end:?}");
+        p.send(Signal::Output).at(ms(2_000)).send(Signal::Tick);
+        assert!(p.fx.is_empty(), "{end:?}");
+        p.send(Signal::Screen(ScreenVerdict::NeedsYou));
+        assert!(!p.state().is_red(), "{end:?}");
+    }
+}
+
+#[test]
+fn rn_02_an_agent_that_already_reported_gets_no_startup_reads() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::ClaudeCode))
+        .send(Signal::TypedAgent(true));
+    assert!(p.fx.is_empty());
+    assert!(!p.m.reads_typed_agent());
+}
+
+#[test]
+fn rn_02_only_a_shell_rule_reads_a_typed_agent_s_startup() {
+    for config in [
+        codex(),
+        codex_with_screens(),
+        claude(),
+        MachineConfig::unprofiled(),
+    ] {
+        let mut p = Pane::spawned(config.clone());
+        p.send(Signal::TypedAgent(true));
+        assert!(p.fx.is_empty(), "{config:?}");
+        assert!(!p.m.reads_typed_agent(), "{config:?}");
+    }
+}
+
+#[test]
+fn rn_02_a_lost_source_or_an_exit_ends_a_typed_agent_s_startup() {
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Ambiguous);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.reads_typed_agent());
+    p.send(Signal::TypedAgent(true));
+    assert!(!p.m.reads_typed_agent(), "not while the mark is lost");
+
+    let mut p = Pane::typed_on_startup_screen();
+    p.send(Signal::Exited { code: Some(0) });
+    assert!(!p.m.reads_typed_agent());
+    assert_eq!(p.m.next_wake(), None);
+    p.send(Signal::Spawned);
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::Output);
+    assert!(p.fx.is_empty(), "a new shell starts unread");
+}
+
 // ---- Exhaustive and random sequences ----------------------------------------
 
 /// One step of a generated sequence: a signal and how far the clock moves
@@ -1384,6 +1718,8 @@ fn other_signals() -> Vec<Step> {
         (Signal::Output, 0),
         (Signal::SourceLost, 0),
         (Signal::Ambiguous, 0),
+        (Signal::TypedAgent(true), 0),
+        (Signal::TypedAgent(false), 0),
         (Signal::Tick, 300),
         (Signal::Tick, 31_000),
         (
@@ -1621,4 +1957,172 @@ fn rn_02_after_signal_lost_only_a_strong_signal_can_mark_red() {
         full.extend_from_slice(seq);
         assert!(!run(&config, &full), "red after signal lost: {seq:?}");
     });
+}
+
+const FAILED: AgentState = AgentState::Error(ErrorReason::TurnFailed);
+
+/// OpenCode in its own pane, mid-turn.
+fn working_opencode() -> Pane {
+    let mut p = Pane::spawned(codex());
+    p.send(idle(Reporter::OpenCode))
+        .send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    p
+}
+
+#[test]
+fn rf_age_05_a_service_error_inside_a_turn_fails_it() {
+    let mut p = working_opencode();
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: FAILED,
+        cause: Cause::Service,
+    }));
+    assert!(!p.m.is_red(), "an error is not red (RN-01)");
+    // OpenCode's own end of the turn comes after: the error stays.
+    p.send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), FAILED);
+}
+
+#[test]
+fn rf_age_05_a_service_error_while_blocked_fails_the_turn_and_clears_red() {
+    let mut p = working_opencode();
+    p.send(blocked(Some(BlockedKind::Permission))).confirm();
+    assert!(p.m.is_red());
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_atn_08_a_service_error_just_after_the_turn_ended_turns_done_into_error() {
+    let mut p = working_opencode();
+    let end = p.clock.now();
+    p.send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Done);
+    p.at(end + SERVICE_ERROR_GRACE).send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Done,
+        to: FAILED,
+        cause: Cause::Service,
+    }));
+}
+
+#[test]
+fn rn_02_a_service_error_after_the_grace_is_ignored() {
+    let mut p = working_opencode();
+    let end = p.clock.now();
+    p.send(idle(Reporter::OpenCode));
+    p.at(end + SERVICE_ERROR_GRACE + ms(1))
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Done);
+    assert!(p.fx.is_empty());
+}
+
+#[test]
+fn rn_02_a_service_error_with_no_turn_is_ignored() {
+    // Spawned and idle, never worked: nothing to fail.
+    let mut p = Pane::spawned(codex());
+    p.send(idle(Reporter::OpenCode)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Done long since, and seen and gone idle.
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode)).send(Signal::Seen(true));
+    p.at(ms(60_000)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_atn_08_a_service_error_seen_goes_straight_to_idle() {
+    // Seen while it fails inside the turn.
+    let mut p = working_opencode();
+    p.send(Signal::Seen(true)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Seen when the turn ended, failing just after.
+    let mut p = working_opencode();
+    p.send(Signal::Seen(true)).send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+    // Unseen when it failed: the error holds until the pane is seen.
+    let mut p = working_opencode();
+    p.send(Signal::ServiceError)
+        .at(ms(60_000))
+        .send(Signal::Tick);
+    assert_eq!(p.state(), FAILED);
+    p.send(Signal::Seen(true));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_atn_08_a_service_error_counts_once() {
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::ServiceError)
+        .send(Signal::Seen(true));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(Signal::Seen(false)).send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle, "the turn already failed");
+}
+
+#[test]
+fn rf_age_05_opencode_typed_in_a_shell_fails_on_a_service_error() {
+    let mut p = Pane::spawned(shell());
+    p.send(mark(PromptMark::CommandStart))
+        .send(idle(Reporter::OpenCode))
+        .send(status(AgentStatus::Working))
+        .send(idle(Reporter::OpenCode));
+    assert_eq!(p.state(), AgentState::Done);
+    p.send(Signal::ServiceError);
+    assert_eq!(p.state(), FAILED);
+}
+
+#[test]
+fn rn_02_a_service_error_needs_a_rule_that_reads_osc_7501() {
+    for config in [
+        MachineConfig::new(&[Source::Hooks, Source::Screen], None),
+        MachineConfig::new(&[Source::Osc133], None),
+        MachineConfig::new(&[Source::Bel], None),
+        MachineConfig::unprofiled(),
+    ] {
+        let mut p = Pane::spawned(config.clone());
+        p.send(mark(PromptMark::CommandStart))
+            .send(hook(HookEvent::UserPromptSubmit))
+            .send(Signal::ServiceError);
+        assert_ne!(p.state(), FAILED, "{config:?}");
+    }
+}
+
+#[test]
+fn rn_02_a_service_error_after_exit_or_on_a_new_launch_is_ignored() {
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::Exited { code: Some(0) })
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Done);
+    let mut p = working_opencode();
+    p.send(idle(Reporter::OpenCode))
+        .send(Signal::Spawned)
+        .send(Signal::ServiceError);
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rn_01_a_service_error_never_marks_red() {
+    let alphabet: Vec<Step> = vec![
+        (status(AgentStatus::Working), 0),
+        (idle(Reporter::OpenCode), 0),
+        (Signal::ServiceError, 0),
+        (Signal::Seen(true), 0),
+        (Signal::Seen(false), 0),
+        (Signal::Tick, 6_000),
+    ];
+    for config in [codex(), shell()] {
+        for_each_sequence(&alphabet, 5, &mut |seq| {
+            assert!(!run(&config, seq), "red from {seq:?}");
+        });
+    }
 }

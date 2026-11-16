@@ -120,7 +120,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         small_button(("close-tab", tab.get()).into(), assets::CLOSE, &self.theme)
-            .size(px(18.0))
+            .size(px(crate::sidebars::TAB_ROW_CLOSE))
             .aria_label(close_tab_label(name))
             .when(!always, |button| {
                 button

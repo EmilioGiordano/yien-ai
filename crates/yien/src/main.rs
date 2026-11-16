@@ -129,6 +129,9 @@ fn main() -> ExitCode {
         git: Some(GitConfig::default()),
         cli_dirs: CliDirs::from_env(),
         programs: Some(yien_platform::programs::programs_under),
+        opencode: Some(yien_core::OpenCodeService::new(
+            yien_platform::opencode_service::service_files(),
+        )),
         ..CoreConfig::default()
     };
     let config = match settings::start_palette(&settings.initial) {

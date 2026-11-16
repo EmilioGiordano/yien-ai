@@ -2,14 +2,17 @@
 //! Flex ellipsizes the text and keeps the buttons whole; this only drops the
 //! pieces that would not fit at their full width.
 
-use yien_proto::{SessionTitle, is_shell_profile};
+use yien_proto::{SessionTitle, ShellKind, is_shell_profile};
 
-use crate::model::PaneView;
+use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
+use crate::model::{AgentState, PaneView, TabMark};
 
 /// The head's own horizontal padding, each side.
 pub(crate) const PADDING: f32 = 8.0;
 pub(crate) const GAP: f32 = 8.0;
-pub(crate) const GLYPH: f32 = 14.0;
+/// The slot of the head's first piece: the agent's badge with the state in
+/// its corner, or the state mark alone, the same width either way.
+pub(crate) const GLYPH: f32 = crate::agent_badge::SIDE;
 pub(crate) const BUTTON: f32 = 20.0;
 /// The text size of the name, profile and state label, and of the folder.
 pub(crate) const TEXT_SIZE: f32 = 12.5;
@@ -51,6 +54,69 @@ pub(crate) fn runs_agent(pane: &PaneView) -> bool {
 /// last: an agent profile's program, or an agent CLI typed in a shell.
 pub(crate) fn names_agent(pane: &PaneView) -> bool {
     runs_agent(pane) || pane.runs_typed_agent()
+}
+
+/// The badge of the agent CLI `pane` runs, from what [`program_tag`] names:
+/// an agent profile's program or an agent CLI typed in a shell. A shell, a
+/// stand-in shell or another program has none.
+///
+/// ```ignore
+/// assert_eq!(agent_badge(&claude_pane), Some(AgentBadge::Claude));
+/// ```
+pub(crate) fn agent_badge(pane: &PaneView) -> Option<AgentBadge> {
+    if !names_agent(pane) {
+        return None;
+    }
+    match program_tag(pane) {
+        "claude" => Some(AgentBadge::Claude),
+        "codex" => Some(AgentBadge::Codex),
+        "opencode" => Some(AgentBadge::OpenCode),
+        _ => None,
+    }
+}
+
+/// The badge a pane's head and tab row show: its agent's ([`agent_badge`]),
+/// else its shell's: the kind of a `shell:<kind>` profile, or the default
+/// shell's or a stand-in shell's program by name. `None` when nothing is
+/// known: details not arrived, or an agent without a bundled mark.
+///
+/// ```ignore
+/// assert_eq!(pane_badge(&cmd_pane), Some(Badge::Shell(ShellBadge::Cmd)));
+/// ```
+pub(crate) fn pane_badge(pane: &PaneView) -> Option<Badge> {
+    if let Some(agent) = agent_badge(pane) {
+        return Some(Badge::Agent(agent));
+    }
+    let id = pane.profile_id.as_str();
+    if let Some(kind) = ShellKind::from_profile(id) {
+        // A kind not installed runs the default shell under the kind's id;
+        // the profile name then names the shell that runs, not the kind.
+        let runs = if pane.profile.is_empty() || pane.profile == kind.name() {
+            ShellBadge::of_kind(kind)
+        } else {
+            match ShellKind::ALL
+                .into_iter()
+                .find(|k| k.name() == pane.profile)
+            {
+                Some(other) => ShellBadge::of_kind(other),
+                None => ShellBadge::of_program(&pane.name, cfg!(windows)),
+            }
+        };
+        return Some(Badge::Shell(runs));
+    }
+    let stand_in = !id.is_empty() && !pane.runs_session && pane.running;
+    (is_shell_profile(id) || stand_in)
+        .then(|| Badge::Shell(ShellBadge::of_program(&pane.name, cfg!(windows))))
+}
+
+/// The state mark a pane head draws in its lead slot: none for an idle
+/// shell, as an idle shell tab row has none; the state's mark otherwise,
+/// Idle's orange dot included for agents and panes with nothing known.
+pub(crate) fn head_mark(pane: &PaneView) -> TabMark {
+    match (pane.state, pane_badge(pane)) {
+        (AgentState::Idle, Some(Badge::Shell(_))) => TabMark::Shell,
+        (state, _) => TabMark::State(state),
+    }
 }
 
 /// The text a pane head may show, as it would read in full.
@@ -214,9 +280,11 @@ mod tests {
     use yien_proto::{PaneId, ProfileId, SessionTitle};
 
     use super::{
-        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, names_agent, program_tag, runs_agent,
+        BUTTON, GAP, GLYPH, HeadText, PADDING, PaneHeadLayout, agent_badge, head_mark, names_agent,
+        pane_badge, program_tag, runs_agent,
     };
-    use crate::model::{AgentState, PaneView};
+    use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
+    use crate::model::{AgentState, PaneView, TabMark};
 
     const BIGGEST: f32 = 20.0 / 13.0;
     const SCALES: [f32; 4] = [1.0, 1.25, 1.5, BIGGEST];
@@ -593,5 +661,191 @@ mod tests {
         let shell = pane("shell", true);
         let text = head(&shell);
         assert!(!text.agent);
+    }
+
+    #[test]
+    fn rf_pan_12_each_agent_maps_to_its_own_badge() {
+        let want = [
+            ("claude", AgentBadge::Claude),
+            ("codex", AgentBadge::Codex),
+            ("opencode", AgentBadge::OpenCode),
+        ];
+        for (id, badge) in want {
+            assert_eq!(agent_badge(&pane(id, true)), Some(badge), "profile {id}");
+            assert_eq!(agent_badge(&typed(id)), Some(badge), "typed {id}");
+        }
+        let all: Vec<_> = want.iter().map(|(_, b)| *b).collect();
+        assert_eq!(all, AgentBadge::ALL);
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_a_stand_in_or_another_agent_has_no_badge() {
+        assert_eq!(agent_badge(&pane("shell", true)), None);
+        assert_eq!(agent_badge(&pane("claude", false)), None, "stand-in shell");
+        assert_eq!(agent_badge(&pane("", true)), None, "details not here yet");
+        assert_eq!(agent_badge(&pane("aider", true)), None, "no mark bundled");
+        assert_eq!(agent_badge(&typed("Claude")), None);
+        let exited = PaneView {
+            running: false,
+            ..typed("codex")
+        };
+        assert_eq!(agent_badge(&exited), None);
+    }
+
+    fn named(profile: &str, name: &str, runs_session: bool) -> PaneView {
+        PaneView {
+            name: name.into(),
+            ..pane(profile, runs_session)
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_a_shell_pane_shows_its_shell_badge() {
+        let shell = |b| Some(Badge::Shell(b));
+        // A one-pane shell profile names its kind, whatever the pane's name.
+        assert_eq!(
+            pane_badge(&named("shell:pwsh", "work", true)),
+            shell(ShellBadge::PowerShell)
+        );
+        assert_eq!(
+            pane_badge(&named("shell:cmd", "cmd", true)),
+            shell(ShellBadge::Cmd)
+        );
+        assert_eq!(
+            pane_badge(&named("shell:git-bash", "bash", true)),
+            shell(ShellBadge::GitBash)
+        );
+        // The default shell goes by its program.
+        assert_eq!(
+            pane_badge(&named("shell", "powershell", true)),
+            shell(ShellBadge::PowerShell)
+        );
+        assert_eq!(
+            pane_badge(&named("shell", "cmd", true)),
+            shell(ShellBadge::Cmd)
+        );
+        assert_eq!(
+            pane_badge(&named("shell", "fish", true)),
+            shell(ShellBadge::Other)
+        );
+        // A stand-in shell after a failed resume is a shell too.
+        assert_eq!(
+            pane_badge(&named("claude", "pwsh", false)),
+            shell(ShellBadge::PowerShell)
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_an_agent_outranks_its_shell_and_nothing_known_has_no_badge() {
+        let agent = |b| Some(Badge::Agent(b));
+        assert_eq!(
+            pane_badge(&named("shell:cmd", "codex", true)),
+            agent(AgentBadge::Codex)
+        );
+        assert_eq!(pane_badge(&pane("claude", true)), agent(AgentBadge::Claude));
+        assert_eq!(pane_badge(&pane("", true)), None, "details not here yet");
+        assert_eq!(pane_badge(&pane("aider", true)), None, "no mark bundled");
+        let exited = PaneView {
+            running: false,
+            ..pane("claude", false)
+        };
+        assert_eq!(pane_badge(&exited), None, "an ended agent is not a shell");
+    }
+
+    #[test]
+    fn rf_pan_12_an_idle_shell_head_has_no_corner_mark_like_its_tab_row() {
+        let idle = |p: PaneView| head_mark(&p);
+        assert_eq!(idle(named("shell", "pwsh", true)), TabMark::Shell);
+        assert_eq!(idle(named("shell:cmd", "cmd", true)), TabMark::Shell);
+        assert_eq!(
+            idle(named("claude", "pwsh", false)),
+            TabMark::Shell,
+            "stand-in"
+        );
+        // Agents keep Idle's orange dot; so does a pane with nothing known.
+        let idle_dot = TabMark::State(AgentState::Idle);
+        assert_eq!(idle(pane("claude", true)), idle_dot);
+        assert_eq!(idle(named("shell", "codex", true)), idle_dot, "typed agent");
+        assert_eq!(idle(pane("", true)), idle_dot);
+        // A shell's other states keep their marks.
+        for state in [AgentState::Working, AgentState::Done, AgentState::NeedsYou] {
+            let busy = PaneView {
+                state,
+                ..named("shell", "pwsh", true)
+            };
+            assert_eq!(head_mark(&busy), TabMark::State(state), "{state:?}");
+        }
+    }
+
+    /// A pane as the core reports it: the profile id it started with, the
+    /// profile's display name and the pane's name.
+    fn started(profile_id: &str, profile: &str, name: &str) -> PaneView {
+        PaneView {
+            profile: profile.into(),
+            ..named(profile_id, name, true)
+        }
+    }
+
+    #[test]
+    fn rf_pan_12_every_way_to_start_git_bash_shows_the_git_bash_badge() {
+        let git_bash = Some(Badge::Shell(ShellBadge::GitBash));
+        // The new tab menu, the palette's "new tab with Git Bash", the split
+        // menu and a restored pane all start `shell:git-bash`, which the core
+        // reports as "Git Bash", named `bash`, or by the user's name.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "bash")),
+            git_bash
+        );
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "work")),
+            git_bash
+        );
+        // Before its details arrive, the id alone tells it.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "", "terminal")),
+            git_bash
+        );
+        // `terminal.shell = "git-bash"`: the default shell, named `bash`.
+        let default = pane_badge(&started("shell", "Shell", "bash"));
+        if cfg!(windows) {
+            assert_eq!(default, git_bash);
+        } else {
+            assert_eq!(default, Some(Badge::Shell(ShellBadge::Other)));
+        }
+        // Never the cmd badge.
+        let cmd = Some(Badge::Shell(ShellBadge::Cmd));
+        assert_ne!(
+            pane_badge(&started("shell:git-bash", "Git Bash", "bash")),
+            cmd
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_a_missing_shell_shows_the_shell_that_runs_instead() {
+        // Git Bash not installed: the core runs the default shell under the
+        // `shell:git-bash` id and names that shell in the profile.
+        assert_eq!(
+            pane_badge(&started("shell:git-bash", "Command Prompt", "cmd")),
+            Some(Badge::Shell(ShellBadge::Cmd))
+        );
+        assert_eq!(
+            pane_badge(&started("shell:pwsh", "Windows PowerShell", "powershell")),
+            Some(Badge::Shell(ShellBadge::PowerShell))
+        );
+        // A default shell YIEN cannot name ("Shell") goes by its program.
+        assert_eq!(
+            pane_badge(&started("shell:cmd", "Shell", "zsh")),
+            Some(Badge::Shell(ShellBadge::Other))
+        );
+    }
+
+    #[test]
+    fn rf_pan_12_bash_typed_inside_another_shell_keeps_the_outer_badge() {
+        // The core names a shell pane after a CLI it runs only for agent
+        // CLIs, so `bash` typed in cmd leaves the pane named `cmd`.
+        assert_eq!(
+            pane_badge(&started("shell:cmd", "Command Prompt", "cmd")),
+            Some(Badge::Shell(ShellBadge::Cmd))
+        );
     }
 }

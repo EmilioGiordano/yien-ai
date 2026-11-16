@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+mod agent_badge;
 mod assets;
 mod attention;
 mod bridge;

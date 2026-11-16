@@ -27,6 +27,7 @@
 
 mod hooks;
 mod machine;
+pub mod opencode;
 mod profile;
 mod question;
 mod signal;
@@ -40,7 +41,7 @@ pub use hooks::{
 };
 pub use machine::{
     AgentState, Cause, Effect, ErrorReason, Machine, MachineConfig, NEEDS_YOU_CONFIRM, NeedsReason,
-    STARTUP_SCREEN_MAX_WAIT, STARTUP_SCREEN_SETTLE,
+    SERVICE_ERROR_GRACE, STARTUP_SCREEN_MAX_WAIT, STARTUP_SCREEN_SETTLE,
 };
 pub use profile::{
     AgentKind, Confirms, Detect, Launch, MAX_PROFILE_BYTES, PROFILE_SCHEMA, Profile, ProfileError,

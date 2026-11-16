@@ -255,12 +255,20 @@ pub enum Signal {
     },
     /// Whether the pane is seen: focused in a focused window (RN-07).
     Seen(bool),
+    /// An agent CLI whose startup screens the caller can read runs under the
+    /// shell (`true`), or it no longer does (`false`). The caller sends it
+    /// only for a shell pane, on the change.
+    TypedAgent(bool),
     /// The user sent input to the pane. The caller sends it only for the
     /// user's own keys and pastes, never for focus or mouse reports that YIEN
     /// itself generates.
     Input,
     /// The pane produced output (coalesced by the caller).
     Output,
+    /// The agent's own service reported that a turn of a session this pane
+    /// shows failed (OpenCode's `session.execution.failed`). The caller sends
+    /// it only for a session the pane's program named over OSC 7501.
+    ServiceError,
     /// The structured channel cannot deliver (hook pipe down).
     SourceLost,
     /// A detection input that cannot be interpreted, such as a hook payload

@@ -56,6 +56,7 @@ pub enum OscSignal {
 ///     kind: Some(StatusKind::Permission),
 ///     app: StatusApp::Codex,
 ///     sub_session: false,
+///     id: None,
 /// };
 /// assert_eq!(signals, vec![OscSignal::Status(status)]);
 /// ```
@@ -70,6 +71,62 @@ pub struct ProgramStatus {
     /// The record carries an `id`: it is about a sub-session or a background
     /// task, not the program as a whole.
     pub sub_session: bool,
+    /// That `id`, when it has the shape of the ids OpenCode sends.
+    pub id: Option<StatusId>,
+}
+
+/// The longest [`StatusId`], in bytes.
+pub const MAX_STATUS_ID: usize = 32;
+
+/// The `id` of an OSC 7501 record: 1 to [`MAX_STATUS_ID`] ASCII letters,
+/// digits, `_`, `.`, `+` or `-`, the shape OpenCode gives every id it sends.
+/// It names one of the user's sessions, so its `Debug` leaves it out.
+///
+/// ```
+/// use yien_vt::osc_scan::StatusId;
+///
+/// let id = StatusId::new("ses_e29191ec0ffe3tC2NzOxg6Pfch").unwrap();
+/// assert_eq!(id.as_str(), "ses_e29191ec0ffe3tC2NzOxg6Pfch");
+/// assert_eq!(format!("{id:?}"), "StatusId(..)");
+/// assert!(StatusId::new("a b").is_none());
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StatusId {
+    len: u8,
+    bytes: [u8; MAX_STATUS_ID],
+}
+
+impl StatusId {
+    /// The id, when `value` has the accepted shape.
+    pub fn new(value: &str) -> Option<Self> {
+        let shaped = (1..=MAX_STATUS_ID).contains(&value.len())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'));
+        if !shaped {
+            return None;
+        }
+        let mut bytes = [0; MAX_STATUS_ID];
+        bytes
+            .get_mut(..value.len())?
+            .copy_from_slice(value.as_bytes());
+        Some(Self {
+            len: u8::try_from(value.len()).ok()?,
+            bytes,
+        })
+    }
+
+    /// The id as the program sent it.
+    pub fn as_str(&self) -> &str {
+        let bytes = self.bytes.get(..usize::from(self.len)).unwrap_or_default();
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for StatusId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StatusId(..)")
+    }
 }
 
 /// The `state` of an OSC 7501 record.
@@ -337,6 +394,7 @@ fn parse_status(rest: &str) -> Option<ProgramStatus> {
     let mut kind = None;
     let mut app = None;
     let mut sub_session = false;
+    let mut id = None;
     for field in rest.split(':') {
         let Some((key, value)) = field.split_once('=') else {
             continue;
@@ -345,7 +403,10 @@ fn parse_status(rest: &str) -> Option<ProgramStatus> {
             "state" if state.is_none() => state = Some(program_state(value)?),
             "kind" if kind.is_none() => kind = status_kind(value),
             "app" if app.is_none() => app = Some(status_app(value)),
-            "id" => sub_session = true,
+            "id" if !sub_session => {
+                sub_session = true;
+                id = StatusId::new(value);
+            }
             _ => {}
         }
     }
@@ -354,6 +415,7 @@ fn parse_status(rest: &str) -> Option<ProgramStatus> {
         kind,
         app: app.unwrap_or(StatusApp::Other),
         sub_session,
+        id,
     })
 }
 
@@ -656,7 +718,18 @@ mod tests {
             kind,
             app,
             sub_session,
+            id: None,
         })
+    }
+
+    fn with_id(signal: OscSignal, id: &str) -> OscSignal {
+        match signal {
+            OscSignal::Status(status) => OscSignal::Status(ProgramStatus {
+                id: StatusId::new(id),
+                ..status
+            }),
+            other => other,
+        }
     }
 
     fn scan_with_replies(
@@ -788,17 +861,72 @@ mod tests {
     fn rf_age_05_7501_records_with_an_id_are_marked() {
         assert_eq!(
             scan(b"\x1b]7501;state=working:id=ses_e29191ec0ffe3tC2NzOxg6Pfch:app=opencode\x1b\\"),
-            vec![status(
-                StatusApp::OpenCode,
-                ProgramState::Working,
-                None,
-                true
+            vec![with_id(
+                status(StatusApp::OpenCode, ProgramState::Working, None, true),
+                "ses_e29191ec0ffe3tC2NzOxg6Pfch"
             )]
         );
         assert_eq!(
             scan(b"\x1b]7501;state=clear:id=ses_1\x1b\\"),
-            vec![status(StatusApp::Other, ProgramState::Clear, None, true)]
+            vec![with_id(
+                status(StatusApp::Other, ProgramState::Clear, None, true),
+                "ses_1"
+            )]
         );
+    }
+
+    #[test]
+    fn rn_02_an_id_of_another_shape_still_marks_the_record_but_names_nothing() {
+        let too_long = format!("\x1b]7501;state=working:id={}\x07", "a".repeat(33));
+        for bytes in [
+            &b"\x1b]7501;state=working:id=\x07"[..],
+            b"\x1b]7501;state=working:id=ses 1\x07",
+            b"\x1b]7501;state=working:id=ses/1\x07",
+            b"\x1b]7501;state=working:id=s\xc3\xa9s\x07",
+            too_long.as_bytes(),
+        ] {
+            assert_eq!(
+                scan(bytes),
+                vec![status(StatusApp::Other, ProgramState::Working, None, true)],
+                "{bytes:?}"
+            );
+        }
+        let longest = "a".repeat(MAX_STATUS_ID);
+        let bytes = format!("\x1b]7501;state=working:id={longest}\x07");
+        assert_eq!(
+            scan(bytes.as_bytes()),
+            vec![with_id(
+                status(StatusApp::Other, ProgramState::Working, None, true),
+                &longest
+            )]
+        );
+        // The first `id` wins, even when it names nothing.
+        assert_eq!(
+            scan(b"\x1b]7501;state=working:id=a b:id=ses_2\x07"),
+            vec![status(StatusApp::Other, ProgramState::Working, None, true)]
+        );
+        assert_eq!(
+            scan(b"\x1b]7501;state=working:id=ses_1:id=ses_2\x07"),
+            vec![with_id(
+                status(StatusApp::Other, ProgramState::Working, None, true),
+                "ses_1"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_status_id_keeps_its_text_out_of_debug() {
+        let id = StatusId::new("ses_secret").unwrap();
+        assert_eq!(format!("{id:?}"), "StatusId(..)");
+        let record = ProgramStatus {
+            state: ProgramState::Working,
+            kind: None,
+            app: StatusApp::OpenCode,
+            sub_session: true,
+            id: Some(id),
+        };
+        assert!(!format!("{record:?}").contains("secret"));
+        assert_eq!(id.as_str(), "ses_secret");
     }
 
     #[test]

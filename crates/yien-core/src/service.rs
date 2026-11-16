@@ -27,6 +27,7 @@ use crate::convert;
 use crate::git::{GitReport, GitThread};
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
+use crate::opencode::OpenCodeWatch;
 use crate::pane::{self, EngineFactory, FrameSlot, PANE_COMMANDS, PaneCmd, PaneInput, PaneSetup};
 use crate::persist::{self, Opened, Writer};
 use crate::programs::{self, Shells};
@@ -58,6 +59,8 @@ pub(crate) struct Ctx {
     pub clipboards: Arc<Clipboards>,
     /// The shell panes the program poller looks under (RF-PAN-12).
     pub shells: Arc<Shells>,
+    /// The watcher of OpenCode's service, when the core reads it.
+    pub opencode: Option<Arc<OpenCodeWatch>>,
 }
 
 /// Hook events waiting for one pane's actor. Beyond this the pane's channel
@@ -726,6 +729,14 @@ impl Service {
                         (handle.visible, handle.seen) = (visible, seen);
                     }
                     self.to_pane(pane, PaneCmd::View { visible, seen }).await;
+                }
+                Effect::Program {
+                    pane,
+                    launch,
+                    program,
+                } => {
+                    self.to_pane(pane, PaneCmd::Program { launch, program })
+                        .await
                 }
             }
         }

@@ -667,6 +667,7 @@ fn rf_age_05_status_query_with_st_and_records_reach_the_signals() {
             kind: None,
             app: StatusApp::Codex,
             sub_session: false,
+            id: None,
         })]
     );
     assert_eq!(e.frame().line_text(0), "ok");

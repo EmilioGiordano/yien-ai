@@ -12,7 +12,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{
-    Effect as AgentEffect, HookEvent, Machine, SessionEndReason, Signal, evaluate_screen,
+    Effect as AgentEffect, HookEvent, Machine, ScreenRule, SessionEndReason, Signal,
+    evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
@@ -25,6 +26,7 @@ use yien_vt::{
 
 use crate::convert;
 use crate::launch::{self, Fill, HookFill, LaunchPlan};
+use crate::opencode::{OPENCODE, Sessions, Watching};
 use crate::programs::Watched;
 use crate::resume::{self, ResumeFailure};
 use crate::screens::ScreenSource;
@@ -91,6 +93,12 @@ pub(crate) enum PaneCmd {
         launch: u64,
     },
     Terminate,
+    /// The known program running in the shell of launch number `launch`
+    /// (RF-PAN-12) changed.
+    Program {
+        launch: u64,
+        program: Option<String>,
+    },
 }
 
 /// Bytes for a pane's program, sent by the handle straight to the actor.
@@ -477,6 +485,15 @@ struct Actor {
     restored_mark: Option<usize>,
     /// The launch's terminal title and who set it.
     titles: Titles,
+    /// The startup screens of the agent CLI last found in the shell, read
+    /// while the machine says so.
+    typed_screen: Vec<ScreenRule>,
+    /// The OpenCode sessions this launch's program named over OSC 7501.
+    opencode_sessions: Sessions,
+    /// The shell poller finds OpenCode under this launch's shell.
+    typed_opencode: bool,
+    /// This pane's hold on the OpenCode watcher, while OpenCode runs here.
+    opencode: Option<Watching>,
 }
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
@@ -546,6 +563,10 @@ pub(crate) fn spawn(
         restored: setup.restored,
         restored_mark: None,
         titles: Titles::new(false),
+        typed_screen: Vec::new(),
+        opencode_sessions: Sessions::default(),
+        typed_opencode: false,
+        opencode: None,
     };
     let task = tokio::spawn(actor.run(cmds, input, hooks));
     tokio::spawn(async move {
@@ -564,7 +585,11 @@ enum Wake {
     Input(PaneInput),
     Hook(HookItem),
     Reader(Option<ReaderMsg>),
-    Noticed { owed: bool },
+    /// OpenCode's service says a turn of this session failed.
+    Failed(Arc<str>),
+    Noticed {
+        owed: bool,
+    },
     UiSize,
     Timer,
 }
@@ -581,6 +606,13 @@ async fn ui_size_reported(pending: &mut Option<Pending>) -> bool {
     match pending {
         Some(p) if p.ui_seen.is_none() => p.ui.changed().await.is_ok(),
         _ => std::future::pending().await,
+    }
+}
+
+async fn failed_session(opencode: &mut Option<Watching>) -> Arc<str> {
+    match opencode {
+        Some(watching) => watching.failed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -618,6 +650,7 @@ impl Actor {
                 Some(item) = hooks.recv() => Wake::Hook(item),
                 Some(bytes) = input.recv(), if take_input => Wake::Input(bytes),
                 msg = recv_reader(&mut self.session), if take_output => Wake::Reader(msg),
+                session = failed_session(&mut self.opencode) => Wake::Failed(session),
                 true = ui_size_reported(&mut self.pending) => Wake::UiSize,
                 room = self.ctx.events.reserve(), if self.notice_owed => Wake::Noticed {
                     owed: match room {
@@ -645,6 +678,7 @@ impl Actor {
                 Wake::Hook(item) => self.on_hook(item, &mut hooks),
                 Wake::Reader(Some(msg)) => self.on_reader(msg),
                 Wake::Reader(None) => self.on_reader_gone(),
+                Wake::Failed(session) => self.on_failed(&session),
                 Wake::Noticed { owed } => self.notice_owed = owed,
                 Wake::UiSize => {
                     if let Some(p) = &mut self.pending {
@@ -711,6 +745,10 @@ impl Actor {
     /// feeding the old engine cannot reach this one.
     async fn start(&mut self) {
         self.session = None;
+        // Sessions of the program that ran before are not this one's.
+        self.opencode_sessions.clear();
+        self.typed_opencode = false;
+        self.sync_opencode();
         self.outbox.clear();
         self.retry_at = None;
         self.sync = None;
@@ -837,6 +875,35 @@ impl Actor {
         });
         self.report(PaneEvent::Started);
         self.step(&Signal::Spawned);
+        self.sync_opencode();
+    }
+
+    /// Holds the OpenCode watcher while OpenCode runs in this launch: its
+    /// profile's program, the program found under the shell, or whatever
+    /// reports as OpenCode until it gives the terminal back.
+    fn sync_opencode(&mut self) {
+        let running = self.session.as_ref().is_some_and(|s| !s.exited);
+        let wanted = running
+            && (self.plan.profile == OPENCODE
+                || self.typed_opencode
+                || self.opencode_sessions.reported());
+        if wanted != self.opencode.is_some() {
+            self.opencode = self
+                .ctx
+                .opencode
+                .as_ref()
+                .filter(|_| wanted)
+                .map(|watch| watch.join());
+        }
+    }
+
+    /// A failure OpenCode's service reported, for any of its sessions: it
+    /// fails this pane's turn only if this pane's OpenCode named the session.
+    fn on_failed(&mut self, session: &str) {
+        if self.opencode_sessions.contains(session) {
+            tracing::debug!(pane = self.id.get(), "OpenCode reported a failed turn");
+            self.step(&Signal::ServiceError);
+        }
     }
 
     /// Spawns the plan filled with `fill`, off the runtime's threads, and
@@ -1015,7 +1082,32 @@ impl Actor {
                 self.outbox.clear();
                 self.retry_at = None;
             }
+            PaneCmd::Program { launch, program } => self.on_program(launch, program.as_deref()),
         }
+    }
+
+    /// An agent CLI found running in this launch's shell has its startup
+    /// screens read with its profile's patterns until it first reports.
+    fn on_program(&mut self, launch: u64, program: Option<&str>) {
+        if launch != self.launch || !runs_shell(&self.plan) {
+            return;
+        }
+        let screens = program
+            .and_then(|name| self.ctx.config.profiles.iter().find(|p| p.id == name))
+            .map(|profile| profile.typed_startup_screens().to_vec())
+            .unwrap_or_default();
+        let typed = !screens.is_empty();
+        if typed {
+            self.typed_screen = screens;
+        }
+        self.step(&Signal::TypedAgent(typed));
+        let opencode = program == Some(OPENCODE);
+        if self.typed_opencode && !opencode {
+            // It left, perhaps without the `clear` that forgets its sessions.
+            self.opencode_sessions.clear();
+        }
+        self.typed_opencode = opencode;
+        self.sync_opencode();
     }
 
     fn on_input(&mut self, input: PaneInput) {
@@ -1051,6 +1143,7 @@ impl Actor {
                     s.exited = true;
                     s.watched = None;
                 }
+                self.sync_opencode();
                 if let Some(failure) = self.resume_failure(code) {
                     self.failed_resume = Some(failure);
                     return;
@@ -1144,6 +1237,7 @@ impl Actor {
         let Some(session) = self.session.take() else {
             return;
         };
+        self.sync_opencode();
         self.outbox.clear();
         self.retry_at = None;
         if !session.exited {
@@ -1170,6 +1264,13 @@ impl Actor {
         for signal in &out.signals {
             if let yien_vt::OscSignal::Cwd(dir) = signal {
                 self.report(PaneEvent::Cwd(dir.clone()));
+            }
+            if let yien_vt::OscSignal::Status(status) = signal {
+                let learned = self.opencode_sessions.absorb(status);
+                self.sync_opencode();
+                if let (true, Some(watching)) = (learned, &self.opencode) {
+                    watching.poke();
+                }
             }
             if let Some(osc) = convert::osc_signal(signal) {
                 self.step(&Signal::Osc(osc));
@@ -1252,7 +1353,12 @@ impl Actor {
                 AgentEffect::CheckScreen => {
                     let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                    let verdict = evaluate_screen(&self.plan.screen, &rows);
+                    let rules = if self.machine.reads_typed_agent() {
+                        &self.typed_screen
+                    } else {
+                        &self.plan.screen
+                    };
+                    let verdict = evaluate_screen(rules, &rows);
                     self.step(&Signal::Screen(verdict));
                 }
                 AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId {
@@ -1607,9 +1713,18 @@ mod tests {
         hooks_lost: Arc<AtomicBool>,
         _events: mpsc::Receiver<CoreMsg>,
         _input: mpsc::Sender<PaneInput>,
+        /// An OpenCode watcher with no service file: it never connects, and
+        /// the test hands the panes its failures.
+        opencode: Arc<crate::opencode::OpenCodeWatch>,
     }
 
     impl Solo {
+        /// An OpenCode pane.
+        fn opencode() -> Self {
+            let opencode = yien_proto::ProfileId::new(OPENCODE);
+            Self::run(Some(&opencode), Vec::new(), false, None, None)
+        }
+
         /// Starts the actor with `queued` already waiting in its hook queue.
         fn start(queued: Vec<HookItem>, lost: bool) -> Self {
             Self::launch(queued, lost, None, None)
@@ -1626,20 +1741,40 @@ mod tests {
             resume: Option<&str>,
             restored: Option<Vec<u8>>,
         ) -> Self {
+            let claude = yien_proto::ProfileId::new("claude");
+            Self::run(Some(&claude), queued, lost, resume, restored)
+        }
+
+        /// A shell pane, with its own program's output alone.
+        fn shell() -> Self {
+            Self::run(None, Vec::new(), false, None, None)
+        }
+
+        fn run(
+            profile: Option<&yien_proto::ProfileId>,
+            queued: Vec<HookItem>,
+            lost: bool,
+            resume: Option<&str>,
+            restored: Option<Vec<u8>>,
+        ) -> Self {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_time()
                 .build()
                 .unwrap();
             let config = crate::CoreConfig::default();
-            let claude = yien_proto::ProfileId::new("claude");
-            let plan = launch::resolve(Some(&claude), &config.profiles, &config.shell).unwrap();
+            let plan = launch::resolve(profile, &config.profiles, &config.shell).unwrap();
             let fallback = resume
                 .is_some()
                 .then(|| launch::resolve(None, &config.profiles, &config.shell).unwrap());
             let backend = Arc::new(yien_pty::FakePty::new());
             let screen = Arc::new(ScreenSource::default());
             let (events, events_rx) = mpsc::channel(64);
+            let opencode = crate::opencode::OpenCodeWatch::new(crate::OpenCodeService {
+                files: Vec::new(),
+                retry: (Duration::from_secs(60), Duration::from_secs(60)),
+                idle_timeout: Duration::from_secs(5),
+            });
             let ctx = Ctx {
                 backend: backend.clone(),
                 config: Arc::new(config),
@@ -1652,6 +1787,7 @@ mod tests {
                 consoles: Arc::default(),
                 clipboards: Arc::default(),
                 shells: Arc::default(),
+                opencode: Some(Arc::clone(&opencode)),
             };
             let reports = Arc::clone(&ctx.reports);
             let (hooks, hooks_rx) = mpsc::channel(crate::service::PANE_HOOK_QUEUE);
@@ -1665,7 +1801,11 @@ mod tests {
                 id: PaneId::new(1),
                 plan,
                 cwd: ".".to_owned(),
-                size: if resume.is_some() { (80, 6) } else { (20, 4) },
+                size: match (resume, profile) {
+                    (Some(_), _) => (80, 6),
+                    (None, None) => (80, 24),
+                    (None, Some(_)) => (20, 4),
+                },
                 slot: Arc::default(),
                 visible: false,
                 seen: false,
@@ -1690,6 +1830,7 @@ mod tests {
                 hooks_lost,
                 _events: events_rx,
                 _input: input,
+                opencode,
             }
         }
 
@@ -2268,6 +2409,250 @@ mod tests {
         child.output(b"\x1b[2J\x1b[HLoading\xe2\x80\xa6");
         let events = pane.collect(SETTLE);
         assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    /// Codex's folder trust as its 0.167.2 sources render it.
+    const CODEX_TRUST: &str =
+        include_str!("../../yien-agent/tests/fixtures/startup-screens/codex-0.167.2-trust.txt");
+
+    /// PowerShell running `codex`, then Codex drawing its folder trust.
+    fn codex_typed_on_its_trust_screen(pane: &Solo) -> yien_pty::FakeChild {
+        let child = pane.next_child();
+        child.output(b"\x1b]133;A\x07PS C:\\work> codex\r\n\x1b]133;C\x07");
+        let trust = format!("\x1b[2J\x1b[H{}", CODEX_TRUST.replace('\n', "\r\n"));
+        child.output(trust.as_bytes());
+        child
+    }
+
+    fn found(launch: u64, program: Option<&str>) -> PaneCmd {
+        PaneCmd::Program {
+            launch,
+            program: program.map(str::to_owned),
+        }
+    }
+
+    const SCREEN_RED: AgentState = AgentState::NeedsYou(yien_proto::NeedsReason::ScreenRule);
+
+    #[test]
+    fn rf_atn_09_codex_typed_in_a_shell_turns_red_on_its_trust_screen_once_found() {
+        let pane = Solo::shell();
+        let child = codex_typed_on_its_trust_screen(&pane);
+        let events = pane.collect(SETTLE);
+        assert_eq!(
+            last_state(&events),
+            Some(AgentState::Working),
+            "no read before codex is found: {events:?}"
+        );
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(SCREEN_RED), "{events:?}");
+        // Answered: the next screen is no startup screen.
+        child.output("\x1b[2J\x1b[H\u{203a} Ask Codex to do anything".as_bytes());
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        child.output(b"\x1b]7501;state=idle:app=codex\x1b\\");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_codex_leaving_the_shell_clears_its_startup_red() {
+        let pane = Solo::shell();
+        let _child = codex_typed_on_its_trust_screen(&pane);
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(SCREEN_RED));
+        pane.cmds.try_send(found(0, None)).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_a_program_of_another_launch_or_without_startup_screens_reads_nothing() {
+        for cmd in [
+            found(3, Some("codex")),
+            found(0, Some("opencode")),
+            found(0, Some("pwsh")),
+        ] {
+            let pane = Solo::shell();
+            let _child = codex_typed_on_its_trust_screen(&pane);
+            pane.collect(SETTLE);
+            let label = format!("{cmd:?}");
+            pane.cmds.try_send(cmd).unwrap();
+            let events = pane.collect(SETTLE);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+                "{label}: {events:?}"
+            );
+            drop(pane.cmds);
+        }
+    }
+
+    #[test]
+    fn rn_02_a_relaunched_shell_pane_starts_unread() {
+        let pane = Solo::shell();
+        let _old = codex_typed_on_its_trust_screen(&pane);
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(SCREEN_RED));
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 1 }).unwrap();
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        // The new shell shows the same screen; the old launch's report is stale.
+        let child = pane.next_child();
+        let trust = format!("\x1b[2J\x1b[H{}", CODEX_TRUST.replace('\n', "\r\n"));
+        child.output(trust.as_bytes());
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_an_agent_pane_ignores_a_program_found_under_it() {
+        let pane = Solo::start(Vec::new(), false);
+        let child = pane.next_child();
+        let trust = format!("\x1b[2J\x1b[H{}", CODEX_TRUST.replace('\n', "\r\n"));
+        child.output(trust.as_bytes());
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        let events = pane.collect(SETTLE);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        drop(pane.cmds);
+    }
+
+    const OPENCODE_PERMISSION: &[u8] =
+        include_bytes!("../tests/fixtures/osc7501/opencode-2.2.7-permission.bin");
+
+    /// The session OpenCode named in the capture.
+    const CAPTURED: &str = "ses_e29191ec0ffe3tC2NzOxg6Pfch";
+
+    const TURN_FAILED: AgentState = AgentState::Error(yien_proto::ErrorReason::TurnFailed);
+
+    /// The capture up to OpenCode's exit, and from its `at`-th record.
+    fn capture_until_exit() -> &'static [u8] {
+        let exit = b"\x1b]7501;state=clear\x1b\\";
+        let at = OPENCODE_PERMISSION
+            .windows(exit.len())
+            .rposition(|w| w == exit)
+            .unwrap();
+        &OPENCODE_PERMISSION[..at]
+    }
+
+    /// Waits until `n` panes hold the OpenCode watcher.
+    fn assert_holders(pane: &Solo, n: usize) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while pane.opencode.panes() != n {
+            assert!(
+                Instant::now() < end,
+                "{} panes, not {n}",
+                pane.opencode.panes()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn rf_age_05_an_opencode_turn_its_service_says_failed_shows_error() {
+        let pane = Solo::opencode();
+        let child = pane.next_child();
+        assert_holders(&pane, 1);
+        child.output(capture_until_exit());
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Done), "{events:?}");
+        // Another client's session, then this pane's.
+        pane.opencode.report_failed("ses_another_client");
+        assert_eq!(last_state(&pane.collect(SETTLE)), None);
+        pane.opencode.report_failed(CAPTURED);
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(TURN_FAILED), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PaneEvent::State(AgentState::NeedsYou(_), _))),
+            "{events:?}"
+        );
+        // Its exit lets the watcher go.
+        child.output(b"\x1b]7501;state=clear\x1b\\");
+        child.exit(0);
+        assert_holders(&pane, 0);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_a_failure_of_a_session_the_pane_never_named_changes_nothing() {
+        let pane = Solo::opencode();
+        let child = pane.next_child();
+        // Working, but OpenCode named no session yet.
+        child.output(b"\x1b]7501;state=working:app=opencode\x1b\\");
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(AgentState::Working));
+        pane.opencode.report_failed(CAPTURED);
+        assert_eq!(last_state(&pane.collect(SETTLE)), None);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_opencode_typed_in_a_shell_holds_the_watcher_while_it_runs() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        assert_holders(&pane, 0);
+        pane.cmds.try_send(found(0, Some(OPENCODE))).unwrap();
+        assert_holders(&pane, 1);
+        child.output(b"\x1b]133;C\x07");
+        child.output(capture_until_exit());
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Done), "{events:?}");
+        pane.opencode.report_failed(CAPTURED);
+        assert_eq!(last_state(&pane.collect(SETTLE)), Some(TURN_FAILED));
+        // OpenCode left without its `clear`: the pane lets the watcher go.
+        pane.cmds.try_send(found(0, None)).unwrap();
+        assert_holders(&pane, 0);
+        // Reporting again holds it again.
+        child.output(b"\x1b]7501;state=idle:app=opencode\x1b\\");
+        assert_holders(&pane, 1);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_a_shell_forgets_the_sessions_of_an_opencode_that_left() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        pane.cmds.try_send(found(0, Some(OPENCODE))).unwrap();
+        child.output(b"\x1b]133;C\x07");
+        child.output(capture_until_exit());
+        pane.collect(SETTLE);
+        pane.cmds.try_send(found(0, None)).unwrap();
+        // The shell's prompt is back; the same session fails elsewhere.
+        child.output(b"\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+        pane.collect(SETTLE);
+        pane.opencode.report_failed(CAPTURED);
+        let events = pane.collect(SETTLE);
+        assert_ne!(last_state(&events), Some(TURN_FAILED), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rnf_14_a_pane_without_opencode_never_starts_the_watcher() {
+        let pane = Solo::start(Vec::new(), false);
+        let child = pane.next_child();
+        child.output(b"\x1b]7501;state=working:id=ses_1:app=claude-code\x1b\\");
+        pane.collect(SETTLE);
+        assert_eq!(pane.opencode.panes(), 0);
         drop(pane.cmds);
     }
 }

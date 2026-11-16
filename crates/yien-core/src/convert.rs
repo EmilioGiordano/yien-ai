@@ -200,6 +200,7 @@ mod tests {
             kind,
             app: yien_vt::StatusApp::Other,
             sub_session,
+            id: None,
         })
     }
 
@@ -218,6 +219,7 @@ mod tests {
                 kind: None,
                 app,
                 sub_session: false,
+                id: None,
             });
             assert_eq!(
                 osc_signal(&idle),
