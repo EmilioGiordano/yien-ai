@@ -193,14 +193,17 @@ pub(crate) fn parse_key(key: &str) -> Result<Keystroke, String> {
 pub(crate) struct TerminalFacts {
     /// Columns and rows of its last frame.
     pub(crate) size: (u16, u16),
+    /// Millis since the UNIX epoch when the frame was taken, if any.
+    pub(crate) frame_at_ms: Option<u64>,
     /// Its visible rows, when asked for.
     pub(crate) rows: Option<Vec<String>>,
 }
 
 impl TerminalFacts {
-    pub(crate) fn of(frame: &Frame, with_text: bool) -> Self {
+    pub(crate) fn of(frame: &Frame, with_text: bool, frame_at_ms: Option<u64>) -> Self {
         Self {
             size: (frame.size.cols, frame.size.rows),
+            frame_at_ms,
             rows: with_text.then(|| (0..frame.lines.len()).map(|r| frame.line_text(r)).collect()),
         }
     }
@@ -269,6 +272,7 @@ pub(crate) fn workspace_state(
                     keyboard: keyboard == Some(id),
                     visible: drawn.contains(&id),
                     size: facts.as_ref().map(|f| f.size),
+                    frame_at_ms: facts.as_ref().and_then(|f| f.frame_at_ms),
                     rows: facts.and_then(|f| f.rows).map(VisibleRows::new),
                 });
             }
@@ -472,18 +476,23 @@ mod tests {
     fn adr_21_visible_rows_come_only_from_a_frame_and_only_when_asked() {
         let ws = workspace();
         let shown = frame(&["PS C:\\work> claude", ""], 30);
-        let with_text = |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, true));
+        let with_text =
+            |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, true, Some(42)));
         let (_, _, panes) = workspace_state(&ws, None, &with_text);
         assert_eq!(panes[1].size, Some((30, 2)));
+        assert_eq!(panes[1].frame_at_ms, Some(42));
+        assert_eq!(panes[0].frame_at_ms, None);
         assert_eq!(
             panes[1].rows.as_ref().map(|r| r.as_slice().to_vec()),
             Some(vec!["PS C:\\work> claude".to_owned(), String::new()])
         );
         assert!(panes[0].rows.is_none() && panes[0].size.is_none());
 
-        let without = |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, false));
+        let without =
+            |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, false, None));
         let (_, _, panes) = workspace_state(&ws, None, &without);
         assert_eq!(panes[1].size, Some((30, 2)));
+        assert_eq!(panes[1].frame_at_ms, None);
         assert!(panes[1].rows.is_none());
     }
 

@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::base::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -58,6 +58,9 @@ pub(crate) struct TerminalPane {
     font_size: f32,
     theme: Theme,
     frame: Option<Frame>,
+    /// Millis since the UNIX epoch when `frame` was taken in, for the
+    /// test control dump.
+    frame_at_ms: Option<u64>,
     /// IME composition not yet committed (RF-PAN-15).
     preedit: Option<String>,
     /// The grid's bounds and cell size at the last paint.
@@ -100,6 +103,7 @@ impl TerminalPane {
             font_size,
             theme,
             frame: None,
+            frame_at_ms: None,
             preedit: None,
             grid: None,
             sent_size: None,
@@ -127,14 +131,18 @@ impl TerminalPane {
     /// The single place frames enter the view, so a change in how the core
     /// delivers them touches only this.
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
+        self.frame_at_ms = Some(unix_millis());
         self.frame = Some(frame);
         cx.notify();
     }
 
     /// What the state dump of the test control reads: the last frame's
-    /// size, and its rows when `with_text`. `None` before the first frame.
+    /// size, when it was taken, and its rows when `with_text`. `None`
+    /// before the first frame.
     pub(crate) fn facts(&self, with_text: bool) -> Option<TerminalFacts> {
-        self.frame.as_ref().map(|f| TerminalFacts::of(f, with_text))
+        self.frame
+            .as_ref()
+            .map(|f| TerminalFacts::of(f, with_text, self.frame_at_ms))
     }
 
     /// Text the layout or the IME typed, as the input handler delivers it.
@@ -1059,4 +1067,13 @@ impl Focusable for TerminalPane {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// Wall-clock milliseconds for the test control dump. Same machine as the
+/// script, so the two clocks are comparable.
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
