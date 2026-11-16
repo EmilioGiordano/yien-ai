@@ -54,8 +54,10 @@ panes that fail to fill are reported. After settling, it reads the YIEN
 process's working set and private bytes with Get-Process, and the working set
 and private bytes of every descendant process (shells, ConPTY hosts: not
 YIEN's memory) with Win32_Process. The budget is checked against the YIEN
-process's private bytes; the working set and the descendants are reported
-separately.
+process's private bytes and requires the fill to complete in every
+PowerShell pane; if any pane fails to focus or fill, the verdict is
+unmeasurable and counts as a miss (verdict_measurable is false in the JSON).
+The working set and the descendants are reported separately.
 
 Per-run folders and run.json files (for stop.ps1) are written under
 <slot>/run/perf-budget-<timestamp>/, and the JSON summary under
@@ -525,11 +527,13 @@ $yienPrivateMb = [math]::Round($yienPrivate / 1MB, 1)
 $yienWorkingMb = [math]::Round($yienWorking / 1MB, 1)
 $childPrivateMb = [math]::Round($childPrivate / 1MB, 1)
 $childWorkingMb = [math]::Round($childWorking / 1MB, 1)
-$rnf03Miss = $yienPrivateMb -gt $BudgetRnf03Mb
+$rnf03Miss = ($yienPrivateMb -gt $BudgetRnf03Mb) -or ($fillFailed.Count -gt 0)
 if ($rnf03Miss) { $misses++ }
+$rnf03Measurable = $fillFailed.Count -eq 0
 $rnf03 = [ordered]@{
     budget_mb            = $BudgetRnf03Mb
-    basis                = 'budget checked against the YIEN process''s own private bytes; ERS excludes shells, agents and ConPTY (OpenConsole) processes, which are reported separately'
+    basis                = 'budget checked against the YIEN process''s own private bytes, and requires the 10000-line fill to complete in every PowerShell pane; ERS excludes shells, agents and ConPTY (OpenConsole) processes, which are reported separately'
+    verdict_measurable   = $rnf03Measurable
     panes                = $paneCount
     fill_lines           = $FillLines
     panes_filled         = $filled
@@ -571,6 +575,9 @@ Write-Host ("| RNF-01 | can-type warm median {0,5} ms | <= {1,5} ms   | {2,-6} |
 Write-Host ("| RNF-02 | p95 {0,5} ms {1,5} ({2,2} keys) | <= {3,5} ms   | {4,-6} |" -f $verdict.p95, $(if ($frameBasis) { 'frame' } else { 'poll ' }), $Keys, $BudgetRnf02Ms, $(if ($rnf02Miss) { 'MISS' } else { 'PASS' }))
 Write-Host ("| RNF-03 | yien private {0,6} MB    | <= {1,5} MB    | {2,-6} |" -f $yienPrivateMb, $BudgetRnf03Mb, $(if ($rnf03Miss) { 'MISS' } else { 'PASS' }))
 Write-Host "+-------+-------------------------+----------------+--------+"
+if ($fillFailed.Count -gt 0) {
+    Write-Host "NOTE: $($fillFailed.Count) pane(s) could not be filled; the 10000-line histories were unmeasured for them (RNF-03: unmeasurable)"
+}
 Write-Host "JSON: $JsonPath"
 Write-Host "Budgets missed: $misses (exit code = budgets missed)"
 exit $misses
