@@ -1,0 +1,569 @@
+//! The window's side of the test control pipe (ADR-21): the requests the
+//! binary hands over, and the pure parts of answering them — the state dump,
+//! which command an id runs, which key a name presses.
+
+use gpui_kit::Keystroke;
+use tokio::sync::mpsc;
+use yien_proto::frame::Frame;
+use yien_proto::test_control::{
+    CommandArgs, PaneState, ProjectState, Reply, Request, SplitWay, TabState, VisibleRows,
+};
+use yien_proto::{Orientation, PaneId};
+
+use crate::catalog::spec;
+use crate::grid::named_key;
+use crate::model::{AgentState, TabMark, WorkspaceView};
+use crate::palette::Target;
+use crate::pane_head::program_tag;
+
+/// One request from the test control pipe and where its reply goes.
+///
+/// ```
+/// let (reply, answer) = std::sync::mpsc::channel();
+/// let call = yien_ui::TestCall {
+///     request: yien_proto::test_control::Request::State { text: false },
+///     reply,
+/// };
+/// let _ = call.reply.send(yien_proto::test_control::Reply::done());
+/// assert!(answer.recv().unwrap().ok);
+/// ```
+#[derive(Debug)]
+pub struct TestCall {
+    /// What the script asks.
+    pub request: Request,
+    /// Where the window sends its one reply.
+    pub reply: std::sync::mpsc::Sender<Reply>,
+}
+
+/// The requests the window answers while `--test-control` is on.
+///
+/// ```
+/// let (calls, receiver) = tokio::sync::mpsc::channel(8);
+/// let control = yien_ui::TestControl::new(receiver);
+/// # drop((calls, control));
+/// ```
+#[derive(Debug)]
+pub struct TestControl {
+    pub(crate) calls: mpsc::Receiver<TestCall>,
+}
+
+impl TestControl {
+    /// Wraps the receiving end the binary feeds from the pipe.
+    ///
+    /// ```
+    /// let (_calls, receiver) = tokio::sync::mpsc::channel(1);
+    /// let _control = yien_ui::TestControl::new(receiver);
+    /// ```
+    pub fn new(calls: mpsc::Receiver<TestCall>) -> Self {
+        Self { calls }
+    }
+}
+
+/// The command ids that take arguments: the palette's rows that are not in
+/// the catalog, made from the profiles and the workspace.
+pub(crate) const ARGUMENT_COMMANDS: &[&str] = &[
+    "tab.new_with",
+    "pane.split_with",
+    "pane.focus",
+    "tab.select",
+    "project.select",
+];
+
+/// What a command id runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Run {
+    /// The catalog entry with this id: its action, dispatched as the palette
+    /// does.
+    Catalog(&'static str),
+    /// A palette row that takes arguments.
+    Target(Target),
+}
+
+/// Which command `id` runs with `args`, checked against what the window
+/// knows: the profile must be one the palette lists, the pane, tab or
+/// project must exist.
+pub(crate) fn resolve_command(
+    id: &str,
+    args: &CommandArgs,
+    ws: &WorkspaceView,
+) -> Result<Run, String> {
+    if let Some(spec) = spec(id) {
+        return Ok(Run::Catalog(spec.id));
+    }
+    let profile = || {
+        let wanted = args
+            .profile
+            .clone()
+            .ok_or_else(|| format!("{id} needs args.profile"))?;
+        if ws.profiles().iter().any(|p| p.id == wanted) {
+            Ok(wanted)
+        } else {
+            Err(format!("no profile {}", wanted.as_str()))
+        }
+    };
+    let target = match id {
+        "tab.new_with" => Target::NewTab(profile()?),
+        "pane.split_with" => {
+            let orientation = match args.direction {
+                Some(SplitWay::Right) => Orientation::Horizontal,
+                Some(SplitWay::Down) => Orientation::Vertical,
+                None => return Err(format!("{id} needs args.direction: right or down")),
+            };
+            Target::Split(profile()?, orientation)
+        }
+        "pane.focus" => {
+            let pane = args.pane.ok_or_else(|| format!("{id} needs args.pane"))?;
+            if ws.tab_of(pane).is_none() {
+                return Err(format!("no pane {}", pane.get()));
+            }
+            Target::Pane(pane)
+        }
+        "tab.select" => {
+            let tab = args.tab.ok_or_else(|| format!("{id} needs args.tab"))?;
+            if ws.tab(tab).is_none() {
+                return Err(format!("no tab {}", tab.get()));
+            }
+            Target::Tab(tab)
+        }
+        "project.select" => {
+            let project = args
+                .project
+                .ok_or_else(|| format!("{id} needs args.project"))?;
+            if ws.project(project).is_none() {
+                return Err(format!("no project {}", project.get()));
+            }
+            Target::Project(project)
+        }
+        _ => {
+            return Err(format!(
+                "no command {id}: use a catalog id or one of {}",
+                ARGUMENT_COMMANDS.join(", ")
+            ));
+        }
+    };
+    Ok(Run::Target(target))
+}
+
+/// The keystroke a key name presses, in gpui notation (`ctrl-c`, `enter`,
+/// `shift-tab`). A key that would type a character is refused: characters
+/// go through `text`, as typing them does.
+pub(crate) fn parse_key(key: &str) -> Result<Keystroke, String> {
+    let keystroke = Keystroke::parse(key).map_err(|_| format!("not a key: {key}"))?;
+    let m = keystroke.modifiers;
+    let named = named_key(&keystroke.key).is_some();
+    if !named && !(m.control || m.alt || m.platform || m.function) {
+        return Err(format!("{key} types a character; send it with text"));
+    }
+    Ok(keystroke)
+}
+
+/// What the state dump reads from a pane's terminal view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalFacts {
+    /// Columns and rows of its last frame.
+    pub(crate) size: (u16, u16),
+    /// Its visible rows, when asked for.
+    pub(crate) rows: Option<Vec<String>>,
+}
+
+impl TerminalFacts {
+    pub(crate) fn of(frame: &Frame, with_text: bool) -> Self {
+        Self {
+            size: (frame.size.cols, frame.size.rows),
+            rows: with_text.then(|| (0..frame.lines.len()).map(|r| frame.line_text(r)).collect()),
+        }
+    }
+}
+
+/// The projects, tabs and panes as the window shows them. `keyboard` is the
+/// pane whose terminal has the keyboard; `terminal` reads a pane's view.
+pub(crate) fn workspace_state(
+    ws: &WorkspaceView,
+    keyboard: Option<PaneId>,
+    terminal: &dyn Fn(PaneId) -> Option<TerminalFacts>,
+) -> (Vec<ProjectState>, Vec<TabState>, Vec<PaneState>) {
+    let drawn: Vec<PaneId> = ws
+        .selected_tab()
+        .map(|tab| tab.rects().into_iter().map(|(p, _)| p).collect())
+        .unwrap_or_default();
+    let mut projects = Vec::new();
+    let mut tabs = Vec::new();
+    let mut panes = Vec::new();
+    for project in ws.projects() {
+        projects.push(ProjectState {
+            id: project.id,
+            name: project.name.clone(),
+            root: project.root.clone(),
+            folded: ws.is_folded(project.id),
+            tabs: project.tabs.clone(),
+        });
+        for tab in ws.tabs_of(project) {
+            let state = ws.tab_state(tab);
+            let ids = tab.layout.panes();
+            tabs.push(TabState {
+                id: tab.id,
+                project: tab.project,
+                name: tab.name.clone(),
+                dir: tab.dir.clone(),
+                branch: tab.branch.clone(),
+                worktree: tab.worktree.is_some(),
+                state: state.label().to_owned(),
+                mark: match ws.tab_mark(tab) {
+                    TabMark::Shell => "shell".to_owned(),
+                    TabMark::State(state) => state_key(state).to_owned(),
+                },
+                needs_you: state.needs_you(),
+                muted: tab.muted,
+                focused: tab.focused,
+                maximized: tab.maximized,
+                panes: ids.clone(),
+            });
+            for id in ids {
+                let pane = ws.pane(id);
+                let facts = terminal(id);
+                panes.push(PaneState {
+                    id,
+                    tab: tab.id,
+                    name: pane.name.clone(),
+                    profile: pane.profile.clone(),
+                    profile_id: pane.profile_id.as_str().to_owned(),
+                    tag: program_tag(&pane).to_owned(),
+                    state: pane.state.label().to_owned(),
+                    signal_lost: pane.signal_lost,
+                    running: pane.running,
+                    exited: pane.exited,
+                    exit_code: pane.exit_code,
+                    cwd: pane.cwd.clone(),
+                    focused: tab.focused == id,
+                    keyboard: keyboard == Some(id),
+                    visible: drawn.contains(&id),
+                    size: facts.as_ref().map(|f| f.size),
+                    rows: facts.and_then(|f| f.rows).map(VisibleRows::new),
+                });
+            }
+        }
+    }
+    (projects, tabs, panes)
+}
+
+/// A state as a snake case key, as `mark` carries it.
+fn state_key(state: AgentState) -> &'static str {
+    match state {
+        AgentState::NeedsYou => "needs_you",
+        AgentState::Error => "error",
+        AgentState::Done => "done",
+        AgentState::Working => "working",
+        AgentState::Idle => "idle",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yien_proto::frame::{Cell, CellFlags, Rgb, Size};
+    use yien_proto::{
+        LayoutChild, LayoutNode, NeedsReason, PaneInfo, ProfileId, ProfileInfo, ProjectId,
+        ProjectInfo, TabId, TabInfo, WorkspaceSnapshot,
+    };
+
+    fn pane_info(
+        id: u64,
+        tab: u64,
+        profile: &str,
+        name: &str,
+        state: yien_proto::AgentState,
+    ) -> PaneInfo {
+        PaneInfo {
+            id: PaneId::new(id),
+            tab: TabId::new(tab),
+            name: name.into(),
+            profile: profile.into(),
+            profile_id: ProfileId::new(profile),
+            title: None,
+            cwd: None,
+            state,
+            running: true,
+            exit_code: None,
+            session_id: None,
+            needs_you_since: None,
+            attention_since: None,
+            question: None,
+            signal_lost: false,
+            runs_session: true,
+        }
+    }
+
+    /// One project with a tab of a Claude pane beside a shell, and a second
+    /// tab with a shell alone.
+    fn workspace() -> WorkspaceView {
+        let split = LayoutNode::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![
+                LayoutChild {
+                    node: LayoutNode::Pane(PaneId::new(3)),
+                    flex: 0.5,
+                },
+                LayoutChild {
+                    node: LayoutNode::Pane(PaneId::new(4)),
+                    flex: 0.5,
+                },
+            ],
+        };
+        let tab = |id: u64, layout: LayoutNode, focused: u64| TabInfo {
+            id: TabId::new(id),
+            project: ProjectId::new(1),
+            name: format!("Tab {id}"),
+            dir: "C:/work".into(),
+            branch: Some("main".into()),
+            layout,
+            focused: PaneId::new(focused),
+            maximized: None,
+            muted: false,
+            worktree: None,
+        };
+        WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(1),
+                name: "work".into(),
+                root: "C:/work".into(),
+                tabs: vec![TabId::new(2), TabId::new(5)],
+                collapsed: false,
+            }],
+            tabs: vec![
+                tab(2, split, 4),
+                tab(5, LayoutNode::Pane(PaneId::new(6)), 6),
+            ],
+            panes: vec![
+                pane_info(
+                    3,
+                    2,
+                    "claude",
+                    "claude",
+                    yien_proto::AgentState::NeedsYou(NeedsReason::Permission),
+                ),
+                pane_info(4, 2, "shell", "pwsh", yien_proto::AgentState::Idle),
+                pane_info(6, 5, "shell", "pwsh", yien_proto::AgentState::Idle),
+            ],
+            active_tab: Some(TabId::new(2)),
+            profiles: vec![
+                ProfileInfo {
+                    id: ProfileId::new("shell"),
+                    name: "Shell".into(),
+                },
+                ProfileInfo {
+                    id: ProfileId::new("claude"),
+                    name: "Claude Code".into(),
+                },
+            ],
+            ..WorkspaceSnapshot::default()
+        })
+    }
+
+    fn frame(rows: &[&str], cols: u16) -> Frame {
+        let cell = |ch| Cell {
+            ch,
+            zerowidth: Vec::new(),
+            fg: Rgb::default(),
+            bg: Rgb::default(),
+            flags: CellFlags::EMPTY,
+        };
+        Frame {
+            size: Size {
+                cols,
+                rows: rows.len() as u16,
+            },
+            lines: rows
+                .iter()
+                .map(|r| {
+                    let mut line: Vec<Cell> = r.chars().map(cell).collect();
+                    line.resize(cols as usize, cell(' '));
+                    line
+                })
+                .collect(),
+            cursor: None,
+            display_offset: 0,
+            history_len: 0,
+            background: Rgb::default(),
+            cursor_color: Rgb::default(),
+            modes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn adr_21_state_lists_projects_tabs_and_panes_in_tab_bar_order() {
+        let ws = workspace();
+        let (projects, tabs, panes) = workspace_state(&ws, Some(PaneId::new(4)), &|_| None);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].tabs, vec![TabId::new(2), TabId::new(5)]);
+        let ids: Vec<u64> = tabs.iter().map(|t| t.id.get()).collect();
+        assert_eq!(ids, vec![2, 5]);
+        let ids: Vec<u64> = panes.iter().map(|p| p.id.get()).collect();
+        assert_eq!(ids, vec![3, 4, 6]);
+        assert_eq!(tabs[0].panes, vec![PaneId::new(3), PaneId::new(4)]);
+        assert_eq!(tabs[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn rn_01_a_tab_with_a_waiting_agent_is_marked_needs_you_and_a_tab_of_shells_has_no_mark() {
+        let ws = workspace();
+        let (_, tabs, _) = workspace_state(&ws, None, &|_| None);
+        assert_eq!(tabs[0].mark, "needs_you");
+        assert_eq!(tabs[0].state, "Needs you");
+        assert!(tabs[0].needs_you);
+        assert_eq!(tabs[1].mark, "shell");
+        assert_eq!(tabs[1].state, "Idle");
+        assert!(!tabs[1].needs_you);
+    }
+
+    #[test]
+    fn adr_21_panes_carry_their_head_focus_keyboard_and_visibility() {
+        let ws = workspace();
+        let (_, _, panes) = workspace_state(&ws, Some(PaneId::new(4)), &|_| None);
+        let claude = &panes[0];
+        assert_eq!(
+            (
+                claude.name.as_str(),
+                claude.profile_id.as_str(),
+                claude.tag.as_str()
+            ),
+            ("claude", "claude", "claude")
+        );
+        assert_eq!(claude.state, "Needs you");
+        assert!(!claude.focused && !claude.keyboard && claude.visible);
+        let shell = &panes[1];
+        assert_eq!(shell.tag, "pwsh");
+        assert!(shell.focused && shell.keyboard && shell.visible);
+        let hidden = &panes[2];
+        assert!(hidden.focused && !hidden.keyboard && !hidden.visible);
+    }
+
+    #[test]
+    fn adr_21_visible_rows_come_only_from_a_frame_and_only_when_asked() {
+        let ws = workspace();
+        let shown = frame(&["PS C:\\work> claude", ""], 30);
+        let with_text = |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, true));
+        let (_, _, panes) = workspace_state(&ws, None, &with_text);
+        assert_eq!(panes[1].size, Some((30, 2)));
+        assert_eq!(
+            panes[1].rows.as_ref().map(|r| r.as_slice().to_vec()),
+            Some(vec!["PS C:\\work> claude".to_owned(), String::new()])
+        );
+        assert!(panes[0].rows.is_none() && panes[0].size.is_none());
+
+        let without = |p: PaneId| (p == PaneId::new(4)).then(|| TerminalFacts::of(&shown, false));
+        let (_, _, panes) = workspace_state(&ws, None, &without);
+        assert_eq!(panes[1].size, Some((30, 2)));
+        assert!(panes[1].rows.is_none());
+    }
+
+    #[test]
+    fn adr_19_catalog_ids_run_their_catalog_entry() {
+        let ws = workspace();
+        for id in [
+            "pane.split_right",
+            "pane.close",
+            "tab.new_claude",
+            "terminal.copy",
+        ] {
+            assert_eq!(
+                resolve_command(id, &CommandArgs::default(), &ws),
+                Ok(Run::Catalog(spec(id).unwrap().id))
+            );
+        }
+    }
+
+    #[test]
+    fn adr_21_argument_commands_resolve_to_the_palette_rows() {
+        let ws = workspace();
+        let args = |f: fn(&mut CommandArgs)| {
+            let mut a = CommandArgs::default();
+            f(&mut a);
+            a
+        };
+        assert_eq!(
+            resolve_command(
+                "tab.new_with",
+                &args(|a| a.profile = Some(ProfileId::new("claude"))),
+                &ws
+            ),
+            Ok(Run::Target(Target::NewTab(ProfileId::new("claude"))))
+        );
+        assert_eq!(
+            resolve_command(
+                "pane.split_with",
+                &args(|a| {
+                    a.profile = Some(ProfileId::new("shell"));
+                    a.direction = Some(SplitWay::Down);
+                }),
+                &ws
+            ),
+            Ok(Run::Target(Target::Split(
+                ProfileId::new("shell"),
+                Orientation::Vertical
+            )))
+        );
+        assert_eq!(
+            resolve_command("pane.focus", &args(|a| a.pane = Some(PaneId::new(6))), &ws),
+            Ok(Run::Target(Target::Pane(PaneId::new(6))))
+        );
+        assert_eq!(
+            resolve_command("tab.select", &args(|a| a.tab = Some(TabId::new(5))), &ws),
+            Ok(Run::Target(Target::Tab(TabId::new(5))))
+        );
+        assert_eq!(
+            resolve_command(
+                "project.select",
+                &args(|a| a.project = Some(ProjectId::new(1))),
+                &ws
+            ),
+            Ok(Run::Target(Target::Project(ProjectId::new(1))))
+        );
+    }
+
+    #[test]
+    fn adr_21_unknown_ids_missing_args_and_unknown_things_are_refused() {
+        let ws = workspace();
+        let none = CommandArgs::default();
+        for id in ARGUMENT_COMMANDS {
+            assert!(spec(id).is_none(), "{id} must not shadow a catalog id");
+            assert!(resolve_command(id, &none, &ws).is_err(), "{id}");
+        }
+        assert!(resolve_command("disk.format", &none, &ws).is_err());
+        let unknown = CommandArgs {
+            profile: Some(ProfileId::new("nope")),
+            direction: Some(SplitWay::Right),
+            pane: Some(PaneId::new(99)),
+            tab: Some(TabId::new(99)),
+            project: Some(ProjectId::new(99)),
+        };
+        for id in ARGUMENT_COMMANDS {
+            assert!(resolve_command(id, &unknown, &ws).is_err(), "{id}");
+        }
+        let no_direction = CommandArgs {
+            profile: Some(ProfileId::new("shell")),
+            ..CommandArgs::default()
+        };
+        assert!(resolve_command("pane.split_with", &no_direction, &ws).is_err());
+    }
+
+    #[test]
+    fn adr_21_keys_parse_in_gpui_notation_and_characters_are_refused() {
+        let ctrl_c = parse_key("ctrl-c").unwrap();
+        assert!(ctrl_c.modifiers.control);
+        assert_eq!(ctrl_c.key, "c");
+        for named in [
+            "enter",
+            "escape",
+            "up",
+            "f6",
+            "shift-tab",
+            "alt-left",
+            "backspace",
+        ] {
+            assert!(parse_key(named).is_ok(), "{named}");
+        }
+        for typed in ["a", "space", "shift-a", "1", "-"] {
+            assert!(parse_key(typed).is_err(), "{typed}");
+        }
+    }
+}

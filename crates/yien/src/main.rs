@@ -136,6 +136,7 @@ fn main() -> ExitCode {
         settings,
         files,
         updates,
+        None,
         move || {
             tracing::info!("yien exiting");
             if let Some(watcher) = &settings_watcher {

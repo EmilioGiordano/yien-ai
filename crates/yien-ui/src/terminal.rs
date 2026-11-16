@@ -19,6 +19,7 @@ use crate::bridge::{Backlog, Link, Sent, deliver, pane_busy};
 use crate::grid::{
     self, CursorPaint, PastePlan, Pointer, PromptKey, RightClick, Underline, WheelAction,
 };
+use crate::test_control::TerminalFacts;
 use crate::theme::Theme;
 
 /// The terminal font size when the settings name none.
@@ -128,6 +129,12 @@ impl TerminalPane {
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
         self.frame = Some(frame);
         cx.notify();
+    }
+
+    /// What the state dump of the test control reads: the last frame's
+    /// size, and its rows when `with_text`. `None` before the first frame.
+    pub(crate) fn facts(&self, with_text: bool) -> Option<TerminalFacts> {
+        self.frame.as_ref().map(|f| TerminalFacts::of(f, with_text))
     }
 
     /// Text the layout or the IME typed, as the input handler delivers it.

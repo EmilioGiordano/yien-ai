@@ -32,6 +32,7 @@ mod shell;
 mod sidebars;
 mod tab_order;
 mod terminal;
+mod test_control;
 mod theme;
 mod title_bar;
 mod tray;
@@ -51,6 +52,7 @@ pub use bridge::{CoreClient, Refused};
 pub use files::{Files, FilesHost, ListDone, OpenDone, SearchDone};
 pub use model::{AgentState, FolderTarget, PaneView, ProjectView, TabView, WorkspaceView};
 pub use settings::{ConfigUpdate, Settings, SettingsHost};
+pub use test_control::{TestCall, TestControl};
 pub use update::{UpdateHost, UpdateOffer, Updates};
 
 use crate::bridge::Link;
@@ -83,6 +85,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// `updates` brings each newer YIEN the update check finds, and downloads
 /// and installs one when the user asks.
 ///
+/// `test_control` answers a test script's requests (ADR-21); `None` unless
+/// YIEN was started with `--test-control`.
+///
 /// `on_quit` runs once when the app quits, including at Windows logoff or
 /// shutdown, where gpui ends the process without returning from `run`.
 ///
@@ -93,8 +98,9 @@ pub fn commands() -> Vec<(&'static str, &'static str)> {
 /// # fn files() -> yien_ui::Files { unimplemented!() }
 /// # fn updates() -> yien_ui::Updates { unimplemented!() }
 /// let (client, events) = connect();
-/// yien_ui::run(client, events, os(), settings(), files(), updates(), || println!("bye"));
+/// yien_ui::run(client, events, os(), settings(), files(), updates(), None, || println!("bye"));
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     client: Box<dyn CoreClient>,
     events: mpsc::Receiver<CoreMsg>,
@@ -102,6 +108,7 @@ pub fn run(
     settings: Settings,
     files: Files,
     updates: Updates,
+    test_control: Option<TestControl>,
     on_quit: impl FnOnce() + 'static,
 ) {
     gpui_kit::application()
@@ -133,7 +140,16 @@ pub fn run(
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
                 cx.new(|cx| {
                     Shell::new(
-                        link, events, attention, settings, files, updates, base_keys, window, cx,
+                        link,
+                        events,
+                        attention,
+                        settings,
+                        files,
+                        updates,
+                        test_control,
+                        base_keys,
+                        window,
+                        cx,
                     )
                 })
             });

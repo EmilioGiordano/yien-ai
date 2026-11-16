@@ -45,6 +45,7 @@ use crate::region::{self, DividerKey, Modality, Region};
 use crate::settings::{Settings, SettingsHost, SettingsModel, profiles_notice};
 use crate::sidebars::{self, Bar, Drawn};
 use crate::terminal::{TerminalEvent, TerminalPane};
+use crate::test_control::TestControl;
 use crate::theme::{Theme, ThemeKind};
 use crate::title_bar::{
     PILL_LEAST, PILL_SHARE, PILL_WIDTH, ROW_RIGHT_PADDING, TitleLayout, centring_margins,
@@ -65,6 +66,7 @@ mod status;
 mod tab_controls;
 mod tab_drag;
 mod tab_menu;
+mod test_control;
 mod tray;
 mod update;
 mod worktrees;
@@ -273,6 +275,7 @@ impl Shell {
         settings: Settings,
         files: Files,
         updates: Updates,
+        test_control: Option<TestControl>,
         base_keys: Vec<KeyBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -333,6 +336,9 @@ impl Shell {
         })
         .detach();
         Self::listen_to_settings(settings.updates, window, cx);
+        if let Some(control) = test_control {
+            Self::listen_to_test_control(control, window, cx);
+        }
         let updates = Self::update_panel(updates, window, cx);
         let appearance = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.apply_look(window, cx);
