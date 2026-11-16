@@ -73,7 +73,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:CurrentRun = $null
 trap {
+    if ($script:CurrentRun -and (Get-Command Stop-YienRun -ErrorAction SilentlyContinue)) {
+        Stop-YienRun $script:CurrentRun.Root
+    }
     Write-Host "perf-budget failed: $_"
     exit 10
 }
@@ -120,6 +124,7 @@ function UtcMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 function Stop-YienRun([string]$Root) {
     $stop = Join-Path $PSScriptRoot 'stop.ps1'
     try { & $stop -Root $Root } catch { Write-Warning "stop.ps1 failed for ${Root}: $_" }
+    $script:CurrentRun = $null
 }
 
 <# Starts YIEN with a throwaway data folder and a fresh test control pipe.
@@ -158,12 +163,13 @@ function Start-ThrowawayRun([string]$Tag) {
         mock_port = $null
     }
     Write-Utf8 (Join-Path $root 'run.json') ($run | ConvertTo-Json)
-    return [pscustomobject]@{
+    $script:CurrentRun = [pscustomobject]@{
         Name      = $name
         Pid       = $yien.Id
         Root      = $root
         Stopwatch = $sw
     }
+    return $script:CurrentRun
 }
 
 function Get-KeyboardPane($State) {
