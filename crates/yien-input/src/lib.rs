@@ -210,7 +210,22 @@ pub fn encode_in(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
 }
 
 /// The kitty keyboard protocol flag "disambiguate escape codes" (bit 0).
-pub const KITTY_DISAMBIGUATE: u8 = 1;
+pub const KITTY_DISAMBIGUATE: u8 = 0b1;
+/// The kitty keyboard protocol flag "report event types" (bit 1).
+pub const KITTY_REPORT_EVENTS: u8 = 0b10;
+/// The kitty keyboard protocol flag "report alternate keys" (bit 2).
+pub const KITTY_ALTERNATE_KEYS: u8 = 0b100;
+/// The kitty keyboard protocol flag "report all keys as escape codes"
+/// (bit 3); the protocol says it implies disambiguation.
+pub const KITTY_ALL_AS_ESCAPE: u8 = 0b1000;
+/// The kitty keyboard protocol flag "report associated text" (bit 4).
+pub const KITTY_ASSOCIATED_TEXT: u8 = 0b10000;
+
+/// Whether the program asked for escape codes that need no disambiguation:
+/// the disambiguate flag, or report-all, which implies it.
+fn kitty_disambiguated(flags: u8) -> bool {
+    flags & (KITTY_DISAMBIGUATE | KITTY_ALL_AS_ESCAPE) != 0
+}
 
 /// Encodings a program needs that no mode it sets announces. The caller
 /// knows which program runs and sets them; every quirk is off by default.
@@ -249,10 +264,13 @@ pub struct KeyModes {
 }
 
 /// Like [`encode_in`], but the keys the legacy bytes lose keep their
-/// modifiers where the program can see them. Shift+Enter is `CSI 13;2u` when
-/// the kitty protocol asks to disambiguate. Otherwise, with win32-input-mode
-/// on, Shift+Enter, Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as
-/// Windows Terminal sends them. Ctrl+Delete is `ESC d` when the quirks say
+/// modifiers where the program can see them. With the kitty protocol asking
+/// to disambiguate (or report all keys, which implies it), Esc and every
+/// Ctrl/Alt combination on an ASCII key go as `CSI u` instead of their
+/// legacy byte, Enter, Tab and Backspace keep theirs, and Shift+Enter is
+/// `CSI 13;2u`. Otherwise, with win32-input-mode on, Shift+Enter,
+/// Ctrl+Backspace and Ctrl+Delete go as Win32 key events, as Windows
+/// Terminal sends them. Ctrl+Delete is `ESC d` when the quirks say
 /// so. Every other key, and these keys in any other case, are encoded
 /// exactly as [`encode_in`] does.
 ///
@@ -263,14 +281,15 @@ pub struct KeyModes {
 /// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, kitty), Some(b"\x1b[13;2u".to_vec()));
 /// assert_eq!(encode_with(&Key::Enter, Mods::SHIFT, KeyModes::default()), Some(b"\r".to_vec()));
 /// assert_eq!(encode_with(&Key::Enter, Mods::NONE, kitty), Some(b"\r".to_vec()));
+/// assert_eq!(encode_with(&Key::Escape, Mods::NONE, kitty), Some(b"\x1b[27u".to_vec()));
+/// assert_eq!(encode_with(&Key::Char('c'), Mods::CTRL, kitty), Some(b"\x1b[99;5u".to_vec()));
 /// let quirks = KeyQuirks { ctrl_delete_as_meta_d: true };
 /// let meta_d = KeyModes { quirks, ..KeyModes::default() };
 /// assert_eq!(encode_with(&Key::Delete, Mods::CTRL, meta_d), Some(b"\x1bd".to_vec()));
 /// ```
 pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
-    // Claude Code drops the Shift of a Win32 Enter; OpenConsole passes CSI 13;2u verbatim.
-    if *key == Key::Enter && mods == Mods::SHIFT && modes.kitty_flags & KITTY_DISAMBIGUATE != 0 {
-        return Some(b"\x1b[13;2u".to_vec());
+    if let Some(bytes) = kitty_encode(key, mods, modes.kitty_flags) {
+        return Some(bytes);
     }
     if *key == Key::Delete && mods == Mods::CTRL && modes.quirks.ctrl_delete_as_meta_d {
         return Some(vec![0x1b, b'd']);
@@ -281,6 +300,49 @@ pub fn encode_with(key: &Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
         return Some(win32::press(&event));
     }
     encode_in(key, mods, modes.app_cursor)
+}
+
+/// The escape codes the kitty keyboard protocol asks for once the program
+/// asked for disambiguation (or report-all, which implies it); `None`
+/// leaves the byte stream exactly as legacy.
+fn kitty_encode(key: &Key, mods: Mods, flags: u8) -> Option<Vec<u8>> {
+    if !kitty_disambiguated(flags) {
+        return None;
+    }
+    // Enter, Tab and Backspace keep their legacy bytes so the shell stays
+    // reachable; Shift+Enter is the exception the agent CLIs read.
+    match key {
+        Key::Escape => Some(csi_u(27, mods, None)),
+        Key::Enter => (mods == Mods::SHIFT).then(|| csi_u(13, mods, None)),
+        Key::Char(c) if (' '..='~').contains(c) && (mods.ctrl || mods.alt) => {
+            // The key code is the unshifted codepoint. The shifted key is
+            // reported only when the program asked for alternate keys and
+            // it is knowable: an ASCII letter, where shift is the case of
+            // the letter. Digits and symbols shift per layout, so their
+            // shifted key is left out.
+            let code = u32::from(c.to_ascii_lowercase());
+            let shifted =
+                (mods.shift && flags & KITTY_ALTERNATE_KEYS != 0 && c.is_ascii_alphabetic())
+                    .then(|| u32::from(c.to_ascii_uppercase()));
+            Some(csi_u(code, mods, shifted))
+        }
+        _ => None,
+    }
+}
+
+/// `CSI code[:shifted][;modifiers]u`, modifiers as 1 + the kitty bit field.
+fn csi_u(code: u32, mods: Mods, shifted: Option<u32>) -> Vec<u8> {
+    let mut out = format!("\x1b[{code}");
+    if let Some(shifted) = shifted {
+        out.push(':');
+        out.push_str(&shifted.to_string());
+    }
+    if mods != Mods::NONE {
+        out.push(';');
+        out.push_str(&mods.csi_param().to_string());
+    }
+    out.push('u');
+    out.into_bytes()
 }
 
 /// The Win32 event for a key the legacy bytes cannot carry, as Windows
@@ -444,7 +506,13 @@ mod tests {
     fn all_modes() -> Vec<KeyModes> {
         let mut out = Vec::new();
         for win32_input in [false, true] {
-            for kitty_flags in [0, KITTY_DISAMBIGUATE, 0b1_1111, 0b0_1010] {
+            for kitty_flags in [
+                0,
+                KITTY_DISAMBIGUATE,
+                0b1_1111,
+                0b0_0110,
+                KITTY_ALL_AS_ESCAPE,
+            ] {
                 for app_cursor in [false, true] {
                     out.push(KeyModes {
                         app_cursor,
@@ -495,7 +563,13 @@ mod tests {
     fn rf_age_02_kitty_disambiguation_wins_over_win32_input_mode() {
         // Claude Code under the bundled OpenConsole sets both, and only CSI u
         // keeps its Shift.
-        for kitty_flags in [KITTY_DISAMBIGUATE, 0b1_1111, 0b0_0101] {
+        for kitty_flags in [
+            KITTY_DISAMBIGUATE,
+            0b1_1111,
+            0b0_0101,
+            KITTY_ALL_AS_ESCAPE,
+            0b0_1010,
+        ] {
             for app_cursor in [false, true] {
                 let both = KeyModes {
                     app_cursor,
@@ -513,8 +587,9 @@ mod tests {
 
     #[test]
     fn rf_age_02_kitty_flags_without_disambiguation_keep_the_win32_event() {
+        // Report event types | alternate keys: no disambiguation.
         let other_flags = KeyModes {
-            kitty_flags: 0b0_1010,
+            kitty_flags: 0b0_0110,
             ..WIN32
         };
         assert_eq!(
@@ -587,7 +662,8 @@ mod tests {
             b"\r"
         );
         let no_disambiguation = KeyModes {
-            kitty_flags: 0b0_1010,
+            // Report event types | alternate keys: no disambiguation.
+            kitty_flags: 0b0_0110,
             ..KeyModes::default()
         };
         assert_eq!(
@@ -651,6 +727,17 @@ mod tests {
                     let word_key = matches!(key, Key::Backspace | Key::Delete);
                     if modes.win32_input && word_key && mods == Mods::CTRL {
                         continue;
+                    }
+                    // Disambiguation rewires Esc and Ctrl/Alt combos on purpose.
+                    if kitty_disambiguated(modes.kitty_flags) {
+                        let rewired = match key {
+                            Key::Escape => true,
+                            Key::Char(_) => mods.ctrl || mods.alt,
+                            _ => false,
+                        };
+                        if rewired {
+                            continue;
+                        }
                     }
                     assert_eq!(
                         encode_with(key, mods, modes),
@@ -736,5 +823,213 @@ mod tests {
         assert_eq!(enc(Key::F(5), Mods::NONE), b"\x1b[15~");
         assert_eq!(enc(Key::F(12), Mods::NONE), b"\x1b[23~");
         assert_eq!(encode(&Key::F(20), Mods::NONE), None);
+    }
+
+    const KITTY_ALL: KeyModes = KeyModes {
+        app_cursor: false,
+        win32_input: false,
+        kitty_flags: 0b1_1111,
+        quirks: KeyQuirks {
+            ctrl_delete_as_meta_d: false,
+        },
+    };
+    const KITTY_ALTERNATE: KeyModes = KeyModes {
+        kitty_flags: KITTY_DISAMBIGUATE | KITTY_ALTERNATE_KEYS,
+        ..KITTY
+    };
+
+    #[test]
+    fn rf_age_02_kitty_disambiguate_encodes_escape_as_csi_u() {
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        for flags in [KITTY_DISAMBIGUATE, 0b1_1111, KITTY_ALL_AS_ESCAPE, 0b0_1010] {
+            let modes = KeyModes {
+                kitty_flags: flags,
+                ..KITTY
+            };
+            assert_eq!(
+                encode_with(&Key::Escape, Mods::NONE, modes).unwrap(),
+                b"\x1b[27u",
+                "{modes:?}"
+            );
+            assert_eq!(
+                encode_with(&Key::Escape, Mods::CTRL, modes).unwrap(),
+                b"\x1b[27;5u",
+                "{modes:?}"
+            );
+            assert_eq!(
+                encode_with(&Key::Escape, alt, modes).unwrap(),
+                b"\x1b[27;3u",
+                "{modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_age_02_kitty_disambiguate_encodes_ctrl_and_alt_chars_as_csi_u() {
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        let ctrl_alt = Mods {
+            ctrl: true,
+            alt: true,
+            shift: false,
+        };
+        let ctrl_shift = Mods {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        for flags in [KITTY_DISAMBIGUATE, KITTY_ALL_AS_ESCAPE] {
+            let modes = KeyModes {
+                kitty_flags: flags,
+                ..KITTY
+            };
+            assert_eq!(
+                encode_with(&Key::Char('c'), Mods::CTRL, modes).unwrap(),
+                b"\x1b[99;5u",
+                "{modes:?}"
+            );
+            // The codepoint is the unshifted, lower-case one.
+            assert_eq!(
+                encode_with(&Key::Char('C'), ctrl_shift, modes).unwrap(),
+                b"\x1b[99;6u",
+                "{modes:?}"
+            );
+            assert_eq!(
+                encode_with(&Key::Char('c'), alt, modes).unwrap(),
+                b"\x1b[99;3u",
+                "{modes:?}"
+            );
+            assert_eq!(
+                encode_with(&Key::Char('c'), ctrl_alt, modes).unwrap(),
+                b"\x1b[99;7u",
+                "{modes:?}"
+            );
+            // ctrl+? is DEL; under disambiguation it is CSI 63;5u.
+            assert_eq!(
+                encode_with(&Key::Char('?'), Mods::CTRL, modes).unwrap(),
+                b"\x1b[63;5u",
+                "{modes:?}"
+            );
+            // ctrl+space is CSI 32;5u, not the NULL byte.
+            assert_eq!(
+                encode_with(&Key::Char(' '), Mods::CTRL, modes).unwrap(),
+                b"\x1b[32;5u",
+                "{modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rf_age_02_kitty_disambiguate_keeps_text_and_exceptions_legacy() {
+        let ctrl_alt_shift = Mods {
+            ctrl: true,
+            alt: true,
+            shift: true,
+        };
+        for modes in [KITTY, KITTY_ALL] {
+            for key in [Key::Enter, Key::Tab, Key::Backspace] {
+                for mods in [Mods::NONE, Mods::CTRL, Mods::SHIFT, ctrl_alt_shift] {
+                    // Outside the Shift+Enter exception, the byte stream is
+                    // exactly what legacy sends.
+                    if key == Key::Enter && mods == Mods::SHIFT {
+                        continue;
+                    }
+                    assert_eq!(
+                        encode_with(&key, mods, modes),
+                        encode_in(&key, mods, modes.app_cursor),
+                        "{key:?} {mods:?} in {modes:?}"
+                    );
+                }
+            }
+            // Plain and shifted letters are text.
+            assert_eq!(
+                encode_with(&Key::Char('a'), Mods::NONE, modes).unwrap(),
+                b"a"
+            );
+            assert_eq!(
+                encode_with(&Key::Char('A'), Mods::SHIFT, modes).unwrap(),
+                b"A"
+            );
+            // Shift+Enter stays CSI 13;2u.
+            assert_eq!(
+                encode_with(&Key::Enter, Mods::SHIFT, modes).unwrap(),
+                b"\x1b[13;2u"
+            );
+        }
+        // Report all keys on Shift+Enter is its canonical CSI u form.
+        let report_all = KeyModes {
+            kitty_flags: KITTY_ALL_AS_ESCAPE,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_with(&Key::Enter, Mods::SHIFT, report_all).unwrap(),
+            b"\x1b[13;2u"
+        );
+    }
+
+    #[test]
+    fn rf_age_02_report_alternate_keys_adds_the_shifted_key_for_ascii_letters() {
+        let ctrl_shift = Mods {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        // With alternate keys: the shifted key follows a colon.
+        assert_eq!(
+            encode_with(&Key::Char('c'), ctrl_shift, KITTY_ALTERNATE).unwrap(),
+            b"\x1b[99:67;6u"
+        );
+        assert_eq!(
+            encode_with(&Key::Escape, Mods::NONE, KITTY_ALTERNATE).unwrap(),
+            b"\x1b[27u"
+        );
+        // Without the flag: no shifted key.
+        assert_eq!(
+            encode_with(&Key::Char('c'), ctrl_shift, KITTY).unwrap(),
+            b"\x1b[99;6u"
+        );
+        // Digits shift per layout, so their shifted key is left out even
+        // with the flag.
+        assert_eq!(
+            encode_with(&Key::Char('4'), ctrl_shift, KITTY_ALTERNATE).unwrap(),
+            b"\x1b[52;6u"
+        );
+    }
+
+    #[test]
+    fn rf_age_02_kitty_disambiguate_leaves_non_ascii_chars_as_utf8() {
+        for modes in [KITTY, KITTY_ALL] {
+            assert_eq!(
+                encode_with(&Key::Char('é'), Mods::CTRL, modes).unwrap(),
+                encode_in(&Key::Char('é'), Mods::CTRL, modes.app_cursor).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn rf_age_02_report_all_implies_disambiguation() {
+        // Flag 3 alone turns Esc into CSI 27u (the protocol implies
+        // disambiguation); the same holds for report events | report-all.
+        for flags in [KITTY_ALL_AS_ESCAPE, 0b0_1010] {
+            let modes = KeyModes {
+                kitty_flags: flags,
+                ..KeyModes::default()
+            };
+            assert_eq!(
+                encode_with(&Key::Escape, Mods::NONE, modes).unwrap(),
+                b"\x1b[27u",
+                "{modes:?}"
+            );
+            assert_eq!(
+                encode_with(&Key::Char('c'), Mods::CTRL, modes).unwrap(),
+                b"\x1b[99;5u",
+                "{modes:?}"
+            );
+        }
     }
 }
