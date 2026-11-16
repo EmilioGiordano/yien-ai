@@ -121,6 +121,8 @@ A PR is ready to merge only when all of these hold:
 
 A criterion that does not apply (a docs-only branch, no workspace yet, no UI yet) counts as met when the PR says so and why.
 
+The batch `docs/roadmap-<batch>` PR is ready to merge when GitHub CI is green on the three systems; the other criteria do not apply to it.
+
 ## Integration and merge
 
 Ready branches are tested together before any reaches `main`.
