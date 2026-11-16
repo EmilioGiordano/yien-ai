@@ -162,7 +162,7 @@ Every feature is checked in the running app, driven by tools, not only by unit t
 - Copy the release exe to the slot's `run/` folder before starting it. If the file is locked, report it; never kill a process you did not start.
 - What still needs a human (a real screen reader, feel, look) goes in the PR as a short checklist.
 
-No branch is handed over without a PASS, including docs-only or comment-only branches. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
+No branch is handed over without a PASS, including docs-only or comment-only branches. The one exception is the batch `docs/roadmap-<batch>` PR: it only summarises decisions already reviewed on their branches, so it needs no reviewer PASS and merges when CI is green on the three systems. Findings are fixed, argued against with evidence, or recorded as deliberate; never skipped.
 
 `TASK-*.md` and `REPORT-*.md` are gitignored and never committed.
 
