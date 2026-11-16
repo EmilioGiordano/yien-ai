@@ -368,7 +368,16 @@ pub(crate) fn key_bytes(press: &KeyPress<'_>, modes: &Modes) -> Option<Vec<u8>> 
             })
             .unwrap_or(base)
     };
-    yien_input::encode_in(&Key::Char(c), mods, app_cursor)
+    yien_input::encode_with(
+        &Key::Char(c),
+        mods,
+        KeyModes {
+            app_cursor,
+            win32_input: modes.win32_input,
+            kitty_flags: modes.kitty_keyboard,
+            quirks: press.quirks,
+        },
+    )
 }
 
 /// What a wheel turn does in a pane.
@@ -853,6 +862,61 @@ mod tests {
     }
 
     #[test]
+    fn rf_age_02_ctrl_and_alt_combinations_follow_the_pane_s_kitty_flags() {
+        // OpenCode 2.3.0 pushes kitty flags 5 (disambiguate | alternate
+        // keys) on the alternate screen; it ignores legacy Ctrl+C mid-turn.
+        let kitty = Modes {
+            kitty_keyboard: 5,
+            ..modes()
+        };
+        assert_eq!(
+            key_bytes(&press("escape", None, Mods::NONE), &kitty).unwrap(),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            key_bytes(&press("c", None, Mods::CTRL), &kitty).unwrap(),
+            b"\x1b[99;5u"
+        );
+        assert_eq!(
+            key_bytes(&press("b", Some("b"), ALT), &kitty).unwrap(),
+            b"\x1b[98;3u"
+        );
+        // Ctrl+Shift carries the shifted key when the flag asks for it.
+        let shift_ctrl = press(
+            "c",
+            None,
+            Mods {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        );
+        assert_eq!(key_bytes(&shift_ctrl, &kitty).unwrap(), b"\x1b[99:67;6u");
+        // An AltGr chord that produced text is text, not a key, even here.
+        let mut altgr = press(
+            "q",
+            Some("@"),
+            Mods {
+                ctrl: true,
+                alt: true,
+                shift: false,
+            },
+        );
+        altgr.prefer_text = true;
+        assert_eq!(key_bytes(&altgr, &kitty), None);
+        // Legacy encoding is untouched when the program set no flags.
+        let legacy = modes();
+        assert_eq!(
+            key_bytes(&press("escape", None, Mods::NONE), &legacy).unwrap(),
+            vec![0x1b]
+        );
+        assert_eq!(
+            key_bytes(&press("c", None, Mods::CTRL), &legacy).unwrap(),
+            vec![0x03]
+        );
+    }
+
+    #[test]
     fn rf_pan_15_altgr_is_text_not_ctrl_alt() {
         let mut altgr = press(
             "q",
@@ -899,8 +963,9 @@ mod tests {
         };
         assert_eq!(key_bytes(&shift_enter, &both).unwrap(), b"\x1b[13;2u");
         // Flags without disambiguation leave the Win32 event alone.
+        // (Report event types | alternate keys: no disambiguation.)
         let other_flags = Modes {
-            kitty_keyboard: 0b0_1010,
+            kitty_keyboard: 0b0_0110,
             ..conpty
         };
         assert_eq!(
