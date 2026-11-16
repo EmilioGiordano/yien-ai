@@ -49,10 +49,11 @@ and the reply is synthetic.
    `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, `DISABLE_AUTOUPDATER=1`,
    `DISABLE_TELEMETRY=1`, `DISABLE_ERROR_REPORTING=1`,
    `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `YIEN_AGENT_HOME` under
-   the root; `--env-remove` the `CLAUDECODE`, `CLAUDE_CODE_*` markers. Trust
-   the work folder in `.claude.json` (projects map) unless the case is the
-   trust screen itself. For the permission case, launch with
-   `--permission-mode manual`.
+   the root; the `CLAUDECODE`, `CLAUDE_CODE_*` markers never need passing,
+   the tool drops them. Trust the work folder in `.claude.json` (projects
+   map) unless the case is the trust screen itself. For the permission
+   case, launch with `--permission-mode manual`. Pass the variables with
+   `--env` (see below), never through a parent shell.
 
    **OpenCode** — a fresh `HOME`/`USERPROFILE` and `XDG_*` under the root, a
    project-level `opencode.json` with an `oai` provider on the built-in
@@ -71,15 +72,23 @@ and the reply is synthetic.
 
    ```
    cargo xtask capture --steps <case>.steps --out <case>.bin --cwd <work> \
+       --env ANTHROPIC_API_KEY=... --env ANTHROPIC_BASE_URL=http://127.0.0.1:<port> \
+       --env CLAUDE_CONFIG_DIR=<root>/claude ... \
        [--size 120x40] [--env KEY=VALUE]... [--env-remove KEY]... \
        -- <cli> [args...]
    ```
 
-   Claude steps are run with the env of step 2; OpenCode with `HOME` et al.
-   from step 2. The `.bin` is written only on success; a failure keeps a
+   `--cwd` is required, and the child does not inherit the parent
+   environment: anything matching `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_*`,
+   `OPENCODE_*`, `*_API_KEY` or `*_TOKEN` is dropped, as are `HOME`,
+   `USERPROFILE`, `CLAUDE_CONFIG_DIR` and `XDG_*` (they would point at a
+   real profile). Those may come only from `--env`, and then they must be
+   absolute paths inside `--cwd` or the slot in `.yien-slot`; anything
+   else is refused. Pass every throwaway variable with `--env`, not with a
+   parent shell. The `.bin` is written only on success; a failure keeps a
    `.partial` next to it for inspection.
-4. Check the records: `python -c "re.findall(rb'\\x1b\\]7501;[^\\x07]*',
-   open('<case>.bin','rb').read())"` and update the tests in
+4. Check the records: `python -c "import re,sys; print(re.findall(rb'\\x1b\\]7501;[^\\x07]*', open(sys.argv[1],'rb').read()))" <case>.bin`
+   and update the tests in
    `crates/yien-core/src/status_replay.rs` if a state changed on purpose.
    Record new failures as findings; do not change product behaviour to match
    a fixture.
