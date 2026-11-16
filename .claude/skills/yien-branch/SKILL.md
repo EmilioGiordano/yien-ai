@@ -40,7 +40,7 @@ Spawn `implementer` with a fresh context. Give it the worktree path, the branch 
 
 1. Spawn `quality-reviewer` with the worktree path and the TASK path, a fresh context and none of the implementer's reasoning.
 2. Before relaying findings, sanity-check them. A finding that contradicts the plan is noted, not obeyed. A finding that turns out wrong goes into the reviewer's "Known false positives".
-3. On `FAIL`, send the findings to the implementer to fix, then send the fix commits back to review. Every FAIL needs a later PASS.
+3. On `FAIL`, send the findings to the implementer to fix, then send the fix commits back to review. Every FAIL needs a later PASS. A Low fix of one or two lines that touches no behaviour covered by another finding needs no new round: read its diff and run fmt, clippy and the touched crate's tests through `scripts/cargo.sh` yourself. A Medium or higher finding, or a fix that touches logic, always goes back to review.
 4. Repeat until PASS; there is no round limit. When the reviewer calls a problem a design problem, redesign before patching again. Stop and ask Emilio only when a finding needs a decision AGENTS.md reserves for him.
 
 When the review reports coverage the implementer cannot add alone, spawn `test-engineer` with the worktree path, then have the implementer commit its tests.
