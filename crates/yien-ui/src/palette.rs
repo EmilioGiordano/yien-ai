@@ -348,7 +348,7 @@ pub(crate) fn command_entries(
 /// deeper; then the projects. A pane row names its project, tab and folder,
 /// so two panes running the same program can be told apart when filtered;
 /// a name two panes of one tab share gets the pane's place in it, `(2)`.
-/// Each row shows its agent state, red when it needs you (RN-01).
+/// Each row shows its agent state, red when it needs you or failed (RN-01).
 pub(crate) fn switcher_entries(ws: &WorkspaceView) -> Vec<Entry> {
     let mut entries = Vec::new();
     for project in ws.projects() {
