@@ -2,6 +2,8 @@
 //! binary hands over, and the pure parts of answering them — the state dump,
 //! which command an id runs, which key a name presses.
 
+use std::time::Instant;
+
 use gpui_kit::Keystroke;
 use tokio::sync::mpsc;
 use yien_proto::frame::Frame;
@@ -23,6 +25,7 @@ use crate::pane_head::program_tag;
 /// let call = yien_ui::TestCall {
 ///     request: yien_proto::test_control::Request::State { text: false },
 ///     reply,
+///     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
 /// };
 /// let _ = call.reply.send(yien_proto::test_control::Reply::done());
 /// assert!(answer.recv().unwrap().ok);
@@ -33,6 +36,34 @@ pub struct TestCall {
     pub request: Request,
     /// Where the window sends its one reply.
     pub reply: std::sync::mpsc::Sender<Reply>,
+    /// After this the pipe has stopped waiting, so the window must not act:
+    /// a script that retries would otherwise press a key twice.
+    pub deadline: Instant,
+}
+
+impl TestCall {
+    /// Whether the call's deadline has passed at `now`.
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    /// let (reply, _answer) = std::sync::mpsc::channel();
+    /// let now = Instant::now();
+    /// let call = yien_ui::TestCall {
+    ///     request: yien_proto::test_control::Request::State { text: false },
+    ///     reply,
+    ///     deadline: now,
+    /// };
+    /// assert!(call.expired(now));
+    /// assert!(!call.expired(now - Duration::from_millis(1)));
+    /// ```
+    pub fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
+/// The reply to a call that came after its deadline: nothing was done.
+pub(crate) fn expired_reply() -> Reply {
+    Reply::error("expired: the request reached the window after its deadline and was not run")
 }
 
 /// The requests the window answers while `--test-control` is on.
@@ -544,6 +575,26 @@ mod tests {
             ..CommandArgs::default()
         };
         assert!(resolve_command("pane.split_with", &no_direction, &ws).is_err());
+    }
+
+    #[test]
+    fn adr_21_an_expired_call_is_refused_and_a_live_one_is_not() {
+        let (reply, _answer) = std::sync::mpsc::channel();
+        let now = Instant::now();
+        let call = TestCall {
+            request: Request::Key {
+                pane: None,
+                key: "ctrl-c".into(),
+            },
+            reply,
+            deadline: now + std::time::Duration::from_millis(50),
+        };
+        assert!(!call.expired(now));
+        assert!(call.expired(call.deadline));
+        assert!(call.expired(now + std::time::Duration::from_secs(1)));
+        let refused = expired_reply();
+        assert!(!refused.ok);
+        assert!(refused.error.unwrap().starts_with("expired"));
     }
 
     #[test]

@@ -3,6 +3,8 @@
 //! runs them, text as the input handler delivers it, keys dispatched as if
 //! pressed.
 
+use std::time::Instant;
+
 use gpui_kit::*;
 use yien_proto::PaneId;
 use yien_proto::test_control::{Reply, Request, TEST_CONTROL_VERSION, UiState, WindowState};
@@ -10,7 +12,9 @@ use yien_proto::test_control::{Reply, Request, TEST_CONTROL_VERSION, UiState, Wi
 use super::Shell;
 use crate::catalog::spec;
 use crate::region::Region;
-use crate::test_control::{Run, TestControl, parse_key, resolve_command, workspace_state};
+use crate::test_control::{
+    Run, TestControl, expired_reply, parse_key, resolve_command, workspace_state,
+};
 
 impl Shell {
     /// Answers each request in turn until the pipe's sender goes away.
@@ -22,6 +26,10 @@ impl Shell {
         let mut calls = control.calls;
         cx.spawn_in(window, async move |this, cx| {
             while let Some(call) = calls.recv().await {
+                if call.expired(Instant::now()) {
+                    let _ = call.reply.send(expired_reply());
+                    continue;
+                }
                 let reply = match call.request {
                     // Dispatched outside the shell's update: the key may run
                     // one of the shell's own actions, which updates it again.

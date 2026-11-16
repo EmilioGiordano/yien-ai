@@ -4,7 +4,7 @@
 
 use std::ffi::OsString;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use yien_platform::test_control::{TestControlError, TestControlServer};
@@ -17,6 +17,10 @@ pub const FLAG: &str = "--test-control";
 /// How long a request waits for the window. A busy window answers well
 /// within it; one that does not is reported as stuck rather than waited on.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How much longer than a call's deadline the pipe waits for the reply, so
+/// a call the window took just before its deadline is still answered.
+const ANSWER_GRACE: Duration = Duration::from_secs(1);
 
 /// Requests waiting for the window; the pipe serves one client at a time,
 /// so one is in flight in practice.
@@ -69,20 +73,38 @@ pub fn start(name: &str) -> Result<(TestControlServer, TestControl), TestControl
 
 /// The pipe named `name`, handing each request to `calls`.
 fn serve(name: &str, calls: mpsc::Sender<TestCall>) -> Result<TestControlServer, TestControlError> {
-    TestControlServer::start(name, move |request| ask(&calls, request, ANSWER_TIMEOUT))
+    TestControlServer::start(name, move |request| {
+        ask(&calls, request, ANSWER_TIMEOUT, ANSWER_GRACE)
+    })
 }
 
-/// Hands `request` to the window and waits up to `timeout` for its reply.
-/// Runs on the pipe's thread, never on the window's.
-fn ask(calls: &mpsc::Sender<TestCall>, request: Request, timeout: Duration) -> Reply {
+/// Hands `request` to the window, which must take it within `timeout`, and
+/// waits `grace` longer for its reply. Runs on the pipe's thread, never on
+/// the window's.
+fn ask(
+    calls: &mpsc::Sender<TestCall>,
+    request: Request,
+    timeout: Duration,
+    grace: Duration,
+) -> Reply {
     let (reply, answer) = std::sync::mpsc::channel();
-    if calls.try_send(TestCall { request, reply }).is_err() {
+    let deadline = Instant::now() + timeout;
+    if calls
+        .try_send(TestCall {
+            request,
+            reply,
+            deadline,
+        })
+        .is_err()
+    {
         return Reply::error("the window is not taking requests");
     }
-    answer.recv_timeout(timeout).unwrap_or_else(|e| match e {
-        RecvTimeoutError::Timeout => Reply::error("the window did not answer in time"),
-        RecvTimeoutError::Disconnected => Reply::error("the window is gone"),
-    })
+    answer
+        .recv_timeout(timeout + grace)
+        .unwrap_or_else(|e| match e {
+            RecvTimeoutError::Timeout => Reply::error("the window did not answer in time"),
+            RecvTimeoutError::Disconnected => Reply::error("the window is gone"),
+        })
 }
 
 #[cfg(test)]
@@ -129,9 +151,16 @@ mod tests {
         let window = std::thread::spawn(move || {
             let call = receiver.blocking_recv().unwrap();
             assert_eq!(call.request, Request::State { text: true });
+            let left = call.deadline.saturating_duration_since(Instant::now());
+            assert!(left > Duration::ZERO && left <= ANSWER_TIMEOUT);
             call.reply.send(Reply::key(true)).unwrap();
         });
-        let reply = ask(&calls, Request::State { text: true }, ANSWER_TIMEOUT);
+        let reply = ask(
+            &calls,
+            Request::State { text: true },
+            ANSWER_TIMEOUT,
+            ANSWER_GRACE,
+        );
         window.join().unwrap();
         assert_eq!(reply, Reply::key(true));
     }
@@ -140,7 +169,12 @@ mod tests {
     fn a_window_that_is_gone_or_silent_is_reported_not_waited_on() {
         let (calls, receiver) = mpsc::channel::<TestCall>(QUEUE);
         drop(receiver);
-        let reply = ask(&calls, Request::State { text: false }, ANSWER_TIMEOUT);
+        let reply = ask(
+            &calls,
+            Request::State { text: false },
+            ANSWER_TIMEOUT,
+            ANSWER_GRACE,
+        );
         assert!(!reply.ok);
 
         let (calls, mut receiver) = mpsc::channel::<TestCall>(QUEUE);
@@ -153,6 +187,7 @@ mod tests {
             &calls,
             Request::State { text: false },
             Duration::from_millis(20),
+            Duration::from_millis(10),
         );
         assert_eq!(
             reply.error.as_deref(),
@@ -162,7 +197,12 @@ mod tests {
 
         let (calls, mut receiver) = mpsc::channel::<TestCall>(QUEUE);
         let dropped = std::thread::spawn(move || drop(receiver.blocking_recv().unwrap()));
-        let reply = ask(&calls, Request::State { text: false }, ANSWER_TIMEOUT);
+        let reply = ask(
+            &calls,
+            Request::State { text: false },
+            ANSWER_TIMEOUT,
+            ANSWER_GRACE,
+        );
         assert_eq!(reply.error.as_deref(), Some("the window is gone"));
         dropped.join().unwrap();
     }
