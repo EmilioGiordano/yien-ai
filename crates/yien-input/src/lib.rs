@@ -211,15 +211,11 @@ pub fn encode_in(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
 
 /// The kitty keyboard protocol flag "disambiguate escape codes" (bit 0).
 pub const KITTY_DISAMBIGUATE: u8 = 0b1;
-/// The kitty keyboard protocol flag "report event types" (bit 1).
-pub const KITTY_REPORT_EVENTS: u8 = 0b10;
 /// The kitty keyboard protocol flag "report alternate keys" (bit 2).
 pub const KITTY_ALTERNATE_KEYS: u8 = 0b100;
 /// The kitty keyboard protocol flag "report all keys as escape codes"
 /// (bit 3); the protocol says it implies disambiguation.
 pub const KITTY_ALL_AS_ESCAPE: u8 = 0b1000;
-/// The kitty keyboard protocol flag "report associated text" (bit 4).
-pub const KITTY_ASSOCIATED_TEXT: u8 = 0b10000;
 
 /// Whether the program asked for escape codes that need no disambiguation:
 /// the disambiguate flag, or report-all, which implies it.
