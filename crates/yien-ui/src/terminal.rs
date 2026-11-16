@@ -83,6 +83,7 @@ pub(crate) struct TerminalPane {
 }
 
 impl TerminalPane {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: PaneId,
         link: Rc<Link>,
