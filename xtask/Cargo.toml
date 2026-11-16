@@ -11,6 +11,9 @@ publish.workspace = true
 anyhow = { workspace = true }
 toml = { workspace = true }
 serde_json = { workspace = true }
+yien-input = { workspace = true }
+yien-pty = { workspace = true }
+yien-vt = { workspace = true }
 
 [lints]
 workspace = true

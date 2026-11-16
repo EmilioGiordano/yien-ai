@@ -8782,6 +8782,9 @@ dependencies = [
  "anyhow",
  "serde_json",
  "toml 1.2.1+spec-1.1.0",
+ "yien-input",
+ "yien-pty",
+ "yien-vt",
 ]
 
 [[package]]
