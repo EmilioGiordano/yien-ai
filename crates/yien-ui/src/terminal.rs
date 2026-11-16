@@ -83,7 +83,10 @@ pub(crate) struct TerminalPane {
 }
 
 impl TerminalPane {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site; each argument is a separate part of the pane's setup"
+    )]
     pub(crate) fn new(
         id: PaneId,
         link: Rc<Link>,
