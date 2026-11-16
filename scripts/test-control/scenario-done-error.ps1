@@ -48,7 +48,13 @@ Write-Host "run $name, yien pid $serverPid, folder $($run.root)"
 
 $results = New-Object System.Collections.Generic.List[object]
 
-function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
+function Step {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StepPane,
+        [Parameter(Mandatory)][string]$StepName,
+        [Parameter(Mandatory)][scriptblock]$Check
+    )
     $started = [DateTime]::UtcNow
     try {
         $detail = & $Check
@@ -70,13 +76,23 @@ function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
     return $ok
 }
 
-function State([switch]$Text) {
+function State {
+    [CmdletBinding()]
+    param([switch]$Text)
     return Get-YienState -Name $name -ServerPid $serverPid -Text:$Text
 }
 
-function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What, [double]$TimeoutSec) {
+function Wait-Pane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What,
+        [double]$TimeoutSec,
+        [switch]$Text
+    )
     $timeout = if ($TimeoutSec) { $TimeoutSec } else { $StateTimeoutSec }
-    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $timeout -Until {
+    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $timeout -Text:$Text -Until {
         param($s)
         $p = Get-YienPane $s $Pane
         $null -ne $p -and (& $Until $p $s)
@@ -89,7 +105,13 @@ function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What, [double]$Time
     return Get-YienPane $state $Pane
 }
 
-function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
+function Wait-NewPane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int[]]$Before,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What
+    )
     $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $StartTimeoutSec -Until {
         param($s)
         @($s.panes | Where-Object { $Before -notcontains $_.id -and (& $Until $_ $s) }).Count -gt 0
@@ -98,7 +120,9 @@ function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
     return $state.panes | Where-Object { $Before -notcontains $_.id -and (& $Until $_ $state) } | Select-Object -First 1
 }
 
-function Wait-Prompt([int]$Pane) {
+function Wait-Prompt {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Pane)
     # Claude's input box is drawn once its prompt is ready for typing.
     $null = Wait-Pane $Pane -Text -What "Claude's prompt" -TimeoutSec 30 -Until {
         param($p)
@@ -107,24 +131,35 @@ function Wait-Prompt([int]$Pane) {
     Start-Sleep -Milliseconds 1500
 }
 
-function Focus-Pane([int]$Pane) {
+function Focus-Pane {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Pane)
     Invoke-YienCommand -Name $name -ServerPid $serverPid -Id 'pane.focus' -Arguments @{ pane = $Pane }
     $null = Wait-Pane $Pane -What 'the keyboard' -Until { param($p) $p.keyboard } -TimeoutSec 10
 }
 
-function Key([int]$Pane, [string]$Key) {
+function Key {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][string]$Key
+    )
     $null = Send-YienKey -Name $name -ServerPid $serverPid -Pane $Pane -Key $Key
 }
 
 # The launch tab, the one that is not the Claude tab.
-function Shell-Tab-Id([int]$ClaudeTab) {
+function Shell-Tab-Id {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$ClaudeTab)
     $s = State
     $other = $s.tabs | Where-Object { $_.id -ne $ClaudeTab } | Select-Object -First 1
     if (-not $other) { throw 'no other tab to select' }
     return $other.id
 }
 
-function Select-Tab([int]$Tab) {
+function Select-Tab {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Tab)
     Invoke-YienCommand -Name $name -ServerPid $serverPid -Id 'tab.select' -Arguments @{ tab = $Tab }
     $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec 10 -Until {
         param($s) $s.selected_tab -eq $Tab
@@ -132,7 +167,12 @@ function Select-Tab([int]$Tab) {
     if (-not $state) { throw "tab $Tab was not selected" }
 }
 
-function Check-Ended([int]$Pane, [string]$Want) {
+function Check-Ended {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][string]$Want
+    )
     $s = State
     $p = Get-YienPane $s $Pane
     $tab = $s.tabs | Where-Object { $_.id -eq $p.tab }

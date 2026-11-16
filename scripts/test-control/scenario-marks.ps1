@@ -45,7 +45,13 @@ Write-Host "run $name, yien pid $serverPid, folder $($run.root)"
 
 $results = New-Object System.Collections.Generic.List[object]
 
-function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
+function Step {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StepPane,
+        [Parameter(Mandatory)][string]$StepName,
+        [Parameter(Mandatory)][scriptblock]$Check
+    )
     $started = [DateTime]::UtcNow
     try {
         $detail = & $Check
@@ -68,11 +74,22 @@ function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
 }
 
 function State {
+    [CmdletBinding()]
+    param()
     return Get-YienState -Name $name -ServerPid $serverPid
 }
 
-function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What) {
-    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $StateTimeoutSec -Until {
+function Wait-Pane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What,
+        [double]$TimeoutSec,
+        [switch]$Text
+    )
+    $timeout = if ($TimeoutSec) { $TimeoutSec } else { $StateTimeoutSec }
+    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $timeout -Text:$Text -Until {
         param($s)
         $p = Get-YienPane $s $Pane
         $null -ne $p -and (& $Until $p $s)
@@ -80,12 +97,18 @@ function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What) {
     if (-not $state) {
         $p = Get-YienPane (State) $Pane
         $now = if ($p) { "name=$($p.name) badge=$($p.badge) state=$($p.state) running=$($p.running)" } else { 'gone' }
-        throw "pane $Pane never got $What within $StateTimeoutSec s; now $now"
+        throw "pane $Pane never got $What within $timeout s; now $now"
     }
     return Get-YienPane $state $Pane
 }
 
-function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
+function Wait-NewPane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int[]]$Before,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What
+    )
     $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $StartTimeoutSec -Until {
         param($s)
         @($s.panes | Where-Object { $Before -notcontains $_.id -and (& $Until $_ $s) }).Count -gt 0
@@ -95,7 +118,15 @@ function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
 }
 
 # Checks one fresh pane and its tab against the badge and state they must show.
-function Check-Badge([string]$Label, [int]$Pane, [string]$WantBadge, [string]$WantTag, [string]$WantMark) {
+function Check-Badge {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][string]$WantBadge,
+        [Parameter(Mandatory)][string]$WantTag,
+        [Parameter(Mandatory)][string]$WantMark
+    )
     $p = Wait-Pane $Pane -What "a running $Label pane" -Until { param($p) $p.running }
     if ($p.badge -ne $WantBadge) { throw "the pane's badge is '$($p.badge)', not '$WantBadge'" }
     if ($p.tag -ne $WantTag) { throw "the pane's tag is '$($p.tag)', not '$WantTag'" }

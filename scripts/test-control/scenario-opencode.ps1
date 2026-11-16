@@ -62,7 +62,13 @@ Write-Host "run $name, yien pid $serverPid, folder $($run.root)"
 
 $results = New-Object System.Collections.Generic.List[object]
 
-function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
+function Step {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StepPane,
+        [Parameter(Mandatory)][string]$StepName,
+        [Parameter(Mandatory)][scriptblock]$Check
+    )
     $started = [DateTime]::UtcNow
     try {
         $detail = & $Check
@@ -85,12 +91,22 @@ function Step([string]$StepPane, [string]$StepName, [scriptblock]$Check) {
 }
 
 function State {
+    [CmdletBinding()]
+    param()
     return Get-YienState -Name $name -ServerPid $serverPid
 }
 
-function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What, [double]$TimeoutSec) {
+function Wait-Pane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What,
+        [double]$TimeoutSec,
+        [switch]$Text
+    )
     $timeout = if ($TimeoutSec) { $TimeoutSec } else { 20 }
-    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $timeout -Until {
+    $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $timeout -Text:$Text -Until {
         param($s)
         $p = Get-YienPane $s $Pane
         $null -ne $p -and (& $Until $p $s)
@@ -103,7 +119,13 @@ function Wait-Pane([int]$Pane, [scriptblock]$Until, [string]$What, [double]$Time
     return Get-YienPane $state $Pane
 }
 
-function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
+function Wait-NewPane {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int[]]$Before,
+        [Parameter(Mandatory)][scriptblock]$Until,
+        [Parameter(Mandatory)][string]$What
+    )
     $state = Wait-YienState -Name $name -ServerPid $serverPid -TimeoutSec $StartTimeoutSec -Until {
         param($s)
         @($s.panes | Where-Object { $Before -notcontains $_.id -and (& $Until $_ $s) }).Count -gt 0
@@ -112,16 +134,28 @@ function Wait-NewPane([int[]]$Before, [scriptblock]$Until, [string]$What) {
     return $state.panes | Where-Object { $Before -notcontains $_.id -and (& $Until $_ $state) } | Select-Object -First 1
 }
 
-function Focus-Pane([int]$Pane) {
+function Focus-Pane {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Pane)
     Invoke-YienCommand -Name $name -ServerPid $serverPid -Id 'pane.focus' -Arguments @{ pane = $Pane }
     $null = Wait-Pane $Pane -What 'the keyboard' -Until { param($p) $p.keyboard } -TimeoutSec 10
 }
 
-function Key([int]$Pane, [string]$Key) {
+function Key {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Pane,
+        [Parameter(Mandatory)][string]$Key
+    )
     $null = Send-YienKey -Name $name -ServerPid $serverPid -Pane $Pane -Key $Key
 }
 
-function Run-Turn([string]$Label, [int]$Pane) {
+function Run-Turn {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][int]$Pane
+    )
     $ok = Step $Label 'working' {
         Focus-Pane $Pane
         Send-YienText -Name $name -ServerPid $serverPid -Pane $Pane -Text 'please answer slow'
