@@ -171,7 +171,8 @@ function Check-Ended {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][int]$Pane,
-        [Parameter(Mandatory)][string]$Want
+        [Parameter(Mandatory)][string]$Want,
+        [Parameter(Mandatory)][string]$Mark
     )
     $s = State
     $p = Get-YienPane $s $Pane
@@ -179,7 +180,7 @@ function Check-Ended {
     if ($p.state -ne $Want) { throw "the pane's state is '$($p.state)', not $Want" }
     if ($tab.state -ne $Want) { throw "the tab's state is '$($tab.state)', not $Want" }
     if ($tab.needs_you) { throw 'the tab carries the red mark' }
-    if ($tab.mark -ne $Want.ToLowerInvariant()) { throw "the tab's mark is '$($tab.mark)', not $($Want.ToLowerInvariant())" }
+    if ($tab.mark -ne $Mark) { throw "the tab's mark is '$($tab.mark)', not $Mark" }
     if ($s.waiting -ne 0) { throw "the counter counts $($s.waiting), not zero" }
     "pane and tab $Want, tab mark $($tab.mark), counter $($s.waiting)"
 }
@@ -213,8 +214,8 @@ try {
         }
         if ($ok) {
             $null = Step 'done' 'lands-done' {
-                $null = Wait-Pane $claude.id -What 'Done' -Until { param($p) $p.state -eq 'Done' }
-                Check-Ended $claude.id 'Done'
+                $null = Wait-Pane $claude.id -What 'Done' -Until { param($p) $p.state -eq 'Ready to review' }
+                Check-Ended $claude.id 'Ready to review' 'done'
             }
         }
 
@@ -231,7 +232,7 @@ try {
         if ($ok) {
             $null = Step 'error' 'lands-error' {
                 $null = Wait-Pane $claude.id -What 'Error' -Until { param($p) $p.state -eq 'Error' }
-                $detail = Check-Ended $claude.id 'Error'
+                $detail = Check-Ended $claude.id 'Error' 'error'
                 "$detail, never Needs you"
             }
         }
