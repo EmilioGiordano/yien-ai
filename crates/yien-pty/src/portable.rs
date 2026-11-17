@@ -71,6 +71,12 @@ fn command(spec: &SpawnSpec) -> CommandBuilder {
     if let Some(dir) = &spec.cwd {
         cmd.cwd(dir);
     }
+    if spec.env_clear {
+        // portable-pty seeds the builder with the session environment and,
+        // on Windows, the registry's variables at spawn; drop them all and
+        // let `env` below define the whole environment.
+        cmd.env_clear();
+    }
     for key in &spec.env_remove {
         cmd.env_remove(key);
     }

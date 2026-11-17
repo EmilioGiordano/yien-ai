@@ -165,6 +165,12 @@ pub struct Config {
     /// `update.check`: whether YIEN asks GitHub once a day for a newer
     /// release. Off means no network request for updates at all.
     pub update_check: bool,
+    /// `window.close_to_tray`: closing the window (the close button,
+    /// Alt+F4) hides it to the notification area and YIEN keeps running
+    /// (RF-SES-09). Off keeps the old behaviour: closing quits, asking
+    /// first while agents work. Windows only; elsewhere the setting is
+    /// ignored and closing quits.
+    pub close_to_tray: bool,
     /// `[keys]`, in file order.
     pub keys: Vec<KeyOverride>,
 }
@@ -182,6 +188,7 @@ impl Default for Config {
             shell_integration: true,
             osc52_copy: true,
             update_check: true,
+            close_to_tray: true,
             keys: Vec::new(),
         }
     }

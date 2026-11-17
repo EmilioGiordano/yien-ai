@@ -1,0 +1,6 @@
+# OpenCode 2.3.0, fresh throwaway HOME, --standalone so the managed
+# service's default port stays untouched; the project opencode.json points
+# the mock provider (oai/mock) at the local OpenAI-compatible mock. The TUI
+# boots and reports state=idle.
+wait-for 60000 Ask anything
+wait 500

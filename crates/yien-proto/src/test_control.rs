@@ -21,7 +21,7 @@ use crate::{PaneId, ProfileId, ProjectId, TabId};
 /// ```
 /// assert!(yien_proto::test_control::TEST_CONTROL_VERSION >= 1);
 /// ```
-pub const TEST_CONTROL_VERSION: u32 = 1;
+pub const TEST_CONTROL_VERSION: u32 = 2;
 
 /// The longest request line, in bytes, without its newline.
 ///
@@ -104,6 +104,11 @@ pub enum Request {
         /// The new height.
         height: f32,
     },
+    /// Closes the window the way its close button does: with the default
+    /// settings it hides the window and YIEN keeps running (RF-SES-09);
+    /// otherwise it quits, asking first while agents work (RF-SES-13).
+    #[serde(rename = "window.close")]
+    WindowClose {},
 }
 
 impl Request {
@@ -120,6 +125,7 @@ impl Request {
             Self::Text { .. } => "text",
             Self::Key { .. } => "key",
             Self::Resize { .. } => "resize",
+            Self::WindowClose {} => "window.close",
         }
     }
 
@@ -170,6 +176,7 @@ impl Request {
                 }
                 Ok(())
             }
+            Self::WindowClose {} => Ok(()),
         }
     }
 }
@@ -382,6 +389,11 @@ pub struct WindowState {
     pub height: f32,
     /// The OS says the window is the active one.
     pub active: bool,
+    /// The window is shown on the screen. Closing the window with the new
+    /// default settings hides it, so this is what a script reads to tell
+    /// hidden from open (RF-SES-09).
+    #[serde(default)]
+    pub window_visible: bool,
     /// Where the keyboard is: `panes`, `tab_bar`, `context_bar`, `dividers`.
     pub region: String,
     /// The overlay that holds the keyboard, if any: `palette`, `confirm`.
@@ -418,6 +430,10 @@ pub struct TabState {
     pub branch: Option<String>,
     /// It was opened on a linked worktree.
     pub worktree: bool,
+    /// Which badge the row shows: its agent's (`claude`, `codex`,
+    /// `opencode`), else its shell's (`powershell`, `cmd`, `git_bash`,
+    /// `other`), `None` when nothing is known.
+    pub badge: Option<String>,
     /// The state word of its most urgent pane: `Working`, `Needs you`.
     pub state: String,
     /// The row's mark: the snake case state (`needs_you`, `working`), or
@@ -446,6 +462,10 @@ pub struct PaneState {
     pub name: String,
     /// The profile's name: `Claude Code`, `Shell`.
     pub profile: String,
+    /// The badge the head shows: its agent's (`claude`, `codex`, `opencode`),
+    /// else its shell's (`powershell`, `cmd`, `git_bash`, `other`), `None`
+    /// when nothing is known.
+    pub badge: Option<String>,
     /// The profile's id: `claude`, `shell`.
     pub profile_id: String,
     /// The program tag the head shows next to the name.
@@ -530,6 +550,7 @@ mod tests {
             name: "pwsh".into(),
             profile: "Shell".into(),
             profile_id: "shell".into(),
+            badge: Some("powershell".into()),
             tag: "pwsh".into(),
             state: "Idle".into(),
             signal_lost: false,
@@ -599,6 +620,10 @@ mod tests {
                 width: 1200.0,
                 height: 800.0
             }
+        );
+        assert_eq!(
+            parse(r#"{"op":"window.close"}"#).unwrap(),
+            Request::WindowClose {}
         );
     }
 
@@ -682,6 +707,7 @@ mod tests {
                 width: 1440.0,
                 height: 900.0,
                 active: false,
+                window_visible: false,
                 region: "panes".into(),
                 overlay: None,
             },
@@ -702,6 +728,7 @@ mod tests {
                 dir: "C:/work".into(),
                 branch: None,
                 worktree: false,
+                badge: Some("claude".into()),
                 state: "Needs you".into(),
                 mark: "needs_you".into(),
                 needs_you: true,
@@ -722,10 +749,40 @@ mod tests {
         assert_eq!(json["ok"], true);
         assert_eq!(json["state"]["keyboard_pane"], 3);
         assert_eq!(json["state"]["tabs"][0]["mark"], "needs_you");
+        assert_eq!(json["state"]["tabs"][0]["badge"], "claude");
+        assert_eq!(json["state"]["panes"][0]["badge"], "powershell");
         assert_eq!(json["state"]["panes"][0]["rows"][0], "> hi");
         assert_eq!(json["state"]["panes"][0]["size"][0], 80);
         let back: Reply = serde_json::from_value(json).unwrap();
         assert_eq!(back.state.as_deref(), Some(&state));
+    }
+
+    #[test]
+    fn a_badge_comes_out_as_null_when_none_is_known() {
+        let pane = PaneState {
+            badge: None,
+            ..pane()
+        };
+        let json = serde_json::to_value(&pane).unwrap();
+        assert!(json["badge"].is_null());
+        let tab = TabState {
+            id: TabId::new(2),
+            project: ProjectId::new(1),
+            name: "Tab 2".into(),
+            dir: "C:/work".into(),
+            branch: None,
+            worktree: false,
+            badge: None,
+            state: "Idle".into(),
+            mark: "shell".into(),
+            needs_you: false,
+            muted: false,
+            focused: PaneId::new(3),
+            maximized: None,
+            panes: vec![PaneId::new(3)],
+        };
+        let json = serde_json::to_value(&tab).unwrap();
+        assert!(json["badge"].is_null());
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# Claude Code 2.1.325, trusted folder, mock Messages API: /exit ends the
+# session cleanly.
+wait-for 30000 effort
+text /exit
+key enter
+wait-exit 30000

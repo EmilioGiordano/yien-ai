@@ -1,0 +1,13 @@
+# Claude Code 2.1.325, untrusted folder, mock Messages API: the folder
+# trust screen shows; Down+Enter accepts it; the REPL boots and reports idle.
+# Recapture needs an untrusted folder (fresh CLAUDE_CONFIG_DIR, empty
+# projects map) and the keyboard negotiation to finish before the keys.
+wait-for 30000 trust this folder
+# The CLI's keyboard-mode setup lands after the screen draws and resets the
+# selection, so the keys wait it out.
+wait 3500
+key down
+wait 500
+key enter
+wait-for 20000 effort
+wait 500

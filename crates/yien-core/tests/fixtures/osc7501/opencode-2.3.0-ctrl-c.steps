@@ -1,0 +1,12 @@
+# OpenCode 2.3.0: a slow turn, stopped with Ctrl+C. This build aborts the
+# turn and quits from a single Ctrl+C, so the Claude-style "Ctrl+C three
+# times" case does not exist here; the records say state=clear.
+wait-for 60000 Ask anything
+wait 2000
+text slow please
+wait 300
+key enter
+wait-for 60000 esc interrupt
+wait 1000
+key ctrl-c
+wait-exit 15000

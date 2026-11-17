@@ -3,9 +3,12 @@
 //! - `check-deps`: enforces the layer rule on every `crates/*/Cargo.toml`.
 //! - `trace [--ers <path>]`: maps requirement ids to the tests named after them.
 //! - `dist`: builds and zips the portable Windows package.
+//! - `capture`: run a program in a pseudo terminal and write the bytes it
+//!   printed, driven by a step file, for the CLI fixtures.
 
 #![forbid(unsafe_code)]
 
+mod capture;
 mod check_deps;
 mod conpty;
 mod dist;
@@ -16,7 +19,8 @@ mod trace;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo xtask <check-deps | trace [--ers <path>] | dist | installer>";
+const USAGE: &str =
+    "usage: cargo xtask <check-deps | trace [--ers <path>] | dist | installer | capture [args...]>";
 
 fn main() -> ExitCode {
     match run() {
@@ -33,6 +37,7 @@ fn run() -> anyhow::Result<ExitCode> {
     let root = workspace_root();
     match args.first().map(String::as_str) {
         Some("check-deps") if args.len() == 1 => check_deps::run(&root),
+        Some("capture") => capture::run(&args[1..]),
         Some("dist") if args.len() == 1 => dist::run(&root),
         Some("installer") if args.len() == 1 => installer::run(&root),
         Some("trace") => match &args[1..] {

@@ -33,6 +33,28 @@ const CODEX_ERROR: &[u8] = include_bytes!("../tests/fixtures/osc7501/codex-0.167
 const CODEX_STARTUP: &[u8] = include_bytes!("../tests/fixtures/osc7501/codex-0.167.2-startup.bin");
 const OPENCODE_PERMISSION: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/opencode-2.2.7-permission.bin");
+// RNF-23: real captures of Claude Code 2.1.325 and OpenCode 2.3.0, recorded
+// against the local mocks with throwaway profiles. The `.steps` files next
+// to them redo each capture; see the README in this folder.
+const CLAUDE_325_STARTUP: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-startup.bin");
+const CLAUDE_325_ESC: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-esc.bin");
+const CLAUDE_325_ERROR: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-error.bin");
+const CLAUDE_325_EXIT: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-exit.bin");
+const CLAUDE_325_PERMISSION: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-permission.bin");
+const OPENCODE_230_STARTUP: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-startup.bin");
+const OPENCODE_230_ESC: &[u8] = include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-esc.bin");
+const OPENCODE_230_CTRL_C: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-ctrl-c.bin");
+const OPENCODE_230_PERMISSION: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-permission.bin");
+const OPENCODE_230_ERROR: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-error.bin");
+const OPENCODE_230_EXIT: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/opencode-2.3.0-exit.bin");
 
 const DA1_QUERY: &[u8] = b"\x1b[c";
 const DA1_REPLY: &[u8] = b"\x1b[?6c";
@@ -522,9 +544,18 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (CLAUDE_ERROR, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CLAUDE_CTRL_C, "claude"),
+        (CLAUDE_325_PERMISSION, "claude"),
+        (CLAUDE_325_ESC, "claude"),
+        (CLAUDE_325_ERROR, "claude"),
+        (CLAUDE_325_EXIT, "claude"),
         (CODEX_PERMISSION, "codex"),
         (CODEX_ERROR, "codex"),
         (CODEX_STARTUP, "codex"),
+        (OPENCODE_PERMISSION, "opencode"),
+        (OPENCODE_230_ESC, "opencode"),
+        (OPENCODE_230_CTRL_C, "opencode"),
+        (OPENCODE_230_PERMISSION, "opencode"),
+        (OPENCODE_230_ERROR, "opencode"),
     ] {
         // Claude's first rule is its permission prompt, which a turn shows.
         let skip = usize::from(profile == "claude");
@@ -620,4 +651,137 @@ fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
         }
         assert_eq!(pane.states, states(capture, "shell"), "{program}");
     }
+}
+
+#[test]
+fn rnf_23_claude_2_1_325_startup_screen_needs_you_until_the_repl_reports() {
+    assert_query_answered_in_order(CLAUDE_325_STARTUP, "claude");
+    // Split where the Down key first echoes: the trust screen is fully drawn
+    // with its selection on "No, exit" when the first read settles.
+    let split =
+        position(CLAUDE_325_STARTUP, b"\x1b[1C\x1b[4A \x1b[4GNo, exit").expect("the Down key echo");
+    assert_eq!(
+        replay_settled(
+            &[&CLAUDE_325_STARTUP[..split], &CLAUDE_325_STARTUP[split..]],
+            "claude"
+        ),
+        [SCREEN_RED, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rnf_23_claude_2_1_325_esc_mid_turn_is_idle_not_done() {
+    assert_query_answered_in_order(CLAUDE_325_ESC, "claude");
+    assert_eq!(
+        states(CLAUDE_325_ESC, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rnf_23_claude_2_1_325_permission_prompt_needs_you() {
+    assert_query_answered_in_order(CLAUDE_325_PERMISSION, "claude");
+    assert_eq!(
+        states(CLAUDE_325_PERMISSION, "claude"),
+        [
+            AgentState::Working,
+            AgentState::NeedsYou(NeedsReason::Permission)
+        ]
+    );
+}
+
+#[test]
+fn rnf_23_claude_2_1_325_failed_turn_is_error() {
+    assert_query_answered_in_order(CLAUDE_325_ERROR, "claude");
+    assert_eq!(
+        states(CLAUDE_325_ERROR, "claude"),
+        [
+            AgentState::Working,
+            AgentState::Error(ErrorReason::TurnFailed)
+        ]
+    );
+}
+
+#[test]
+fn rnf_23_claude_2_1_325_exit_sends_clear_and_ends_idle() {
+    assert_query_answered_in_order(CLAUDE_325_EXIT, "claude");
+    let replay = replay(CLAUDE_325_EXIT, config("claude"), CLAUDE_325_EXIT.len());
+    assert_eq!(replay.states, []);
+    assert!(!replay.machine.agent_reporting());
+    assert_eq!(replay.machine.state(), AgentState::Idle);
+}
+
+#[test]
+fn rnf_23_opencode_2_3_0_startup_reports_idle_and_no_trust_screen() {
+    assert_query_answered_in_order(OPENCODE_230_STARTUP, "opencode");
+    let replay = replay(
+        OPENCODE_230_STARTUP,
+        config("opencode"),
+        OPENCODE_230_STARTUP.len(),
+    );
+    assert_eq!(replay.states, []);
+    assert_eq!(replay.machine.state(), AgentState::Idle);
+    let parts: Vec<&[u8]> = OPENCODE_230_STARTUP.chunks(64).collect();
+    assert_eq!(replay_settled(&parts, "opencode"), []);
+}
+
+#[test]
+fn rnf_23_opencode_2_3_0_esc_mid_turn_ends_the_turn_not_as_error() {
+    assert_query_answered_in_order(OPENCODE_230_ESC, "opencode");
+    // Esc aborts the turn; its own `idle` then ends it as Done (unseen).
+    assert_eq!(
+        states(OPENCODE_230_ESC, "opencode"),
+        [AgentState::Working, AgentState::Done]
+    );
+}
+
+/// Ctrl+C at a turn or an idle prompt quits OpenCode: the record is `clear`.
+#[test]
+fn rnf_23_opencode_2_3_0_ctrl_c_mid_turn_quits() {
+    assert_query_answered_in_order(OPENCODE_230_CTRL_C, "opencode");
+    assert_eq!(
+        states(OPENCODE_230_CTRL_C, "opencode"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rnf_23_opencode_2_3_0_permission_prompt_needs_you() {
+    assert_query_answered_in_order(OPENCODE_230_PERMISSION, "opencode");
+    assert_eq!(
+        states(OPENCODE_230_PERMISSION, "opencode"),
+        [
+            AgentState::Working,
+            AgentState::NeedsYou(NeedsReason::Permission)
+        ]
+    );
+}
+
+/// OpenCode sends no `state=error` over OSC 7501 for a failed turn; the
+/// `clear` with a session id is a sub-session record and is dropped, and its
+/// own `idle` ends the turn as Done. YIEN learns the error from the shared
+/// service's database, not from the terminal.
+#[test]
+fn rnf_23_opencode_2_3_0_api_error_ends_the_turn_not_as_error() {
+    assert_query_answered_in_order(OPENCODE_230_ERROR, "opencode");
+    let replay = replay(
+        OPENCODE_230_ERROR,
+        config("opencode"),
+        OPENCODE_230_ERROR.len(),
+    );
+    assert_eq!(replay.states, [AgentState::Working, AgentState::Done]);
+    assert_eq!(replay.machine.state(), AgentState::Done);
+}
+
+#[test]
+fn rnf_23_opencode_2_3_0_exit_sends_clear_and_ends_idle() {
+    assert_query_answered_in_order(OPENCODE_230_EXIT, "opencode");
+    let replay = replay(
+        OPENCODE_230_EXIT,
+        config("opencode"),
+        OPENCODE_230_EXIT.len(),
+    );
+    assert_eq!(replay.states, []);
+    assert!(!replay.machine.agent_reporting());
+    assert_eq!(replay.machine.state(), AgentState::Idle);
 }

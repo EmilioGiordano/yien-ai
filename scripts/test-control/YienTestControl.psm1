@@ -25,6 +25,12 @@ Requests (see the report of feat/test-control for the full protocol):
     {"op":"text","pane":7,"text":"claude"}
     {"op":"key","pane":7,"key":"ctrl-c"}
     {"op":"resize","width":1200,"height":800}
+    {"op":"window.close"}
+
+The state's `window.window_visible` says whether the window is shown. With
+`window.close_to_tray` on (the default) and the notification-area icon up,
+`window.close` hides the window and YIEN keeps running; with the setting off,
+or with the icon missing, it quits the app, asking first while agents work.
 
 Pass -ServerPid to check that the pipe's server is the YIEN the script
 started, so another process that took the name first is refused.
@@ -165,6 +171,17 @@ function Set-YienWindowSize {
     $null = Assert-YienOk (Send-YienRequest -Name $Name -ServerPid $ServerPid -Request $request) 'resize'
 }
 
+<# Closes the window the way the close button does: hides it to the
+notification area with `window.close_to_tray` on (the default) and the icon
+up, quits otherwise, asking first while agents work. The state's
+`window.window_visible` says which happened. #>
+function Close-YienWindow {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name, [int]$ServerPid = 0)
+    $request = @{ op = 'window.close' }
+    $null = Assert-YienOk (Send-YienRequest -Name $Name -ServerPid $ServerPid -Request $request) 'window.close'
+}
+
 <#
 .SYNOPSIS
 Polls the state until -Until returns true for it; returns that state, or
@@ -228,5 +245,5 @@ function Write-YienUtf8([string]$Path, [string]$Text) {
 }
 
 Export-ModuleMember -Function Send-YienRequest, Get-YienState, Invoke-YienCommand, Send-YienText,
-    Send-YienKey, Set-YienWindowSize, Wait-YienState, Get-YienPane, Get-YienPaneText,
+    Send-YienKey, Set-YienWindowSize, Close-YienWindow, Wait-YienState, Get-YienPane, Get-YienPaneText,
     Get-YienSlotDir, New-YienNonce, Write-YienUtf8

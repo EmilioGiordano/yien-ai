@@ -1,0 +1,10 @@
+# Claude Code 2.1.325, trusted folder, mock Messages API: the mock answers
+# this turn with a Bash tool call for curl against port 9, so the CLI,
+# launched with --permission-mode manual, asks first. (Echo-class commands
+# are never asked; the mock's command is not one of them.) The step file is
+# run with: -- claude --permission-mode manual
+wait-for 30000 effort
+text mocktool
+key enter
+wait-for 60000 Do you want to proceed?
+wait 1000

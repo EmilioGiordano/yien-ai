@@ -84,7 +84,8 @@ pub trait PtyBackend: Send + Sync {
 
 /// What to run and in what terminal size.
 ///
-/// The child inherits YIEN's environment; `env` adds or overrides variables.
+/// The child inherits YIEN's environment unless `env_clear` is set; `env`
+/// adds or overrides variables.
 ///
 /// ```
 /// use yien_pty::SpawnSpec;
@@ -108,6 +109,11 @@ pub struct SpawnSpec {
     pub env_remove: Vec<OsString>,
     /// Variables set on top of the inherited environment, in order.
     pub env: Vec<(OsString, OsString)>,
+    /// Start from an empty environment, instead of the inherited one:
+    /// nothing comes along, not even from the registry on Windows, and
+    /// `env` seeds the whole environment. For captures and tests that must
+    /// not see the caller's profile.
+    pub env_clear: bool,
     /// Terminal width in cells, at least 1.
     pub cols: u16,
     /// Terminal height in cells, at least 1.
@@ -123,6 +129,7 @@ impl fmt::Debug for SpawnSpec {
             .field("cwd", &self.cwd)
             .field("env_remove", &self.env_remove)
             .field("env_keys", &env_keys)
+            .field("env_clear", &self.env_clear)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
             .finish()
@@ -143,6 +150,7 @@ impl SpawnSpec {
             cwd: None,
             env_remove: Vec::new(),
             env: Vec::new(),
+            env_clear: false,
             cols: 80,
             rows: 24,
         }
@@ -205,6 +213,20 @@ impl SpawnSpec {
     /// ```
     pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
         self.env_remove.push(key.into());
+        self
+    }
+
+    /// Starts the child from an empty environment: nothing is inherited,
+    /// and [`SpawnSpec::env`] seeds the whole thing. On Windows the
+    /// registry's user and system variables, which the platform merges at
+    /// spawn, are not passed either.
+    ///
+    /// ```
+    /// let spec = yien_pty::SpawnSpec::new("sh").env_clear().env("TERM", "xterm");
+    /// assert!(spec.env_clear);
+    /// ```
+    pub fn env_clear(mut self) -> Self {
+        self.env_clear = true;
         self
     }
 

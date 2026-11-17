@@ -1,0 +1,11 @@
+# OpenCode 2.3.0: the mock answers this turn with a 400 after a few
+# seconds; the UI shows "Session failed" with the mock's message. The CLI
+# does not report the failure over OSC 7501 (YIEN learns it from the shared
+# service's database instead); the records say state=clear then state=idle.
+wait-for 60000 Ask anything
+wait 2000
+text mockerror
+wait 300
+key enter
+wait-for 60000 Session failed
+wait 1000
