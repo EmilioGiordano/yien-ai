@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::base::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -58,6 +58,11 @@ pub(crate) struct TerminalPane {
     font_size: f32,
     theme: Theme,
     frame: Option<Frame>,
+    /// Millis since the UNIX epoch when `frame` was taken in, for the
+    /// test control dump.
+    frame_at_ms: Option<u64>,
+    /// Test control is on: frames get a wall-clock stamp for its dump.
+    test_control: bool,
     /// IME composition not yet committed (RF-PAN-15).
     preedit: Option<String>,
     /// The grid's bounds and cell size at the last paint.
@@ -78,12 +83,17 @@ pub(crate) struct TerminalPane {
 }
 
 impl TerminalPane {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site; each argument is a separate part of the pane's setup"
+    )]
     pub(crate) fn new(
         id: PaneId,
         link: Rc<Link>,
         family: Option<SharedString>,
         font_size: f32,
         theme: Theme,
+        test_control: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -100,6 +110,8 @@ impl TerminalPane {
             font_size,
             theme,
             frame: None,
+            frame_at_ms: None,
+            test_control,
             preedit: None,
             grid: None,
             sent_size: None,
@@ -127,14 +139,18 @@ impl TerminalPane {
     /// The single place frames enter the view, so a change in how the core
     /// delivers them touches only this.
     pub(crate) fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
+        self.frame_at_ms = stamp_frame(self.test_control);
         self.frame = Some(frame);
         cx.notify();
     }
 
     /// What the state dump of the test control reads: the last frame's
-    /// size, and its rows when `with_text`. `None` before the first frame.
+    /// size, when it was taken, and its rows when `with_text`. `None`
+    /// before the first frame.
     pub(crate) fn facts(&self, with_text: bool) -> Option<TerminalFacts> {
-        self.frame.as_ref().map(|f| TerminalFacts::of(f, with_text))
+        self.frame
+            .as_ref()
+            .map(|f| TerminalFacts::of(f, with_text, self.frame_at_ms))
     }
 
     /// Text the layout or the IME typed, as the input handler delivers it.
@@ -1058,5 +1074,49 @@ impl EntityInputHandler for TerminalPane {
 impl Focusable for TerminalPane {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// Wall-clock milliseconds for the test control dump. Same machine as the
+/// script, so the two clocks are comparable.
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The frame stamp for the test control dump: `None` unless test control is
+/// on, so frames outside `--test-control` cost one branch.
+fn stamp_frame(test_control: bool) -> Option<u64> {
+    if test_control {
+        Some(unix_millis())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_frame;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn stamp_frame_is_none_without_test_control() {
+        assert_eq!(stamp_frame(false), None);
+    }
+
+    #[test]
+    fn stamp_frame_is_now_with_test_control() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let stamp = stamp_frame(true).expect("test control stamps frames");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((before..=after).contains(&stamp));
     }
 }

@@ -490,6 +490,12 @@ pub struct PaneState {
     pub visible: bool,
     /// The terminal size of its last frame: columns, rows.
     pub size: Option<(u16, u16)>,
+    /// Millis since the UNIX epoch when its terminal view took the last
+    /// frame, `None` before the first frame. Test-only precision for the
+    /// test control dump: scripts compare it against their own clock to
+    /// time key-to-screen without poll quantization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_at_ms: Option<u64>,
     /// Its visible rows, when the request asked for text and a frame came.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<VisibleRows>,
@@ -556,6 +562,7 @@ mod tests {
             keyboard: true,
             visible: true,
             size: None,
+            frame_at_ms: None,
             rows: None,
         }
     }
@@ -782,6 +789,20 @@ mod tests {
     fn rows_are_left_out_unless_asked_for() {
         let json = serde_json::to_value(pane()).unwrap();
         assert!(json.get("rows").is_none());
+    }
+
+    #[test]
+    fn frame_at_ms_is_left_out_unless_a_frame_was_set() {
+        let json = serde_json::to_value(pane()).unwrap();
+        assert!(json.get("frame_at_ms").is_none());
+        let stamped = PaneState {
+            frame_at_ms: Some(1_700_000_000_000),
+            ..pane()
+        };
+        let json = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(json["frame_at_ms"], 1_700_000_000_000u64);
+        let back: PaneState = serde_json::from_value(json).unwrap();
+        assert_eq!(back.frame_at_ms, Some(1_700_000_000_000));
     }
 
     #[test]
