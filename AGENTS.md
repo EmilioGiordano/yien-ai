@@ -93,7 +93,7 @@ The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is t
 - The gate gives up after an hour with exit code 75. That is not a test failure: report it, with the memory and process counts it printed, and the orchestrator tells Emilio. A lock whose owner died, or that is older than 4 hours, is broken automatically.
 - A gated build can outlast a tool call's time limit. Run long ones (full gate, release builds, first build of a slot) in the background and wait for them to finish.
 - Each worktree has an untracked `.yien-slot` file naming its target dir: `<build-root>/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile outside the build root; `scripts/cargo.sh` refuses a slot elsewhere. Never share a target dir between two branches: mixed builds have caused real bugs.
-- Old slots are cleaned only when the build drive drops below about 40 GB free.
+- Once Emilio has validated a branch from the installer and the interface, the orchestrator deletes the slots of the validated branches, the staging slot included. Any other slot is cleaned only when the build drive drops below about 40 GB free. A deleted slot is recreated by the next build of its branch, cold.
 - Branches run cheap checks on the crates they touch: `fmt --check`, `check -p <crates> --all-targets`, `test -p <crates>`. The full gate runs at integration.
 
 ## The branch loop
