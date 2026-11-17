@@ -228,6 +228,9 @@ pub enum ScreenVerdict {
     NeedsYou,
     /// No rule matched.
     NoMatch,
+    /// A rule with `confirms = "interrupt"` matched: a turn the user stopped
+    /// ended, and the agent drew the interrupt line to say so.
+    Interrupted,
 }
 
 /// One input to the state machine.

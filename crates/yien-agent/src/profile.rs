@@ -207,15 +207,19 @@ pub enum SessionReader {
     CodexSessions,
 }
 
-/// What a screen rule confirms. Only "needs you" exists: a screen rule
-/// confirms a weaker signal (ADR-08), and lights the red mark alone only on
-/// a startup screen, before the agent's hooks or OSC 7501 first speak
-/// ([`MachineConfig::reads_startup_screens`]).
+/// What a screen rule confirms. "needs you" lights the red mark; a screen
+/// rule confirms a weaker signal (ADR-08), and lights the red mark alone
+/// only on a startup screen, before the agent's hooks or OSC 7501 first
+/// speak ([`MachineConfig::reads_startup_screens`]). "interrupt" ends a
+/// running turn as idle: Claude Code 2.1.326 stops sending its record when
+/// the user interrupts a turn, and only draws the interrupt line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confirms {
     /// The agent waits for the user.
     NeedsYou,
+    /// The user stopped the turn: the agent drew the interrupt line.
+    Interrupt,
 }
 
 /// How to find the agent's executable and version.
@@ -291,7 +295,9 @@ impl ScreenRule {
 }
 
 /// Runs screen rules for a [`crate::Effect::CheckScreen`] and returns the
-/// answer to feed back as [`crate::Signal::Screen`].
+/// answer to feed back as [`crate::Signal::Screen`]. An interrupt wins a tie
+/// against needs you: RN-02 prefers inactive to "needs you", and the
+/// interrupt line ends a turn rather than opening one.
 ///
 /// ```
 /// use yien_agent::{ScreenVerdict, builtin_profiles, evaluate_screen};
@@ -301,9 +307,15 @@ impl ScreenRule {
 /// let rules = &claude.rules[0].screen;
 /// assert_eq!(evaluate_screen(rules, &["", "  Do you want to proceed?"]), ScreenVerdict::NeedsYou);
 /// assert_eq!(evaluate_screen(rules, &["$ ls"]), ScreenVerdict::NoMatch);
+/// assert_eq!(evaluate_screen(rules, &["  ⎿  Interrupted · What should Claude do instead?"]), ScreenVerdict::Interrupted);
 /// ```
 pub fn evaluate_screen(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
     if rules
+        .iter()
+        .any(|r| r.confirms == Confirms::Interrupt && r.matches(rows))
+    {
+        ScreenVerdict::Interrupted
+    } else if rules
         .iter()
         .any(|r| r.confirms == Confirms::NeedsYou && r.matches(rows))
     {
