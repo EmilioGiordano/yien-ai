@@ -89,6 +89,16 @@ pub const SCHEMA: &[Setting] = &[
               false: such copies are ignored. Applies at once.",
     },
     Setting {
+        key: "window.close_to_tray",
+        default: "true",
+        doc: "true: closing the window hides it to the notification area and YIEN keeps \
+              running; your panes and their agents stay alive, and clicking the icon (or \
+              launching yien.exe again) brings the window back, everything as it was. The \
+              icon's tooltip says how many panes need you, and its menu opens YIEN or quits \
+              it (asking first while agents work). false: closing the window quits, asking \
+              first while agents work. Windows only; elsewhere closing quits.",
+    },
+    Setting {
         key: "update.check",
         default: "true",
         doc: "true: once a day YIEN asks GitHub whether a newer YIEN was released and \
@@ -111,6 +121,7 @@ pub(crate) const TABLES: &[&str] = &[
     "terminal",
     "terminal.font",
     "update",
+    "window",
 ];
 
 /// The table that maps command ids to chords (RF-CFG-03).

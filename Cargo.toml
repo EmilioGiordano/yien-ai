@@ -47,6 +47,8 @@ windows = "0.62.2"
 raw-window-handle = "0.6.2"
 semver = "1.0.28"
 sha2 = "0.10.9"
+tray-icon = { version = "0.26.1", default-features = false }
+png = "0.18.1"
 
 [workspace.lints.rust]
 missing_docs = "warn"

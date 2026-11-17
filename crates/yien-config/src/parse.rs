@@ -158,6 +158,9 @@ impl Walk<'_> {
                 self.loaded.config.osc52_copy = self.boolean(path, value)?;
             }
             "update.check" => self.loaded.config.update_check = self.boolean(path, value)?,
+            "window.close_to_tray" => {
+                self.loaded.config.close_to_tray = self.boolean(path, value)?;
+            }
             "ui.font.size" => {
                 self.loaded.config.ui_font.size = self.size(path, value, MAX_UI_FONT_SIZE)?;
             }
@@ -429,6 +432,21 @@ group = \"project\"")
         let p = err("update.check = 1\n");
         assert!(
             p.message.contains("update.check must be true or false"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn rf_ses_09_close_to_tray_is_on_unless_turned_off() {
+        assert!(ok("").config.close_to_tray);
+        let off = ok("[window]\nclose_to_tray = false");
+        assert!(!off.config.close_to_tray);
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        assert!(!ok("window.close_to_tray = false").config.close_to_tray);
+        let p = err("window.close_to_tray = \"yes\"\n");
+        assert!(
+            p.message
+                .contains("window.close_to_tray must be true or false"),
             "{p}"
         );
     }

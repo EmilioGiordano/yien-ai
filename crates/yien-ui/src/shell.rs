@@ -37,6 +37,8 @@ use crate::model::{
     AgentState, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView, folder_label,
     frames_to_take, typed_tab_name,
 };
+use crate::os_tray::{OsTray, TrayEvent};
+use crate::os_window::OsWindow;
 use crate::palette::{
     Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
     keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
@@ -55,6 +57,7 @@ use crate::title_bar::{
 };
 use crate::tray::{CloseRequest, close_request, quit_detail};
 use crate::update::Updates;
+use crate::window_close::{CloseMode, close_mode};
 
 mod bars;
 mod default_tab;
@@ -205,6 +208,14 @@ pub(crate) struct Shell {
     worktree_close: Option<worktrees::Closing>,
     /// Toasts, the taskbar badge and the flash (RF-ATN-09, -10).
     alerts: Alerts,
+    /// The notification-area icon: the app icon, the "panes that need you"
+    /// count in its tooltip, `Open YIEN` and `Quit YIEN` (RF-SES-09).
+    os_tray: Rc<dyn OsTray>,
+    /// The window's visibility; closing the window hides it, the tray or a
+    /// second launch brings it back (RF-SES-09).
+    os_window: Rc<dyn OsWindow>,
+    /// The count the tray icon's tooltip carries, to avoid re-setting it.
+    tray_needs: Option<usize>,
     /// A newer YIEN: its notice, notes and install.
     updates: update::UpdatePanel,
     /// The tab bar and the context bar as places the keyboard can be
@@ -275,6 +286,8 @@ impl Shell {
         link: Rc<Link>,
         mut events: mpsc::Receiver<CoreMsg>,
         os: Rc<dyn OsAttention>,
+        os_tray: Rc<dyn OsTray>,
+        os_window: Rc<dyn OsWindow>,
         settings: Settings,
         files: Files,
         updates: Updates,
@@ -338,6 +351,20 @@ impl Shell {
             }
         })
         .detach();
+        let (tray_events, mut tray_events_rx) = mpsc::unbounded_channel::<TrayEvent>();
+        os_tray.on_event(Box::new(move |event| {
+            let _ = tray_events.send(event);
+        }));
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = tray_events_rx.recv().await {
+                let handled =
+                    this.update_in(cx, |shell, window, cx| shell.tray_event(event, window, cx));
+                if handled.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
         Self::listen_to_settings(settings.updates, window, cx);
         if let Some(control) = test_control {
             Self::listen_to_test_control(control, window, cx);
@@ -364,7 +391,7 @@ impl Shell {
         let files = FilesPanel::new(files, window, cx);
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |shell, cx| shell.window_should_close(window, cx))
+            this.update(cx, |shell, cx| shell.window_close_requested(window, cx))
                 .unwrap_or(true)
         });
         let tray = std::env::var_os(TRAY_SEED_VAR).map(|_| Tray::new(cx.focus_handle()));
@@ -421,6 +448,9 @@ impl Shell {
             worktree_prompt: None,
             worktree_close: None,
             alerts: Alerts::new(os),
+            os_tray,
+            os_window,
+            tray_needs: None,
             updates,
             tab_bar_focus: cx.focus_handle(),
             context_focus: cx.focus_handle(),
@@ -589,9 +619,14 @@ impl Shell {
 
     /// Updates the badge and, when a pane started needing the user while the
     /// window is in the background, schedules the toast for when the
-    /// coalescing window closes.
+    /// coalescing window closes. Also keeps the tray icon's tooltip count.
     fn update_alerts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = window.is_window_active();
+        let needs = self.workspace.waiting_panes().len();
+        if self.tray_needs != Some(needs) {
+            self.tray_needs = Some(needs);
+            self.os_tray.set_needs(needs);
+        }
         let Some(at) = self.alerts.update(&self.workspace, focused, Instant::now()) else {
             return;
         };
@@ -611,6 +646,7 @@ impl Shell {
     /// named, or on the pane waiting longest if that one moved on.
     fn toast_clicked(&mut self, launch: &str, window: &mut Window, cx: &mut Context<Self>) {
         tracing::debug!("toast clicked");
+        self.os_window.show();
         window.activate_window();
         let waiting = self.workspace.waiting_panes();
         let pane = launch_pane(launch)
@@ -1544,10 +1580,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// The OS asks to close the window (the title bar's close button,
-    /// Alt+F4). While agents work the window stays and asks first
-    /// (RF-SES-13); logoff and shutdown never come through here.
-    fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// The real quit asked for itself: ask first while agents work, then
+    /// true so the window closes (and `cx.quit()` follows). Logoff and
+    /// shutdown never come through here.
+    fn quit_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let asking = self
             .confirm
             .as_ref()
@@ -1566,11 +1602,57 @@ impl Shell {
         }
     }
 
-    /// `app: quit YIEN`: closes the window, which quits, asking first while
-    /// agents work (RF-SES-13). Pressed again, or held, while the question
-    /// is open it keeps asking.
+    /// The OS asked to close the window: the title bar's close button,
+    /// Alt+F4, and the `window.close` test action. With `window.close_to_tray`
+    /// on, the window hides to the notification area and YIEN keeps running
+    /// (RF-SES-09); otherwise the quit path runs, as it always did.
+    fn window_close_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match close_mode(self.settings.config().close_to_tray, self.os_tray.live()) {
+            CloseMode::Hide => {
+                if self.os_window.hide() {
+                    tracing::info!("the window hides to the notification area");
+                }
+                false
+            }
+            CloseMode::Quit => self.quit_app(window, cx),
+        }
+    }
+
+    /// The real quit: the window is shown first, so the question has
+    /// somewhere to appear when agents work, then the quit runs as it
+    /// always did (RF-SES-13).
+    fn quit_app(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.os_window.visible() {
+            self.os_window.show();
+            window.activate_window();
+        }
+        self.quit_should_close(window, cx)
+    }
+
+    /// The tray icon was clicked, or its menu was used (RF-SES-09).
+    fn tray_event(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            TrayEvent::Open => self.open_window(window),
+            TrayEvent::Quit => {
+                if self.quit_app(window, cx) {
+                    window.remove_window();
+                }
+            }
+        }
+    }
+
+    /// Brings the window back from the notification area, or into view
+    /// when it is already shown.
+    fn open_window(&mut self, window: &mut Window) {
+        self.os_window.show();
+        window.activate_window();
+    }
+
+    /// `app: quit YIEN`, and `Quit YIEN` from the notification area: the
+    /// real quit, asking first while agents work (RF-SES-13). Pressed
+    /// again, or held, while the question is open it keeps asking.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.window_should_close(window, cx) {
+        if self.quit_app(window, cx) {
             window.remove_window();
         }
     }

@@ -39,9 +39,9 @@ use windows_sys::Win32::System::Threading::{
     STARTF_USESHOWWINDOW, STARTUPINFOW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, IsIconic,
-    SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNA,
-    SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindowAsync,
+    AllowSetForegroundWindow, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, SW_HIDE,
+    SW_MINIMIZE, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNA, SW_SHOWNOACTIVATE,
+    SetForegroundWindow,
 };
 
 use super::{Claim, Instance, InstanceError, ShowRequest};
@@ -455,21 +455,18 @@ fn wants_foreground() -> bool {
 }
 
 /// Brings the window forward for a show request: restored if minimized,
-/// then in front when the request may take the foreground, or flashing on
-/// the taskbar when it may not. Never synthesizes input to force it.
+/// shown again if it was hidden to the tray, then in front when the request
+/// may take the foreground, or flashing on the taskbar when it may not.
+/// Never synthesizes input to force it.
 pub(super) fn show_window(hwnd: isize, request: ShowRequest) {
     let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    // A hidden window is neither minimized nor shown: put it back first, or
+    // no foreground or flash below can reach it. A request that may not
+    // activate gets the window back without the foreground.
+    crate::window::show(hwnd as isize, request.activate);
     // SAFETY: `hwnd` is this process's own window; these calls only read it
     // or post to it, and fail harmlessly if it is gone.
     unsafe {
-        if IsIconic(hwnd) != 0 {
-            let show = if request.activate {
-                SW_RESTORE
-            } else {
-                SW_SHOWNOACTIVATE
-            };
-            ShowWindowAsync(hwnd, show);
-        }
         if request.activate && SetForegroundWindow(hwnd) != 0 {
             return;
         }

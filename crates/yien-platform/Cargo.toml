@@ -23,6 +23,8 @@ ignore = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 yien-which = { workspace = true }
+tray-icon = { workspace = true }
+png = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Networking_WinHttp",
