@@ -250,6 +250,11 @@ pub struct Machine {
     startup_red: bool,
     /// The state a startup screen's red mark returns to once it is gone.
     startup_from: AgentState,
+    /// The pending screen read was armed for the interrupt line: needs-you
+    /// rules are not read, only the interrupt ends a turn.
+    awaiting_interrupt: bool,
+    /// The read the pending settle will make is for the interrupt line.
+    settle_for_interrupt: bool,
     /// An agent CLI typed in the shell runs and has not reported yet, so its
     /// startup screens are read.
     typed_agent: bool,
@@ -271,6 +276,7 @@ impl Machine {
             pending: None,
             input_pending: false,
             awaiting_screen: false,
+            awaiting_interrupt: false,
             last_activity: Duration::ZERO,
             watchdog_at: None,
             session_ended: false,
@@ -278,6 +284,7 @@ impl Machine {
             reported_turn: false,
             agent_reporting: false,
             settle_at: None,
+            settle_for_interrupt: false,
             unread_since: None,
             startup_red: false,
             startup_from: AgentState::Idle,
@@ -352,6 +359,13 @@ impl Machine {
             .into_iter()
             .flatten()
             .min()
+    }
+
+    /// Whether the machine waits for an answer to a screen read it armed
+    /// for the interrupt line: the caller should feed it only rules that
+    /// match an interrupt, since the rest of the turn's prompts are history.
+    pub fn screen_read_is_interrupt(&self) -> bool {
+        self.awaiting_interrupt
     }
 
     /// Whether an agent reporting over OSC 7501 has taken the pane over from
@@ -453,7 +467,7 @@ impl Machine {
                     // An answered startup screen is read again, not taken
                     // for a turn going on.
                     self.input_pending = false;
-                    self.arm_startup_read(now, fx);
+                    self.arm_screen_read(now, fx, false);
                 } else if self.state.is_red() && self.input_pending {
                     self.set_state(AgentState::Working, Cause::User, now, fx);
                 } else if self.state == AgentState::Working {
@@ -690,6 +704,13 @@ impl Machine {
 
     fn on_screen(&mut self, verdict: ScreenVerdict, now: Duration, fx: &mut Vec<Effect>) {
         let asked = std::mem::take(&mut self.awaiting_screen);
+        let for_interrupt = std::mem::take(&mut self.awaiting_interrupt);
+        if asked && for_interrupt {
+            // A read armed mid-turn sees the whole history: needs you are a
+            // startup channel, and a stale prompt must not light the red
+            // mark on an unremarkable turn.
+            return;
+        }
         if asked && self.reads_startup_screen() {
             // Settled output already held for the confirmation window.
             let cause = Cause::Source(Source::Screen);
@@ -728,6 +749,7 @@ impl Machine {
     /// it never raises the red mark.
     fn on_interrupted_screen(&mut self, now: Duration, fx: &mut Vec<Effect>) {
         let asked = std::mem::take(&mut self.awaiting_screen);
+        let _interrupt_kind = std::mem::take(&mut self.awaiting_interrupt);
         if asked && self.in_turn() {
             let cause = Cause::Source(Source::Screen);
             self.set_state(AgentState::Idle, cause, now, fx);
@@ -736,10 +758,11 @@ impl Machine {
 
     /// Reads the screen once output settles, and at least every
     /// [`STARTUP_SCREEN_MAX_WAIT`] while it keeps coming.
-    fn arm_startup_read(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+    fn arm_screen_read(&mut self, now: Duration, fx: &mut Vec<Effect>, for_interrupt: bool) {
         let first = *self.unread_since.get_or_insert(now);
         let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
         self.settle_at = Some(at);
+        self.settle_for_interrupt = for_interrupt;
         fx.push(Effect::WakeAt(at));
     }
 
@@ -751,7 +774,7 @@ impl Machine {
             return;
         }
         if self.reads_interrupt_screen() {
-            self.arm_startup_read(now, fx);
+            self.arm_screen_read(now, fx, true);
         }
     }
 
@@ -778,7 +801,7 @@ impl Machine {
         }
         self.typed_agent = true;
         // The screen may have settled long before the program was found.
-        self.arm_startup_read(now, fx);
+        self.arm_screen_read(now, fx, false);
     }
 
     /// A turn the agent's service says failed: the running one, or the one
@@ -808,6 +831,7 @@ impl Machine {
         self.settle_at = None;
         self.unread_since = None;
         self.awaiting_screen = false;
+        self.awaiting_interrupt = false;
         if self.startup_red {
             self.set_state(self.startup_from, cause, now, fx);
         }
@@ -824,6 +848,7 @@ impl Machine {
                     && !self.awaiting_screen
                 {
                     self.awaiting_screen = true;
+                    self.awaiting_interrupt = self.settle_for_interrupt;
                     fx.push(Effect::CheckScreen);
                 }
             }
@@ -854,6 +879,7 @@ impl Machine {
         if now >= self.last_activity + period {
             if self.screen_allowed() && !self.awaiting_screen {
                 self.awaiting_screen = true;
+                self.awaiting_interrupt = false;
                 fx.push(Effect::CheckScreen);
             }
             self.last_activity = now;
@@ -875,14 +901,11 @@ impl Machine {
             && !self.signal_lost
     }
 
-    /// Whether the screen is read for a startup screen: the rule allows it,
-    /// the agent has not spoken over its structured channel since it was
-    /// spawned, and no turn or end is on show. A typed agent's screens are
-    /// read over the shell's running command too.
-    /// Reads the screen during a running turn for the line an agent draws
-    /// when the user interrupts it: Claude Code 2.1.326 stops sending its
-    /// `state=idle` on an interrupted turn, so the line is the only sign of
-    /// it. The read only ends the turn; it never raises the red mark.
+    /// Whether the screen is read during a running turn for the line an
+    /// agent draws when the user interrupts it: Claude Code 2.1.326 stops
+    /// sending its `state=idle` on an interrupted turn, so the line is the
+    /// only sign of it. The read only ends the turn; it never raises the
+    /// red mark.
     ///
     /// ```
     /// use std::time::Duration;
@@ -899,11 +922,13 @@ impl Machine {
     pub fn reads_interrupt_screen(&self) -> bool {
         self.in_turn()
             && !self.exited
-            && (self.config.declares(Source::Screen)
-                || self.typed_agent
-                || self.agent_reporting)
+            && (self.config.declares(Source::Screen) || self.typed_agent || self.agent_reporting)
     }
 
+    /// Whether the screen is read for a startup screen: the rule allows it,
+    /// the agent has not spoken over its structured channel since it was
+    /// spawned, and no turn or end is on show. A typed agent's screens are
+    /// read over the shell's running command too.
     fn reads_startup_screen(&self) -> bool {
         if self.typed_agent {
             return !self.exited && !self.signal_lost && (!self.state.is_red() || self.startup_red);
@@ -960,6 +985,7 @@ impl Machine {
         self.input_pending = false;
         self.pending = None;
         self.awaiting_screen = false;
+        self.awaiting_interrupt = false;
         self.settle_at = None;
         self.unread_since = None;
         self.set_state(AgentState::Idle, cause, now, fx);
@@ -1003,6 +1029,7 @@ impl Machine {
         } else {
             self.pending = None;
             self.awaiting_screen = false;
+            self.awaiting_interrupt = false;
             self.watchdog_at = None;
         }
         if !matches!(to, AgentState::Working | AgentState::NeedsYou(_)) {

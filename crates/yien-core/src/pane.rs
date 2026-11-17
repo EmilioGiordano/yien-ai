@@ -12,7 +12,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{
-    Effect as AgentEffect, HookEvent, Machine, ScreenRule, SessionEndReason, Signal,
+    Confirms, Effect as AgentEffect, HookEvent, Machine, ScreenRule, SessionEndReason, Signal,
     evaluate_screen,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
@@ -488,6 +488,10 @@ struct Actor {
     /// The startup screens of the agent CLI last found in the shell, read
     /// while the machine says so.
     typed_screen: Vec<ScreenRule>,
+    /// The subset of whichever rules this pane reads that end a running turn:
+    /// the interrupt lines. A turn shows stale prompts; only these may be
+    /// trusted to end one (RN-02).
+    interrupt_rules: Vec<ScreenRule>,
     /// The OpenCode sessions this launch's program named over OSC 7501.
     opencode_sessions: Sessions,
     /// The shell poller finds OpenCode under this launch's shell.
@@ -524,6 +528,13 @@ pub(crate) fn spawn(
             ui_seen,
         }
     });
+    let interrupt_rules: Vec<ScreenRule> = setup
+        .plan
+        .screen
+        .iter()
+        .filter(|rule| rule.confirms == Confirms::Interrupt)
+        .cloned()
+        .collect();
     let actor = Actor {
         id,
         plan: setup.plan,
@@ -564,6 +575,7 @@ pub(crate) fn spawn(
         restored_mark: None,
         titles: Titles::new(false),
         typed_screen: Vec::new(),
+        interrupt_rules,
         opencode_sessions: Sessions::default(),
         typed_opencode: false,
         opencode: None,
@@ -1098,6 +1110,11 @@ impl Actor {
             .unwrap_or_default();
         let typed = !screens.is_empty();
         if typed {
+            self.interrupt_rules = screens
+                .iter()
+                .filter(|rule| rule.confirms == Confirms::Interrupt)
+                .cloned()
+                .collect();
             self.typed_screen = screens;
         }
         self.step(&Signal::TypedAgent(typed));
@@ -1353,13 +1370,13 @@ impl Actor {
                 AgentEffect::CheckScreen => {
                     let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                    // A typed agent keeps its own rules for the interrupt
-                    // line for as long as its turn runs: the shell's rules
-                    // do not carry it.
-                    let typed = self.machine.reads_typed_agent()
-                        || (self.machine.reads_interrupt_screen() && !self.typed_screen.is_empty());
-                    let rules = if typed {
+                    // A typed agent keeps its own rules until it reports;
+                    // an interrupt read sees only interrupt rules, since the
+                    // turn's prompts are history (RN-02).
+                    let rules = if self.machine.reads_typed_agent() {
                         &self.typed_screen
+                    } else if self.machine.screen_read_is_interrupt() {
+                        &self.interrupt_rules
                     } else {
                         &self.plan.screen
                     };
