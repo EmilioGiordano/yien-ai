@@ -1,0 +1,17 @@
+# Claude Code 2.1.326, trusted folder, mock Messages API: a turn stopped
+# with Ctrl+C as 0x03 (YIEN's byte), then Ctrl+C twice more to exit. The
+# capture runs with YIEN's hook settings (--settings, the yien-hook events);
+# the recording went through a logging stand-in for yien-hook, so the hook
+# calls are visible in the report, not in this file.
+# Preconditions: the work folder already trusted (answer the folder trust
+# screen once; Claude writes the projects entry itself) and the "custom API
+# key" question answered Yes once (Claude persists it in ~/.claude.json).
+wait-for 60000 effort
+text slow please
+key enter
+wait-for 30000 interrupt
+key ctrl-c
+wait 3000
+key ctrl-c
+key ctrl-c
+wait-exit 10000
