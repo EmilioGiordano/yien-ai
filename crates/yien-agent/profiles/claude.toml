@@ -62,6 +62,14 @@ confirms = "needs_you"
 bottom_rows = 16
 pattern = '''(?m)^\W*Use Claude Code's terminal setup\?\W*$'''
 
+# Claude 2.1.326 stops sending state=idle when the user interrupts a turn
+# mid-stream; the interrupt line it draws is the only thing told about it.
+# Ends the turn as idle, never needs you (RN-02).
+[[rules.screen]]
+confirms = "interrupt"
+bottom_rows = 12
+pattern = '(?m)Interrupted · What should Claude do instead\?'
+
 [[rules]]
 versions = ">=2.0, <2.1.295"
 sources = ["hooks", "screen"]
