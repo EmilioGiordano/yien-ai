@@ -5,8 +5,9 @@
 use std::time::Duration;
 
 use yien_agent::{
-    AgentState, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason, ScreenRule,
-    ScreenVerdict, SessionEndReason, SessionStartSource, Signal, builtin_profiles, evaluate_screen,
+    AgentState, Confirms, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason,
+    ScreenRule, ScreenVerdict, SessionEndReason, SessionStartSource, Signal, builtin_profiles,
+    evaluate_screen,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -24,6 +25,9 @@ const CLAUDE_IN_POWERSHELL: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-typed-in-powershell.bin");
 /// A slow turn stopped by Ctrl+C, then Ctrl+C twice more to exit.
 const CLAUDE_CTRL_C: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c.bin");
+/// The same on 2.1.326, against the mock with YIEN's hooks logged by a stub.
+const CLAUDE_326_CTRL_C: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.326-ctrl-c.bin");
 /// The same typed in PowerShell with YIEN's prompt marks.
 const CLAUDE_CTRL_C_IN_POWERSHELL: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c-typed-in-powershell.bin");
@@ -125,6 +129,27 @@ fn states(capture: &[u8], profile: &str) -> Vec<AgentState> {
 
 fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `capture` with the `skip`-th occurrence of `needle` removed: bytes as the
+/// CLI sent them, minus a record it stopped sending.
+fn excise(capture: &[u8], needle: &[u8], skip: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capture.len());
+    let mut rest = capture;
+    let mut index = 0;
+    loop {
+        let Some(at) = position(rest, needle) else {
+            out.extend_from_slice(rest);
+            return out;
+        };
+        if index == skip {
+            out.extend_from_slice(&rest[..at]);
+        } else {
+            out.extend_from_slice(&rest[..at + needle.len()]);
+        }
+        rest = &rest[at + needle.len()..];
+        index += 1;
+    }
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
@@ -441,7 +466,18 @@ impl Settled {
                 match effect {
                     Effect::Transition { to, .. } => self.states.push(to),
                     Effect::CheckScreen => {
-                        queue.push(Signal::Screen(read_screen(&self.engine, &self.rules)));
+                        // An interrupt read sees only interrupt rules, as in
+                        // the pane: a stale prompt must not light the red mark.
+                        let rules: Vec<ScreenRule> = if self.machine.screen_read_is_interrupt() {
+                            self.rules
+                                .iter()
+                                .filter(|rule| rule.confirms == Confirms::Interrupt)
+                                .cloned()
+                                .collect()
+                        } else {
+                            self.rules.clone()
+                        };
+                        queue.push(Signal::Screen(read_screen(&self.engine, &rules)));
                     }
                     _ => {}
                 }
@@ -544,6 +580,7 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (CLAUDE_ERROR, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CLAUDE_CTRL_C, "claude"),
+        (CLAUDE_326_CTRL_C, "claude"),
         (CLAUDE_325_PERMISSION, "claude"),
         (CLAUDE_325_ESC, "claude"),
         (CLAUDE_325_ERROR, "claude"),
@@ -558,13 +595,19 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (OPENCODE_230_ERROR, "opencode"),
     ] {
         // Claude's first rule is its permission prompt, which a turn shows.
+        // The interrupt rule matches the line a turn ends on; it is not a
+        // startup screen, so it is not read for that.
         let skip = usize::from(profile == "claude");
-        let startup = &screen_rules(profile)[skip..];
+        let startup: Vec<_> = screen_rules(profile)
+            .into_iter()
+            .filter(|rule| rule.confirms != Confirms::Interrupt)
+            .skip(skip)
+            .collect();
         let mut engine = AlacrittyEngine::new(VtConfig::default(), 120, 40);
         for (i, bytes) in capture.chunks(64).enumerate() {
             engine.feed(bytes);
             assert_eq!(
-                read_screen(&engine, startup),
+                read_screen(&engine, &startup),
                 ScreenVerdict::NoMatch,
                 "{profile}, read {i}"
             );
@@ -588,7 +631,9 @@ fn rf_age_05_agents_typed_in_a_shell_report_as_in_their_own_pane() {
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CLAUDE_CTRL_C, "claude"),
+        (CLAUDE_326_CTRL_C, "claude"),
     ] {
+        // Found at once, so every read until its first record is made.
         assert_eq!(
             states(capture, "shell"),
             states(capture, profile),
@@ -709,6 +754,56 @@ fn rnf_23_claude_2_1_325_exit_sends_clear_and_ends_idle() {
     assert_eq!(replay.states, []);
     assert!(!replay.machine.agent_reporting());
     assert_eq!(replay.machine.state(), AgentState::Idle);
+}
+
+#[test]
+fn rnf_23_claude_2_1_326_ctrl_c_interrupt_is_idle_and_its_exit_changes_nothing() {
+    assert_query_answered_in_order(CLAUDE_326_CTRL_C, "claude");
+    // Ctrl+C at turn start gives `idle` (113 bytes after `working`); two
+    // more exit with `clear`, which changes nothing.
+    assert_eq!(
+        states(CLAUDE_326_CTRL_C, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+/// The interrupt the 2.1.326 fix targets: a turn already running when
+/// Ctrl+C lands sends nothing at all, and the only sign is the interrupt
+/// line Claude draws. The bytes are the real 2.1.325 capture with the
+/// OSC 7501 idle record of the interrupt taken out — the exact difference
+/// 2.1.326 shows mid-stream — cut before the exit's `clear`, which would
+/// end the turn on its own.
+#[test]
+fn rnf_23_claude_2_1_326_interrupted_turn_ends_idle_without_a_record() {
+    let needle = b"\x1b]7501;state=idle:app=claude-code\x07";
+    let silent = excise(CLAUDE_CTRL_C, needle, 1);
+    assert_eq!(position(&silent, needle), position(CLAUDE_CTRL_C, needle));
+    let end = position(&silent, b"\x1b]7501;state=clear").expect("the exit sends clear");
+    let parts: Vec<&[u8]> = silent[..end].chunks(64).collect();
+    assert_eq!(
+        replay_settled(&parts, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rf_age_05_claude_2_1_326_ctrl_c_in_a_hooked_pane_goes_idle_then_ends_cleanly() {
+    for chunk in [1, 7, 64, CLAUDE_326_CTRL_C.len()] {
+        let (states, before_exit) = replay_hooked(CLAUDE_326_CTRL_C, chunk, false);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads");
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle, AgentState::Done],
+            "{chunk}-byte reads"
+        );
+        let (states, before_exit) = replay_hooked(CLAUDE_326_CTRL_C, chunk, true);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads, seen");
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle],
+            "{chunk}-byte reads, seen"
+        );
+    }
 }
 
 #[test]
