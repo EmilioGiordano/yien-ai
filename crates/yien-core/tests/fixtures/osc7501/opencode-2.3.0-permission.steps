@@ -1,0 +1,10 @@
+# OpenCode 2.3.0: the mock answers this turn with a bash tool call for curl
+# against port 9. The project opencode.json needs the permission rule
+# {"bash": "ask"}, or nothing asks; its default lets the command run.
+wait-for 60000 Ask anything
+wait 2000
+text mocktool
+wait 300
+key enter
+wait-for 60000 Permission required
+wait 1000

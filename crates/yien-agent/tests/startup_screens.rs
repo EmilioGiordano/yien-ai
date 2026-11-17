@@ -9,6 +9,10 @@ use yien_agent::{ScreenRule, ScreenVerdict, Version, builtin_profiles, evaluate_
 const CODEX: Version = Version::new(0, 167, 2);
 const CLAUDE: Version = Version::new(2, 1, 325);
 
+/// Claude Code 2.1.325's folder trust screen, as the CLI drew it in a
+/// ConPTY; the folder row is elided to a neutral path.
+const CLAUDE_REAL_TRUST: &str = include_str!("fixtures/startup-screens/claude-2.1.325-trust.txt");
+
 /// The screen rules `id` runs for a version its profile verified.
 fn rules(id: &str, version: Version) -> Vec<ScreenRule> {
     let profiles = builtin_profiles().unwrap_or_default();
@@ -148,8 +152,9 @@ const CLAUDE_TERMINAL_SETUP: &str = "\
  ❯ 1. Yes, use recommended settings
    2. No, maybe later with /terminal-setup";
 
-const CLAUDE_SCREENS: [(&str, &str); 8] = [
+const CLAUDE_SCREENS: [(&str, &str); 9] = [
     ("trust", CLAUDE_TRUST),
+    ("trust, captured 2.1.325", CLAUDE_REAL_TRUST),
     ("trust with grants", CLAUDE_TRUST_PLAIN),
     ("theme", CLAUDE_THEME),
     ("login", CLAUDE_LOGIN),

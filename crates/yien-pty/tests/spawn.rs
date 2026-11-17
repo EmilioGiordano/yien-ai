@@ -275,3 +275,50 @@ fn close_ends_the_child_and_reports_the_terminal_closed() {
     assert!(closer.is_closed());
     assert!(!driver.until_exit().success());
 }
+
+#[test]
+fn env_clear_starts_the_child_from_an_empty_environment() {
+    // A marker the child must see, and four the parent has (an ordinary one
+    // and a credential) that the child must not.
+    let command = if cfg!(windows) { "set" } else { "env" };
+    let mut spec = run(command)
+        .env_clear()
+        .env("YIEN_CAPTURE_PROBE", "present")
+        // Without PATH the program is not found on any system.
+        .env(
+            "PATH",
+            std::env::var_os("PATH").expect("the test host has PATH"),
+        );
+    if cfg!(windows) {
+        // What the empty start still needs to run a program.
+        spec = spec.env(
+            "SYSTEMROOT",
+            std::env::var_os("SYSTEMROOT").expect("the test host has SystemRoot"),
+        );
+    }
+    // cmd.exe itself defaults COMSPEC, PROMPT and PATHEXT; anything else in
+    // the output would have to have come from us or the registry.
+    let mut driver = Driver::new(backend().spawn(spec).unwrap());
+    driver.until(|out| contains(out, b"YIEN_CAPTURE_PROBE=present"));
+    driver.until_exit();
+    let output = String::from_utf8_lossy(&driver.output);
+    assert!(
+        output.contains("YIEN_CAPTURE_PROBE=present"),
+        "the explicit variable is set; output: {output}"
+    );
+    for forbidden in [
+        "TEMP=",
+        "TMP=",
+        "APPDATA=",
+        "LOCALAPPDATA=",
+        "HOMEDRIVE=",
+        "HOMEPATH=",
+        "USERPROFILE=",
+        "ANTHROPIC_API_KEY=",
+    ] {
+        assert!(
+            !output.contains(forbidden),
+            "{forbidden} leaked into the cleared child; output: {output}"
+        );
+    }
+}
