@@ -463,6 +463,9 @@ impl Machine {
                         self.input_pending = false;
                     }
                 }
+                // A turn is read for the interrupt line for as long as it
+                // runs, red or not.
+                self.arm_interrupt_read(now, fx);
             }
             Signal::Hook(_) | Signal::Osc(_) | Signal::Screen(_) => self.detect(signal, now, fx),
         }
@@ -473,7 +476,15 @@ impl Machine {
             return;
         };
         let typed_screen = source == Source::Screen && self.typed_agent;
-        if !self.config.declares(source) && !typed_screen {
+        let armed_interrupt_read = source == Source::Screen && self.awaiting_screen;
+        if !self.config.declares(source) && !typed_screen && !armed_interrupt_read {
+            return;
+        }
+        // An interrupt verdict ends the turn whatever the rank a channel
+        // reached: 2.1.326 sends no record for one, so no hook outranks it
+        // and no needs-you is raised against it (RN-02 keeps red as it is).
+        if let Signal::Screen(ScreenVerdict::Interrupted) = signal {
+            self.on_interrupted_screen(now, fx);
             return;
         }
         if let Signal::Screen(verdict) = signal {
@@ -710,6 +721,19 @@ impl Machine {
         }
     }
 
+    /// A screen read armed during a turn (or about one) found the line an
+    /// agent draws when the user interrupts its turn: Claude Code 2.1.326
+    /// stops sending `state=idle` for one, so the line is all the machine
+    /// gets. It ends the turn as Idle, whatever channel outranks the screen;
+    /// it never raises the red mark.
+    fn on_interrupted_screen(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        let asked = std::mem::take(&mut self.awaiting_screen);
+        if asked && self.in_turn() {
+            let cause = Cause::Source(Source::Screen);
+            self.set_state(AgentState::Idle, cause, now, fx);
+        }
+    }
+
     /// Reads the screen once output settles, and at least every
     /// [`STARTUP_SCREEN_MAX_WAIT`] while it keeps coming.
     fn arm_startup_read(&mut self, now: Duration, fx: &mut Vec<Effect>) {
@@ -717,6 +741,18 @@ impl Machine {
         let at = (now + STARTUP_SCREEN_SETTLE).min(first + STARTUP_SCREEN_MAX_WAIT);
         self.settle_at = Some(at);
         fx.push(Effect::WakeAt(at));
+    }
+
+    /// Arms the read of an interrupt during a turn, like a startup read:
+    /// once output settles, at least every [`STARTUP_SCREEN_MAX_WAIT`].
+    fn arm_interrupt_read(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        if self.reads_startup_screen() {
+            // The settled read covers the interrupt line too.
+            return;
+        }
+        if self.reads_interrupt_screen() {
+            self.arm_startup_read(now, fx);
+        }
     }
 
     /// An agent CLI with startup screens was found running in the shell, or
@@ -784,7 +820,9 @@ impl Machine {
             } else {
                 self.settle_at = None;
                 self.unread_since = None;
-                if self.reads_startup_screen() && !self.awaiting_screen {
+                if (self.reads_startup_screen() || self.reads_interrupt_screen())
+                    && !self.awaiting_screen
+                {
                     self.awaiting_screen = true;
                     fx.push(Effect::CheckScreen);
                 }
@@ -841,6 +879,31 @@ impl Machine {
     /// the agent has not spoken over its structured channel since it was
     /// spawned, and no turn or end is on show. A typed agent's screens are
     /// read over the shell's running command too.
+    /// Reads the screen during a running turn for the line an agent draws
+    /// when the user interrupts it: Claude Code 2.1.326 stops sending its
+    /// `state=idle` on an interrupted turn, so the line is the only sign of
+    /// it. The read only ends the turn; it never raises the red mark.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{HookEvent, Machine, MachineConfig, Signal, Source};
+    ///
+    /// let ms = Duration::from_millis;
+    /// let m = Machine::new(MachineConfig::new(&[Source::Hooks, Source::Screen], None));
+    /// assert!(!m.reads_interrupt_screen());
+    /// let (m, _) = m.step(&Signal::Hook(HookEvent::UserPromptSubmit), ms(0));
+    /// assert!(m.reads_interrupt_screen());
+    /// let (m, _) = m.step(&Signal::Tick, ms(1_000));
+    /// assert!(m.reads_interrupt_screen());
+    /// ```
+    pub fn reads_interrupt_screen(&self) -> bool {
+        self.in_turn()
+            && !self.exited
+            && (self.config.declares(Source::Screen)
+                || self.typed_agent
+                || self.agent_reporting)
+    }
+
     fn reads_startup_screen(&self) -> bool {
         if self.typed_agent {
             return !self.exited && !self.signal_lost && (!self.state.is_red() || self.startup_red);

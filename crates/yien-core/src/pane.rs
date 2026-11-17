@@ -1353,7 +1353,12 @@ impl Actor {
                 AgentEffect::CheckScreen => {
                     let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                    let rules = if self.machine.reads_typed_agent() {
+                    // A typed agent keeps its own rules for the interrupt
+                    // line for as long as its turn runs: the shell's rules
+                    // do not carry it.
+                    let typed = self.machine.reads_typed_agent()
+                        || (self.machine.reads_interrupt_screen() && !self.typed_screen.is_empty());
+                    let rules = if typed {
                         &self.typed_screen
                     } else {
                         &self.plan.screen
