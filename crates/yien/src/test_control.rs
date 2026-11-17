@@ -209,6 +209,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn adr_21_args_on_a_command_reach_the_window_untouched() {
+        // The window, not the pipe, decides that `tab.new` takes no args: a
+        // refusal only works when the args are still on the request.
+        use std::io::{BufRead, BufReader, Write};
+
+        let name = format!("arg-{}-{:x}", std::process::id(), std::process::id());
+        let (calls, mut receiver) = mpsc::channel::<TestCall>(QUEUE);
+        let server = serve(&name, calls).unwrap();
+        let path = server.path().to_owned();
+        let window = std::thread::spawn(move || {
+            let call = receiver.blocking_recv().unwrap();
+            let seen = call.request.clone();
+            call.reply.send(Reply::done()).unwrap();
+            seen
+        });
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        pipe.write_all(br#"{"op":"command","id":"tab.new","args":{"pane":3}}"#)
+            .unwrap();
+        pipe.write_all(b"\n").unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut pipe).read_line(&mut line).unwrap();
+        let request = window.join().unwrap();
+        assert_eq!(
+            request,
+            Request::Command {
+                id: "tab.new".into(),
+                args: yien_proto::test_control::CommandArgs {
+                    pane: Some(yien_proto::PaneId::new(3)),
+                    ..Default::default()
+                },
+            }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn adr_21_a_line_on_the_pipe_reaches_the_window_and_its_reply_comes_back() {
         use std::io::{BufRead, BufReader, Write};
 

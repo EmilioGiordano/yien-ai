@@ -12,11 +12,12 @@ use yien_proto::test_control::{
 };
 use yien_proto::{Orientation, PaneId};
 
+use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
 use crate::catalog::spec;
 use crate::grid::named_key;
 use crate::model::{AgentState, TabMark, WorkspaceView};
 use crate::palette::Target;
-use crate::pane_head::program_tag;
+use crate::pane_head::{pane_badge, program_tag};
 
 /// One request from the test control pipe and where its reply goes.
 ///
@@ -111,14 +112,19 @@ pub(crate) enum Run {
 }
 
 /// Which command `id` runs with `args`, checked against what the window
-/// knows: the profile must be one the palette lists, the pane, tab or
-/// project must exist.
+/// knows: the catalog's ids take no arguments, so a request carrying any
+/// is refused; the palette's argument rows must have the ones they read,
+/// and the profile must be one the palette lists, the pane, tab or project
+/// must exist.
 pub(crate) fn resolve_command(
     id: &str,
     args: &CommandArgs,
     ws: &WorkspaceView,
 ) -> Result<Run, String> {
     if let Some(spec) = spec(id) {
+        if *args != CommandArgs::default() {
+            return Err(format!("{id} takes no args"));
+        }
         return Ok(Run::Catalog(spec.id));
     }
     let profile = || {
@@ -238,6 +244,7 @@ pub(crate) fn workspace_state(
                 dir: tab.dir.clone(),
                 branch: tab.branch.clone(),
                 worktree: tab.worktree.is_some(),
+                badge: ws.tab_badge(tab).map(|b| badge_key(b).to_owned()),
                 state: state.label().to_owned(),
                 mark: match ws.tab_mark(tab) {
                     TabMark::Shell => "shell".to_owned(),
@@ -258,6 +265,7 @@ pub(crate) fn workspace_state(
                     name: pane.name.clone(),
                     profile: pane.profile.clone(),
                     profile_id: pane.profile_id.as_str().to_owned(),
+                    badge: pane_badge(&pane).map(|b| badge_key(b).to_owned()),
                     tag: program_tag(&pane).to_owned(),
                     state: pane.state.label().to_owned(),
                     signal_lost: pane.signal_lost,
@@ -275,6 +283,19 @@ pub(crate) fn workspace_state(
         }
     }
     (projects, tabs, panes)
+}
+
+/// A badge as a snake case key, as `badge` carries it.
+fn badge_key(badge: Badge) -> &'static str {
+    match badge {
+        Badge::Agent(AgentBadge::Claude) => "claude",
+        Badge::Agent(AgentBadge::Codex) => "codex",
+        Badge::Agent(AgentBadge::OpenCode) => "opencode",
+        Badge::Shell(ShellBadge::PowerShell) => "powershell",
+        Badge::Shell(ShellBadge::Cmd) => "cmd",
+        Badge::Shell(ShellBadge::GitBash) => "git_bash",
+        Badge::Shell(ShellBadge::Other) => "other",
+    }
 }
 
 /// A state as a snake case key, as `mark` carries it.
@@ -435,6 +456,72 @@ mod tests {
     }
 
     #[test]
+    fn rf_pan_12_each_pane_and_tab_carries_its_badge() {
+        let ws = workspace();
+        let (_, tabs, panes) = workspace_state(&ws, Some(PaneId::new(4)), &|_| None);
+        let badge = |p: &PaneState| p.badge.clone();
+        assert_eq!(
+            badge(&panes[0]).as_deref(),
+            Some("claude"),
+            "the claude pane"
+        );
+        assert_eq!(
+            badge(&panes[1]).as_deref(),
+            Some("powershell"),
+            "the shell pane"
+        );
+        assert_eq!(
+            badge(&panes[2]).as_deref(),
+            Some("powershell"),
+            "the other shell pane"
+        );
+        // The tab's badge is its most urgent pane's: Claude's in the split tab,
+        // the shell's in the shells-only tab.
+        assert_eq!(tabs[0].badge.as_deref(), Some("claude"));
+        assert_eq!(tabs[1].badge.as_deref(), Some("powershell"));
+    }
+
+    /// One project with one cmd pane.
+    fn cmd_workspace() -> WorkspaceView {
+        WorkspaceView::from_snapshot(&WorkspaceSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(1),
+                name: "work".into(),
+                root: "C:/work".into(),
+                tabs: vec![TabId::new(2)],
+                collapsed: false,
+            }],
+            tabs: vec![TabInfo {
+                id: TabId::new(2),
+                project: ProjectId::new(1),
+                name: "Tab 2".into(),
+                dir: "C:/work".into(),
+                branch: None,
+                layout: LayoutNode::Pane(PaneId::new(3)),
+                focused: PaneId::new(3),
+                maximized: None,
+                muted: false,
+                worktree: None,
+            }],
+            panes: vec![PaneInfo {
+                profile: "Command Prompt".into(),
+                ..pane_info(3, 2, "shell:cmd", "cmd", yien_proto::AgentState::Idle)
+            }],
+            active_tab: Some(TabId::new(2)),
+            ..WorkspaceSnapshot::default()
+        })
+    }
+
+    #[test]
+    fn rf_pan_12_a_cmd_pane_and_its_tab_carry_the_cmd_badge() {
+        let ws = cmd_workspace();
+        let (_, tabs, panes) = workspace_state(&ws, None, &|_| None);
+        assert_eq!(panes[0].badge.as_deref(), Some("cmd"));
+        assert_eq!(tabs[0].badge.as_deref(), Some("cmd"));
+        assert_eq!(tabs[0].mark, "shell");
+    }
+
+    #[test]
     fn rn_01_a_tab_with_a_waiting_agent_is_marked_needs_you_and_a_tab_of_shells_has_no_mark() {
         let ws = workspace();
         let (_, tabs, _) = workspace_state(&ws, None, &|_| None);
@@ -488,6 +575,71 @@ mod tests {
     }
 
     #[test]
+    fn adr_21_catalog_ids_refuse_args_they_would_ignore() {
+        let ws = workspace();
+        for id in CATALOG_ID_SAMPLE {
+            for (what, args) in ARG_VARIANTS {
+                assert_eq!(
+                    resolve_command(id, &args(), &ws),
+                    Err(format!("{id} takes no args")),
+                    "{id} with {what}"
+                );
+            }
+        }
+        // The same ids from the existing test still resolve without args.
+        for id in ["tab.new_claude", "app.quit"] {
+            assert_eq!(
+                resolve_command(id, &CommandArgs::default(), &ws),
+                Ok(Run::Catalog(spec(id).unwrap().id))
+            );
+        }
+    }
+
+    const CATALOG_ID_SAMPLE: &[&str] = &[
+        "tab.new",
+        "tab.new_claude",
+        "app.quit",
+        "pane.split_right",
+        "pane.close",
+        "terminal.copy",
+        "agent.next_needs_you",
+    ];
+
+    /// A name for one args-carrying case, and how to build it.
+    type ArgCase = (&'static str, fn() -> CommandArgs);
+
+    /// Each way a request can carry args: one arg set, every field set.
+    const ARG_VARIANTS: &[ArgCase] = &[
+        ("profile", || CommandArgs {
+            profile: Some(ProfileId::new("claude")),
+            ..CommandArgs::default()
+        }),
+        ("direction", || CommandArgs {
+            direction: Some(SplitWay::Down),
+            ..CommandArgs::default()
+        }),
+        ("pane", || CommandArgs {
+            pane: Some(PaneId::new(3)),
+            ..CommandArgs::default()
+        }),
+        ("tab", || CommandArgs {
+            tab: Some(TabId::new(2)),
+            ..CommandArgs::default()
+        }),
+        ("project", || CommandArgs {
+            project: Some(ProjectId::new(1)),
+            ..CommandArgs::default()
+        }),
+        ("everything", || CommandArgs {
+            profile: Some(ProfileId::new("shell")),
+            direction: Some(SplitWay::Right),
+            pane: Some(PaneId::new(3)),
+            tab: Some(TabId::new(2)),
+            project: Some(ProjectId::new(1)),
+        }),
+    ];
+
+    #[test]
     fn adr_19_catalog_ids_run_their_catalog_entry() {
         let ws = workspace();
         for id in [
@@ -501,6 +653,21 @@ mod tests {
                 Ok(Run::Catalog(spec(id).unwrap().id))
             );
         }
+    }
+
+    #[test]
+    fn adr_21_argument_ids_keep_ignoring_the_args_they_do_not_read() {
+        let ws = workspace();
+        // tab.new_with reads only profile: a stray pane beside it still runs.
+        let stray = CommandArgs {
+            profile: Some(ProfileId::new("claude")),
+            pane: Some(PaneId::new(4)),
+            ..CommandArgs::default()
+        };
+        assert_eq!(
+            resolve_command("tab.new_with", &stray, &ws),
+            Ok(Run::Target(Target::NewTab(ProfileId::new("claude"))))
+        );
     }
 
     #[test]

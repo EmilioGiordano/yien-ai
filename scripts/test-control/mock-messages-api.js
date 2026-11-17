@@ -8,9 +8,12 @@
 // Prints "listening <port>" on stdout once ready.
 //
 // A turn whose last user message contains "slow" streams for about 40 s;
-// anything else answers at once. Only the main turn is slowed: Claude Code's
-// side requests (titles, topic checks) carry no tools and always answer at
-// once. Ctrl+C in Claude closes the stream; the mock stops writing then.
+// anything else answers at once. A turn whose last user message contains
+// "mockerror" answers with an API error after a few seconds, so a scenario
+// can select the other tab first and watch the pane fail while unseen. Only
+// the main turn is slowed or failed: Claude Code's side requests (titles,
+// topic checks) carry no tools and always answer at once. Ctrl+C in Claude
+// closes the stream; the mock stops writing then.
 
 'use strict';
 
@@ -21,6 +24,8 @@ const SLOW_CHUNKS = 80;
 const SLOW_GAP_MS = 500;
 const FAST_CHUNKS = 2;
 const FAST_GAP_MS = 10;
+// Long enough for a scenario to select another tab before the error lands.
+const ERROR_DELAY_MS = 8000;
 
 function option(name, fallback) {
   const at = process.argv.indexOf(name);
@@ -75,7 +80,26 @@ function answer(req, res, raw) {
   }
   const tools = Array.isArray(body.tools) ? body.tools.length : 0;
   const slow = tools > 0 && /slow/.test(lastUserText(body));
-  note(`messages stream=${Boolean(body.stream)} tools=${tools} slow=${slow}`);
+  const fail = tools > 0 && /mockerror/.test(lastUserText(body));
+  note(`messages stream=${Boolean(body.stream)} tools=${tools} slow=${slow} fail=${fail}`);
+  if (fail) {
+    // A non-retryable error, like an invalid key: Claude Code gives up at
+    // once and ends the turn with StopFailure. The wait lets a scenario
+    // select another tab first, so the failure lands on an unseen pane.
+    let closed = false;
+    res.on('close', () => {
+      closed = true;
+    });
+    res.on('error', () => {});
+    setTimeout(() => {
+      if (closed || res.writableEnded) return;
+      sendJson(res, 400, {
+        type: 'error',
+        error: { type: 'invalid_request_error', message: 'mock failure' },
+      });
+    }, ERROR_DELAY_MS);
+    return;
+  }
   const message = {
     id: 'msg_mock',
     type: 'message',
