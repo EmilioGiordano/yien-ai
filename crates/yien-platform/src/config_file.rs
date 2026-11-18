@@ -711,7 +711,7 @@ mod tests {
     }
 
     /// Unix only: on Windows the same file would go to Notepad, which must
-    /// not open while Emilio is at the PC.
+    /// not open while the developer is at the PC.
     #[cfg(unix)]
     #[test]
     fn rf_ctx_03_with_no_editor_a_script_is_refused_through_the_callback() {
