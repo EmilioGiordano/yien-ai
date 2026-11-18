@@ -26,8 +26,7 @@ Windows only.
 
 THIS SENDS REAL INPUT TO THE DESKTOP: keys go to whatever window is in
 front, clicks hit real screen coordinates. It may only run at the UI
-validation of a feature (AGENTS.md "Validating in the UI"), and only after
-Emilio has said yes for that run. For everything the test control pipe can
+validation of a feature (AGENTS.md "Validating in the UI"), and only after the developer has said yes for that run. For everything the test control pipe can
 drive, use YienTestControl.psm1 or the scenario scripts instead; they never
 touch the desktop.
 
