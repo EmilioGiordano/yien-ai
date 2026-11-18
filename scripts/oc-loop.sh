@@ -164,7 +164,7 @@ while true; do
     if [ $impl_rc -ne 0 ] || [ -z "$impl_session" ]; then
       echo "oc-loop.sh: implementer fix round failed (oc.sh exit $impl_rc); see $log_dir" >&2
       record "implementer fix round failed (oc.sh exit $impl_rc)"
-      exit 2
+      exit 1
     fi
     continue
   fi
@@ -232,7 +232,7 @@ while true; do
   if [ $impl_rc -ne 0 ] || [ -z "$impl_session" ]; then
     echo "oc-loop.sh: implementer fix round failed (oc.sh exit $impl_rc); see $log_dir" >&2
     record "implementer fix round failed (oc.sh exit $impl_rc)"
-    exit 2
+    exit 1
   fi
   prev_findings="$reviewer_reply"
 done
