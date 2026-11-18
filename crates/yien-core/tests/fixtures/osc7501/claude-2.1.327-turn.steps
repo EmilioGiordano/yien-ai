@@ -1,0 +1,7 @@
+wait-for 60000 effort
+text slow please
+key enter
+wait-for 60000 word word
+wait 500
+text 
+wait 3000
