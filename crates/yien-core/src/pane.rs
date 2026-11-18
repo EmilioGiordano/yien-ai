@@ -496,6 +496,10 @@ struct Actor {
     /// when a turn starts, so a match that was on screen before the turn
     /// began — a stale interrupt line — never counts as this turn's own.
     interrupt_low: usize,
+    /// The in-turn marker was on screen at some read of this turn. Once it
+    /// is gone and no output arrives, the turn is over (a CLI that neither
+    /// draws a line nor reports the end, like 2.1.327).
+    interrupt_marker_seen: bool,
     /// The OpenCode sessions this launch's program named over OSC 7501.
     opencode_sessions: Sessions,
     /// The shell poller finds OpenCode under this launch's shell.
@@ -503,6 +507,11 @@ struct Actor {
     /// This pane's hold on the OpenCode watcher, while OpenCode runs here.
     opencode: Option<Watching>,
 }
+
+/// The in-turn hint Claude draws on its status row. Drawn at turn start
+/// and kept while streaming; it disappears when the turn is over
+/// (2.1.327 draws no line and fires no record at a mid-stream interrupt).
+const INTERRUPT_MARKER: &str = "esc to interrupt";
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
 /// program. A panic in it is reported as [`PaneEvent::Crashed`].
@@ -580,6 +589,7 @@ pub(crate) fn spawn(
         titles: Titles::new(false),
         typed_screen: Vec::new(),
         interrupt_low: 0,
+        interrupt_marker_seen: false,
         interrupt_rules,
         opencode_sessions: Sessions::default(),
         typed_opencode: false,
@@ -1364,6 +1374,8 @@ impl Actor {
                         let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                         self.interrupt_low = interrupt_marks(&self.interrupt_rules, &rows);
+                        self.interrupt_marker_seen =
+                            rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
                     }
                     if state != self.state {
                         let kind = attention_kind(state);
@@ -1400,8 +1412,16 @@ impl Actor {
                         // began is history (a fresh interrupt's idle record
                         // is the normal case and ends the turn itself).
                         let count = interrupt_marks(&self.interrupt_rules, &rows);
+                        let marker = rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
+                        if marker {
+                            self.interrupt_marker_seen = true;
+                        }
                         let verdict = if count > self.interrupt_low {
                             ScreenVerdict::Interrupted
+                        } else if self.interrupt_marker_seen && !marker {
+                            // The Claude spinner/hint was drawn and is
+                            // gone: the turn is over, however it ended.
+                            ScreenVerdict::TurnEnded
                         } else {
                             ScreenVerdict::NoMatch
                         };
