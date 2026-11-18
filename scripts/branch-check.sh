@@ -88,10 +88,17 @@ main() {
     echo "branch-check.sh: no .yien-slot; logs go to $log_dir" >&2
   fi
 
-  local diff_files committed_files touched
-  diff_files=$(git -C "$worktree" diff --name-only "$base...HEAD")
-  committed_files=$(git -C "$worktree" log --no-merges --name-only --pretty=format: "$base..HEAD")
-  touched=$(printf '%s\n' "$diff_files" | crates_for_paths)
+  local diff_files committed_files touched rs_diff rev_list
+  diff_files=$(git -C "$worktree" diff --name-only "$base...HEAD") \
+    || { echo "branch-check.sh: cannot diff $base...HEAD in $worktree" >&2; exit 2; }
+  committed_files=$(git -C "$worktree" log --no-merges --name-only --pretty=format: "$base..HEAD") \
+    || { echo "branch-check.sh: cannot list committed files in $base..HEAD" >&2; exit 2; }
+  touched=$(printf '%s\n' "$diff_files" | crates_for_paths) \
+    || { echo "branch-check.sh: path-to-crate mapping failed" >&2; exit 2; }
+  rs_diff=$(git -C "$worktree" diff "$base...HEAD" -- '*.rs') \
+    || { echo "branch-check.sh: cannot diff $base...HEAD for .rs files" >&2; exit 2; }
+  rev_list=$(git -C "$worktree" rev-list --no-merges "$base..HEAD") \
+    || { echo "branch-check.sh: cannot list commits in $base..HEAD" >&2; exit 2; }
 
   if [ -n "$touched" ] && [ ! -f "$cargo_sh" ]; then
     echo "branch-check.sh: crates are touched but $cargo_sh is missing" >&2
@@ -147,7 +154,7 @@ main() {
     if ! commit_lint_ok "$subject" "$body"; then
       details+="  ${sha:0:10} $subject"$'\n'
     fi
-  done < <(git -C "$worktree" rev-list --no-merges "$base..HEAD")
+  done <<< "$rev_list"
   if [ -z "$details" ]; then
     echo "commit-lint: PASS"
   else
@@ -188,7 +195,7 @@ main() {
       '-'*) ;;
       *) new_line=$((new_line + 1)) ;;
     esac
-  done < <(git -C "$worktree" diff "$base...HEAD" -- '*.rs')
+  done <<< "$rs_diff"
   if [ -z "$details" ]; then
     echo "unsafe: PASS"
   else
@@ -222,7 +229,7 @@ main() {
       '-'*) ;;
       *) new_line=$((new_line + 1)) ;;
     esac
-  done < <(git -C "$worktree" diff "$base...HEAD" -- '*.rs')
+  done <<< "$rs_diff"
   if [ "$warns" -eq 0 ]; then
     echo "library-panics: PASS"
   else
