@@ -86,5 +86,24 @@ else
 fi
 rm -rf "$ps_repo" 2>/dev/null || true
 
+# integration: a git failure must exit 2 with a message, never fall through to
+# PASS (finding: failing git in a command substitution was silently skipped)
+git_fail_repo=$(mktemp -d)
+if git -C "$git_fail_repo" init -q -b master \
+  && printf 'base\n' > "$git_fail_repo/README.md" \
+  && git -C "$git_fail_repo" -c user.email=t@t -c user.name=t add README.md \
+  && git -C "$git_fail_repo" -c user.email=t@t -c user.name=t commit -qm 'chore/init'; then
+  out=$(bash "$test_dir/../branch-check.sh" "$git_fail_repo" no-such-ref-xyz 2>&1); rc=$?
+  check "bad base ref exits 2" 2 "$rc"
+  git -C "$git_fail_repo" switch --orphan unborn -q
+  out=$(bash "$test_dir/../branch-check.sh" "$git_fail_repo" master 2>&1); rc=$?
+  check "unborn HEAD exits 2" 2 "$rc"
+  check "unborn HEAD names the failing diff" 1 "$(printf '%s\n' "$out" | grep -c 'cannot diff')"
+else
+  fail=$((fail + 3))
+  echo "not ok: scratch repo for git-failure tests could not be created"
+fi
+rm -rf "$git_fail_repo" 2>/dev/null || true
+
 echo "branch-check.test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
