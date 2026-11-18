@@ -231,6 +231,10 @@ pub enum ScreenVerdict {
     /// A rule with `confirms = "interrupt"` matched: a turn the user stopped
     /// ended, and the agent drew the interrupt line to say so.
     Interrupted,
+    /// An armed interrupt read saw the turn's in-turn marker gone: the
+    /// agent drew the spinner/hint no more, so the turn is over. A CLI that
+    /// neither draws a line nor reports the end (2.1.327) emits this.
+    TurnEnded,
 }
 
 /// One input to the state machine.

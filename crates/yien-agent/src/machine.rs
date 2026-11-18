@@ -501,6 +501,12 @@ impl Machine {
             self.on_interrupted_screen(now, fx);
             return;
         }
+        // A turn-ended verdict does the same, but only from Working: a
+        // quiet pause inside a permission prompt is not a turn end (RN-02).
+        if let Signal::Screen(ScreenVerdict::TurnEnded) = signal {
+            self.on_turn_ended(now, fx);
+            return;
+        }
         if let Signal::Screen(verdict) = signal {
             self.on_screen(*verdict, now, fx);
             return;
@@ -739,6 +745,20 @@ impl Machine {
         {
             let cause = Cause::Source(Source::Screen);
             self.needs(NeedsReason::ScreenRule, cause, now, fx);
+        }
+    }
+
+    /// An armed interrupt read saw the turn's in-turn spinner/hint gone and
+    /// no record: the turn is over (the mock's work, or the user's Ctrl+C
+    /// in a build that draws no line, like 2.1.327). Ends the turn like the
+    /// agent's own end signal; RN-02 keeps red as it is, and an interrupted
+    /// turn the hooks never announced never lights needs you.
+    fn on_turn_ended(&mut self, now: Duration, fx: &mut Vec<Effect>) {
+        let asked = std::mem::take(&mut self.awaiting_screen);
+        let _interrupt_kind = std::mem::take(&mut self.awaiting_interrupt);
+        if asked && self.state == AgentState::Working {
+            let cause = Cause::Source(Source::Screen);
+            self.end_turn(cause, now, fx);
         }
     }
 
