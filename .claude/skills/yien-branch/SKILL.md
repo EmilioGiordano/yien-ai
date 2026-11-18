@@ -30,7 +30,7 @@ Write `TASK-<topic>.md` in the worktree root (gitignored):
 - **Files:** where the change goes, found by reading the code.
 - **Steps:** implementation order.
 - **Out of scope:** what must not be touched, including other worktrees.
-- **Design:** for visual work (new marks, layouts, colours, icons), the option Emilio picked from a canvas or mockup of the options. Do not start the branch before he picks one.
+- **Design:** for visual work (new marks, layouts, colours, icons), the option the developer picked from a canvas or mockup of the options. Do not start the branch before they pick one.
 - **Done when:** observable criteria, the tests that must exist (named with requirement ids), the UI validation script (test-control state and actions it checks), and what only a human can check.
 
 ## 3. Implement
@@ -42,7 +42,7 @@ Spawn `implementer` with a fresh context. Give it the worktree path, the branch 
 1. Spawn `quality-reviewer` with the worktree path and the TASK path, a fresh context and none of the implementer's reasoning.
 2. Before relaying findings, sanity-check them. A finding that contradicts the plan is noted, not obeyed. A finding that turns out wrong goes into the reviewer's "Known false positives".
 3. On `FAIL`, send the findings to the implementer to fix, then send the fix commits back to review. Every FAIL needs a later PASS. A Low fix of one or two lines that touches no behaviour covered by another finding needs no new round: read its diff and run fmt, clippy and the touched crate's tests through `scripts/cargo.sh` yourself. A Medium or higher finding, or a fix that touches logic, always goes back to review.
-4. Repeat until PASS; there is no round limit. When the reviewer calls a problem a design problem, redesign before patching again. Stop and ask Emilio only when a finding needs a decision AGENTS.md reserves for him.
+4. Repeat until PASS; there is no round limit. When the reviewer calls a problem a design problem, redesign before patching again. Stop and ask the developer only when a finding needs a decision AGENTS.md reserves for them.
 
 When the review reports coverage the implementer cannot add alone, spawn `test-engineer` with the worktree path, then have the implementer commit its tests.
 
@@ -61,6 +61,6 @@ On `PASS`:
    No attribution lines.
 3. Record new dependencies and spec impact in `docs/` (absolute paths in `AGENTS.md`).
 4. Complete `REPORT-<topic>.md` in the worktree (gitignored), which already holds the subagents' full reports: add the verdict, the findings and their resolution, risks and manual checks.
-5. Report to Emilio in Spanish: the PR link and what changed.
+5. Report to the developer in Spanish: the PR link and what changed.
 
 The branch is now ready for `yien-integrate`. Never delete the branch or the worktree, never push to `main` directly.
