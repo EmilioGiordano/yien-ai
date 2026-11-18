@@ -62,5 +62,29 @@ check "normal file" 1 "$(is_forbidden_path 'README.md'; echo $?)"
 check "source file" 1 "$(is_forbidden_path 'crates/yien-ui/src/main.rs'; echo $?)"
 check "task md suffix" 1 "$(is_forbidden_path 'TASK-foo.md.bak'; echo $?)"
 
+# integration: the PowerShell check must be able to pass a real good .ps1 and
+# fail a broken one (a POSIX mktemp path made it unparseable before)
+ps_repo=$(mktemp -d)
+if git -C "$ps_repo" init -q -b master \
+  && printf 'base\n' > "$ps_repo/README.md" \
+  && git -C "$ps_repo" -c user.email=t@t -c user.name=t add README.md \
+  && git -C "$ps_repo" -c user.email=t@t -c user.name=t commit -qm 'chore/init' \
+  && git -C "$ps_repo" switch -qc feature \
+  && printf 'Write-Host "ok"\n' > "$ps_repo/good.ps1" \
+  && git -C "$ps_repo" -c user.email=t@t -c user.name=t add good.ps1 \
+  && git -C "$ps_repo" -c user.email=t@t -c user.name=t commit -qm 'test/add a valid ps1'; then
+  out=$(bash "$test_dir/../branch-check.sh" "$ps_repo" master 2>&1)
+  check "powershell pass on valid ps1" 1 "$(printf '%s\n' "$out" | grep -c '^powershell: PASS$')"
+  printf 'Write-Host "unterminated\n' > "$ps_repo/broken.ps1"
+  git -C "$ps_repo" -c user.email=t@t -c user.name=t add broken.ps1
+  git -C "$ps_repo" -c user.email=t@t -c user.name=t commit -qm 'test/add a broken ps1'
+  out=$(bash "$test_dir/../branch-check.sh" "$ps_repo" master 2>&1)
+  check "powershell fail on broken ps1" 1 "$(printf '%s\n' "$out" | grep -c '^powershell: FAIL$')"
+else
+  fail=$((fail + 2))
+  echo "not ok: scratch repo for powershell tests could not be created"
+fi
+rm -rf "$ps_repo" 2>/dev/null || true
+
 echo "branch-check.test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
