@@ -7,7 +7,7 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, Confirms, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason,
     ScreenRule, ScreenVerdict, SessionEndReason, SessionStartSource, Signal, builtin_profiles,
-    evaluate_screen,
+    evaluate_screen, interrupt_marks,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -454,9 +454,25 @@ struct Settled {
     rules: Vec<ScreenRule>,
     now: Duration,
     states: Vec<AgentState>,
+    /// As in the pane: matches already on screen when the turn began, so a
+    /// fresh interrupt line is the only one that may end it.
+    interrupt_low: usize,
 }
 
 impl Settled {
+    fn rows(&self) -> Vec<String> {
+        let frame = self.engine.frame();
+        (0..frame.lines.len()).map(|r| frame.line_text(r)).collect()
+    }
+
+    fn interrupt_rules(&self) -> Vec<ScreenRule> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.confirms == Confirms::Interrupt)
+            .cloned()
+            .collect()
+    }
+
     fn step(&mut self, signal: Signal) {
         let mut queue = vec![signal];
         while let Some(signal) = queue.pop() {
@@ -464,19 +480,35 @@ impl Settled {
             self.machine = next;
             for effect in effects {
                 match effect {
-                    Effect::Transition { to, .. } => self.states.push(to),
+                    Effect::Transition { to, .. } => {
+                        self.states.push(to);
+                        if to == AgentState::Working {
+                            let rows = self.rows();
+                            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                            self.interrupt_low = interrupt_marks(&self.interrupt_rules(), &rows);
+                        }
+                    }
                     Effect::CheckScreen => {
                         // An interrupt read sees only interrupt rules, as in
                         // the pane: a stale prompt must not light the red mark.
                         let rules: Vec<ScreenRule> = if self.machine.screen_read_is_interrupt() {
-                            self.rules
-                                .iter()
-                                .filter(|rule| rule.confirms == Confirms::Interrupt)
-                                .cloned()
-                                .collect()
+                            self.interrupt_rules()
                         } else {
                             self.rules.clone()
                         };
+                        if self.machine.screen_read_is_interrupt() {
+                            let rows = self.rows();
+                            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                            let count = interrupt_marks(&rules, &rows);
+                            let verdict = if count > self.interrupt_low {
+                                ScreenVerdict::Interrupted
+                            } else {
+                                ScreenVerdict::NoMatch
+                            };
+                            self.interrupt_low = self.interrupt_low.min(count);
+                            queue.push(Signal::Screen(verdict));
+                            continue;
+                        }
                         queue.push(Signal::Screen(read_screen(&self.engine, &rules)));
                     }
                     _ => {}
@@ -493,6 +525,7 @@ impl Settled {
             rules,
             now: Duration::ZERO,
             states: Vec::new(),
+            interrupt_low: 0,
         };
         pane.step(Signal::Spawned);
         pane
@@ -765,6 +798,73 @@ fn rnf_23_claude_2_1_326_ctrl_c_interrupt_is_idle_and_its_exit_changes_nothing()
         states(CLAUDE_326_CTRL_C, "claude"),
         [AgentState::Working, AgentState::Idle]
     );
+}
+
+/// The interrupt line a previous turn left on screen: a new turn running
+/// with it visible must not end early. This is the stale-line case from
+/// the field: interrupt, submit the follow-up prompt, and the turn stays
+/// Working while Claude streams.
+#[test]
+fn rf_age_05_a_turn_runs_normally_with_the_interrupt_line_still_on_screen() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    // A previous interrupt's line, still on screen when the follow-up
+    // prompt arrives (a resumed session keeps it in the same place).
+    pane.feed(&drawn(
+        "  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    // The mock streams a turn's worth of output for five seconds, the
+    // stale line still on screen.
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working],
+        "a normal turn must not end while the stream runs"
+    );
+}
+
+/// The phrase printed inside ordinary content — a file's or a reply's
+/// words, or a bare phrase row — is not Claude's drawn interrupt line and
+/// must not end the turn.
+#[test]
+fn rf_age_05_a_turn_with_the_phrase_in_its_content_stays_working() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    pane.feed(
+        b"the file you asked about says: Interrupted \xc2\xb7 What should Claude do instead?\r\nInterrupted \xc2\xb7 What should Claude do instead?\r\n",
+    );
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(pane.states, [AgentState::Working]);
+}
+
+/// A resumed session whose restored screen already holds the line: its
+/// first turn must not end early either.
+#[test]
+fn rf_age_05_a_resumed_session_with_the_interrupt_line_on_screen_stays_working_on_its_first_turn() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    // What a `--resume` after an interrupt shows at the bottom before any
+    // new turn runs, as a restored screen holds it.
+    pane.feed(&drawn(
+        "  \u{276F} slow please\n  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(pane.states, [AgentState::Working]);
 }
 
 /// The interrupt the 2.1.326 fix targets: a turn already running when
