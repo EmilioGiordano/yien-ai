@@ -8,6 +8,7 @@
 # Per-branch working files
 TASK-*.md
 REPORT-*.md
+LOOP-*.md
 
 # Local agent state
 /.claude/settings.local.json
