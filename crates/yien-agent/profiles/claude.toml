@@ -64,13 +64,13 @@ pattern = '''(?m)^\W*Use Claude Code's terminal setup\?\W*$'''
 
 # Claude 2.1.326 stops sending state=idle when the user interrupts a turn
 # mid-stream; the interrupt line it draws is the only thing told about it.
-# Ends the turn as idle, never needs you (RN-02). The line lands wherever
-# the assistant message ended, not at the bottom of the screen, so the
-# rule reads the whole frame.
+# Ends the turn as idle, never needs you (RN-02). Claude draws the line
+# starting with its branch glyph ⎿, so the row-start anchor keeps a file
+# or a reply printing the phrase mid-line from matching.
 [[rules.screen]]
 confirms = "interrupt"
 bottom_rows = 60
-pattern = '(?m)Interrupted · What should Claude do instead\?'
+pattern = '(?m)^\s*⎿\s+Interrupted · What should Claude do instead\?'
 
 [[rules]]
 versions = ">=2.0, <2.1.295"

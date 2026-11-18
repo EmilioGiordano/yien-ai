@@ -292,6 +292,48 @@ impl ScreenRule {
         let start = end.saturating_sub(usize::from(self.bottom_rows));
         self.pattern.is_match(&rows[start..end].join("\n"))
     }
+
+    /// Whether the pattern matches one row alone. Interrupt rules are
+    /// single-line; for a multi-row rule only its first row is looked at.
+    pub fn matches_row(&self, row: &str) -> bool {
+        self.pattern.is_match(row)
+    }
+}
+
+/// The number of rows matching an interrupt rule, counted one row at a
+/// time. A turn's own interrupt line is the only thing that can raise it,
+/// so a stale one from a previous turn does not end the new turn; a fresh
+/// interrupt does, before any other signal speaks.
+///
+/// ```
+/// use yien_agent::{Confirms, ScreenRule, builtin_profiles, interrupt_marks};
+///
+/// let profiles = builtin_profiles().unwrap();
+/// let claude = profiles.iter().find(|p| p.id == "claude").unwrap();
+/// let rules: Vec<ScreenRule> = claude.rules[0]
+///     .screen
+///     .iter()
+///     .filter(|rule| rule.confirms == Confirms::Interrupt)
+///     .cloned()
+///     .collect();
+/// assert_eq!(
+///     interrupt_marks(&rules, &[
+///         "  ⎿  Interrupted · What should Claude do instead?",
+///         "  ⎿  Interrupted · What should Claude do instead?",
+///     ]),
+///     2
+/// );
+/// assert_eq!(
+///     interrupt_marks(&rules, &["a file says: Interrupted · What should Claude do instead?"]),
+///     0
+/// );
+/// ```
+pub fn interrupt_marks(rules: &[ScreenRule], rows: &[&str]) -> usize {
+    rules
+        .iter()
+        .filter(|rule| rule.confirms == Confirms::Interrupt)
+        .map(|rule| rows.iter().filter(|row| rule.matches_row(row)).count())
+        .sum()
 }
 
 /// Runs screen rules for a [`crate::Effect::CheckScreen`] and returns the
