@@ -223,10 +223,11 @@ The brief is the only context it gets.
 
 ## Delegating to OpenCode
 
-- Opus orchestrates; OpenCode (via `scripts/oc.sh`) is implementer, reviewer and test-engineer by default.
-- Call form: `scripts/oc.sh <worktree> <role> <task-file> [session-id]`; fix rounds pass the previous session id.
-- Escalate to a Claude subagent for: unsafe code, concurrency, security, or a branch that fails review two rounds in a row.
-- Opus always reads the final diff and runs the branch checks itself before the PR; it trusts the diff, not the reply.
+- Opus orchestrates; OpenCode is the default worker for a branch. The default call form is the loop: `scripts/oc-loop.sh <worktree> <task-file> [--rounds N] [--impl-session ID]` — implement, mechanical checks, strict review, fix, repeat until PASS or N rounds (default 3). It writes `LOOP-<topic>.md` in the worktree root (gitignored, like TASK/REPORT) and prints only the rounds used, the final verdict, the session ids, the last reviewer reply and where the logs are. Individual steps stay available as `scripts/oc.sh <worktree> <role> <task-file> [session-id]`.
+- `scripts/branch-check.sh <worktree>` is mandatory before a PASS: fmt, clippy and tests on the touched crates through `scripts/cargo.sh`, commit lint, `unsafe`, forbidden files, PowerShell parse, `xtask check-deps`. The strict reviewer must run it itself and paste its output; any FAIL line fails the review.
+- Roles: `implementer`, `reviewer`, `strict-reviewer`, `test-engineer`. Models are per role: `YIEN_OC_MODEL_<ROLE>` (dashes as underscores) overrides `YIEN_OC_MODEL`, which overrides the defaults — implementer `opencode/inkling-2-small-free#high`, reviewer and strict-reviewer `opencode/glm-5.3-flash-free#high`, test-engineer the implementer default. The model used is printed on stderr.
+- The strict reviewer defaults to FAIL and needs evidence for every checklist item; "unverified" fails the verdict. Escalate to Claude's quality-reviewer for: unsafe code, concurrency, security, or after N failed rounds.
+- The orchestrator still reads the final diff and runs the integration; it trusts the diff, not the reply.
 - Free model: never pass secrets or personal data in briefs.
 - One build at a time: OpenCode also builds only through `scripts/cargo.sh`.
 
