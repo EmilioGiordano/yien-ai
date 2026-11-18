@@ -457,7 +457,12 @@ struct Settled {
     /// As in the pane: matches already on screen when the turn began, so a
     /// fresh interrupt line is the only one that may end it.
     interrupt_low: usize,
+    /// As in the pane: the in-turn marker was drawn at some read this turn.
+    interrupt_marker_seen: bool,
 }
+
+/// The in-turn hint Claude draws on its status row.
+const INTERRUPT_MARKER: &str = "esc to interrupt";
 
 impl Settled {
     fn rows(&self) -> Vec<String> {
@@ -486,6 +491,8 @@ impl Settled {
                             let rows = self.rows();
                             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                             self.interrupt_low = interrupt_marks(&self.interrupt_rules(), &rows);
+                            self.interrupt_marker_seen =
+                                rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
                         }
                     }
                     Effect::CheckScreen => {
@@ -497,11 +504,18 @@ impl Settled {
                             self.rules.clone()
                         };
                         if self.machine.screen_read_is_interrupt() {
+                            let rules = self.interrupt_rules();
                             let rows = self.rows();
                             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                             let count = interrupt_marks(&rules, &rows);
+                            let marker = rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
+                            if marker {
+                                self.interrupt_marker_seen = true;
+                            }
                             let verdict = if count > self.interrupt_low {
                                 ScreenVerdict::Interrupted
+                            } else if self.interrupt_marker_seen && !marker {
+                                ScreenVerdict::TurnEnded
                             } else {
                                 ScreenVerdict::NoMatch
                             };
@@ -526,6 +540,7 @@ impl Settled {
             now: Duration::ZERO,
             states: Vec::new(),
             interrupt_low: 0,
+            interrupt_marker_seen: false,
         };
         pane.step(Signal::Spawned);
         pane
@@ -753,6 +768,65 @@ fn rf_age_05_a_typed_shell_turn_runs_normally_with_the_interrupt_line_still_on_s
 
 /// PowerShell's prompt and the `claude` typed at it, with its marks.
 /// PowerShell's prompt and the `codex` typed at it, with its marks.
+/// The 2.1.327 turn capture's whole arc: spawn, working record, the mock
+/// streams to its end, the done record. The redesign must not change this.
+const CLAUDE_327_TURN: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.327-turn.bin");
+
+#[test]
+fn rnf_23_claude_2_1_327_the_captured_turn_ends_on_its_record() {
+    assert_eq!(
+        states(CLAUDE_327_TURN, "shell"),
+        [AgentState::Working, AgentState::Done]
+    );
+}
+
+/// A turn mid-stream at settle, which never produces another record:
+/// the prompt's hint gone and no output for a five-second window ends the
+/// turn as Idle.
+#[test]
+fn rf_age_05_a_silent_turn_with_the_hint_gone_is_idle() {
+    const WITH_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\u{2726} Architecting\u{2026} (10s \u{00B7} \u{2193} 34 tokens)\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt";
+    const WITHOUT_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\n\u{2726} Saut\u{00E9}ed for 41s \u{00B7} done 1:42\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    pane.feed(&drawn(WITH_HINT));
+    pane.feed(b"\x1b]7501;state=working:app=claude-code\x07");
+    assert_eq!(pane.states, [AgentState::Working]);
+    // The turn's hint is gone and no output arrives: the turn is over.
+    pane.feed(&drawn(WITHOUT_HINT));
+    for _ in 0..50 {
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Done],
+        "an armed read with the hint gone and no output ends the turn"
+    );
+}
+
+/// The same for a shell pane running a detected `claude`: its turn ends the
+/// same way.
+#[test]
+fn rf_age_05_a_silent_typed_shell_pane_with_the_hint_gone_is_idle() {
+    const WITH_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\u{2726} Architecting\u{2026} (10s \u{00B7} \u{2193} 34 tokens)\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt";
+    const WITHOUT_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\n\u{2726} Saut\u{00E9}ed for 41s \u{00B7} done 1:42\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.step(Signal::TypedAgent(true));
+    pane.feed(&drawn(WITH_HINT));
+    pane.feed(b"\x1b]7501;state=working:app=claude-code\x07");
+    assert_eq!(pane.states, [AgentState::Working]);
+    pane.feed(&drawn(WITHOUT_HINT));
+    for _ in 0..50 {
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Done],
+        "the typed pane ends the turn the same way"
+    );
+}
+
 const CODEX_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> codex\r\n\x1b]133;C\x07";
 
 const CLAUDE_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> claude\r\n\x1b]133;C\x07";
@@ -785,13 +859,38 @@ fn rf_age_05_codex_typed_in_a_shell_needs_you_on_its_trust_screen_once_found() {
 
 #[test]
 fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
-    for (capture, program) in [
-        (CLAUDE_IN_POWERSHELL, "claude"),
-        (CLAUDE_CTRL_C_IN_POWERSHELL, "claude"),
-        (CLAUDE_QUESTION, "claude"),
-        (CLAUDE_INTERRUPT, "claude"),
-        (CODEX_PERMISSION, "codex"),
-        (CODEX_STARTUP, "codex"),
+    // The unhooked prompt: marker says the turn ended, record says
+    // idle afterwards, the last transition moves Done -> Idle.
+    let claude_question_expected = [
+        AgentState::Working,
+        AgentState::NeedsYou(NeedsReason::Question),
+        AgentState::Working,
+        AgentState::Done,
+    ];
+    let claude_in_powershell_expected = [
+        AgentState::Working,
+        AgentState::NeedsYou(NeedsReason::Question),
+        AgentState::Working,
+        AgentState::Done,
+        AgentState::Working,
+        AgentState::Done,
+        AgentState::Idle,
+    ];
+    for (capture, program, expected) in [
+        (
+            CLAUDE_IN_POWERSHELL,
+            "claude",
+            Some(&claude_in_powershell_expected[..]),
+        ),
+        (CLAUDE_CTRL_C_IN_POWERSHELL, "claude", None),
+        (
+            CLAUDE_QUESTION,
+            "claude",
+            Some(&claude_question_expected[..]),
+        ),
+        (CLAUDE_INTERRUPT, "claude", None),
+        (CODEX_PERMISSION, "codex", None),
+        (CODEX_STARTUP, "codex", None),
     ] {
         // Found at once, so every read until its first record is made.
         let mut pane = Settled::spawned(config("shell"), typed_rules(program));
@@ -799,7 +898,14 @@ fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
         for part in capture.chunks(64) {
             pane.feed(part);
         }
-        assert_eq!(pane.states, states(capture, "shell"), "{program}");
+        match expected {
+            Some(want) => assert_eq!(pane.states, want, "{program} {capture:?}"),
+            None => assert_eq!(
+                pane.states,
+                states(capture, "shell"),
+                "{program} {capture:?}"
+            ),
+        }
     }
 }
 
