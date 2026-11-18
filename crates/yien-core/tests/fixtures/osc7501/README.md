@@ -29,6 +29,7 @@ capture here yet; the Codex screen fixtures live in
 | OpenCode | 2.3.0 | permission prompt | `opencode-2.3.0-permission.bin` | `opencode-2.3.0-permission.steps` |
 | OpenCode | 2.3.0 | API error (mock `mockerror` trigger) | `opencode-2.3.0-error.bin` | `opencode-2.3.0-error.steps` |
 | OpenCode | 2.3.0 | normal exit (Ctrl+C at the idle prompt) | `opencode-2.3.0-exit.bin` | `opencode-2.3.0-exit.steps` |
+| Claude Code | 2.1.327 | full turn: `state=working`, then `state=done` at the mock's end (no interrupt line drawn, no `idle` record; the in-turn status hint `esc to interrupt` sits on the status row while streaming) | `claude-2.1.327-turn.bin` | `claude-2.1.327-turn.steps` |
 
 `claude-2.1.325-ctrl-c.bin` also carries the exit (`clear` records): reused,
 not redone. `claude-2.1.325-typed-in-powershell.bin` and
