@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Delegate a task or brief to an OpenCode worker (implementer, reviewer or
-# test-engineer) running in a YIEN worktree.
+# Delegate a task or brief to an OpenCode worker (implementer, reviewer,
+# strict-reviewer or test-engineer) running in a YIEN worktree.
 # Usage: scripts/oc.sh <worktree> <role> <task-or-brief-file> [session-id]
-#   role  implementer | reviewer | test-engineer
-# The model comes from YIEN_OC_MODEL (default opencode/inkling-2-small-free#high).
+#   role  implementer | reviewer | strict-reviewer | test-engineer
+# The model: YIEN_OC_MODEL_<ROLE> (dashes as underscores) overrides YIEN_OC_MODEL,
+# which overrides the defaults: implementer opencode/inkling-2-small-free#high,
+# reviewer and strict-reviewer opencode/glm-5.3-flash-free#high,
+# test-engineer the implementer default. The model used is printed on stderr.
 # Writes <worktree>/opencode.json (overwritten every run) with the role's
 # permissions, and saves the full JSON log to <slot>/oc-logs/<role>-<ts>.jsonl,
 # where the slot comes from <worktree>/.yien-slot.
@@ -14,7 +17,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: scripts/oc.sh <worktree> <role> <task-or-brief-file> [session-id]" >&2
-  echo "  role: implementer | reviewer | test-engineer" >&2
+  echo "  role: implementer | reviewer | strict-reviewer | test-engineer" >&2
   exit 2
 }
 
@@ -25,7 +28,7 @@ task_file=$3
 session_id=${4:-}
 
 case "$role" in
-  implementer|reviewer|test-engineer) ;;
+  implementer|reviewer|strict-reviewer|test-engineer) ;;
   *) usage ;;
 esac
 
@@ -50,9 +53,10 @@ mkdir -p "$log_dir"
 log_file="$log_dir/$role-$(date +%Y%m%d-%H%M%S)-$$.jsonl"
 
 # Rule order matters: OpenCode applies the LAST matching rule, so "*" comes
-# first and the specifics after it. The reviewer is read-only for the code
-# and may write only REPORT-<topic>.md (the brief says the same).
-if [ "$role" = "reviewer" ]; then
+# first and the specifics after it. The reviewer and the strict reviewer are
+# read-only for the code and may write only REPORT-<topic>.md (their briefs say
+# the same).
+if [ "$role" = "reviewer" ] || [ "$role" = "strict-reviewer" ]; then
   cat > "$worktree/opencode.json" <<'EOF'
 {
   "$schema": "https://opencode.ai/config.json",
@@ -107,7 +111,14 @@ EOF
 fi
 
 prompt=$(cat "$brief_file"; printf '\n\n'; cat "$task_file")
-model=${YIEN_OC_MODEL:-opencode/inkling-2-small-free#high}
+role_key=$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')
+case "$role" in
+  reviewer|strict-reviewer) default_model=opencode/glm-5.3-flash-free#high ;;
+  *) default_model=opencode/inkling-2-small-free#high ;;
+esac
+model_var="YIEN_OC_MODEL_$role_key"
+model=${!model_var:-${YIEN_OC_MODEL:-$default_model}}
+echo "oc.sh: model $model" >&2
 
 cmd=(opencode run -m "$model" --auto --archived --title "$branch-$role" --format json)
 if [ -n "$session_id" ]; then cmd+=(-s "$session_id"); fi
