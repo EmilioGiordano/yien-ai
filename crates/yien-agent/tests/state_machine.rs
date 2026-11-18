@@ -2152,6 +2152,65 @@ fn rf_age_05_an_interrupted_turn_goes_idle_in_a_hooked_pane() {
 }
 
 #[test]
+fn rf_age_05_turn_ended_in_a_hooked_pane_is_done_when_unseen() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    // The pane never saw this turn's end: Done, like a Stop hook.
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Done);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Done,
+        cause: Cause::Source(Source::Screen),
+    }));
+    assert!(!p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_turn_ended_in_a_hooked_pane_is_idle_when_seen() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true));
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_turn_ended_at_a_permission_prompt_stays_needs_you() {
+    let mut p = Pane::needs_you_claude();
+    p.settled_screen(ScreenVerdict::TurnEnded);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+    assert!(!p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.iter().all(|e| !matches!(
+        e,
+        Effect::Transition {
+            to: AgentState::Idle,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn rf_age_05_turn_ended_from_an_idle_pane_stays_idle() {
+    let mut p = Pane::new(claude());
+    p.send(Signal::Spawned);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.iter().any(|e| matches!(
+        e,
+        Effect::Transition {
+            to: AgentState::Idle,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn rf_age_05_an_interrupted_turn_at_a_permission_prompt_goes_idle() {
     let mut p = Pane::needs_you_claude();
     p.settled_screen(ScreenVerdict::Interrupted);
