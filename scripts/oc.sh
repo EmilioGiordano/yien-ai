@@ -70,6 +70,13 @@ if [ "$role" = "reviewer" ] || [ "$role" = "strict-reviewer" ]; then
     "websearch": "deny",
     "bash": {
       "*": "allow",
+      "* > *": "deny",
+      "* >> *": "deny",
+      "tee *": "deny",
+      "sed -i*": "deny",
+      "mv *": "deny",
+      "cp *": "deny",
+      "rm *": "deny",
       "git push*": "deny",
       "git merge*": "deny",
       "git reset --hard*": "deny",
