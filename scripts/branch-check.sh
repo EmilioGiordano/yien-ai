@@ -242,8 +242,10 @@ main() {
     git -C "$worktree" cat-file -e "HEAD:$f" 2>/dev/null || continue
     ps_touched=$((ps_touched + 1))
     tmp=$(mktemp)
-    git -C "$worktree" show "HEAD:$f" > "$tmp"
-    if ! out=$(powershell -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$tmp', [ref]\$null, [ref]\$e); if (\$e -and \$e.Count -gt 0) { \$e | ForEach-Object { \$_.Message }; exit 1 }" 2>&1); then
+    git -C "$worktree" show "HEAD:$f" > "$tmp" || { rm -f "$tmp"; echo "branch-check.sh: cannot read HEAD:$f" >&2; exit 2; }
+    # PowerShell cannot open an MSYS path; it resolves it against a drive root.
+    tmpw=$(cygpath -w "$tmp") || { rm -f "$tmp"; echo "branch-check.sh: cygpath cannot convert $tmp" >&2; exit 2; }
+    if ! out=$(powershell -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$tmpw', [ref]\$null, [ref]\$e); if (\$e -and \$e.Count -gt 0) { \$e | ForEach-Object { \$_.Message }; exit 1 }" 2>&1); then
       details+="  $f: $out"$'\n'
     fi
     rm -f "$tmp"
