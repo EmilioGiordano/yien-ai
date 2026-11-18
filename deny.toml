@@ -20,6 +20,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant, via gpui-kit (Linux)" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, via gpui-kit (Linux)" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via gpui-kit (Linux)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono, via gpui-kit" },
 ]
 
 [licenses]

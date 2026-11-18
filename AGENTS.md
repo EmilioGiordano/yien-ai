@@ -41,7 +41,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 
 ## Who does what
 
-| Action | Orchestrator (main Claude session) | Subagents | Emilio |
+| Action | Orchestrator (main Claude session) | Subagents | Developer |
 |---|---|---|---|
 | Create a branch or worktree | yes | no | — |
 | Commit on its branch | yes | yes | — |
@@ -56,10 +56,10 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 
 ## When to stop and ask
 
-- Anything Emilio cannot undo from his side: deleting, force-pushing, merging a PR that does not meet the merge criteria, touching files he has not committed.
+- Anything the developer cannot undo from their side: deleting, force-pushing, merging a PR that does not meet the merge criteria, touching files they have not committed.
 - A design trade-off with two reasonable outcomes that the ERS and the plan do not settle.
 - A requirement that turns out wrong or impossible.
-- A branch whose result is visual (new marks, layouts, colours, icons): it starts only after Emilio picks a design from a canvas or mockup that shows the options.
+- A branch whose result is visual (new marks, layouts, colours, icons): it starts only after the developer picks a design from a canvas or mockup that shows the options.
 
 Everything else: decide, do it, report the decision and its reason.
 
@@ -90,17 +90,17 @@ Parallel work means one branch, one worktree and one implementer per feature. Wo
 The PC has 16 GB of RAM, and parallel builds have crashed it before. Memory is the limit, not CPU.
 
 - `scripts/cargo.sh <args>` waits until no other cargo is running and 2000 MB are free, takes the build lock (`YIEN_BUILD_LOCK`), and runs at `-j 2`. `scripts/cargo.sh --full <args>` waits for 4000 MB and runs at `-j 4`. Never call `cargo` directly, and never lower the thresholds.
-- The gate gives up after an hour with exit code 75. That is not a test failure: report it, with the memory and process counts it printed, and the orchestrator tells Emilio. A lock whose owner died, or that is older than 4 hours, is broken automatically.
+- The gate gives up after an hour with exit code 75. That is not a test failure: report it, with the memory and process counts it printed, and the orchestrator tells the developer. A lock whose owner died, or that is older than 4 hours, is broken automatically.
 - A gated build can outlast a tool call's time limit. Run long ones (full gate, release builds, first build of a slot) in the background and wait for them to finish.
 - Each worktree has an untracked `.yien-slot` file naming its target dir: `<build-root>/slot-<n>`. The orchestrator assigns a free slot when it creates the worktree and reuses slots so rebuilds stay warm. Never compile outside the build root; `scripts/cargo.sh` refuses a slot elsewhere. Never share a target dir between two branches: mixed builds have caused real bugs.
-- Old slots are cleaned only when the build drive drops below about 40 GB free.
+- Once the developer has validated branches from the installer and the interface, the orchestrator deletes their slots, and the staging slot once every branch built in it is validated. Any other slot is cleaned only when the build drive drops below about 40 GB free. A deleted slot is recreated by the next build of its branch, cold.
 - Branches run cheap checks on the crates they touch: `fmt --check`, `check -p <crates> --all-targets`, `test -p <crates>`. The full gate runs at integration.
 
 ## The branch loop
 
 Every branch goes through the same loop: steps 1–7 with the `yien-branch` skill, step 8 with `yien-integrate`.
 
-1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria. For visual work, the TASK names the design option Emilio picked (see "When to stop and ask").
+1. The orchestrator writes `TASK-<topic>.md` in the worktree root: goal, requirement ids, files, out of scope, done criteria. For visual work, the TASK names the design option the developer picked (see "When to stop and ask").
 2. `implementer` implements and runs the branch checks, committing as it goes.
 3. `quality-reviewer` reviews the branch against `main`. Its verdict is PASS or FAIL.
 4. On FAIL, the findings go back to `implementer`, and the fix commits go back to `quality-reviewer`. Repeat until PASS; there is no round limit. Stop and ask only when a finding needs a decision listed under "When to stop and ask".
@@ -158,8 +158,8 @@ The next session starts with: "Leé docs/handoff.md y seguí con la tanda."
 Every feature is checked in the running app, driven by tools, not only by unit tests.
 
 - **Test control (preferred):** `yien --test-control <pipe>` exposes a local pipe that dumps UI state (projects, tabs, panes, focus, agent states, visible text) and injects actions (commands, keys, text, resizes). It is test-only, off by default and protected like the hook pipe (RNF-11). Every feature adds the state fields and actions its validation needs, so the check is a script, not a person.
-- **Throwaway profile:** every run sets YIEN's data and config dirs to a new folder under the slot, so a test never touches Emilio's real sessions or settings. Only generated files, never his documents.
-- **Screen driving (fallback):** PowerShell with user32 (`SetForegroundWindow`, `SendInput`, `PrintWindow`) for what the pipe cannot reach: real focus, IME, a real keyboard. It takes focus and sends real input, so ask Emilio right before each run and run it only if he says yes.
+- **Throwaway profile:** every run sets YIEN's data and config dirs to a new folder under the slot, so a test never touches the developer's real sessions or settings. Only generated files, never their documents.
+- **Screen driving (fallback):** PowerShell with user32 (`SetForegroundWindow`, `SendInput`, `PrintWindow`) for what the pipe cannot reach: real focus, IME, a real keyboard. It takes focus and sends real input, so ask the developer right before each run and run it only if they say yes.
 - Watch the process while it runs: responding, CPU and working set every 5 seconds. A freeze is a failure.
 - Copy the release exe to the slot's `run/` folder before starting it. If the file is locked, report it; never kill a process you did not start.
 - What still needs a human (a real screen reader, feel, look) goes in the PR as a short checklist.
@@ -185,7 +185,7 @@ Types: `core`, `feat`, `fix`, `ui`, `docs`, `test`, `chore`, `refactor`, `perf`,
 
 ### Tidying unpushed history
 
-The implementer may tidy the commits on its own branch that are not pushed. Pushed commits are never touched; pushed history stays Emilio's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
+The implementer may tidy the commits on its own branch that are not pushed. Pushed commits are never touched; pushed history stays the developer's. `rebase` and `reset --hard` are allowed only for this procedure, on the agent's own branch.
 
 1. Save the tip: `git rev-parse HEAD`.
 2. Pick the base: `@{u}` when `git rev-parse --verify -q @{u}` succeeds, so only commits after the upstream are rewritten; otherwise `git merge-base HEAD origin/main`. If `git rev-list --merges <base>..HEAD` is not empty, do not tidy: never rebase across a merge commit.
@@ -207,7 +207,7 @@ Design reasoning goes in the report, the commit or the PR, never in the code.
 ## Language
 
 - **English:** code, comments, UI strings, test names and messages, logs, commits, branches, PRs.
-- **Spanish:** `docs/` and conversation with Emilio.
+- **Spanish:** `docs/` and conversation with the developer.
 
 ## Briefing a subagent
 
@@ -223,10 +223,11 @@ The brief is the only context it gets.
 
 ## Delegating to OpenCode
 
-- Opus orchestrates; OpenCode (via `scripts/oc.sh`) is implementer, reviewer and test-engineer by default.
-- Call form: `scripts/oc.sh <worktree> <role> <task-file> [session-id]`; fix rounds pass the previous session id.
-- Escalate to a Claude subagent for: unsafe code, concurrency, security, or a branch that fails review two rounds in a row.
-- Opus always reads the final diff and runs the branch checks itself before the PR; it trusts the diff, not the reply.
+- Opus orchestrates; OpenCode is the default worker for a branch. The default call form is the loop: `scripts/oc-loop.sh <worktree> <task-file> [--rounds N] [--impl-session ID]` — implement, mechanical checks, strict review, fix, repeat until PASS or N rounds (default 3). It writes `LOOP-<topic>.md` in the worktree root (gitignored, like TASK/REPORT) and prints only the rounds used, the final verdict, the session ids, the last reviewer reply and where the logs are. Individual steps stay available as `scripts/oc.sh <worktree> <role> <task-file> [session-id]`.
+- `scripts/branch-check.sh <worktree>` is mandatory before a PASS: fmt, clippy and tests on the touched crates through `scripts/cargo.sh`, commit lint, `unsafe`, forbidden files, PowerShell parse, `xtask check-deps`. The strict reviewer must run it itself and paste its output; any FAIL line fails the review.
+- Roles: `implementer`, `reviewer`, `strict-reviewer`, `test-engineer`. Models are per role: `YIEN_OC_MODEL_<ROLE>` (dashes as underscores) overrides `YIEN_OC_MODEL`, which overrides the defaults — implementer `opencode/inkling-2-small-free#high`, reviewer and strict-reviewer `opencode/glm-5.3-flash-free#high`, test-engineer the implementer default. The model used is printed on stderr.
+- The strict reviewer defaults to FAIL and needs evidence for every checklist item; "unverified" fails the verdict. Escalate to Claude's quality-reviewer for: unsafe code, concurrency, security, or after N failed rounds.
+- The orchestrator still reads the final diff and runs the integration; it trusts the diff, not the reply.
 - Free model: never pass secrets or personal data in briefs.
 - One build at a time: OpenCode also builds only through `scripts/cargo.sh`.
 
@@ -307,5 +308,5 @@ A command that does not exist yet (no workspace, no `xtask`) is skipped and repo
 - ConPTY sends `ESC [ 6 n` at startup and blocks the child until it is answered. Never drop PTY replies.
 - ConPTY never closes the master, so EOF never arrives. End of session is the child's exit status; drain until quiet after it exits.
 - A shell heredoc mangles Rust escape literals (`\x1b`, `\r\n`). Write those files with the Write or Edit tool.
-- A running `yien.exe` holds the binary and linking fails with `os error 5`. Report it; never kill a process Emilio may own.
+- A running `yien.exe` holds the binary and linking fails with `os error 5`. Report it; never kill a process the developer may own.
 - Grid indexing must account for the display offset. A wide character owns two cells; the second is a spacer.
