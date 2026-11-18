@@ -682,8 +682,80 @@ fn typed_rules(program: &str) -> Vec<ScreenRule> {
     found.typed_startup_screens().to_vec()
 }
 
+/// The interrupt the 2.1.326 fix targets, replayed through a shell pane
+/// that runs a detected `claude`: the bytes are the real 2.1.325 capture
+/// with the interrupt `idle` record taken out, played under shell marks and
+/// the CLI's startup-screen rules as the pane does. The turn starts at the
+/// shell's command-start mark, with nothing on screen; the user interrupts
+/// mid-stream in 2.1.326, which sends nothing.
+#[test]
+fn rnf_23_claude_2_1_326_interrupted_turn_ends_idle_in_a_typed_shell() {
+    let needle = b"\x1b]7501;state=idle:app=claude-code\x07";
+    // The startup-rest record stays; the interrupted turn's does not.
+    let silent = excise(CLAUDE_CTRL_C_IN_POWERSHELL, needle, 1);
+    let end = position(&silent, b"\x1b]7501;state=clear").expect("the exit sends clear");
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    // The shell poller finds `claude` under the shell a moment after boot,
+    // as in the real pane.
+    pane.step(Signal::TypedAgent(true));
+    for part in silent[..end].chunks(64) {
+        pane.feed(part);
+    }
+    pane.wait();
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ],
+        "the typed shell pane must leave Working on the interrupt line"
+    );
+}
+
+/// The same typed shell pane with the interrupt line left on screen from a
+/// previous interrupt: its first match is history and the running turn
+/// stays Working while the mock streams. The startup-rest record ends the
+/// shell's command-start phase, a working record opens a fresh turn, and
+/// the stale line is on screen for all of it.
+#[test]
+fn rf_age_05_a_typed_shell_turn_runs_normally_with_the_interrupt_line_still_on_screen() {
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    // The frame put on screen as the startup-rest frame cleared and
+    // redrawn: the interrupt line from the previous interrupt, visible.
+    pane.feed(&drawn(
+        "  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    // The startup-rest record closes the startup window; a working record
+    // opens the turn the user is about to interrupt.
+    pane.feed(b"\x1b]7501;state=idle:app=claude-code\x07");
+    pane.feed(b"\x1b]7501;state=working:app=claude-code\x07");
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working]
+    );
+    // The mock streams a turn's worth of output for five seconds, the
+    // stale line still on screen.
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working],
+        "a stale interrupt line must not end a typed shell pane's turn"
+    );
+}
+
+/// PowerShell's prompt and the `claude` typed at it, with its marks.
 /// PowerShell's prompt and the `codex` typed at it, with its marks.
 const CODEX_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> codex\r\n\x1b]133;C\x07";
+
+const CLAUDE_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> claude\r\n\x1b]133;C\x07";
 
 #[test]
 fn rf_age_05_codex_typed_in_a_shell_needs_you_on_its_trust_screen_once_found() {
