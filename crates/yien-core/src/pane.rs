@@ -12,8 +12,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{
-    Confirms, Effect as AgentEffect, HookEvent, Machine, ScreenRule, SessionEndReason, Signal,
-    evaluate_screen,
+    Confirms, Effect as AgentEffect, HookEvent, Machine, ScreenRule, ScreenVerdict,
+    SessionEndReason, Signal, evaluate_screen, interrupt_marks,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
@@ -492,6 +492,10 @@ struct Actor {
     /// the interrupt lines. A turn shows stale prompts; only these may be
     /// trusted to end one (RN-02).
     interrupt_rules: Vec<ScreenRule>,
+    /// The fewest matching interrupt rows seen this turn. Re-initialised
+    /// when a turn starts, so a match that was on screen before the turn
+    /// began — a stale interrupt line — never counts as this turn's own.
+    interrupt_low: usize,
     /// The OpenCode sessions this launch's program named over OSC 7501.
     opencode_sessions: Sessions,
     /// The shell poller finds OpenCode under this launch's shell.
@@ -575,6 +579,7 @@ pub(crate) fn spawn(
         restored_mark: None,
         titles: Titles::new(false),
         typed_screen: Vec::new(),
+        interrupt_low: 0,
         interrupt_rules,
         opencode_sessions: Sessions::default(),
         typed_opencode: false,
@@ -1352,6 +1357,14 @@ impl Actor {
             match effect {
                 AgentEffect::Transition { to, .. } => {
                     let state = convert::agent_state(to);
+                    if state == AgentState::Working {
+                        // The interrupt line may have been drawn by an
+                        // earlier turn: only matches beyond this baseline
+                        // can end this one.
+                        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
+                        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                        self.interrupt_low = interrupt_marks(&self.interrupt_rules, &rows);
+                    }
                     if state != self.state {
                         let kind = attention_kind(state);
                         self.attention_since = match self.attention_since {
@@ -1380,7 +1393,23 @@ impl Actor {
                     } else {
                         &self.plan.screen
                     };
-                    let verdict = evaluate_screen(rules, &rows);
+                    let interrupt = self.machine.screen_read_is_interrupt();
+                    let verdict = if interrupt {
+                        // Only an interrupt line drawn during this turn
+                        // counts; one that was already on screen when it
+                        // began is history (a fresh interrupt's idle record
+                        // is the normal case and ends the turn itself).
+                        let count = interrupt_marks(&self.interrupt_rules, &rows);
+                        let verdict = if count > self.interrupt_low {
+                            ScreenVerdict::Interrupted
+                        } else {
+                            ScreenVerdict::NoMatch
+                        };
+                        self.interrupt_low = self.interrupt_low.min(count);
+                        verdict
+                    } else {
+                        evaluate_screen(rules, &rows)
+                    };
                     self.step(&Signal::Screen(verdict));
                 }
                 AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId {
