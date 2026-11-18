@@ -52,8 +52,8 @@ request and no `UserPromptSubmit` hook fired. What it shows, against
 one at rest, 326 does not), the interrupt still travels as
 `state=working` then `state=idle` about 110 bytes apart, the folder trust
 screen answers `state=blocked:kind=permission:msg=trust this folder`, no
-`Stop` hook ever fires, and the exit still sends three `state=clear` with
-the `SessionEnd(prompt_input_exit)` hook. The capture cannot speak for a
+`Stop` hook ever fires, and the exit sends one `state=clear` with the
+`SessionEnd(prompt_input_exit)` hook. The capture cannot speak for a
 turn already streaming when Ctrl+C lands; the interrupted line the turn
 draws is covered by the screen rule and replay tests instead.
 
