@@ -16,6 +16,41 @@ usage() {
   exit 2
 }
 
+# Runs oc.sh and splits its output into session id and reply.
+run_oc() { # <role> <brief-file> [session-id] -> sets session, reply; returns rc
+  local role=$1 brief=$2 sid=${3:-}
+  local args=("$worktree" "$role" "$brief")
+  [ -n "$sid" ] && args+=("$sid")
+  local out rc=0
+  out=$(bash "$script_dir/oc.sh" "${args[@]}" 2>&1) || rc=$?
+  session=""
+  reply=""
+  local l
+  while IFS= read -r l; do
+    if [ -z "$session" ] && [[ "$l" == session:\ * ]]; then
+      session=${l#session: }
+    else
+      reply+="$l"$'\n'
+    fi
+  done <<< "$out"
+  return $rc
+}
+
+new_brief() { # <name> -> fresh brief file path in log_dir
+  mktemp "$log_dir/loop-${1}-XXXXXXXX.md"
+}
+
+record() { # <text> -> append to LOOP file
+  printf '%s\n' "$1" >> "$loop_file"
+}
+
+detect_verdict() { # reviewer reply -> PASS|FAIL|UNKNOWN
+  local v
+  v=$(printf '%s\n' "$1" | sed -nE 's/^## Verdict: (PASS|FAIL)[[:space:]]*$/\1/p' | head -n1)
+  echo "${v:-UNKNOWN}"
+}
+
+main() {
 [ $# -ge 2 ] || usage
 worktree=$1
 task_file=$2
@@ -62,40 +97,6 @@ loop_file="$worktree/LOOP-$topic.md"
   echo "- max fix rounds: $max_rounds"
   echo
 } > "$loop_file" || { echo "oc-loop.sh: cannot write $loop_file" >&2; exit 2; }
-
-# Runs oc.sh and splits its output into session id and reply.
-run_oc() { # <role> <brief-file> [session-id] -> sets session, reply; returns rc
-  local role=$1 brief=$2 sid=${3:-}
-  local args=("$worktree" "$role" "$brief")
-  [ -n "$sid" ] && args+=("$sid")
-  local out rc=0
-  out=$(bash "$script_dir/oc.sh" "${args[@]}" 2>&1) || rc=$?
-  session=""
-  reply=""
-  local l
-  while IFS= read -r l; do
-    if [ -z "$session" ] && [[ "$l" == session:\ * ]]; then
-      session=${l#session: }
-    else
-      reply+="$l"$'\n'
-    fi
-  done <<< "$out"
-  return $rc
-}
-
-new_brief() { # <name> -> fresh brief file path in log_dir
-  mktemp "$log_dir/loop-${1}-XXXXXXXX.md"
-}
-
-record() { # <text> -> append to LOOP file
-  printf '%s\n' "$1" >> "$loop_file"
-}
-
-detect_verdict() { # reviewer reply -> PASS|FAIL|UNKNOWN
-  local v
-  v=$(printf '%s\n' "$1" | grep -m1 -E '^## Verdict: (PASS|FAIL)' | sed -E 's/^## Verdict: (PASS|FAIL).*/\1/')
-  echo "${v:-UNKNOWN}"
-}
 
 rounds=0
 reviewer_session=""
@@ -249,3 +250,8 @@ echo "loop log: $loop_file"
 
 if [ "$verdict" = "PASS" ]; then exit 0; fi
 exit 1
+}
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
