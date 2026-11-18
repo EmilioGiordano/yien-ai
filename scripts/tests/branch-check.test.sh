@@ -62,6 +62,19 @@ check "normal file" 1 "$(is_forbidden_path 'README.md'; echo $?)"
 check "source file" 1 "$(is_forbidden_path 'crates/yien-ui/src/main.rs'; echo $?)"
 check "task md suffix" 1 "$(is_forbidden_path 'TASK-foo.md.bak'; echo $?)"
 
+# detect_verdict: reviewer reply -> PASS|FAIL|UNKNOWN; anything but an exact
+# "## Verdict: PASS|FAIL" line must not read as PASS
+source "$test_dir/../oc-loop.sh"
+check "detect template line" "UNKNOWN" "$(detect_verdict '## Verdict: PASS | FAIL')"
+check "detect real pass" "PASS" "$(detect_verdict '## Verdict: PASS')"
+check "detect real fail" "FAIL" "$(detect_verdict '## Verdict: FAIL')"
+check "detect trailing period" "UNKNOWN" "$(detect_verdict '## Verdict: PASS.')"
+check "detect empty reply" "UNKNOWN" "$(detect_verdict '')"
+check "detect lowercase verdict" "UNKNOWN" "$(detect_verdict '## verdict: pass')"
+check "detect pass with trailing spaces" "PASS" "$(detect_verdict '## Verdict: PASS   ')"
+check "detect multiline with fail" "FAIL" "$(detect_verdict "$(printf 'intro\n## Verdict: FAIL\nmore')")"
+check "detect multiline with pass" "PASS" "$(detect_verdict "$(printf 'intro\n## Verdict: PASS\nmore')")"
+
 # integration: the PowerShell check must be able to pass a real good .ps1 and
 # fail a broken one (a POSIX mktemp path made it unparseable before)
 ps_repo=$(mktemp -d)
