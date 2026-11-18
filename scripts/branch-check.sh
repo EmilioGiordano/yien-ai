@@ -273,7 +273,7 @@ main() {
   fi
 
   if [ "$failed" -eq 0 ]; then
-    echo "branch-check: PASS"
+    echo "branch-check: PASS (0 failed)"
     exit 0
   fi
   echo "branch-check: FAIL ($failed failed)"
