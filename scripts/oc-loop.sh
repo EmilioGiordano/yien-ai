@@ -22,7 +22,10 @@ run_oc() { # <role> <brief-file> [session-id] -> sets session, reply; returns rc
   local args=("$worktree" "$role" "$brief")
   [ -n "$sid" ] && args+=("$sid")
   local out rc=0
-  out=$(bash "$script_dir/oc.sh" "${args[@]}" 2>&1) || rc=$?
+  local errlog
+  errlog=$(mktemp "$log_dir/oc-${role}-stderr-XXXXXXXX.log") || { echo "oc-loop.sh: cannot create a stderr log in $log_dir" >&2; return 2; }
+  out=$(bash "$script_dir/oc.sh" "${args[@]}" 2> "$errlog") || rc=$?
+  if [ $rc -ne 0 ]; then echo "oc-loop.sh: $role stderr log: $errlog" >&2; fi
   session=""
   reply=""
   local l
