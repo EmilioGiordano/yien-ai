@@ -231,10 +231,15 @@ pub enum ScreenVerdict {
     /// A rule with `confirms = "interrupt"` matched: a turn the user stopped
     /// ended, and the agent drew the interrupt line to say so.
     Interrupted,
-    /// An armed interrupt read saw the turn's in-turn marker gone: the
-    /// agent drew the spinner/hint no more, so the turn is over. A CLI that
-    /// neither draws a line nor reports the end (2.1.327) emits this.
+    /// An armed interrupt read saw the profile's `confirms = "in_turn"` marker
+    /// gone after seeing it during this turn, with no `needs_you` prompt on
+    /// screen: the turn ended as idle (Claude 2.1.327 draws no interrupt line
+    /// and sends no record on Ctrl+C).
     TurnEnded,
+    /// A typed agent's `confirms = "ready"` rule matched without its in-turn
+    /// marker during startup, so its REPL is idle even if it sent no startup
+    /// `state=idle` record over OSC 7501.
+    Ready,
 }
 
 /// One input to the state machine.

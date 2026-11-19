@@ -211,8 +211,12 @@ pub enum SessionReader {
 /// rule confirms a weaker signal (ADR-08), and lights the red mark alone
 /// only on a startup screen, before the agent's hooks or OSC 7501 first
 /// speak ([`MachineConfig::reads_startup_screens`]). "interrupt" ends a
-/// running turn as idle: Claude Code 2.1.326 stops sending its record when
-/// the user interrupts a turn, and only draws the interrupt line.
+/// running turn as idle when a CLI stops sending its interrupt record
+/// (Claude Code 2.1.326). "in_turn" matches a status-bar hint drawn only
+/// while a turn runs so its disappearance ends an interrupted turn as idle
+/// (Claude Code 2.1.327). "ready" matches an idle REPL status bar during
+/// typed-agent startup so a CLI that omits startup `state=idle` does not
+/// leave the shell command stuck on working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confirms {
@@ -220,6 +224,10 @@ pub enum Confirms {
     NeedsYou,
     /// The user stopped the turn: the agent drew the interrupt line.
     Interrupt,
+    /// A turn is running (anchored status-bar marker).
+    InTurn,
+    /// The agent's idle REPL prompt is ready (used only during typed startup).
+    Ready,
 }
 
 /// How to find the agent's executable and version.
@@ -336,10 +344,106 @@ pub fn interrupt_marks(rules: &[ScreenRule], rows: &[&str]) -> usize {
         .sum()
 }
 
-/// Runs screen rules for a [`crate::Effect::CheckScreen`] and returns the
-/// answer to feed back as [`crate::Signal::Screen`]. An interrupt wins a tie
-/// against needs you: RN-02 prefers inactive to "needs you", and the
-/// interrupt line ends a turn rather than opening one.
+/// Whether `rules` declares any rule used during a running turn to detect an
+/// unannounced interrupt (`confirms = "interrupt"` or `confirms = "in_turn"`).
+pub fn has_turn_rules(rules: &[ScreenRule]) -> bool {
+    rules
+        .iter()
+        .any(|r| matches!(r.confirms, Confirms::Interrupt | Confirms::InTurn))
+}
+
+/// Whether `rules` declares a `confirms = "in_turn"` status-bar marker.
+pub fn has_in_turn_rules(rules: &[ScreenRule]) -> bool {
+    rules.iter().any(|r| r.confirms == Confirms::InTurn)
+}
+
+fn has_in_turn_marker(rules: &[ScreenRule], rows: &[&str]) -> bool {
+    rules
+        .iter()
+        .any(|r| r.confirms == Confirms::InTurn && r.matches(rows))
+}
+
+/// Per-turn screen state for detecting an interrupted turn when a CLI sends no
+/// OSC 7501 record (Claude Code 2.1.326 and 2.1.327).
+///
+/// Tracks only rules declared by the active profile:
+/// - `confirms = "interrupt"` lines against a per-turn running minimum so
+///   stale lines from earlier turns do not end a new turn;
+/// - `confirms = "in_turn"` markers seeded only from frames observed during
+///   this turn (never pre-turn content), emitting [`ScreenVerdict::TurnEnded`]
+///   when gone and no `needs_you` prompt is visible.
+///
+/// ```
+/// use yien_agent::{ScreenVerdict, TurnScreen, builtin_profiles};
+///
+/// let profiles = builtin_profiles().unwrap();
+/// let claude = &profiles.iter().find(|p| p.id == "claude").unwrap().rules[0].screen;
+/// let mut turn = TurnScreen::default();
+/// turn.begin_turn(claude, &["  \u{23bf}  Interrupted \u{b7} What should Claude do instead?"]);
+/// turn.observe_in_turn(claude, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} esc to interrupt"]);
+/// assert_eq!(
+///     turn.evaluate(claude, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)"]),
+///     ScreenVerdict::TurnEnded
+/// );
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnScreen {
+    interrupt_low: usize,
+    in_turn_seen: bool,
+}
+
+impl TurnScreen {
+    /// Clears all per-turn state (used when rules change or the machine resets).
+    pub fn reset(&mut self) {
+        self.interrupt_low = 0;
+        self.in_turn_seen = false;
+    }
+
+    /// Snapshots the baseline at the start of a turn. `in_turn_seen` always
+    /// starts `false` so pre-turn screen text cannot seed the marker.
+    pub fn begin_turn(&mut self, rules: &[ScreenRule], rows: &[&str]) {
+        self.interrupt_low = interrupt_marks(rules, rows);
+        self.in_turn_seen = false;
+    }
+
+    /// Whether the profile's `in_turn` marker has been observed this turn.
+    pub fn in_turn_seen(&self) -> bool {
+        self.in_turn_seen
+    }
+
+    /// Observes output during a running turn so a short-lived `in_turn` marker
+    /// drawn and erased by a fast Ctrl+C before the settle timer is not missed.
+    pub fn observe_in_turn(&mut self, rules: &[ScreenRule], rows: &[&str]) {
+        if !self.in_turn_seen && has_in_turn_marker(rules, rows) {
+            self.in_turn_seen = true;
+        }
+    }
+
+    /// Evaluates an interrupt-armed [`crate::Effect::CheckScreen`].
+    pub fn evaluate(&mut self, rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
+        let count = interrupt_marks(rules, rows);
+        let in_turn = has_in_turn_marker(rules, rows);
+        if in_turn {
+            self.in_turn_seen = true;
+        }
+        let verdict = if count > self.interrupt_low {
+            ScreenVerdict::Interrupted
+        } else if self.in_turn_seen
+            && !in_turn
+            && evaluate_screen(rules, rows) != ScreenVerdict::NeedsYou
+        {
+            ScreenVerdict::TurnEnded
+        } else {
+            ScreenVerdict::NoMatch
+        };
+        self.interrupt_low = self.interrupt_low.min(count);
+        verdict
+    }
+}
+
+/// Runs `confirms = "needs_you"` screen rules for a startup or watchdog
+/// [`crate::Effect::CheckScreen`]. Interrupt rules are ignored here so a stale
+/// interrupt line cannot suppress a startup prompt.
 ///
 /// ```
 /// use yien_agent::{ScreenVerdict, builtin_profiles, evaluate_screen};
@@ -349,15 +453,10 @@ pub fn interrupt_marks(rules: &[ScreenRule], rows: &[&str]) -> usize {
 /// let rules = &claude.rules[0].screen;
 /// assert_eq!(evaluate_screen(rules, &["", "  Do you want to proceed?"]), ScreenVerdict::NeedsYou);
 /// assert_eq!(evaluate_screen(rules, &["$ ls"]), ScreenVerdict::NoMatch);
-/// assert_eq!(evaluate_screen(rules, &["  ⎿  Interrupted · What should Claude do instead?"]), ScreenVerdict::Interrupted);
+/// assert_eq!(evaluate_screen(rules, &["  ⎿  Interrupted · What should Claude do instead?"]), ScreenVerdict::NoMatch);
 /// ```
 pub fn evaluate_screen(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
     if rules
-        .iter()
-        .any(|r| r.confirms == Confirms::Interrupt && r.matches(rows))
-    {
-        ScreenVerdict::Interrupted
-    } else if rules
         .iter()
         .any(|r| r.confirms == Confirms::NeedsYou && r.matches(rows))
     {
@@ -365,6 +464,40 @@ pub fn evaluate_screen(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
     } else {
         ScreenVerdict::NoMatch
     }
+}
+
+/// Runs screen rules for a typed agent's startup read in a shell pane.
+/// `needs_you` always wins; otherwise `confirms = "ready"` matches (when no
+/// `in_turn` marker is present) to clear the shell's command-start Working
+/// state once the REPL is idle. Interrupt rules are never evaluated here.
+///
+/// ```
+/// use yien_agent::{ScreenVerdict, builtin_profiles, evaluate_typed_startup};
+///
+/// let profiles = builtin_profiles().unwrap();
+/// let claude = profiles.iter().find(|p| p.id == "claude").unwrap();
+/// let rules = claude.typed_startup_screens();
+/// assert_eq!(
+///     evaluate_typed_startup(rules, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} \u{2190} for agents"]),
+///     ScreenVerdict::Ready
+/// );
+/// assert_eq!(
+///     evaluate_typed_startup(rules, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} esc to interrupt"]),
+///     ScreenVerdict::NoMatch
+/// );
+/// ```
+pub fn evaluate_typed_startup(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
+    if evaluate_screen(rules, rows) == ScreenVerdict::NeedsYou {
+        return ScreenVerdict::NeedsYou;
+    }
+    if !has_in_turn_marker(rules, rows)
+        && rules
+            .iter()
+            .any(|r| r.confirms == Confirms::Ready && r.matches(rows))
+    {
+        return ScreenVerdict::Ready;
+    }
+    ScreenVerdict::NoMatch
 }
 
 /// The detection setup for one range of CLI versions.

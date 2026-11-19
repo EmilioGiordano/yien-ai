@@ -72,6 +72,24 @@ confirms = "interrupt"
 bottom_rows = 60
 pattern = '(?m)^\s*⎿\s+Interrupted · What should Claude do instead\?'
 
+# Claude 2.1.327 draws no interrupt line and sends no OSC 7501 record when
+# Ctrl+C restores the prompt into the input box; the bottom status bar shows
+# `esc to interrupt` only while a turn runs and drops it on interrupt.
+# Anchored to the bottom 3 rows so transcript output above the input box
+# never matches.
+[[rules.screen]]
+confirms = "in_turn"
+bottom_rows = 3
+pattern = '(?m)(?:^\s*|·\s*)esc to interrupt(?:\s*·|\s{2,}|\s*$)'
+
+# Claude's idle REPL status bar, used only during typed-agent startup in a
+# shell pane (before its first OSC 7501 record) so a launch that omits
+# startup state=idle does not leave the shell command stuck on working.
+[[rules.screen]]
+confirms = "ready"
+bottom_rows = 3
+pattern = '(?m)(?:^\s*\(shift\+tab to cycle\)|^\s*(?:⏵⏵|⏸)\s+.*\(shift\+tab to cycle\)|(?:^\s*|·\s*)\? for shortcuts(?:\s*·|\s{2,}|\s*$))'
+
 [[rules]]
 versions = ">=2.0, <2.1.295"
 sources = ["hooks", "screen"]
