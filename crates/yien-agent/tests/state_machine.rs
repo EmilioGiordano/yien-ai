@@ -2152,18 +2152,18 @@ fn rf_age_05_an_interrupted_turn_goes_idle_in_a_hooked_pane() {
 }
 
 #[test]
-fn rf_age_05_turn_ended_in_a_hooked_pane_is_done_when_unseen() {
+fn rf_age_05_turn_ended_in_a_hooked_pane_is_idle_when_unseen() {
     let mut p = Pane::working_claude();
     p.send(Signal::Output);
     p.at(p.m.next_wake().expect("the turn arms a read"))
         .send(Signal::Tick);
     assert_eq!(p.fx, vec![Effect::CheckScreen]);
-    // The pane never saw this turn's end: Done, like a Stop hook.
+    // An interrupt always ends the turn as Idle, never Done and never red.
     p.send(Signal::Screen(ScreenVerdict::TurnEnded));
-    assert_eq!(p.state(), AgentState::Done);
+    assert_eq!(p.state(), AgentState::Idle);
     assert!(p.fx.contains(&Effect::Transition {
         from: AgentState::Working,
-        to: AgentState::Done,
+        to: AgentState::Idle,
         cause: Cause::Source(Source::Screen),
     }));
     assert!(!p.fx.contains(&Effect::MarkRed));
@@ -2178,6 +2178,66 @@ fn rf_age_05_turn_ended_in_a_hooked_pane_is_idle_when_seen() {
         .send(Signal::Tick);
     p.send(Signal::Screen(ScreenVerdict::TurnEnded));
     assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_turn_ended_during_pending_permission_keeps_red() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Output);
+    let read_at = p.m.next_wake().expect("the turn arms a read");
+    p.at(read_at).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    // A permission prompt arrives before the screen verdict comes back.
+    p.send(hook(HookEvent::PermissionRequest));
+    assert!(p.m.needs_you_pending());
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.m.needs_you_pending());
+    p.at(p.m.next_wake().expect("pending confirmation"))
+        .send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+    assert!(p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_typed_agent_ready_screen_clears_shell_working_to_idle() {
+    let mut p = Pane::typed_in_powershell();
+    assert_eq!(p.state(), AgentState::Working);
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.contains(&Effect::MarkRed));
+    assert!(p.m.reads_typed_agent());
+    // A subsequent startup screen still works until the agent speaks.
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+    // Answering it straight to the ready prompt clears red to Idle.
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rn_02_ready_verdict_outside_typed_startup_changes_nothing() {
+    let mut p = Pane::working_claude();
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn rf_age_05_exit_after_turn_ended_in_a_seen_pane_stays_idle() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true));
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(hook(HookEvent::SessionEnd(
+        SessionEndReason::PromptInputExit,
+    )))
+    .send(Signal::Exited { code: Some(0) });
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.is_red());
 }
 
 #[test]

@@ -387,6 +387,23 @@ impl Machine {
         self.agent_reporting
     }
 
+    /// Whether the current turn was started by the agent's own OSC 7501
+    /// record rather than a shell's OSC 133 command mark.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use yien_agent::{AgentStatus, Machine, MachineConfig, OscSignal, PromptMark, Signal, Source};
+    ///
+    /// let m = Machine::new(MachineConfig::new(&[Source::Osc133, Source::Osc7501], None));
+    /// let (m, _) = m.step(&Signal::Osc(OscSignal::Prompt(PromptMark::CommandStart)), Duration::ZERO);
+    /// assert!(!m.in_reported_turn());
+    /// let (m, _) = m.step(&Signal::Osc(OscSignal::Status7501(AgentStatus::Working)), Duration::ZERO);
+    /// assert!(m.in_reported_turn());
+    /// ```
+    pub fn in_reported_turn(&self) -> bool {
+        self.reported_turn
+    }
+
     /// Whether the screen is read for the startup screens of an agent CLI
     /// typed in the shell: the caller answers [`Effect::CheckScreen`] with
     /// that agent's patterns instead of the rule's own.
@@ -501,8 +518,9 @@ impl Machine {
             self.on_interrupted_screen(now, fx);
             return;
         }
-        // A turn-ended verdict does the same, but only from Working: a
-        // quiet pause inside a permission prompt is not a turn end (RN-02).
+        // A turn-ended verdict ends the turn as Idle, only from Working with
+        // no pending NeedsYou: a quiet pause inside a permission prompt is
+        // not a turn end (RN-01/RN-02).
         if let Signal::Screen(ScreenVerdict::TurnEnded) = signal {
             self.on_turn_ended(now, fx);
             return;
@@ -734,6 +752,12 @@ impl Machine {
                 ScreenVerdict::NoMatch if self.startup_red => {
                     self.set_state(self.startup_from, cause, now, fx);
                 }
+                ScreenVerdict::Ready
+                    if self.typed_agent
+                        && (self.startup_red || self.state == AgentState::Working) =>
+                {
+                    self.set_state(AgentState::Idle, cause, now, fx);
+                }
                 _ => {}
             }
             return;
@@ -748,17 +772,16 @@ impl Machine {
         }
     }
 
-    /// An armed interrupt read saw the turn's in-turn spinner/hint gone and
-    /// no record: the turn is over (the mock's work, or the user's Ctrl+C
-    /// in a build that draws no line, like 2.1.327). Ends the turn like the
-    /// agent's own end signal; RN-02 keeps red as it is, and an interrupted
-    /// turn the hooks never announced never lights needs you.
+    /// An armed interrupt read saw the profile's `in_turn` marker gone after
+    /// seeing it during this turn (Claude 2.1.327 draws no interrupt line and
+    /// sends no record on Ctrl+C). Ends the turn as Idle, never Done and never
+    /// red (RN-01/RN-02), and never cancels a pending NeedsYou.
     fn on_turn_ended(&mut self, now: Duration, fx: &mut Vec<Effect>) {
         let asked = std::mem::take(&mut self.awaiting_screen);
         let _interrupt_kind = std::mem::take(&mut self.awaiting_interrupt);
-        if asked && self.state == AgentState::Working {
+        if asked && self.state == AgentState::Working && self.pending.is_none() {
             let cause = Cause::Source(Source::Screen);
-            self.end_turn(cause, now, fx);
+            self.set_state(AgentState::Idle, cause, now, fx);
         }
     }
 
