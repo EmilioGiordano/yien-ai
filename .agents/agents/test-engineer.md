@@ -4,17 +4,13 @@ description: Writes and runs headless tests for a YIEN branch. Finds missing cov
 subagent: true
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
   - run_command
   - manage_task
   - write_file
-  - write_to_file
   - edit_file
-  - replace_file_content
-  - multi_replace_file_content
 ---
 
 # Test Engineer

@@ -4,17 +4,13 @@ description: Implements one YIEN task in the worktree and branch it is given, fr
 subagent: true
 tools:
   - read_file
-  - view_file
   - grep_search
   - find_by_name
   - list_dir
   - run_command
   - manage_task
   - write_file
-  - write_to_file
   - edit_file
-  - replace_file_content
-  - multi_replace_file_content
 ---
 
 # Implementer
