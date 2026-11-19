@@ -231,6 +231,14 @@ The brief is the only context it gets.
 - Free model: never pass secrets or personal data in briefs.
 - One build at a time: OpenCode also builds only through `scripts/cargo.sh`.
 
+## Running under Antigravity
+
+- Project agents live in `.agents/agents/` and skills in `.agents/skills/`. The `.claude/` copies stay for Claude Code; both sets must change together whenever a role, skill or rule changes.
+- Subagents are spawned with `invoke_subagent`, and follow-up rounds reuse the same `conversationId` with `send_message`. If a project agent that needs writes starts without write tools (observed on `agy` 1.5.12), register it with `define_subagent(..., EnableWriteTools: true)` using its body as `SystemPrompt`.
+- On Windows, the shell is PowerShell 5.1: `&&` is a parse error (chain with `;` or use `git -C <worktree>`), the working directory resets between calls, and bash scripts (`scripts/cargo.sh`, `scripts/branch-check.sh`, `scripts/oc*.sh`) run through Git's `sh.exe`: `$sh = (Get-Command sh.exe -ErrorAction SilentlyContinue).Source; if (-not $sh) { $sh = "$(Split-Path (Split-Path (Get-Command git).Source))\bin\sh.exe" }; & $sh scripts/<name>.sh ...`. Every subagent brief must include these notes.
+- Before and after every review round, record `git rev-parse HEAD` and `git status --porcelain`. Any change during or after a review round (a new commit or a modified file) voids that round.
+- The `quality-reviewer` agent has no file write/edit tools, but its read-only boundary is files-only: it still has `run_command` (a shell) to run checks and append `REPORT-<topic>.md`, so its body forbids writing anything else and forbids committing.
+
 ---
 
 # Part 2 — The code
