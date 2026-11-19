@@ -12,8 +12,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{
-    Confirms, Effect as AgentEffect, HookEvent, Machine, ScreenRule, ScreenVerdict,
-    SessionEndReason, Signal, evaluate_screen, interrupt_marks,
+    Effect as AgentEffect, HookEvent, Machine, ScreenRule, ScreenVerdict, SessionEndReason, Signal,
+    TurnScreen, evaluate_screen, evaluate_typed_startup, has_in_turn_rules, has_turn_rules,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
@@ -485,21 +485,11 @@ struct Actor {
     restored_mark: Option<usize>,
     /// The launch's terminal title and who set it.
     titles: Titles,
-    /// The startup screens of the agent CLI last found in the shell, read
-    /// while the machine says so.
+    /// The screen rules of the agent CLI last found running in a shell pane;
+    /// cleared when the program leaves or the machine resets.
     typed_screen: Vec<ScreenRule>,
-    /// The subset of whichever rules this pane reads that end a running turn:
-    /// the interrupt lines. A turn shows stale prompts; only these may be
-    /// trusted to end one (RN-02).
-    interrupt_rules: Vec<ScreenRule>,
-    /// The fewest matching interrupt rows seen this turn. Re-initialised
-    /// when a turn starts, so a match that was on screen before the turn
-    /// began — a stale interrupt line — never counts as this turn's own.
-    interrupt_low: usize,
-    /// The in-turn marker was on screen at some read of this turn. Once it
-    /// is gone and no output arrives, the turn is over (a CLI that neither
-    /// draws a line nor reports the end, like 2.1.327).
-    interrupt_marker_seen: bool,
+    /// Per-turn interrupt/in-turn screen state for the active profile rules.
+    turn_screen: TurnScreen,
     /// The OpenCode sessions this launch's program named over OSC 7501.
     opencode_sessions: Sessions,
     /// The shell poller finds OpenCode under this launch's shell.
@@ -507,11 +497,6 @@ struct Actor {
     /// This pane's hold on the OpenCode watcher, while OpenCode runs here.
     opencode: Option<Watching>,
 }
-
-/// The in-turn hint Claude draws on its status row. Drawn at turn start
-/// and kept while streaming; it disappears when the turn is over
-/// (2.1.327 draws no line and fires no record at a mid-stream interrupt).
-const INTERRUPT_MARKER: &str = "esc to interrupt";
 
 /// Starts the actor of a pane; it ends when `cmds` closes, terminating the
 /// program. A panic in it is reported as [`PaneEvent::Crashed`].
@@ -541,13 +526,6 @@ pub(crate) fn spawn(
             ui_seen,
         }
     });
-    let interrupt_rules: Vec<ScreenRule> = setup
-        .plan
-        .screen
-        .iter()
-        .filter(|rule| rule.confirms == Confirms::Interrupt)
-        .cloned()
-        .collect();
     let actor = Actor {
         id,
         plan: setup.plan,
@@ -588,9 +566,7 @@ pub(crate) fn spawn(
         restored_mark: None,
         titles: Titles::new(false),
         typed_screen: Vec::new(),
-        interrupt_low: 0,
-        interrupt_marker_seen: false,
-        interrupt_rules,
+        turn_screen: TurnScreen::default(),
         opencode_sessions: Sessions::default(),
         typed_opencode: false,
         opencode: None,
@@ -1125,12 +1101,15 @@ impl Actor {
             .unwrap_or_default();
         let typed = !screens.is_empty();
         if typed {
-            self.interrupt_rules = screens
-                .iter()
-                .filter(|rule| rule.confirms == Confirms::Interrupt)
-                .cloned()
-                .collect();
             self.typed_screen = screens;
+            if self.state == AgentState::Working {
+                self.begin_turn();
+            } else {
+                self.turn_screen.reset();
+            }
+        } else {
+            self.typed_screen.clear();
+            self.turn_screen.reset();
         }
         self.step(&Signal::TypedAgent(typed));
         let opencode = program == Some(OPENCODE);
@@ -1254,6 +1233,8 @@ impl Actor {
             machine = machine.step(&Signal::Seen(true), self.now()).0;
         }
         self.machine = machine;
+        self.typed_screen.clear();
+        self.turn_screen.reset();
         self.attention_since = None;
         self.asked = None;
         if self.state != AgentState::Idle {
@@ -1312,6 +1293,7 @@ impl Actor {
             self.step(&Signal::Osc(yien_agent::OscSignal::Bell));
         }
         self.step(&Signal::Output);
+        self.observe_in_turn();
         self.dirty = true;
     }
 
@@ -1358,24 +1340,67 @@ impl Actor {
         };
     }
 
+    fn active_turn_rules(&self) -> &[ScreenRule] {
+        if runs_shell(&self.plan) {
+            &self.typed_screen
+        } else {
+            &self.plan.screen
+        }
+    }
+
+    fn begin_turn(&mut self) {
+        if !has_turn_rules(self.active_turn_rules()) {
+            self.turn_screen.reset();
+            return;
+        }
+        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let rules = if runs_shell(&self.plan) {
+            &self.typed_screen
+        } else {
+            &self.plan.screen
+        };
+        self.turn_screen.begin_turn(rules, &rows);
+    }
+
+    fn observe_in_turn(&mut self) {
+        if self.state != AgentState::Working
+            || self.turn_screen.in_turn_seen()
+            || !has_in_turn_rules(self.active_turn_rules())
+        {
+            return;
+        }
+        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let rules = if runs_shell(&self.plan) {
+            &self.typed_screen
+        } else {
+            &self.plan.screen
+        };
+        self.turn_screen.observe_in_turn(rules, &rows);
+    }
+
     fn step(&mut self, signal: &Signal) {
         let now = self.now();
+        let was_reported = self.machine.in_reported_turn();
         let machine = std::mem::replace(&mut self.machine, Machine::new(self.plan.machine.clone()));
         let (machine, effects) = machine.step(signal, now);
         self.machine = machine;
+        if !was_reported
+            && self.machine.in_reported_turn()
+            && self.state == AgentState::Working
+            && self.machine.state() == yien_agent::AgentState::Working
+        {
+            self.begin_turn();
+        }
         for effect in effects {
             match effect {
                 AgentEffect::Transition { to, .. } => {
                     let state = convert::agent_state(to);
                     if state == AgentState::Working {
-                        // The interrupt line may have been drawn by an
-                        // earlier turn: only matches beyond this baseline
-                        // can end this one.
-                        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
-                        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                        self.interrupt_low = interrupt_marks(&self.interrupt_rules, &rows);
-                        self.interrupt_marker_seen =
-                            rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
+                        self.begin_turn();
+                    } else if !matches!(state, AgentState::NeedsYou(_)) {
+                        self.turn_screen.reset();
                     }
                     if state != self.state {
                         let kind = attention_kind(state);
@@ -1393,42 +1418,27 @@ impl Actor {
                     }
                 }
                 AgentEffect::CheckScreen => {
-                    let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
-                    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                    // A typed agent keeps its own rules until it reports;
-                    // an interrupt read sees only interrupt rules, since the
-                    // turn's prompts are history (RN-02).
-                    let rules = if self.machine.reads_typed_agent() {
-                        &self.typed_screen
-                    } else if self.machine.screen_read_is_interrupt() {
-                        &self.interrupt_rules
-                    } else {
-                        &self.plan.screen
-                    };
-                    let interrupt = self.machine.screen_read_is_interrupt();
-                    let verdict = if interrupt {
-                        // Only an interrupt line drawn during this turn
-                        // counts; one that was already on screen when it
-                        // began is history (a fresh interrupt's idle record
-                        // is the normal case and ends the turn itself).
-                        let count = interrupt_marks(&self.interrupt_rules, &rows);
-                        let marker = rows.iter().any(|row| row.contains(INTERRUPT_MARKER));
-                        if marker {
-                            self.interrupt_marker_seen = true;
-                        }
-                        let verdict = if count > self.interrupt_low {
-                            ScreenVerdict::Interrupted
-                        } else if self.interrupt_marker_seen && !marker {
-                            // The Claude spinner/hint was drawn and is
-                            // gone: the turn is over, however it ended.
-                            ScreenVerdict::TurnEnded
+                    let verdict = if self.machine.screen_read_is_interrupt() {
+                        if has_turn_rules(self.active_turn_rules()) {
+                            let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
+                            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                            let rules = if runs_shell(&self.plan) {
+                                &self.typed_screen
+                            } else {
+                                &self.plan.screen
+                            };
+                            self.turn_screen.evaluate(rules, &rows)
                         } else {
                             ScreenVerdict::NoMatch
-                        };
-                        self.interrupt_low = self.interrupt_low.min(count);
-                        verdict
+                        }
                     } else {
-                        evaluate_screen(rules, &rows)
+                        let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
+                        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                        if self.machine.reads_typed_agent() {
+                            evaluate_typed_startup(&self.typed_screen, &rows)
+                        } else {
+                            evaluate_screen(&self.plan.screen, &rows)
+                        }
                     };
                     self.step(&Signal::Screen(verdict));
                 }
@@ -2724,6 +2734,101 @@ mod tests {
         child.output(b"\x1b]7501;state=working:id=ses_1:app=claude-code\x1b\\");
         pane.collect(SETTLE);
         assert_eq!(pane.opencode.panes(), 0);
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_fall_back_then_relaunch_keeps_claude_turn_rules() {
+        let said = format!("No conversation found with session ID: {RESUMED}\r\n");
+        let (pane, _, shell) = resume_run(vec![resume_start()], None, &said, 1);
+        assert!(shell);
+        // The fallback shell runs codex, which has no interrupt rules.
+        pane.cmds.try_send(found(0, Some("codex"))).unwrap();
+        pane.collect(SETTLE);
+        // Relaunch restores the Claude profile and its turn rules.
+        pane.cmds.try_send(PaneCmd::Relaunch { launch: 1 }).unwrap();
+        let claude = pane.next_child();
+        pane.collect(Duration::from_millis(100));
+        claude.output(
+            b"\x1b[2J\x1b[H\x1b]7501;state=working:app=claude-code\x07\
+              \xe2\x9d\xaf slow please\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        // Silent 2.1.327 interrupt: prompt restored, hint gone, no OSC 7501.
+        claude.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf slow please\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle)",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rn_02_shell_clears_typed_claude_rules_when_program_changes() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        pane.cmds.try_send(found(0, Some("claude"))).unwrap();
+        pane.collect(Duration::from_millis(100));
+        // Claude left and OpenCode (no screen rules) started in the same shell.
+        pane.cmds.try_send(found(0, Some(OPENCODE))).unwrap();
+        pane.collect(Duration::from_millis(100));
+        child.output(
+            b"\x1b[2J\x1b[H\x1b]7501;state=working:app=opencode\x07\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        // Even if the Claude status bar text scrolls off, OpenCode stays Working.
+        child.output(b"\x1b[2J\x1b[Hstill working\r\n");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), None, "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_typed_claude_2_1_327_fast_ctrl_c_in_shell_goes_idle() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        // PowerShell starts `claude` (OSC 133 C -> Working), then the poller finds it.
+        child.output(b"\x1b]133;A\x07PS C:\\work> claude\r\n\x1b]133;C\x07");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        pane.cmds.try_send(found(0, Some("claude"))).unwrap();
+        // 2.1.327 reaches its idle prompt with no startup state=idle record.
+        child.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf \r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 \xe2\x86\x90 for agents",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        // Turn starts and draws the in-turn hint, then Ctrl+C erases it
+        // immediately (before the 300 ms settle timer) with no OSC 7501 record.
+        child.output(
+            b"\x1b[2J\x1b[H\x1b]7501;state=working:app=claude-code\x07\
+              \xe2\x9d\xaf please answer slow\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        child.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf please answer slow\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle)",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PaneEvent::State(AgentState::Done | AgentState::NeedsYou(_), _)
+            )),
+            "{events:?}"
+        );
+        // Exit clears cleanly and stays Idle.
+        child.output(b"\x1b]7501;state=clear\x07\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), None, "{events:?}");
         drop(pane.cmds);
     }
 }
