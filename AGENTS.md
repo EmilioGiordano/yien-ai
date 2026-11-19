@@ -47,7 +47,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Commit on its branch | yes | yes | — |
 | Push a branch, open a PR | yes | no | — |
 | Commit or push to `main` | never | never | yes |
-| Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
+| Merge a PR that meets the merge criteria | yes, only after the developer approves it explicitly; `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
 | Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | `implementer` only, by "Tidying unpushed history" | — |
@@ -110,7 +110,7 @@ Every branch goes through the same loop: steps 1–7 with the `yien-branch` skil
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
 6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and a Low fix verified by the orchestrator as in step 4.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
-8. The branch goes through integration and UI validation. Then the orchestrator merges it.
+8. The branch goes through integration and UI validation. Then the orchestrator asks the developer, who tests the installer and the changes, and merges it only after their explicit approval.
 
 A PR is ready to merge only when all of these hold:
 
@@ -131,7 +131,7 @@ Ready branches are tested together before any reaches `main`.
 2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit; drop it with `git merge --abort` (conflict) or `git reset --hard HEAD~1` (merged but broken). `reset --hard` is allowed only on a `staging/*` branch.
 3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `xtask check-deps` and `xtask trace` (also through `scripts/cargo.sh`) once they exist.
 4. Run the UI validation of each feature on the staging build.
-5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR. Merge a PR only when its GitHub CI is green on all three systems (`gh pr checks <n>`); the local gate runs on Windows only and cannot see Linux or macOS failures.
+5. Mark each PR ready (`gh pr ready`) and comment the result. Ask the developer to approve the batch (they test the staging installer and the changes); only after their explicit approval, merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR. Merge a PR only when its GitHub CI is green on all three systems (`gh pr checks <n>`); the local gate runs on Windows only and cannot see Linux or macOS failures.
 6. `git pull --ff-only` on the local `main`, then `git diff staging/<date> main` must be empty: that proves `main` is what was tested.
 
 On a failure:
@@ -230,6 +230,14 @@ The brief is the only context it gets.
 - The orchestrator still reads the final diff and runs the integration; it trusts the diff, not the reply.
 - Free model: never pass secrets or personal data in briefs.
 - One build at a time: OpenCode also builds only through `scripts/cargo.sh`.
+
+## Running under Antigravity
+
+- Project agents live in `.agents/agents/` and skills in `.agents/skills/`. The `.claude/` copies stay for Claude Code; both sets must change together whenever a role, skill or rule changes.
+- Subagents are spawned with `invoke_subagent`, and follow-up rounds reuse the same `conversationId` with `send_message`. If a project agent that needs writes starts without write tools (observed on `agy` 1.5.12), register it with `define_subagent(..., EnableWriteTools: true)` using its body as `SystemPrompt`.
+- On Windows, the shell is PowerShell 5.1: `&&` is a parse error (chain with `;` or use `git -C <worktree>`), the working directory resets between calls, and bash scripts (`scripts/cargo.sh`, `scripts/branch-check.sh`, `scripts/oc*.sh`) run through Git's `sh.exe`: `$sh = (Get-Command sh.exe -ErrorAction SilentlyContinue).Source; if (-not $sh) { $sh = "$(Split-Path (Split-Path (Get-Command git).Source))\bin\sh.exe" }; & $sh scripts/<name>.sh ...`. Every subagent brief must include these notes.
+- Before and after every review round, record `git rev-parse HEAD` and `git status --porcelain`. Any change during or after a review round (a new commit or a modified file) voids that round.
+- The `quality-reviewer` agent has no file write/edit tools, but its read-only boundary is files-only: it still has `run_command` (a shell) to run checks and append `REPORT-<topic>.md`, so its body forbids writing anything else and forbids committing.
 
 ---
 
