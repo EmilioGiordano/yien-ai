@@ -47,7 +47,7 @@ Behaviour comes from the ERS. Engineering choices come from the plan (05), which
 | Commit on its branch | yes | yes | — |
 | Push a branch, open a PR | yes | no | — |
 | Commit or push to `main` | never | never | yes |
-| Merge a PR that meets the merge criteria | yes, `gh pr merge --merge`, never `--delete-branch` | never | yes |
+| Merge a PR that meets the merge criteria | yes, only after the developer approves it explicitly; `gh pr merge --merge`, never `--delete-branch` | never | yes |
 | Delete a branch or worktree | never | never | yes |
 | Force-push, rewrite pushed history | never | never | yes |
 | Rewrite unpushed commits on its own branch (e.g. to drop a trailer) | yes | `implementer` only, by "Tidying unpushed history" | — |
@@ -110,7 +110,7 @@ Every branch goes through the same loop: steps 1–7 with the `yien-branch` skil
 5. When the review lists coverage gaps the implementer cannot fill alone, `test-engineer` writes the tests and `implementer` commits them.
 6. Medium and Low findings are fixed or recorded as deliberate before the PR. Any commit after a PASS needs a new PASS, except a merge of `origin/main` that reproduces a staging resolution and a Low fix verified by the orchestrator as in step 4.
 7. On PASS, the orchestrator pushes and opens the PR as a draft.
-8. The branch goes through integration and UI validation. Then the orchestrator merges it.
+8. The branch goes through integration and UI validation. Then the orchestrator asks the developer, who tests the installer and the changes, and merges it only after their explicit approval.
 
 A PR is ready to merge only when all of these hold:
 
@@ -131,7 +131,7 @@ Ready branches are tested together before any reaches `main`.
 2. Merge the branches one at a time with `--no-ff`. Run `scripts/cargo.sh check --workspace --all-targets` after each one. The first merge that breaks it names the culprit; drop it with `git merge --abort` (conflict) or `git reset --hard HEAD~1` (merged but broken). `reset --hard` is allowed only on a `staging/*` branch.
 3. Run the full gate once: `scripts/cargo.sh --full` with fmt `--check`, clippy `--all-targets -D warnings`, tests, `deny check`, `build --release`, then `xtask check-deps` and `xtask trace` (also through `scripts/cargo.sh`) once they exist.
 4. Run the UI validation of each feature on the staging build.
-5. Mark each PR ready (`gh pr ready`) and comment the result. Merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR. Merge a PR only when its GitHub CI is green on all three systems (`gh pr checks <n>`); the local gate runs on Windows only and cannot see Linux or macOS failures.
+5. Mark each PR ready (`gh pr ready`) and comment the result. Ask the developer to approve the batch (they test the staging installer and the changes); only after their explicit approval, merge the PRs into `main` one at a time, in staging order, with `gh pr merge <n> --merge`. When a PR conflicts with `main`, merge `origin/main` into its branch with the same resolution used in staging, push, then merge the PR. Merge a PR only when its GitHub CI is green on all three systems (`gh pr checks <n>`); the local gate runs on Windows only and cannot see Linux or macOS failures.
 6. `git pull --ff-only` on the local `main`, then `git diff staging/<date> main` must be empty: that proves `main` is what was tested.
 
 On a failure:
