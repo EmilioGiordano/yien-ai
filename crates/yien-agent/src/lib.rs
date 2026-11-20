@@ -46,8 +46,8 @@ pub use machine::{
 pub use profile::{
     AgentKind, Confirms, Detect, Launch, MAX_PROFILE_BYTES, PROFILE_SCHEMA, Profile, ProfileError,
     Rule, RuleChoice, ScreenRule, SessionIdMode, SessionReader, TurnScreen, builtin_profiles,
-    evaluate_screen, evaluate_typed_startup, has_in_turn_rules, has_turn_rules, interrupt_marks,
-    resolve_profiles,
+    evaluate_screen, evaluate_typed_startup, evaluate_typed_turn_start, has_in_turn_rules,
+    has_turn_rules, interrupt_marks, resolve_profiles,
 };
 pub use question::{MAX_QUESTION_CHARS, claude_hook_question};
 pub use signal::{

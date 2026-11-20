@@ -258,6 +258,10 @@ pub struct Machine {
     /// An agent CLI typed in the shell runs and has not reported yet, so its
     /// startup screens are read.
     typed_agent: bool,
+    /// The typed agent reached its REPL prompt without sending OSC 7501 yet:
+    /// startup `NeedsYou` screens are over, and `in_turn` / interrupt reads
+    /// drive turns until OSC 7501 speaks or the shell prompt returns.
+    typed_repl_ready: bool,
     /// The shell has marked a command's start (OSC 133 C); cmd never does.
     command_marks: bool,
     /// When the last turn ended in Done or Idle.
@@ -289,6 +293,7 @@ impl Machine {
             startup_red: false,
             startup_from: AgentState::Idle,
             typed_agent: false,
+            typed_repl_ready: false,
             command_marks: false,
             turn_ended_at: None,
         }
@@ -422,6 +427,13 @@ impl Machine {
         self.typed_agent
     }
 
+    /// Whether a typed agent in a shell has already reached its REPL prompt
+    /// without reporting over OSC 7501 yet: startup `NeedsYou` checks stop and
+    /// only `in_turn` / interrupt reads run.
+    pub fn typed_repl_ready(&self) -> bool {
+        self.typed_repl_ready
+    }
+
     /// The rule this machine runs with.
     pub fn config(&self) -> &MachineConfig {
         &self.config
@@ -456,6 +468,7 @@ impl Machine {
             Signal::Exited { code } => {
                 self.exited = true;
                 self.typed_agent = false;
+                self.typed_repl_ready = false;
                 self.settle_at = None;
                 self.unread_since = None;
                 match self.state {
@@ -538,7 +551,10 @@ impl Machine {
         if self.typed_agent {
             match source {
                 // The agent speaks for itself; a startup red is cleared below.
-                Source::Osc7501 => self.typed_agent = false,
+                Source::Osc7501 => {
+                    self.typed_agent = false;
+                    self.typed_repl_ready = false;
+                }
                 // The shell's prompt is back: the agent is gone.
                 Source::Osc133 => self.end_typed_startup(Cause::Source(source), now, fx),
                 _ => {}
@@ -739,7 +755,7 @@ impl Machine {
             // Settled output already held for the confirmation window.
             let cause = Cause::Source(Source::Screen);
             match verdict {
-                ScreenVerdict::NeedsYou if !self.startup_red => {
+                ScreenVerdict::NeedsYou if !self.startup_red && !self.typed_repl_ready => {
                     self.startup_from = self.state;
                     self.set_state(
                         AgentState::NeedsYou(NeedsReason::ScreenRule),
@@ -752,11 +768,18 @@ impl Machine {
                 ScreenVerdict::NoMatch if self.startup_red => {
                     self.set_state(self.startup_from, cause, now, fx);
                 }
-                ScreenVerdict::Ready
-                    if self.typed_agent
-                        && (self.startup_red || self.state == AgentState::Working) =>
-                {
-                    self.set_state(AgentState::Idle, cause, now, fx);
+                ScreenVerdict::Ready if self.typed_agent => {
+                    self.typed_repl_ready = true;
+                    if self.startup_red || self.state == AgentState::Working {
+                        self.set_state(AgentState::Idle, cause, now, fx);
+                    }
+                }
+                ScreenVerdict::InTurn if self.typed_agent => {
+                    self.typed_repl_ready = true;
+                    if self.startup_red || matches!(self.state, AgentState::Idle | AgentState::Done)
+                    {
+                        self.set_state(AgentState::Working, cause, now, fx);
+                    }
                 }
                 _ => {}
             }
@@ -871,6 +894,7 @@ impl Machine {
         if !std::mem::take(&mut self.typed_agent) {
             return;
         }
+        self.typed_repl_ready = false;
         self.settle_at = None;
         self.unread_since = None;
         self.awaiting_screen = false;
@@ -974,7 +998,10 @@ impl Machine {
     /// read over the shell's running command too.
     fn reads_startup_screen(&self) -> bool {
         if self.typed_agent {
-            return !self.exited && !self.signal_lost && (!self.state.is_red() || self.startup_red);
+            return !self.exited
+                && !self.signal_lost
+                && (!self.state.is_red() || self.startup_red)
+                && !(self.typed_repl_ready && self.state == AgentState::Working);
         }
         self.config.reads_startup_screens()
             && self.screen_allowed()
@@ -1025,6 +1052,7 @@ impl Machine {
     fn lose(&mut self, cause: Cause, now: Duration, fx: &mut Vec<Effect>) {
         self.signal_lost = true;
         self.typed_agent = false;
+        self.typed_repl_ready = false;
         self.input_pending = false;
         self.pending = None;
         self.awaiting_screen = false;

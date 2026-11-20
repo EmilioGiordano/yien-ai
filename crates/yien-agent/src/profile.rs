@@ -467,8 +467,8 @@ pub fn evaluate_screen(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
 }
 
 /// Runs screen rules for a typed agent's startup read in a shell pane.
-/// `needs_you` always wins; otherwise `confirms = "ready"` matches (when no
-/// `in_turn` marker is present) to clear the shell's command-start Working
+/// `needs_you` always wins; otherwise `confirms = "in_turn"` reports a running
+/// turn, and `confirms = "ready"` clears the shell's command-start Working
 /// state once the REPL is idle. Interrupt rules are never evaluated here.
 ///
 /// ```
@@ -483,21 +483,49 @@ pub fn evaluate_screen(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
 /// );
 /// assert_eq!(
 ///     evaluate_typed_startup(rules, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} esc to interrupt"]),
-///     ScreenVerdict::NoMatch
+///     ScreenVerdict::InTurn
 /// );
 /// ```
 pub fn evaluate_typed_startup(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
     if evaluate_screen(rules, rows) == ScreenVerdict::NeedsYou {
         return ScreenVerdict::NeedsYou;
     }
-    if !has_in_turn_marker(rules, rows)
-        && rules
-            .iter()
-            .any(|r| r.confirms == Confirms::Ready && r.matches(rows))
+    if has_in_turn_marker(rules, rows) {
+        return ScreenVerdict::InTurn;
+    }
+    if rules
+        .iter()
+        .any(|r| r.confirms == Confirms::Ready && r.matches(rows))
     {
         return ScreenVerdict::Ready;
     }
     ScreenVerdict::NoMatch
+}
+
+/// Checks only `confirms = "in_turn"` rules for a typed agent whose REPL is
+/// already at rest without OSC 7501. Never raises `NeedsYou` (RN-02).
+///
+/// ```
+/// use yien_agent::{ScreenVerdict, builtin_profiles, evaluate_typed_turn_start};
+///
+/// let profiles = builtin_profiles().unwrap();
+/// let claude = profiles.iter().find(|p| p.id == "claude").unwrap();
+/// let rules = claude.typed_startup_screens();
+/// assert_eq!(
+///     evaluate_typed_turn_start(rules, &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} esc to interrupt"]),
+///     ScreenVerdict::InTurn
+/// );
+/// assert_eq!(
+///     evaluate_typed_turn_start(rules, &["  Do you want to proceed?"]),
+///     ScreenVerdict::NoMatch
+/// );
+/// ```
+pub fn evaluate_typed_turn_start(rules: &[ScreenRule], rows: &[&str]) -> ScreenVerdict {
+    if has_in_turn_marker(rules, rows) {
+        ScreenVerdict::InTurn
+    } else {
+        ScreenVerdict::NoMatch
+    }
 }
 
 /// The detection setup for one range of CLI versions.

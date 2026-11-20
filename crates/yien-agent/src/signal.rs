@@ -240,6 +240,9 @@ pub enum ScreenVerdict {
     /// marker during startup, so its REPL is idle even if it sent no startup
     /// `state=idle` record over OSC 7501.
     Ready,
+    /// A typed agent's `confirms = "in_turn"` marker matched while no OSC 7501
+    /// record has arrived yet, so a turn is running in the shell pane.
+    InTurn,
 }
 
 /// One input to the state machine.

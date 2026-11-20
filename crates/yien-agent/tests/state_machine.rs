@@ -2201,19 +2201,47 @@ fn rf_age_05_turn_ended_during_pending_permission_keeps_red() {
 
 #[test]
 fn rf_age_05_typed_agent_ready_screen_clears_shell_working_to_idle() {
+    // Startup trust screen answered straight to the ready prompt clears red to Idle.
     let mut p = Pane::typed_in_powershell();
     assert_eq!(p.state(), AgentState::Working);
-    p.settled_screen(ScreenVerdict::Ready);
-    assert_eq!(p.state(), AgentState::Idle);
-    assert!(!p.fx.contains(&Effect::MarkRed));
-    assert!(p.m.reads_typed_agent());
-    // A subsequent startup screen still works until the agent speaks.
     p.settled_screen(ScreenVerdict::NeedsYou);
     assert_eq!(p.state(), SCREEN_RED);
-    // Answering it straight to the ready prompt clears red to Idle.
     p.settled_screen(ScreenVerdict::Ready);
     assert_eq!(p.state(), AgentState::Idle);
     assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.m.reads_typed_agent() && p.m.typed_repl_ready());
+    // Once the REPL is ready, screen rules must never raise red (RN-02).
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_typed_agent_in_turn_verdict_enters_working_and_arms_interrupt_reads() {
+    let mut p = Pane::typed_in_powershell();
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Idle);
+    // A turn starts without OSC 7501: InTurn transitions Idle -> Working.
+    p.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.m.typed_repl_ready());
+    // While Working in the REPL, Output arms an interrupt read (not startup).
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("interrupt read armed"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    assert!(p.m.screen_read_is_interrupt());
+    // Interrupt ends the turn as Idle, never Done and never red.
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.contains(&Effect::MarkRed));
+    // A second turn can still enter Working via InTurn.
+    p.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(p.state(), AgentState::Working);
+    // InTurn outside a typed shell pane does nothing.
+    let mut hooked = Pane::spawned(claude());
+    hooked.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(hooked.state(), AgentState::Idle);
 }
 
 #[test]
