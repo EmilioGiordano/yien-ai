@@ -7,19 +7,22 @@
     reason = "test helpers outside #[test] fns are not covered by clippy.toml's in-test allowances"
 )]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use yien_agent::Profile;
+use yien_core::file_preview::load_file;
 use yien_core::{
     Core, CoreConfig, CoreHandle, InstalledShells, SendError, ShellCommand, ShutdownError,
 };
+use yien_proto::file_preview::{FileFrame, FileNotice};
 use yien_proto::frame::{CellFlags, Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
     AgentState, ClientMsg, Command, CoreMsg, InputBytes, NeedsReason, Orientation, PaneId,
-    ProfileId, ProjectId, ShellKind, TabId, TerminalPalette,
+    PaneKind, ProfileId, ProjectId, ShellKind, TabId, TerminalPalette,
 };
 use yien_pty::{FakeChild, FakeInput, FakePty};
 use yien_vt::Palette;
@@ -1744,4 +1747,190 @@ fn rf_pan_09_a_burst_while_the_ui_does_not_take_leaves_one_notice_and_the_last_t
     assert_eq!(clipboard_notices(&mut h, pane, "burst done"), 1);
     assert_eq!(h.core.take_clipboard(pane).as_deref(), Some("write 49"));
     assert_eq!(h.core.take_clipboard(pane), None);
+}
+
+/// A project on a new folder holding `files`: the folder and the tab.
+fn file_project(h: &mut Harness, name: &str, files: &[(&str, Vec<u8>)]) -> (PathBuf, TabId) {
+    let dir = std::env::temp_dir().join(format!("yien-core-preview-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes).unwrap();
+    }
+    h.command(Command::NewProject {
+        root: dir.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let tab = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.id),
+        _ => None,
+    });
+    (dir, tab)
+}
+
+/// Opens `path` in the tab's file pane and returns the pane.
+fn open_file(h: &mut Harness, tab: TabId, path: &str) -> PaneId {
+    h.command(Command::OpenFile {
+        tab,
+        path: path.into(),
+    });
+    h.wait_for(|m| match m {
+        CoreMsg::PaneUpdated(p) if matches!(p.kind, PaneKind::File(_)) => Some(p.id),
+        _ => None,
+    })
+}
+
+/// Takes file frames of `pane` as they are announced until `pick` accepts one.
+fn file_frame_where(h: &mut Harness, pane: PaneId, pick: impl Fn(&FileFrame) -> bool) -> FileFrame {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Some(frame) = h.core.take_file_frame(pane)
+            && pick(&frame)
+        {
+            return frame;
+        }
+        assert!(Instant::now() < deadline, "no file frame matched");
+        h.wait_for(|m| match m {
+            CoreMsg::FileFrameReady { pane: p } if *p == pane => Some(()),
+            _ => None,
+        });
+    }
+}
+
+/// Rust source of `lines` lines, slow enough to highlight that a later small
+/// file finishes first.
+fn slow_source(lines: usize) -> Vec<u8> {
+    (0..lines)
+        .map(|n| format!("pub fn f{n}(x: &str) -> usize {{ \"{n}\".len() + x.len() }} // {n}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// Waits at least as long as reading `path` takes here, with a margin, so a
+/// load of it the core started earlier has finished.
+fn outwait_load(dir: &Path, path: &str) {
+    let started = Instant::now();
+    let _ = load_file(dir, path);
+    std::thread::sleep(started.elapsed() + Duration::from_millis(300));
+}
+
+#[test]
+fn rf_ctx_02_a_file_is_read_from_disk_and_sliced_to_the_reported_viewport() {
+    let mut h = Harness::start();
+    let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+    let (dir, tab) = file_project(&mut h, "viewport", &[("notes.txt", text.into_bytes())]);
+    let pane = open_file(&mut h, tab, "notes.txt");
+    h.send(ClientMsg::SetFileViewport {
+        pane,
+        top_line: 0,
+        rows: 12,
+    });
+    let frame = file_frame_where(&mut h, pane, |f| f.lines.len() == 12);
+    assert_eq!((frame.path.as_str(), frame.total_lines), ("notes.txt", 100));
+    assert_eq!(frame.lines[0].text, "line 1");
+
+    h.send(ClientMsg::SetFileViewport {
+        pane,
+        top_line: 40,
+        rows: 5,
+    });
+    let frame = file_frame_where(&mut h, pane, |f| f.top_line == 40);
+    let numbers: Vec<usize> = frame.lines.iter().map(|l| l.number).collect();
+    assert_eq!(numbers, [41, 42, 43, 44, 45]);
+
+    h.send(ClientMsg::SetFileViewport {
+        pane,
+        top_line: 99,
+        rows: 5,
+    });
+    let frame = file_frame_where(&mut h, pane, |f| f.top_line != 40);
+    assert_eq!(frame.top_line, 95, "the last page is full");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rf_ctx_02_a_file_over_two_mebibytes_on_disk_shows_its_start_with_a_notice() {
+    let mut h = Harness::start();
+    let line = format!("{}\n", "a".repeat(999));
+    let size = 3 * 1024 * 1024;
+    let big = line.repeat(size / line.len() + 1).into_bytes();
+    let total = big.len() as u64;
+    let (dir, tab) = file_project(&mut h, "big", &[("big.txt", big)]);
+    let pane = open_file(&mut h, tab, "big.txt");
+    let frame = file_frame_where(&mut h, pane, |f| !f.lines.is_empty());
+    let Some(FileNotice::Truncated {
+        bytes_shown,
+        total_bytes,
+        lines_shown,
+        capped_by_lines,
+    }) = frame.notice
+    else {
+        panic!("no truncation notice: {:?}", frame.notice);
+    };
+    assert_eq!(total_bytes, total);
+    assert!(bytes_shown <= 2 * 1024 * 1024, "{bytes_shown}");
+    assert!(!capped_by_lines);
+    assert_eq!(lines_shown, frame.total_lines);
+    assert!(frame.total_lines < 2200, "{}", frame.total_lines);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rf_ctx_02_a_slow_load_finishing_after_a_newer_one_is_never_shown() {
+    let mut h = Harness::start();
+    let (dir, tab) = file_project(
+        &mut h,
+        "stale",
+        &[
+            ("slow.rs", slow_source(20_000)),
+            ("small.txt", b"small\n".to_vec()),
+        ],
+    );
+    let pane = open_file(&mut h, tab, "slow.rs");
+    assert_eq!(open_file(&mut h, tab, "small.txt"), pane, "one file pane");
+    let frame = file_frame_where(&mut h, pane, |f| !f.lines.is_empty());
+    assert_eq!(frame.path, "small.txt");
+    outwait_load(&dir, "slow.rs");
+    if let Some(late) = h.core.take_file_frame(pane) {
+        assert_eq!(
+            late.path, "small.txt",
+            "the slow file replaced the newer one"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rf_ctx_02_closing_a_file_pane_during_its_load_leaves_no_frame() {
+    let mut h = Harness::start();
+    let (dir, tab) = file_project(&mut h, "close", &[("slow.rs", slow_source(20_000))]);
+    let pane = open_file(&mut h, tab, "slow.rs");
+    h.command(Command::ClosePane { pane });
+    h.wait_for(|m| match m {
+        CoreMsg::PaneClosed { pane: p } if *p == pane => Some(()),
+        _ => None,
+    });
+    h.send(ClientMsg::SetFileViewport {
+        pane,
+        top_line: 3,
+        rows: 10,
+    });
+    outwait_load(&dir, "slow.rs");
+    assert_eq!(h.core.take_file_frame(pane), None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rf_ctx_02_a_missing_file_shows_an_error_notice() {
+    let mut h = Harness::start();
+    let (dir, tab) = file_project(&mut h, "missing", &[]);
+    let pane = open_file(&mut h, tab, "gone.rs");
+    let frame = file_frame_where(&mut h, pane, |f| f.notice != Some(FileNotice::Loading));
+    assert!(frame.lines.is_empty());
+    assert!(
+        matches!(&frame.notice, Some(FileNotice::Error(message)) if message.contains("gone.rs")),
+        "{:?}",
+        frame.notice
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
