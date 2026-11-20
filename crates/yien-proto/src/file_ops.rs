@@ -123,6 +123,57 @@ impl FileAction {
     pub fn writes(&self) -> bool {
         !matches!(self, Self::Reveal { .. })
     }
+
+    /// The relative paths the action names.
+    ///
+    /// ```
+    /// use yien_proto::file_ops::FileAction;
+    /// let paste = FileAction::Paste { from: "a".into(), into: "b".into(), cut: false };
+    /// assert_eq!(paste.paths(), ["a", "b"]);
+    /// ```
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            Self::NewFile { dir, .. } | Self::NewFolder { dir, .. } => vec![dir],
+            Self::Paste { from, into, .. } => vec![from, into],
+            Self::Rename { path, .. }
+            | Self::Duplicate { path }
+            | Self::Trash { path }
+            | Self::Delete { path }
+            | Self::Ignore { path }
+            | Self::Reveal { path } => vec![path],
+        }
+    }
+}
+
+/// Whether a path names something with a control character (a newline
+/// would split a `.gitignore` line in two), which no action accepts.
+///
+/// ```
+/// assert!(yien_proto::file_ops::has_control("a\n!secret"));
+/// assert!(!yien_proto::file_ops::has_control("src/main.rs"));
+/// ```
+pub fn has_control(rel: &str) -> bool {
+    rel.chars().any(char::is_control)
+}
+
+/// Whether Win32 path parsing reads the name `part` as another one: it
+/// drops trailing dots and spaces (`foo.` is `foo`, `...` is the folder
+/// holding it) and turns device names (`nul`, `con.txt`) into devices.
+/// Such a name is safe only in a `\\?\` path, which the shell does not take.
+///
+/// ```
+/// use yien_proto::file_ops::win32_rewrites;
+/// assert!(win32_rewrites("foo."));
+/// assert!(win32_rewrites("..."));
+/// assert!(win32_rewrites("nul.txt"));
+/// assert!(!win32_rewrites(".gitignore"));
+/// ```
+pub fn win32_rewrites(part: &str) -> bool {
+    if part.is_empty() || part.ends_with(['.', ' ']) {
+        return true;
+    }
+    let stem = part.split('.').next().unwrap_or(part).trim_end();
+    RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem))
 }
 
 /// The folder holding `rel`: `""` for an entry of the root.
@@ -394,6 +445,38 @@ mod tests {
         }
         assert!(check_name(&"a".repeat(MAX_NAME_LEN + 1), false).is_err());
         assert!(check_name(&"a".repeat(MAX_NAME_LEN), false).is_ok());
+    }
+
+    #[test]
+    fn rnf_14_names_win32_reads_as_another_item_are_found() {
+        for rewritten in [
+            "...", "..", ".", ". ", ".. ", "foo.", "foo ", ".git.", "a b ", "nul", "CON.txt",
+            "Com3.log", "",
+        ] {
+            assert!(win32_rewrites(rewritten), "{rewritten:?}");
+        }
+        for kept in [
+            ".gitignore",
+            "foo",
+            "a.b",
+            " lead",
+            "console",
+            "COM10",
+            ".git",
+        ] {
+            assert!(!win32_rewrites(kept), "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn rnf_14_control_characters_are_found_in_any_path() {
+        assert!(has_control("a\n!secret"));
+        assert!(has_control("dir/x\ty"));
+        assert!(!has_control("ñandú/a b.txt"));
+        let ignore = FileAction::Ignore {
+            path: "a\nb".into(),
+        };
+        assert!(ignore.paths().iter().any(|p| has_control(p)));
     }
 
     #[test]
