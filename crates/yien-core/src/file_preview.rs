@@ -16,21 +16,29 @@ use yien_proto::PaneId;
 use yien_proto::file_preview::{FileFrame, FileLine, FileNotice, SyntaxKind, SyntaxSpan};
 
 /// Maximum bytes read and highlighted for a previewed file (2 MiB).
+///
+/// ```
+/// assert_eq!(yien_core::file_preview::MAX_PREVIEW_BYTES, 2 * 1024 * 1024);
+/// ```
 pub const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
 /// Maximum lines highlighted and retained for a previewed file (20,000 lines).
+///
+/// ```
+/// assert_eq!(yien_core::file_preview::MAX_PREVIEW_LINES, 20_000);
+/// ```
 pub const MAX_PREVIEW_LINES: usize = 20_000;
 
 /// Leading bytes inspected to classify a file as binary (8 KiB).
-pub const BINARY_PROBE_BYTES: usize = 8_192;
+pub(crate) const BINARY_PROBE_BYTES: usize = 8_192;
 
 /// Maximum byte length of a single line passed to the regex syntax highlighter.
 /// Longer lines (such as minified bundles) are shown as plain text without
 /// running regexes on them.
-pub const MAX_HIGHLIGHT_LINE_BYTES: usize = 4_096;
+pub(crate) const MAX_HIGHLIGHT_LINE_BYTES: usize = 4_096;
 
 /// Default visible row window before the UI reports a file pane's viewport.
-pub const DEFAULT_VIEWPORT_ROWS: usize = 80;
+pub(crate) const DEFAULT_VIEWPORT_ROWS: usize = 80;
 
 /// Waiting visible frames for file preview panes, one slot per pane ("last one
 /// wins", ADR-06).
@@ -330,7 +338,7 @@ pub fn load_bytes(
 
 /// Checks the first [`BINARY_PROBE_BYTES`] of `bytes` for NUL bytes or a high
 /// share (> 30%) of non-whitespace control bytes.
-pub fn is_binary(bytes: &[u8]) -> bool {
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     let probe = &bytes[..bytes.len().min(BINARY_PROBE_BYTES)];
     if probe.is_empty() {
         return false;
