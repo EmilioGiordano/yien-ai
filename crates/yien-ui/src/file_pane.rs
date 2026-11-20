@@ -12,13 +12,43 @@ use gpui_kit::*;
 use yien_proto::file_preview::{FileFrame, FileLine, FileNotice};
 use yien_proto::{ClientMsg, Command, PaneId};
 
-use crate::bridge::{Link, deliver};
+use crate::bridge::{Link, Sent, deliver};
 use crate::test_control::TerminalFacts;
 use crate::theme::Theme;
 
 const FALLBACK_MONO: &str = "Consolas";
-const DEFAULT_VISIBLE_ROWS: usize = 60;
-const PAGE_SCROLL_MIN: usize = 10;
+/// The code area's padding above and below the lines.
+const CODE_PAD_Y: f32 = 4.0;
+
+/// The whole lines that fit in a code area `height` pixels tall; at least one.
+pub(crate) fn rows_in(height: f32, line_h: f32) -> usize {
+    if !height.is_finite() || !line_h.is_finite() || line_h <= 0.0 {
+        return 1;
+    }
+    let rows = ((height - 2.0 * CODE_PAD_Y) / line_h).floor();
+    if rows >= 1.0 { rows as usize } else { 1 }
+}
+
+/// The highest first line that still fills a page of `rows`.
+pub(crate) fn last_top(rows: usize, total: usize) -> usize {
+    total.saturating_sub(rows)
+}
+
+/// The first line after a scroll key, or `None` for a key that does not
+/// scroll. A page keeps one line of the last page in view.
+pub(crate) fn scroll_key(key: &str, top: usize, rows: usize, total: usize) -> Option<usize> {
+    let page = rows.saturating_sub(1).max(1);
+    let to = match key {
+        "up" => top.saturating_sub(1),
+        "down" => top.saturating_add(1),
+        "pageup" => top.saturating_sub(page),
+        "pagedown" => top.saturating_add(page),
+        "home" => 0,
+        "end" => usize::MAX,
+        _ => return None,
+    };
+    Some(to.min(last_top(rows, total)))
+}
 
 /// Events a [`FilePaneView`] emits to the window.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,7 +70,10 @@ pub(crate) struct FilePaneView {
     frame: Option<FileFrame>,
     frame_at_ms: Option<u64>,
     test_control: bool,
-    viewport_rows: usize,
+    /// The lines the code area showed at its last paint.
+    rows: Option<usize>,
+    /// The rows the core was last told, so a resize is sent once.
+    sent_rows: Option<usize>,
     wheel_rest: f32,
 }
 
@@ -70,7 +103,8 @@ impl FilePaneView {
             frame: None,
             frame_at_ms: None,
             test_control,
-            viewport_rows: DEFAULT_VISIBLE_ROWS,
+            rows: None,
+            sent_rows: None,
             wheel_rest: 0.0,
         }
     }
@@ -120,7 +154,18 @@ impl FilePaneView {
                 frame.lines.iter().map(|l| l.text.clone()).collect()
             }
         });
-        let height = u16::try_from(frame.lines.len()).unwrap_or(u16::MAX).max(1);
+        let shown = self
+            .rows
+            .map_or(frame.lines.len(), |r| r.min(frame.lines.len()));
+        let rows = rows.map(|mut rows| {
+            if !frame.lines.is_empty() {
+                rows.truncate(shown);
+            }
+            rows
+        });
+        let height = u16::try_from(self.rows.unwrap_or(shown))
+            .unwrap_or(u16::MAX)
+            .max(1);
         Some(TerminalFacts {
             size: (80, height),
             frame_at_ms: self.frame_at_ms,
@@ -128,36 +173,74 @@ impl FilePaneView {
         })
     }
 
+    /// The code font size and line height.
+    fn code_metrics(&self) -> (f32, f32) {
+        let font_size = (self.font_size - 1.5).max(10.0);
+        (font_size, (font_size * 1.44).round().max(15.0))
+    }
+
+    /// The lines a page holds: the measured ones, or the frame's before the
+    /// first paint.
+    fn page_rows(&self) -> usize {
+        self.rows
+            .or_else(|| self.frame.as_ref().map(|f| f.lines.len()))
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn top_and_total(&self) -> (usize, usize) {
+        self.frame
+            .as_ref()
+            .map_or((0, 0), |f| (f.top_line, f.total_lines))
+    }
+
+    /// Takes the code area's height at a paint; a new number of rows goes
+    /// to the core, which slices its frames to it.
+    fn measured(&mut self, height: f32, cx: &mut Context<Self>) {
+        let rows = rows_in(height, self.code_metrics().1);
+        if self.rows != Some(rows) {
+            self.rows = Some(rows);
+            cx.notify();
+        }
+        if self.sent_rows == Some(rows) {
+            return;
+        }
+        let (top, total) = self.top_and_total();
+        let top_line = top.min(last_top(rows, total));
+        // A refused size is asked for again on the next paint.
+        if self.send_viewport(top_line, rows, cx) {
+            self.sent_rows = Some(rows);
+        }
+    }
+
+    fn send_viewport(&self, top_line: usize, rows: usize, cx: &mut Context<Self>) -> bool {
+        let msg = ClientMsg::SetFileViewport {
+            pane: self.id,
+            top_line,
+            rows,
+        };
+        matches!(deliver(&self.link, msg, cx), Sent::Delivered | Sent::Queued)
+    }
+
     fn scroll_to(&mut self, top_line: usize, cx: &mut Context<Self>) {
-        let total = self.frame.as_ref().map_or(0, |f| f.total_lines);
+        let (current, total) = self.top_and_total();
         if total == 0 {
             return;
         }
-        let max_top = total.saturating_sub(1);
-        let top_line = top_line.min(max_top);
-        let current = self.frame.as_ref().map_or(0, |f| f.top_line);
-        if top_line == current {
-            return;
+        let rows = self.page_rows();
+        let top_line = top_line.min(last_top(rows, total));
+        if top_line != current {
+            self.send_viewport(top_line, rows, cx);
         }
-        deliver(
-            &self.link,
-            ClientMsg::SetFileViewport {
-                pane: self.id,
-                top_line,
-                rows: self.viewport_rows,
-            },
-            cx,
-        );
     }
 
     fn scroll_by(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let current = self.frame.as_ref().map_or(0, |f| f.top_line);
-        let next = current.saturating_add_signed(delta);
-        self.scroll_to(next, cx);
+        let (current, _) = self.top_and_total();
+        self.scroll_to(current.saturating_add_signed(delta), cx);
     }
 
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let line_h = (self.font_size * 1.44).max(12.0);
+        let line_h = self.code_metrics().1;
         let delta_y: f32 = match event.delta {
             ScrollDelta::Lines(point) => -point.y * line_h,
             ScrollDelta::Pixels(point) => -f32::from(point.y),
@@ -176,18 +259,10 @@ impl FilePaneView {
             cx.propagate();
             return;
         }
-        let page = self.viewport_rows.saturating_sub(4).max(PAGE_SCROLL_MIN) as isize;
-        match event.keystroke.key.as_str() {
-            "up" => self.scroll_by(-1, cx),
-            "down" => self.scroll_by(1, cx),
-            "pageup" => self.scroll_by(-page, cx),
-            "pagedown" => self.scroll_by(page, cx),
-            "home" => self.scroll_to(0, cx),
-            "end" => {
-                let total = self.frame.as_ref().map_or(0, |f| f.total_lines);
-                self.scroll_to(total.saturating_sub(1), cx);
-            }
-            _ => cx.propagate(),
+        let (top, total) = self.top_and_total();
+        match scroll_key(&event.keystroke.key, top, self.page_rows(), total) {
+            Some(to) => self.scroll_to(to, cx),
+            None => cx.propagate(),
         }
     }
 
@@ -250,8 +325,7 @@ impl FilePaneView {
 impl Render for FilePaneView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let font_size = (self.font_size - 1.5).max(10.0);
-        let line_h = (font_size * 1.44).round().max(15.0);
+        let (font_size, line_h) = self.code_metrics();
         let total_lines = self.frame.as_ref().map_or(0, |f| f.total_lines);
         let gutter_w = if total_lines >= 10_000 {
             48.0
@@ -309,13 +383,14 @@ impl Render for FilePaneView {
                 let rows: Vec<AnyElement> = frame
                     .lines
                     .iter()
+                    .take(self.rows.unwrap_or(usize::MAX))
                     .map(|line| self.render_line(line, gutter_w))
                     .collect();
                 v_flex()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .py(px(4.0))
+                    .py(px(CODE_PAD_Y))
                     .overflow_hidden()
                     .text_size(px(font_size))
                     .line_height(px(line_h))
@@ -325,6 +400,17 @@ impl Render for FilePaneView {
                     .into_any_element()
             }
         };
+
+        let view = cx.entity().downgrade();
+        let measure = canvas(
+            move |bounds, _, cx| {
+                let height = bounds.size.height.as_f32();
+                let _ = view.update(cx, |this, cx| this.measured(height, cx));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
 
         v_flex()
             .id(("file-pane-body", self.id.get()))
@@ -355,7 +441,18 @@ impl Render for FilePaneView {
                 }),
             )
             .children(banner)
-            .child(body)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(body)
+                    .child(measure),
+            )
     }
 }
 
@@ -389,4 +486,41 @@ fn stamp_frame(enabled: bool) -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{last_top, rows_in, scroll_key};
+
+    #[test]
+    fn rf_ctx_02_the_rows_follow_the_code_area_height() {
+        // 4 px above and below the lines.
+        assert_eq!(rows_in(8.0 + 28.0 * 15.0, 15.0), 28);
+        assert_eq!(rows_in(8.0 + 28.0 * 15.0 - 1.0, 15.0), 27);
+        assert_eq!(rows_in(8.0 + 90.0 * 18.0, 18.0), 90);
+        for (height, line_h) in [(0.0, 15.0), (-5.0, 15.0), (f32::NAN, 15.0), (300.0, 0.0)] {
+            assert_eq!(rows_in(height, line_h), 1, "{height} {line_h}");
+        }
+    }
+
+    #[test]
+    fn rf_ctx_02_page_keys_move_by_the_visible_rows() {
+        let (rows, total) = (28, 1000);
+        assert_eq!(scroll_key("pagedown", 0, rows, total), Some(27));
+        assert_eq!(scroll_key("pageup", 27, rows, total), Some(0));
+        assert_eq!(scroll_key("pagedown", 0, 90, total), Some(89));
+        assert_eq!(scroll_key("down", 5, rows, total), Some(6));
+        assert_eq!(scroll_key("up", 0, rows, total), Some(0));
+        assert_eq!(scroll_key("x", 5, rows, total), None);
+    }
+
+    #[test]
+    fn rf_ctx_02_end_shows_a_full_last_page_and_home_the_top() {
+        assert_eq!(scroll_key("end", 0, 28, 1000), Some(972));
+        assert_eq!(scroll_key("pagedown", 990, 28, 1000), Some(972));
+        assert_eq!(scroll_key("home", 500, 28, 1000), Some(0));
+        // A file shorter than the pane never scrolls.
+        assert_eq!(scroll_key("end", 0, 90, 40), Some(0));
+        assert_eq!(last_top(90, 40), 0);
+    }
 }
