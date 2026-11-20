@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod file_preview;
 pub mod files;
 pub mod frame;
 mod git;
