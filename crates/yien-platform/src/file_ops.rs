@@ -18,11 +18,11 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use yien_proto::file_ops::{
-    FileAction, check_name, free_copy_name, gitignore_addition, gitignore_entry, is_git_path,
-    paste_name, rel_join, rel_name, rel_parent,
+    FileAction, check_name, free_copy_name, gitignore_addition, gitignore_entry, has_control,
+    is_git_path, paste_name, rel_join, rel_name, rel_parent, win32_rewrites,
 };
 use yien_proto::path_within;
 
@@ -33,6 +33,10 @@ mod windows;
 
 /// The largest `.gitignore` YIEN reads to add a line.
 const MAX_GITIGNORE: u64 = 4 * 1024 * 1024;
+
+/// How many folder levels below the copied folder a copy goes; deeper is
+/// refused before anything is made.
+pub const MAX_COPY_DEPTH: usize = 128;
 
 /// Why a file action was refused or failed. Each says it for the user; a
 /// refused action changed nothing.
@@ -77,6 +81,18 @@ pub enum FileOpError {
     /// The `.gitignore` is too big or not text.
     #[error("The .gitignore is not a text file YIEN can add to.")]
     BadGitignore,
+    /// The `.gitignore` is a link, which could lead out of the folder.
+    #[error("The .gitignore is a link, so YIEN does not write through it.")]
+    GitignoreLink,
+    /// The Windows shell would read the name as another item.
+    #[error(
+        "The Windows shell reads the name of {0} as another item, so YIEN left it alone; \
+         Delete Permanently works on it."
+    )]
+    ShellName(String),
+    /// A folder to copy is nested too deep.
+    #[error("{0} holds folders more than {MAX_COPY_DEPTH} levels deep; YIEN does not copy it.")]
+    TooDeep(String),
     /// The OS has no such action here yet.
     #[error("{0} is not available on this system yet.")]
     Unsupported(&'static str),
@@ -112,6 +128,9 @@ pub struct Done {
 /// [`FileOpError::Exists`], ...) changes nothing; an OS failure in the
 /// middle of copying a folder removes what the copy made.
 pub fn run(root: &Path, action: &FileAction) -> Result<Done, FileOpError> {
+    if action.paths().iter().any(|p| has_control(p)) {
+        return Err(control_error());
+    }
     let folder = Folder::open(root)?;
     match action {
         FileAction::NewFile { dir, name } => folder.new_entry(dir, name, false),
@@ -124,6 +143,30 @@ pub fn run(root: &Path, action: &FileAction) -> Result<Done, FileOpError> {
         FileAction::Ignore { path } => folder.ignore(path),
         FileAction::Reveal { path } => folder.reveal(path),
     }
+}
+
+fn control_error() -> FileOpError {
+    FileOpError::BadName("A path cannot contain control characters.".to_owned())
+}
+
+/// The folder `rel` of the tab folder `root`, resolved (links followed) and
+/// inside it, for a shell to start in.
+///
+/// # Errors
+/// [`FileOpError::Outside`] when it resolves out of `root`,
+/// [`FileOpError::NotAFolder`] or [`FileOpError::Missing`] when it is not a
+/// folder there.
+///
+/// ```no_run
+/// let dir = yien_platform::file_ops::terminal_folder(std::path::Path::new("C:/Code/yien"), "crates")?;
+/// assert!(dir.is_dir());
+/// # Ok::<(), yien_platform::file_ops::FileOpError>(())
+/// ```
+pub fn terminal_folder(root: &Path, rel: &str) -> Result<PathBuf, FileOpError> {
+    if has_control(rel) {
+        return Err(control_error());
+    }
+    Folder::open(root)?.folder_at(rel, false)
 }
 
 /// How a relative path reads to the user: `the tab's folder` for the root.
@@ -176,9 +219,13 @@ impl Folder {
     }
 
     /// The entry `rel` itself, not followed when it is a link: its folder
-    /// resolved, then its name. It must exist.
+    /// resolved, then its own long name (an 8.3 name like `GIT~1` becomes
+    /// `.git` before the checks). It must exist.
     fn entry(&self, rel: &str, writes: bool) -> Result<PathBuf, FileOpError> {
         let lexical = resolve(&self.root, rel).ok_or_else(|| FileOpError::Outside(shown(rel)))?;
+        if writes && is_git_path(rel, cfg!(windows)) {
+            return Err(FileOpError::GitFolder);
+        }
         let path = if rel.split('/').all(str::is_empty) {
             self.root.clone()
         } else {
@@ -186,20 +233,43 @@ impl Folder {
                 return Err(FileOpError::Outside(shown(rel)));
             };
             let parent = fs::canonicalize(parent).map_err(|e| missing_or(e, rel))?;
-            parent.join(name)
+            let path = parent.join(name);
+            let meta = fs::symlink_metadata(&path).map_err(|e| missing_or(e, rel))?;
+            if meta.file_type().is_symlink() {
+                listed_by_own_name(&parent, name, rel)?;
+                path
+            } else {
+                fs::canonicalize(&path).map_err(|e| missing_or(e, rel))?
+            }
         };
         self.check(rel, &path, writes)?;
-        fs::symlink_metadata(&path).map_err(|e| missing_or(e, rel))?;
         Ok(path)
     }
 
     /// The folder `rel`, links followed, to put something in.
     fn folder(&self, rel: &str) -> Result<PathBuf, FileOpError> {
+        self.folder_at(rel, true)
+    }
+
+    /// The folder `rel`, links followed and inside the tab folder; with
+    /// `writes`, outside `.git` too.
+    fn folder_at(&self, rel: &str, writes: bool) -> Result<PathBuf, FileOpError> {
         let lexical = resolve(&self.root, rel).ok_or_else(|| FileOpError::Outside(shown(rel)))?;
         let path = fs::canonicalize(&lexical).map_err(|e| missing_or(e, rel))?;
-        self.check(rel, &path, true)?;
+        self.check(rel, &path, writes)?;
         if !path.is_dir() {
             return Err(FileOpError::NotAFolder(shown(rel)));
+        }
+        Ok(path)
+    }
+
+    /// The entry `rel` as the Windows shell will be handed it: refused when
+    /// a part of its path is a name Win32 reads as another item (`foo.`,
+    /// `...`, `nul`), since the shell takes no `\\?\` path.
+    fn shell_target(&self, rel: &str, writes: bool) -> Result<PathBuf, FileOpError> {
+        let path = self.entry(rel, writes)?;
+        if cfg!(windows) && shell_rewrites(&path) {
+            return Err(FileOpError::ShellName(shown(rel)));
         }
         Ok(path)
     }
@@ -337,7 +407,7 @@ impl Folder {
         if rel.split('/').all(str::is_empty) {
             return Err(FileOpError::Root("moved to the trash"));
         }
-        let path = self.entry(rel, true)?;
+        let path = self.shell_target(rel, true)?;
         move_to_trash(&path)?;
         Ok(Done {
             dirs: vec![rel_parent(rel).to_owned()],
@@ -368,21 +438,23 @@ impl Folder {
             .is_dir();
         let line = gitignore_entry(rel, is_dir);
         let file = self.root.join(".gitignore");
-        let content = match fs::canonicalize(&file) {
-            Ok(real) => {
-                self.check(".gitignore", &real, true)?;
-                read_text(&real)?
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.check(".gitignore", &file, true)?;
-                String::new()
-            }
+        self.check(".gitignore", &file, true)?;
+        // A link, even a dangling one, could create or change a file outside.
+        let existing = match fs::symlink_metadata(&file) {
+            Ok(meta) if meta.file_type().is_symlink() => return Err(FileOpError::GitignoreLink),
+            Ok(_) => Some(read_text(&file)?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(io_error("read the .gitignore")(e)),
         };
-        if let Some(addition) = gitignore_addition(&content, &line) {
-            OpenOptions::new()
-                .append(true)
-                .create(true)
+        let content = existing.as_deref().unwrap_or_default();
+        if let Some(addition) = gitignore_addition(content, &line) {
+            let mut options = OpenOptions::new();
+            if existing.is_some() {
+                options.append(true);
+            } else {
+                options.write(true).create_new(true);
+            }
+            options
                 .open(&file)
                 .and_then(|mut f| f.write_all(addition.as_bytes()))
                 .map_err(io_error("add to the .gitignore"))?;
@@ -396,10 +468,30 @@ impl Folder {
     }
 
     fn reveal(&self, rel: &str) -> Result<Done, FileOpError> {
-        let path = self.entry(rel, false)?;
+        let path = self.shell_target(rel, false)?;
         show_in_file_manager(&path)?;
         Ok(Done::default())
     }
+}
+
+/// Refuses a link `name` in `parent` unless the folder lists it by that very
+/// name: a short 8.3 name would reach it without being its name.
+fn listed_by_own_name(parent: &Path, name: &std::ffi::OsStr, rel: &str) -> Result<(), FileOpError> {
+    let listing = fs::read_dir(parent).map_err(|e| missing_or(e, rel))?;
+    if listing.flatten().any(|e| e.file_name() == name) {
+        Ok(())
+    } else {
+        Err(FileOpError::Missing(shown(rel)))
+    }
+}
+
+/// Whether a part of `path` is a name Win32 path parsing rewrites.
+fn shell_rewrites(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        Component::Normal(part) => part.to_str().is_none_or(win32_rewrites),
+        Component::CurDir | Component::ParentDir => true,
+        Component::Prefix(_) | Component::RootDir => false,
+    })
 }
 
 /// `NotFound` as [`FileOpError::Missing`], anything else as an OS failure.
@@ -460,9 +552,7 @@ fn copy_file_new(from: &Path, to: &Path) -> io::Result<()> {
 /// inside refuses the copy before anything is made; a failure part way
 /// removes what was made.
 fn copy_dir_new(from: &Path, to: &Path, rel: &str) -> Result<(), FileOpError> {
-    if holds_link(from).map_err(io_error(format!("read {rel}")))? {
-        return Err(FileOpError::Link(shown(rel)));
-    }
+    check_copyable(from, rel)?;
     fs::create_dir(to).map_err(|e| exists_or(e, rel, "copy it"))?;
     let copied = copy_tree(from, to);
     if let Err(e) = copied {
@@ -473,29 +563,47 @@ fn copy_dir_new(from: &Path, to: &Path, rel: &str) -> Result<(), FileOpError> {
     Ok(())
 }
 
-fn holds_link(dir: &Path) -> io::Result<bool> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_symlink() || (kind.is_dir() && holds_link(&entry.path())?) {
-            return Ok(true);
+/// Refuses a folder that holds a link or folders more than
+/// [`MAX_COPY_DEPTH`] levels down. Walked with a list, not recursion, so a
+/// deep folder cannot overflow the thread's stack.
+fn check_copyable(dir: &Path, rel: &str) -> Result<(), FileOpError> {
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((at, depth)) = pending.pop() {
+        let read = |e| io_error(format!("read {rel}"))(e);
+        for entry in fs::read_dir(&at).map_err(read)? {
+            let entry = entry.map_err(read)?;
+            let kind = entry.file_type().map_err(read)?;
+            if kind.is_symlink() {
+                return Err(FileOpError::Link(shown(rel)));
+            }
+            if kind.is_dir() {
+                if depth + 1 > MAX_COPY_DEPTH {
+                    return Err(FileOpError::TooDeep(shown(rel)));
+                }
+                pending.push((entry.path(), depth + 1));
+            }
         }
     }
-    Ok(false)
+    Ok(())
 }
 
+/// Copies what `from` holds into the new folder `to`, with a list of
+/// folders still to copy rather than recursion.
 fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let target = to.join(entry.file_name());
-        if kind.is_symlink() {
-            return Err(io::Error::other("a link appeared while copying"));
-        } else if kind.is_dir() {
-            fs::create_dir(&target)?;
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            copy_file_new(&entry.path(), &target)?;
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((from, to)) = pending.pop() {
+        for entry in fs::read_dir(&from)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let target = to.join(entry.file_name());
+            if kind.is_symlink() {
+                return Err(io::Error::other("a link appeared while copying"));
+            } else if kind.is_dir() {
+                fs::create_dir(&target)?;
+                pending.push((entry.path(), target));
+            } else {
+                copy_file_new(&entry.path(), &target)?;
+            }
         }
     }
     Ok(())
