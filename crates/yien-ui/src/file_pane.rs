@@ -411,9 +411,15 @@ impl Render for FilePaneView {
         )
         .absolute()
         .size_full();
+        let label = self.frame.as_ref().map_or_else(
+            || "File preview".to_owned(),
+            |f| format!("{}, read-only", f.path),
+        );
 
         v_flex()
             .id(("file-pane-body", self.id.get()))
+            .role(Role::Document)
+            .aria_label(label)
             .track_focus(&self.focus)
             .flex_1()
             .min_h_0()
