@@ -420,6 +420,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
             cwd,
             agent: kept.agent.clone(),
             last_command: None,
+            files: None,
         };
     }
     let kind = yien_session::ProfileId::new(p.profile.clone());
@@ -434,6 +435,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
             ended_explicitly: p.ended_explicitly,
         }),
         last_command: None,
+        files: None,
     }
 }
 

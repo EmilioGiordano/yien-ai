@@ -40,6 +40,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
         }),
         last_command: None,
         name: None,
+        files: None,
     };
     let shell = PaneRecord {
         id: PaneId::new(2),
@@ -48,6 +49,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
         agent: None,
         last_command: Some("cargo test".into()),
         name: None,
+        files: None,
     };
     let ended = PaneRecord {
         id: PaneId::new(3),
@@ -60,6 +62,7 @@ pub fn basic(saved_at: u64) -> SessionSnapshot {
         }),
         last_command: None,
         name: None,
+        files: None,
     };
     SessionSnapshot::new(
         saved_at,

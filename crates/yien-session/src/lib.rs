@@ -33,6 +33,7 @@
 //!             }),
 //!             last_command: None,
 //!             name: None,
+//!             files: None,
 //!         }],
 //!         focused: pane,
 //!         branch: None,
@@ -73,8 +74,8 @@ pub use generations::{
     Saved, SkipReason, Skipped, generation_name, load, preserve_newer, save,
 };
 pub use model::{
-    AgentRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord, Selection,
-    SessionRef, SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord,
+    AgentRecord, FilePaneRecord, LayoutRecord, Orientation, PaneRecord, ProfileId, ProjectRecord,
+    Selection, SessionRef, SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord,
 };
 pub use past::{
     MAX_RECORD_BYTES, SESSION_READ_BUDGET, SessionSummary, TITLE_CHARS, claude_dir_matches,

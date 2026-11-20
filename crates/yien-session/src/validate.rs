@@ -239,6 +239,7 @@ mod tests {
             agent: None,
             last_command: None,
             name: None,
+            files: None,
         }
     }
 
