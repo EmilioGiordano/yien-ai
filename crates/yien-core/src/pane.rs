@@ -13,7 +13,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use yien_agent::{
     Effect as AgentEffect, HookEvent, Machine, ScreenRule, ScreenVerdict, SessionEndReason, Signal,
-    TurnScreen, evaluate_screen, evaluate_typed_startup, has_in_turn_rules, has_turn_rules,
+    TurnScreen, evaluate_screen, evaluate_typed_startup, evaluate_typed_turn_start,
+    has_in_turn_rules, has_turn_rules,
 };
 use yien_proto::frame::{Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
@@ -1435,12 +1436,19 @@ impl Actor {
                         let rows = program_rows(&mut **lock(&self.engine), self.restored_mark);
                         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
                         if self.machine.reads_typed_agent() {
-                            evaluate_typed_startup(&self.typed_screen, &rows)
+                            if self.machine.typed_repl_ready() {
+                                evaluate_typed_turn_start(&self.typed_screen, &rows)
+                            } else {
+                                evaluate_typed_startup(&self.typed_screen, &rows)
+                            }
                         } else {
                             evaluate_screen(&self.plan.screen, &rows)
                         }
                     };
                     self.step(&Signal::Screen(verdict));
+                    if verdict == ScreenVerdict::InTurn {
+                        self.observe_in_turn();
+                    }
                 }
                 AgentEffect::SessionId(id) => self.report(PaneEvent::SessionId {
                     id,
@@ -2827,6 +2835,51 @@ mod tests {
         );
         // Exit clears cleanly and stays Idle.
         child.output(b"\x1b]7501;state=clear\x07\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), None, "{events:?}");
+        drop(pane.cmds);
+    }
+
+    #[test]
+    fn rf_age_05_typed_claude_without_osc_7501_works_and_interrupts_in_shell_actor() {
+        let pane = Solo::shell();
+        let child = pane.next_child();
+        child.output(b"\x1b]133;A\x07PS C:\\work> claude\r\n\x1b]133;C\x07");
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        pane.cmds.try_send(found(0, Some("claude"))).unwrap();
+        // Claude reaches its idle prompt with zero OSC 7501 records.
+        child.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf \r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 \xe2\x86\x90 for agents",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        // User submits a prompt; Claude streams with `esc to interrupt` and no OSC 7501.
+        child.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf please answer slow\r\n\
+              \xe2\x9c\xa2 Architecting\xe2\x80\xa6\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt \xc2\xb7 \xe2\x86\x90 for agents",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Working), "{events:?}");
+        // Ctrl+C restores the prompt and drops `esc to interrupt` with no OSC 7501.
+        child.output(
+            b"\x1b[2J\x1b[H\xe2\x9d\xaf please answer slow\r\n\
+              \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle)",
+        );
+        let events = pane.collect(SETTLE);
+        assert_eq!(last_state(&events), Some(AgentState::Idle), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PaneEvent::State(AgentState::Done | AgentState::NeedsYou(_), _)
+            )),
+            "{events:?}"
+        );
+        // Exit back to PowerShell stays Idle.
+        child.output(b"\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+        pane.cmds.try_send(found(0, None)).unwrap();
         let events = pane.collect(SETTLE);
         assert_eq!(last_state(&events), None, "{events:?}");
         drop(pane.cmds);
