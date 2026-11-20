@@ -299,6 +299,9 @@ actions!(
         /// Opens the file under the cursor in the file preview pane (RF-CTX-02),
         /// or expands or collapses the folder.
         FileTreeOpen,
+        /// Opens the file under the cursor in the configured editor
+        /// (RF-CTX-03), or expands or collapses the folder.
+        FileTreeOpenInEditor,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,
         /// Toggles soft line wrapping in the selected tab's file preview pane
@@ -399,6 +402,7 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("left", FileTreeCollapse, file_tree),
         KeyBinding::new("right", FileTreeExpand, file_tree),
         KeyBinding::new("enter", FileTreeOpen, file_tree),
+        KeyBinding::new("ctrl-enter", FileTreeOpenInEditor, file_tree),
         KeyBinding::new("escape", FileTreeEscape, file_tree),
         KeyBinding::new("up", TrayUp, tray),
         KeyBinding::new("down", TrayDown, tray),
@@ -485,6 +489,7 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(FileTreeCollapse),
         Box::new(FileTreeExpand),
         Box::new(FileTreeOpen),
+        Box::new(FileTreeOpenInEditor),
         Box::new(FileTreeEscape),
         Box::new(TrayUp),
         Box::new(TrayDown),
@@ -740,13 +745,22 @@ mod tests {
             ("left", &FileTreeCollapse),
             ("right", &FileTreeExpand),
             ("enter", &FileTreeOpen),
+            ("ctrl-enter", &FileTreeOpenInEditor),
             ("escape", &FileTreeEscape),
         ] {
             assert!(first_is(keys, &files, action), "{keys}");
         }
         // Left and right fall through to the caret while the filter has text.
         assert!(dispatched("left", &files).len() >= 2);
-        for keys in ["up", "down", "left", "right", "enter", "escape"] {
+        for keys in [
+            "up",
+            "down",
+            "left",
+            "right",
+            "enter",
+            "ctrl-enter",
+            "escape",
+        ] {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
         assert!(first_is("f6", &files, &FocusNextRegion));

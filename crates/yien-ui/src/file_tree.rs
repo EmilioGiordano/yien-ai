@@ -57,11 +57,15 @@ pub(crate) struct SearchRequest {
     pub(crate) query: String,
 }
 
-/// What Enter on the cursor's row does.
+/// What Enter, Ctrl+Enter or a click on a row does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Activation {
-    /// Open this file, relative to the root.
-    Open(String),
+    /// Show this file, relative to the root, in the file preview pane
+    /// (RF-CTX-02).
+    Preview(String),
+    /// Open this file, relative to the root, in the configured editor
+    /// (RF-CTX-03).
+    Edit(String),
     /// List these folders.
     List(Vec<String>),
     Nothing,
@@ -381,18 +385,28 @@ impl FileTree {
         }
     }
 
-    /// Enter: opens a file, expands or collapses a folder. On a search
+    /// Enter: previews a file, expands or collapses a folder. On a search
     /// match that is a folder, the search ends and the folder is revealed.
     pub(crate) fn activate(&mut self) -> Activation {
+        self.activate_cursor(false)
+    }
+
+    /// Ctrl+Enter: opens a file in the editor; a folder as Enter.
+    pub(crate) fn activate_in_editor(&mut self) -> Activation {
+        self.activate_cursor(true)
+    }
+
+    fn activate_cursor(&mut self, editor: bool) -> Activation {
         let Some(row) = self.cursor_row() else {
             return Activation::Nothing;
         };
-        self.activate_row(&row)
+        self.activate_row(&row, editor)
     }
 
     /// What a click on `path` does: the cursor goes there, and a folder
-    /// expands or collapses. A double click on a file opens it; on a folder
-    /// its second click is ignored, or the folder would toggle back.
+    /// expands or collapses. A click on a file previews it and a double
+    /// click opens it in the editor; on a folder the second click of a
+    /// double click is ignored, or the folder would toggle back.
     pub(crate) fn click(&mut self, path: &str, double: bool) -> Activation {
         let row = self.rows().into_iter().find(|r| r.path() == Some(path));
         let Some(row) = row else {
@@ -401,13 +415,19 @@ impl FileTree {
         self.set_cursor(path);
         match row.kind() {
             Some(kind) if kind.is_dir() && double => Activation::Nothing,
-            Some(kind) if kind.is_dir() => self.activate_row(&row),
-            Some(_) if double => self.activate_row(&row),
-            _ => Activation::Nothing,
+            Some(_) => self.activate_row(&row, double),
+            None => Activation::Nothing,
         }
     }
 
-    fn activate_row(&mut self, row: &Row) -> Activation {
+    fn activate_row(&mut self, row: &Row, editor: bool) -> Activation {
+        let file = |path: &String| {
+            if editor {
+                Activation::Edit(path.clone())
+            } else {
+                Activation::Preview(path.clone())
+            }
+        };
         match row {
             Row::Entry {
                 path,
@@ -422,13 +442,13 @@ impl FileTree {
                     Activation::List(self.expand(path))
                 }
             }
-            Row::Entry { path, .. } => Activation::Open(path.clone()),
+            Row::Entry { path, .. } => file(path),
             Row::Hit { path, kind } if kind.is_dir() => {
                 let path = path.clone();
                 self.set_query("");
                 Activation::List(self.reveal(&path, true))
             }
-            Row::Hit { path, .. } => Activation::Open(path.clone()),
+            Row::Hit { path, .. } => file(path),
             _ => Activation::Nothing,
         }
     }
@@ -739,13 +759,33 @@ mod tests {
     }
 
     #[test]
+    fn rf_ctx_02_enter_previews_a_file_and_ctrl_enter_opens_it_in_the_editor() {
+        let mut tree = sample();
+        tree.set_cursor("src");
+        assert_eq!(tree.activate(), Activation::List(vec!["src".into()]));
+        tree.listed("src", listing(&[("main.rs", F)]));
+        tree.move_cursor(1);
+        assert_eq!(tree.activate(), Activation::Preview("src/main.rs".into()));
+        assert_eq!(
+            tree.activate_in_editor(),
+            Activation::Edit("src/main.rs".into())
+        );
+        // A folder toggles as with Enter.
+        tree.set_cursor("src");
+        assert_eq!(tree.activate_in_editor(), Activation::Nothing);
+        assert!(!shown(&tree).contains(&"  main.rs".to_owned()), "collapsed");
+        tree.activate_in_editor();
+        assert!(shown(&tree).contains(&"  main.rs".to_owned()), "expanded");
+    }
+
+    #[test]
     fn rf_ctx_03_enter_opens_a_file_by_its_full_path_and_toggles_a_folder() {
         let mut tree = sample();
         tree.set_cursor("src");
         assert_eq!(tree.activate(), Activation::List(vec!["src".into()]));
         tree.listed("src", listing(&[("main.rs", F)]));
         tree.move_cursor(1);
-        assert_eq!(tree.activate(), Activation::Open("src/main.rs".into()));
+        assert_eq!(tree.activate(), Activation::Preview("src/main.rs".into()));
         let expected: PathBuf = ["C:/Code/demo", "src", "main.rs"].iter().collect();
         assert_eq!(tree.path_of("src/main.rs"), Some(expected));
         assert_eq!(tree.path_of("src/../../x"), None);
@@ -763,13 +803,16 @@ mod tests {
     }
 
     #[test]
-    fn rf_ctx_03_a_click_selects_a_file_and_a_double_click_opens_it() {
+    fn rf_ctx_03_a_click_previews_a_file_and_a_double_click_opens_it_in_the_editor() {
         let mut tree = sample();
-        assert_eq!(tree.click("readme.md", false), Activation::Nothing);
+        assert_eq!(
+            tree.click("readme.md", false),
+            Activation::Preview("readme.md".into())
+        );
         assert_eq!(tree.cursor(), Some("readme.md"));
         assert_eq!(
             tree.click("readme.md", true),
-            Activation::Open("readme.md".into())
+            Activation::Edit("readme.md".into())
         );
         assert_eq!(
             tree.click("assets", false),
@@ -894,7 +937,10 @@ mod tests {
                 .starts_with("The first 3 matches")
         );
         tree.move_cursor(1);
-        assert_eq!(tree.activate(), Activation::Open("deep/a/main.rs".into()));
+        assert_eq!(
+            tree.activate(),
+            Activation::Preview("deep/a/main.rs".into())
+        );
         // Clearing the filter goes back to the tree and its cursor.
         tree.set_cursor("deep/a/main.rs");
         assert!(tree.set_query("").is_none());

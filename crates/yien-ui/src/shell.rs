@@ -4249,6 +4249,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_collapse))
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
+            .on_action(cx.listener(Self::file_tree_open_in_editor))
             .on_action(cx.listener(Self::file_tree_escape))
             .on_action(cx.listener(Self::toggle_file_wrap))
             .on_action(cx.listener(Self::show_whats_new))
@@ -4405,6 +4406,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("context bar's Files tab", "files.show"),
     ("file tree rows", "files.show"),
     ("changed file double-click", "files.show"),
+    ("file tree row double-click", "files.show"),
     ("file pane wrap button", "file.toggle_wrap"),
     ("file pane tab close button", "pane.close"),
 ];
