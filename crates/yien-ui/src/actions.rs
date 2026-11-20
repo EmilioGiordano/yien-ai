@@ -39,6 +39,9 @@ pub(crate) const CONTEXT_BAR_CONTEXT: &str = "YienContextBar";
 /// Key context of the context bar's Files view (RF-CTX-01).
 pub(crate) const FILE_TREE_CONTEXT: &str = "YienFileTree";
 
+/// Key context of the name field of a new or renamed file in the Files view.
+pub(crate) const FILE_NAME_CONTEXT: &str = "YienFileName";
+
 /// Key context of the attention tray (RF-ATN-13).
 pub(crate) const TRAY_CONTEXT: &str = "YienTray";
 
@@ -304,6 +307,19 @@ actions!(
         FileTreeOpenInEditor,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,
+        /// Opens the context menu of the entry under the file tree's cursor
+        /// (RF-CTX-01).
+        FileTreeMenu,
+        /// Renames the entry under the file tree's cursor in place.
+        FileTreeRename,
+        /// Moves the entry under the file tree's cursor to the trash.
+        FileTreeTrash,
+        /// Asks, then deletes the entry under the file tree's cursor for good.
+        FileTreeDelete,
+        /// Keeps the name typed in the Files view's name field.
+        FileNameConfirm,
+        /// Leaves the Files view's name field without making or renaming.
+        FileNameCancel,
         /// Toggles soft line wrapping in the selected tab's file preview pane
         /// (RF-CTX-02).
         ToggleFileWrap,
@@ -373,6 +389,8 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let context_bar = Some(CONTEXT_BAR_CONTEXT);
     let file_tree = format!("{FILE_TREE_CONTEXT} > Input");
     let file_tree = Some(file_tree.as_str());
+    let file_name = format!("{FILE_NAME_CONTEXT} > Input");
+    let file_name = Some(file_name.as_str());
     let tray = Some(TRAY_CONTEXT);
     let menu = Some(MENU_CONTEXT);
     let divider = Some(DIVIDER_CONTEXT);
@@ -411,6 +429,15 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("enter", FileTreeOpen, file_tree),
         KeyBinding::new("ctrl-enter", FileTreeOpenInEditor, file_tree),
         KeyBinding::new("escape", FileTreeEscape, file_tree),
+        KeyBinding::new("shift-f10", FileTreeMenu, file_tree),
+        KeyBinding::new("menu", FileTreeMenu, file_tree),
+        KeyBinding::new("f2", FileTreeRename, file_tree),
+        KeyBinding::new("delete", FileTreeTrash, file_tree),
+        KeyBinding::new("shift-delete", FileTreeDelete, file_tree),
+        // After the tree's: the name field sits inside the tree, and the
+        // later binding wins at the same depth.
+        KeyBinding::new("enter", FileNameConfirm, file_name),
+        KeyBinding::new("escape", FileNameCancel, file_name),
         KeyBinding::new("up", TrayUp, tray),
         KeyBinding::new("down", TrayDown, tray),
         KeyBinding::new("enter", TrayConfirm, tray),
@@ -498,6 +525,12 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(FileTreeOpen),
         Box::new(FileTreeOpenInEditor),
         Box::new(FileTreeEscape),
+        Box::new(FileTreeMenu),
+        Box::new(FileTreeRename),
+        Box::new(FileTreeTrash),
+        Box::new(FileTreeDelete),
+        Box::new(FileNameConfirm),
+        Box::new(FileNameCancel),
         Box::new(TrayUp),
         Box::new(TrayDown),
         Box::new(TrayConfirm),
@@ -537,7 +570,7 @@ mod tests {
             KeyBinding::new("tab", FocusNext, Some("Root")),
             KeyBinding::new("shift-tab", FocusNext, Some("Root")),
         ];
-        for keys in ["up", "down", "left", "right", "enter", "escape"] {
+        for keys in ["up", "down", "left", "right", "enter", "escape", "delete"] {
             all.push(KeyBinding::new(keys, InputKey, Some("Input")));
         }
         all.extend(bindings());
@@ -771,6 +804,52 @@ mod tests {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
         }
         assert!(first_is("f6", &files, &FocusNextRegion));
+    }
+
+    #[test]
+    fn rf_ctx_01_the_file_menu_keys_act_in_the_files_view_only() {
+        let files = [
+            "Root",
+            CONTEXT,
+            CONTEXT_BAR_CONTEXT,
+            FILE_TREE_CONTEXT,
+            "Input",
+        ];
+        for (keys, action) in [
+            ("shift-f10", &FileTreeMenu as &dyn Action),
+            ("menu", &FileTreeMenu),
+            ("f2", &FileTreeRename),
+            ("delete", &FileTreeTrash),
+            ("shift-delete", &FileTreeDelete),
+        ] {
+            assert!(first_is(keys, &files, action), "{keys}");
+        }
+        // Shift+F10 still opens the pane menu from a terminal and the tab
+        // menu in the tab bar.
+        assert!(first_is("shift-f10", &TERMINAL_STACK, &OpenPaneMenu));
+        let tab_bar = ["Root", CONTEXT, TAB_BAR_CONTEXT];
+        assert!(first_is("shift-f10", &tab_bar, &TabBarMenu));
+        for keys in ["f2", "delete", "shift-delete", "menu"] {
+            assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
+    }
+
+    #[test]
+    fn rf_ctx_01_enter_and_escape_end_the_name_field_not_the_tree() {
+        let field = [
+            "Root",
+            CONTEXT,
+            CONTEXT_BAR_CONTEXT,
+            FILE_TREE_CONTEXT,
+            FILE_NAME_CONTEXT,
+            "Input",
+        ];
+        assert!(first_is("enter", &field, &FileNameConfirm));
+        assert!(first_is("escape", &field, &FileNameCancel));
+        // The tree's own keys stay behind them, and fall through to the
+        // field's caret and text while it is open.
+        assert!(dispatched("delete", &field).len() >= 2);
+        assert!(dispatched("left", &field).len() >= 2);
     }
 
     #[test]
