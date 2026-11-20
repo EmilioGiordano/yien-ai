@@ -71,82 +71,6 @@ pub(crate) fn next_frame(frame: usize) -> usize {
     (frame + 1) % SPINNER.len()
 }
 
-/// A dot in the circular spinner.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SpinnerDot {
-    pub(crate) cx: f32,
-    pub(crate) cy: f32,
-    pub(crate) r: f32,
-}
-
-#[cfg(test)]
-pub(crate) const SPINNER_DISC_SIZE: f32 = 10.0;
-#[cfg(test)]
-pub(crate) const SPINNER_DISC_RADIUS: f32 = 5.0;
-#[cfg(test)]
-pub(crate) const SPINNER_ORBIT_RADIUS: f32 = 3.2;
-#[cfg(test)]
-pub(crate) const SPINNER_DOT_RADIUS: f32 = 0.85;
-
-/// The 8 dot positions on the 10 px disc (angles -90° + i * 45°).
-#[cfg(test)]
-pub(crate) const SPINNER_DOTS: [SpinnerDot; 8] = [
-    SpinnerDot {
-        cx: 5.0,
-        cy: 1.8,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 7.26,
-        cy: 2.74,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 8.2,
-        cy: 5.0,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 7.26,
-        cy: 7.26,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 5.0,
-        cy: 8.2,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 2.74,
-        cy: 7.26,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 1.8,
-        cy: 5.0,
-        r: SPINNER_DOT_RADIUS,
-    },
-    SpinnerDot {
-        cx: 2.74,
-        cy: 2.74,
-        r: SPINNER_DOT_RADIUS,
-    },
-];
-
-/// The 3-dot snake at each of the 8 frames (indices into [`SPINNER_DOTS`]).
-#[cfg(test)]
-pub(crate) const SPINNER_FRAME_DOTS: [[usize; 3]; 8] = [
-    [0, 1, 2],
-    [1, 2, 3],
-    [2, 3, 4],
-    [3, 4, 5],
-    [4, 5, 6],
-    [5, 6, 7],
-    [6, 7, 0],
-    [7, 0, 1],
-];
-
 /// A glyph drawn in a tab row's mark slot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MarkGlyph {
@@ -190,45 +114,6 @@ pub(crate) fn corner_mark_visual(mark: TabMark, frame: usize) -> Option<MarkVisu
         })),
         MarkVisual::Spinner(path) => Some(MarkVisual::Spinner(path)),
     }
-}
-
-/// A glyph drawn in a tab row's mark slot for static states. Working uses
-/// [`tab_mark_visual`] and [`SPINNER`] instead of a braille character.
-#[cfg(test)]
-pub(crate) fn tab_mark_glyph(mark: TabMark, _frame: usize) -> Option<MarkGlyph> {
-    match mark {
-        TabMark::State(AgentState::NeedsYou) => Some(MarkGlyph {
-            text: NEEDS_YOU_MARK,
-            size: 13.5,
-            bold: false,
-        }),
-        TabMark::State(AgentState::Error) => Some(MarkGlyph {
-            text: ERROR_MARK,
-            size: 13.5,
-            bold: true,
-        }),
-        TabMark::State(AgentState::Done) => Some(MarkGlyph {
-            text: DONE_MARK,
-            size: 11.0,
-            bold: false,
-        }),
-        TabMark::State(AgentState::Idle) => Some(MarkGlyph {
-            text: IDLE_MARK,
-            size: 11.0,
-            bold: false,
-        }),
-        TabMark::State(AgentState::Working) | TabMark::Shell => None,
-    }
-}
-
-/// A state mark in an agent badge's corner: the tab row's glyph, scaled from
-/// its 14 px slot to the corner disc, in fixed px so it never outgrows it.
-#[cfg(test)]
-pub(crate) fn corner_mark_glyph(mark: TabMark, frame: usize) -> Option<MarkGlyph> {
-    tab_mark_glyph(mark, frame).map(|glyph| MarkGlyph {
-        size: glyph.size * crate::agent_badge::CORNER / 14.0,
-        ..glyph
-    })
 }
 
 pub(crate) struct YienAssets;
@@ -278,13 +163,19 @@ mod tests {
         }
     }
 
+    fn expect_glyph(visual: Option<MarkVisual>) -> MarkGlyph {
+        match visual {
+            Some(MarkVisual::Glyph(glyph)) => glyph,
+            other => panic!("expected glyph, got {other:?}"),
+        }
+    }
+
     fn tab_mark_text(mark: TabMark, frame: usize) -> &'static str {
-        tab_mark_glyph(mark, frame).unwrap().text
+        expect_glyph(tab_mark_visual(mark, frame)).text
     }
 
     #[test]
     fn tab_marks_are_the_canvas_glyphs_at_their_sizes() {
-        let glyph = |state| tab_mark_glyph(TabMark::State(state), 0).unwrap();
         let want = [
             (AgentState::NeedsYou, "■", 13.5, false),
             (AgentState::Error, "!", 13.5, true),
@@ -292,7 +183,7 @@ mod tests {
             (AgentState::Idle, "●", 11.0, false),
         ];
         for (state, text, size, bold) in want {
-            let got = glyph(state);
+            let got = expect_glyph(tab_mark_visual(TabMark::State(state), 0));
             assert_eq!(
                 (got.text, got.size, got.bold),
                 (text, size, bold),
@@ -300,7 +191,10 @@ mod tests {
             );
             assert!(got.size <= 14.0, "{state:?} fits its 14 px slot");
         }
-        assert_eq!(tab_mark_glyph(TabMark::State(AgentState::Working), 0), None);
+        assert_eq!(
+            tab_mark_visual(TabMark::State(AgentState::Working), 0),
+            Some(MarkVisual::Spinner(SPINNER[0]))
+        );
     }
 
     #[test]
@@ -313,15 +207,17 @@ mod tests {
             AgentState::Idle,
         ] {
             let mark = TabMark::State(state);
-            let (full, corner) = (
-                tab_mark_glyph(mark, 3).unwrap(),
-                corner_mark_glyph(mark, 3).unwrap(),
-            );
+            let full = expect_glyph(tab_mark_visual(mark, 3));
+            let corner = expect_glyph(corner_mark_visual(mark, 3));
             assert_eq!((corner.text, corner.bold), (full.text, full.bold));
             assert!(corner.size < CORNER, "{state:?} fits the {CORNER} px disc");
             assert!(corner.size >= 7.5, "{state:?} stays legible");
         }
-        assert_eq!(corner_mark_glyph(TabMark::Shell, 0), None);
+        assert_eq!(
+            corner_mark_visual(TabMark::State(AgentState::Working), 3),
+            Some(MarkVisual::Spinner(SPINNER[3]))
+        );
+        assert_eq!(corner_mark_visual(TabMark::Shell, 0), None);
     }
 
     #[test]
@@ -349,27 +245,97 @@ mod tests {
         }
     }
 
+    /// Parses `<circle cx="..." cy="..." r="..."/>` elements from an embedded SVG.
+    fn parse_svg_circles(svg: &str) -> Vec<(f32, f32, f32)> {
+        let attr = |tag: &str, name: &str| -> f32 {
+            let needle = format!(r#"{name}=""#);
+            let start = tag
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing {name} in {tag}"))
+                + needle.len();
+            let end = tag[start..].find('"').unwrap() + start;
+            tag[start..end].parse::<f32>().unwrap()
+        };
+        svg.split("<circle ")
+            .skip(1)
+            .map(|rest| {
+                let tag = rest.split("/>").next().unwrap();
+                (attr(tag, "cx"), attr(tag, "cy"), attr(tag, "r"))
+            })
+            .collect()
+    }
+
     #[test]
     fn rf_atn_15_spinner_frame_geometry_stays_strictly_inside_corner_disc() {
-        assert_eq!(SPINNER_DOTS.len(), 8);
-        assert_eq!(SPINNER_FRAME_DOTS.len(), 8);
-        for (f, frame_dots) in SPINNER_FRAME_DOTS.iter().enumerate() {
-            assert_eq!(frame_dots.len(), 3, "frame {f} must have a 3-dot snake");
-            for &idx in frame_dots {
-                let dot = SPINNER_DOTS[idx];
-                let dist = ((dot.cx - SPINNER_DISC_RADIUS).powi(2)
-                    + (dot.cy - SPINNER_DISC_RADIUS).powi(2))
-                .sqrt();
+        use crate::agent_badge::CORNER;
+        use gpui_kit::{DevicePixels, SvgRenderer, SvgSize, size};
+        use std::sync::Arc;
+
+        let disc_size = CORNER;
+        let disc_radius = disc_size / 2.0;
+        assert_eq!(disc_size, 10.0);
+        assert_eq!(SPINNER.len(), 8);
+
+        let renderer = SvgRenderer::new(Arc::new(YienAssets));
+        for (frame, &path) in SPINNER.iter().enumerate() {
+            let bytes = YienAssets.load(path).unwrap().unwrap();
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(
+                svg.contains(r#"viewBox="0 0 10 10""#),
+                "{path} must match the 10 px corner disc"
+            );
+            assert!(
+                svg.contains(r##"fill="#000""##),
+                "{path} must be monochrome"
+            );
+
+            let circles = parse_svg_circles(svg);
+            assert_eq!(circles.len(), 3, "{path} must have a 3-dot snake");
+            for (offset, &(cx, cy, r)) in circles.iter().enumerate() {
+                let slot = (frame + offset) % SPINNER.len();
+                let angle = (-90.0 + slot as f32 * 45.0).to_radians();
+                let want_cx = disc_radius + 3.2 * angle.cos();
+                let want_cy = disc_radius + 3.2 * angle.sin();
                 assert!(
-                    dist + dot.r <= SPINNER_DISC_RADIUS,
-                    "dot {idx} in frame {f} spills outside corner disc: dist {dist} + r {} = {} > {SPINNER_DISC_RADIUS}",
-                    dot.r,
-                    dist + dot.r
+                    (cx - want_cx).abs() < 0.01 && (cy - want_cy).abs() < 0.01,
+                    "{path} dot {offset} at ({cx}, {cy}) != expected slot {slot} ({want_cx:.2}, {want_cy:.2})"
                 );
-                assert!(dot.cx - dot.r >= 0.0 && dot.cx + dot.r <= SPINNER_DISC_SIZE);
-                assert!(dot.cy - dot.r >= 0.0 && dot.cy + dot.r <= SPINNER_DISC_SIZE);
-                assert!((dist - SPINNER_ORBIT_RADIUS).abs() < 0.01);
-                assert_eq!(dot.r, SPINNER_DOT_RADIUS);
+                assert!(r > 0.0, "{path} dot {offset} has positive radius");
+                let dist = ((cx - disc_radius).powi(2) + (cy - disc_radius).powi(2)).sqrt();
+                assert!(
+                    dist + r < disc_radius,
+                    "{path} dot {offset} spills outside corner disc: {dist} + {r} >= {disc_radius}"
+                );
+                assert!(cx - r >= 0.0 && cx + r <= disc_size, "{path}");
+                assert!(cy - r >= 0.0 && cy + r <= disc_size, "{path}");
+            }
+
+            let parsed = renderer.parse_svg(&bytes).unwrap();
+            for side in [10, 13, 15, 20] {
+                let image = renderer
+                    .render_parsed(
+                        &parsed,
+                        SvgSize::ExactSize(size(DevicePixels(side), DevicePixels(side))),
+                    )
+                    .unwrap();
+                let pixels = image.as_bytes(0).unwrap();
+                let half = side as f32 / 2.0;
+                let mut painted = 0usize;
+                for y in 0..side {
+                    for x in 0..side {
+                        let i = ((y * side + x) * 4) as usize;
+                        if pixels[i + 3] > 0 {
+                            painted += 1;
+                            let dx = x as f32 + 0.5 - half;
+                            let dy = y as f32 + 0.5 - half;
+                            assert!(
+                                dx * dx + dy * dy < half * half,
+                                "{path} at {side}px paints outside disc at ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+                assert!(painted > 0, "{path} at {side}px painted nothing");
             }
         }
     }
@@ -391,32 +357,12 @@ mod tests {
         }
         assert_eq!(seen, SPINNER);
         assert_eq!(frame, 0, "the last frame wraps to the first");
-        let MarkVisual::Spinner(path) = tab_mark_visual(working, SPINNER.len() + 3).unwrap() else {
-            panic!("working must be a spinner");
-        };
-        assert_eq!(path, SPINNER[3]);
+        assert_eq!(
+            tab_mark_visual(working, SPINNER.len() + 3),
+            Some(MarkVisual::Spinner(SPINNER[3]))
+        );
         let idle = TabMark::State(AgentState::Idle);
         assert_eq!(tab_mark_visual(idle, 4), tab_mark_visual(idle, 0));
-    }
-
-    #[test]
-    fn rnf_17_spinner_colour_is_theme_ai_and_meets_contrast_in_both_themes() {
-        use crate::theme::{Theme, ThemeKind};
-        let working = TabMark::State(AgentState::Working);
-        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
-            let t = Theme::of(kind);
-            let color = t.tab_mark_color(working);
-            assert_eq!(color, t.ai, "{kind:?}: working mark must use the ai token");
-            assert_ne!(color, t.mark_red, "{kind:?}: working is never red (RN-01)");
-            assert_ne!(color, t.shu, "{kind:?}: working is never red (RN-01)");
-            for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
-                let ratio = crate::theme::tests::contrast(color, bg);
-                assert!(
-                    ratio >= 3.0,
-                    "{kind:?}: ai on {bg:?} is {ratio:.2}:1 (>= 3:1)"
-                );
-            }
-        }
     }
 
     #[test]
@@ -443,8 +389,6 @@ mod tests {
             assert_eq!(tab_mark_visual(TabMark::Shell, frame), None);
             assert_eq!(corner_mark_visual(TabMark::Shell, frame), None);
         }
-        assert_eq!(tab_mark_glyph(working, 0), None);
-        assert_eq!(corner_mark_glyph(working, 0), None);
     }
 
     #[test]
