@@ -501,8 +501,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
             last_command: None,
             files: Some(FilePaneRecord {
                 files: files.files.clone(),
-                active: (!files.files.is_empty())
-                    .then_some(files.active.min(files.files.len() - 1)),
+                active: files.active_index(),
                 wrap: files.wrap,
             }),
         };

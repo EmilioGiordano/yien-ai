@@ -273,10 +273,16 @@ impl FilePane {
         self.files.get(self.active).map(String::as_str)
     }
 
+    /// The active tab's index, clamped to the open tabs; `None` with no tab.
+    pub fn active_index(&self) -> Option<usize> {
+        let last = self.files.len().checked_sub(1)?;
+        Some(self.active.min(last))
+    }
+
     pub fn to_info(&self) -> FilePaneInfo {
         FilePaneInfo {
             files: self.files.clone(),
-            active: (!self.files.is_empty()).then_some(self.active.min(self.files.len() - 1)),
+            active: self.active_index(),
             wrap: self.wrap,
         }
     }
@@ -3699,6 +3705,22 @@ mod tests {
                 wrap: false,
             })
         );
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_without_tabs_has_no_active_tab() {
+        let empty = FilePane {
+            files: Vec::new(),
+            active: 0,
+            wrap: false,
+        };
+        assert_eq!(empty.to_info().active, None);
+        let stale = FilePane {
+            files: vec!["a.rs".into(), "b.rs".into()],
+            active: 7,
+            wrap: false,
+        };
+        assert_eq!(stale.to_info().active, Some(1));
     }
 
     #[test]
