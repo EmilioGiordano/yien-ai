@@ -248,6 +248,16 @@ impl Theme {
         self.ai
     }
 
+    /// A file pane's scrollbar thumb: faint at rest, stronger while hovered
+    /// or dragged. Neutral, never red (RN-01).
+    pub(crate) fn scroll_thumb(&self, strong: bool) -> Rgba {
+        if strong {
+            self.term_strong
+        } else {
+            self.term_line
+        }
+    }
+
     /// The syntax token colour for a previewed file's span (RF-CTX-02, RN-01).
     pub(crate) fn syntax_color(&self, kind: SyntaxKind) -> Rgba {
         match kind {
@@ -529,6 +539,27 @@ mod tests {
         assert_eq!(big.text(12.5), px(25.0));
         assert_eq!(big.kind, t.kind);
         assert_eq!(big.shu, t.shu);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_scroll_thumb_is_neutral_and_stronger_on_hover() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let (rest, strong) = (t.scroll_thumb(false), t.scroll_thumb(true));
+            for c in [rest, strong] {
+                for red in [t.shu, t.mark_red, t.word_red] {
+                    assert_ne!(c, red, "{kind:?}: the thumb is never red (RN-01)");
+                }
+            }
+            assert!(
+                contrast(rest, t.term_bg) > 1.2,
+                "{kind:?}: the thumb shows at rest"
+            );
+            assert!(
+                contrast(strong, t.term_bg) > contrast(rest, t.term_bg),
+                "{kind:?}: hover makes the thumb stronger"
+            );
+        }
     }
 
     #[test]
