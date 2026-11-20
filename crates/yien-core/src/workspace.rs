@@ -463,6 +463,11 @@ impl Workspace {
         Some((tab.id, tab.dir.as_str()))
     }
 
+    /// The folder of the tab, `None` when it is gone.
+    pub fn tab_dir(&self, tab: TabId) -> Option<&str> {
+        self.tab(tab).ok().map(|t| t.dir.as_str())
+    }
+
     /// Whether `root` is the folder of a project already ([`same_folder`]).
     pub fn has_project_at(&self, root: &str) -> bool {
         self.projects.iter().any(|p| same_folder(&p.root, root))

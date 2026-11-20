@@ -766,6 +766,28 @@ impl Service {
                 return;
             }
         }
+        // A folder a link leads out of the tab folder from is refused, as
+        // the Files view's writes are (RNF-14).
+        if let Command::OpenTerminal { tab, path } = &command
+            && let Some(dir) = self.ws.tab_dir(*tab)
+        {
+            let (root, rel) = (PathBuf::from(dir), path.clone());
+            let checked =
+                tokio::task::spawn_blocking(move || file_ops::terminal_folder(&root, &rel)).await;
+            let refused = match checked {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(_) => Some("The folder could not be checked.".to_owned()),
+            };
+            if let Some(message) = refused {
+                self.emit(CoreMsg::Error {
+                    pane: None,
+                    message,
+                })
+                .await;
+                return;
+            }
+        }
         let pane = command_pane(&command);
         let config = Arc::clone(&self.ctx.config);
         let resolve =
