@@ -14,6 +14,7 @@ mod assets;
 mod attention;
 mod bridge;
 mod catalog;
+mod file_pane;
 mod file_tree;
 mod files;
 mod fonts;
