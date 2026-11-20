@@ -261,7 +261,7 @@ pub(crate) fn sync_component_theme(theme: &Theme, cx: &mut App) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
     fn luminance(c: Rgba) -> f32 {
@@ -275,7 +275,7 @@ pub(crate) mod tests {
         0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
     }
 
-    pub(crate) fn contrast(a: Rgba, b: Rgba) -> f32 {
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
         let (la, lb) = (luminance(a), luminance(b));
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
