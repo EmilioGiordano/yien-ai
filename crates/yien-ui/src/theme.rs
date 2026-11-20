@@ -3,6 +3,7 @@
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use gpui_kit::{App, Hsla, Pixels, Rgba, px, rgb, rgba};
 use yien_proto::TerminalPalette;
+use yien_proto::file_preview::SyntaxKind;
 
 use crate::git::FileMark;
 use crate::model::{AgentState, TabMark};
@@ -72,6 +73,14 @@ pub(crate) struct Theme {
     pub(crate) term_faint: Rgba,
     /// Behind selected terminal cells, which keep their own text colour.
     pub(crate) term_selection: Rgba,
+    /// File preview syntax token colours (RF-CTX-02, never red per RN-01).
+    pub(crate) syn_kw: Rgba,
+    pub(crate) syn_ty: Rgba,
+    pub(crate) syn_fn: Rgba,
+    pub(crate) syn_str: Rgba,
+    pub(crate) syn_num: Rgba,
+    pub(crate) syn_com: Rgba,
+    pub(crate) syn_mac: Rgba,
 }
 
 impl Theme {
@@ -124,6 +133,13 @@ impl Theme {
             term_muted: rgb(0xa19d93),
             term_faint: rgb(0x7d796f),
             term_selection: rgb(0x55514a),
+            syn_kw: rgb(0xc08fb5),
+            syn_ty: rgb(0x7fb4b0),
+            syn_fn: rgb(0x8fa8dc),
+            syn_str: rgb(0x8fb573),
+            syn_num: rgb(0xd6a24c),
+            syn_com: rgb(0x7d796f),
+            syn_mac: rgb(0xd6a24c),
         }
     }
 
@@ -158,6 +174,13 @@ impl Theme {
             // --ai-wash at 14 % over --term-bg: `term_strong` is too dark for
             // the coloured text selected cells keep.
             term_selection: rgb(0xdee2e8),
+            syn_kw: rgb(0x8a3d7c),
+            syn_ty: rgb(0x1f6b66),
+            syn_fn: rgb(0x2f4f8f),
+            syn_str: rgb(0x3e6b24),
+            syn_num: rgb(0x8a5a12),
+            syn_com: rgb(0x6f6c64),
+            syn_mac: rgb(0x8a5a12),
         }
     }
 
@@ -223,6 +246,20 @@ impl Theme {
     /// Indigo, never red: red means an agent needs the user or failed (RN-01).
     pub(crate) fn focus_ring(&self) -> Rgba {
         self.ai
+    }
+
+    /// The syntax token colour for a previewed file's span (RF-CTX-02, RN-01).
+    pub(crate) fn syntax_color(&self, kind: SyntaxKind) -> Rgba {
+        match kind {
+            SyntaxKind::Plain => self.term_text,
+            SyntaxKind::Keyword => self.syn_kw,
+            SyntaxKind::Type => self.syn_ty,
+            SyntaxKind::Function => self.syn_fn,
+            SyntaxKind::String => self.syn_str,
+            SyntaxKind::Number => self.syn_num,
+            SyntaxKind::Comment => self.syn_com,
+            SyntaxKind::Macro => self.syn_mac,
+        }
     }
 }
 
@@ -492,6 +529,33 @@ mod tests {
         assert_eq!(big.text(12.5), px(25.0));
         assert_eq!(big.kind, t.kind);
         assert_eq!(big.shu, t.shu);
+    }
+
+    #[test]
+    fn rf_ctx_02_syntax_colors_are_never_red_and_meet_contrast() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            for syn in [
+                SyntaxKind::Plain,
+                SyntaxKind::Keyword,
+                SyntaxKind::Type,
+                SyntaxKind::Function,
+                SyntaxKind::String,
+                SyntaxKind::Number,
+                SyntaxKind::Comment,
+                SyntaxKind::Macro,
+            ] {
+                let c = t.syntax_color(syn);
+                assert_ne!(c, t.shu, "{kind:?}: {syn:?} must not use red (RN-01)");
+                assert_ne!(c, t.mark_red, "{kind:?}: {syn:?} must not use mark_red");
+                assert_ne!(c, t.word_red, "{kind:?}: {syn:?} must not use word_red");
+                let ratio = contrast(c, t.term_bg);
+                assert!(
+                    ratio >= 4.5,
+                    "{kind:?}: {syn:?} contrast on term_bg is {ratio:.2}:1"
+                );
+            }
+        }
     }
 
     #[test]
