@@ -18,6 +18,7 @@ use yien_core::file_preview::load_file;
 use yien_core::{
     Core, CoreConfig, CoreHandle, InstalledShells, SendError, ShellCommand, ShutdownError,
 };
+use yien_proto::file_ops::FileAction;
 use yien_proto::file_preview::{FileFrame, FileNotice};
 use yien_proto::frame::{CellFlags, Frame, SelectionKind, Side, ViewportPoint};
 use yien_proto::{
@@ -1933,4 +1934,69 @@ fn rf_ctx_02_a_missing_file_shows_an_error_notice() {
         frame.notice
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A project on a new scratch folder: its tab and the folder.
+fn scratch_project(h: &mut Harness, name: &str) -> (TabId, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("yien-core-files-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.command(Command::NewProject {
+        root: dir.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let tab = h.wait_for(|m| match m {
+        CoreMsg::TabUpdated(t) => Some(t.id),
+        _ => None,
+    });
+    (tab, dir)
+}
+
+#[test]
+fn rf_ctx_01_a_file_action_changes_the_folder_and_says_what_to_list_again() {
+    let mut h = Harness::start();
+    let (tab, dir) = scratch_project(&mut h, "action");
+    h.command(Command::FileAction {
+        tab,
+        action: FileAction::NewFolder {
+            dir: String::new(),
+            name: "docs".into(),
+        },
+    });
+    let (dirs, select) = h.wait_for(|m| match m {
+        CoreMsg::FilesChanged {
+            tab: t,
+            dirs,
+            select,
+        } if *t == tab => Some((dirs.clone(), select.clone())),
+        _ => None,
+    });
+    assert_eq!(dirs, [""]);
+    assert_eq!(select.as_deref(), Some("docs"));
+    assert!(dir.join("docs").is_dir());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rnf_14_a_file_action_outside_the_tab_folder_is_refused_with_an_error() {
+    let mut h = Harness::start();
+    let (tab, dir) = scratch_project(&mut h, "refused");
+    h.command(Command::FileAction {
+        tab,
+        action: FileAction::NewFile {
+            dir: "..".into(),
+            name: "escaped.txt".into(),
+        },
+    });
+    let message = h.wait_for(|m| match m {
+        CoreMsg::Error {
+            pane: None,
+            message,
+        } => Some(message.clone()),
+        CoreMsg::FilesChanged { .. } => panic!("the action ran"),
+        _ => None,
+    });
+    assert!(message.contains("outside the tab's folder"), "{message}");
+    assert!(!dir.parent().unwrap().join("escaped.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
