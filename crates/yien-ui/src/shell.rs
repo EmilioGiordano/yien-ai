@@ -2794,29 +2794,29 @@ impl Shell {
                 .line_height(px(agent_badge::SIDE));
         };
         let corner = assets::corner_mark_visual(mark, self.spinner.frame()).map(|visual| {
-            let disc = div()
-                .bg(ground)
-                .when_some(hover_group, |d, group| {
-                    d.group_hover(group, move |s| s.bg(t.hover))
-                })
-                .size(px(agent_badge::CORNER))
-                .line_height(px(agent_badge::CORNER))
-                .text_color(t.tab_mark_color(mark));
+            let color = t.tab_mark_color(mark);
+            let disc = div().bg(ground).when_some(hover_group, |d, group| {
+                d.group_hover(group, move |s| s.bg(t.hover))
+            });
             match visual {
                 assets::MarkVisual::Glyph(glyph) => disc
                     .text_size(px(glyph.size))
+                    .line_height(px(agent_badge::CORNER))
                     .font_weight(if glyph.bold {
                         FontWeight::BOLD
                     } else {
                         FontWeight::NORMAL
                     })
+                    .text_color(color)
                     .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                     .child(glyph.text),
-                assets::MarkVisual::Spinner(path) => disc
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(svg().path(path).size(px(agent_badge::CORNER))),
+                assets::MarkVisual::Spinner(path) => disc.child(
+                    svg()
+                        .path(path)
+                        .size(px(agent_badge::CORNER))
+                        .flex_none()
+                        .text_color(color),
+                ),
             }
         });
         agent_badge::badge(badge, corner, self.fonts.mono.clone())
@@ -2834,22 +2834,25 @@ impl Shell {
     /// A mark's visual, centred in a slot the caller sizes.
     fn mark_element(&self, mark: TabMark, slot_size: f32) -> Div {
         let t = self.theme;
-        let slot = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .text_color(t.tab_mark_color(mark));
+        let slot = div().flex().flex_none().items_center().justify_center();
         let Some(visual) = assets::tab_mark_visual(mark, self.spinner.frame()) else {
             return slot;
         };
+        let color = t.tab_mark_color(mark);
         match visual {
             assets::MarkVisual::Glyph(glyph) => slot
                 .text_size(t.text(glyph.size))
                 .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
+                .text_color(color)
                 .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
                 .child(glyph.text),
-            assets::MarkVisual::Spinner(path) => slot.child(svg().path(path).size(px(slot_size))),
+            assets::MarkVisual::Spinner(path) => slot.child(
+                svg()
+                    .path(path)
+                    .size(px(slot_size))
+                    .flex_none()
+                    .text_color(color),
+            ),
         }
     }
 
