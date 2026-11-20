@@ -75,7 +75,8 @@ pub struct LoadedDocument {
 
 impl LoadedDocument {
     /// Slices only the visible rows `[top_line .. top_line + rows]` for the UI
-    /// (ADR-06).
+    /// (ADR-06). A `top_line` past the last full page moves back to it, so the
+    /// pane never shows a mostly empty page at the end.
     ///
     /// ```
     /// use yien_core::file_preview::load_bytes;
@@ -86,6 +87,7 @@ impl LoadedDocument {
     /// assert_eq!(frame.top_line, 1);
     /// assert_eq!(frame.lines.len(), 1);
     /// assert_eq!(frame.lines[0].number, 2);
+    /// assert_eq!(doc.frame(9, 2).top_line, 1);
     /// ```
     pub fn frame(&self, top_line: usize, rows: usize) -> FileFrame {
         let rows = rows.max(1);
@@ -100,8 +102,7 @@ impl LoadedDocument {
                 notice: self.notice.clone(),
             };
         }
-        let max_top = total_lines.saturating_sub(1);
-        let top_line = top_line.min(max_top);
+        let top_line = top_line.min(total_lines.saturating_sub(rows));
         let end = top_line.saturating_add(rows).min(total_lines);
         FileFrame {
             path: self.path.clone(),
@@ -617,6 +618,18 @@ mod tests {
                 doc.notice
             );
         }
+    }
+
+    #[test]
+    fn rf_ctx_02_a_frame_past_the_end_shows_the_last_full_page() {
+        let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        let doc = load_bytes("notes.txt", text.as_bytes(), text.len() as u64, false);
+        let frame = doc.frame(99, 30);
+        assert_eq!(frame.top_line, 70);
+        assert_eq!(frame.lines.len(), 30);
+        assert_eq!(frame.lines[29].number, 100);
+        let short = doc.frame(5, 500);
+        assert_eq!((short.top_line, short.lines.len()), (0, 100));
     }
 
     proptest! {
