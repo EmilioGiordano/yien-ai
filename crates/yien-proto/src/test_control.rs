@@ -525,6 +525,27 @@ pub struct PaneState {
     /// Whether soft line wrap is enabled, when `kind` is `"file"` (RF-CTX-02).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<bool>,
+    /// Where its scrollbar stands, when `kind` is `"file"` and a frame came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<FileScroll>,
+}
+
+/// A file pane's scroll position: the scrollbar's offset is `top_line`,
+/// its range `0..=total_lines - rows`, and it shows a thumb only when
+/// `total_lines > rows` (RF-CTX-02).
+///
+/// ```
+/// let scroll = yien_proto::test_control::FileScroll { top_line: 0, rows: 30, total_lines: 300 };
+/// assert!(scroll.total_lines > scroll.rows);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileScroll {
+    /// The first line shown, from 0.
+    pub top_line: usize,
+    /// The lines a page holds.
+    pub rows: usize,
+    /// The lines in the file.
+    pub total_lines: usize,
 }
 
 fn default_pane_kind() -> String {
@@ -598,6 +619,7 @@ mod tests {
             open_files: None,
             active_file: None,
             wrap: None,
+            scroll: None,
         }
     }
 
@@ -868,12 +890,26 @@ mod tests {
             open_files: Some(vec!["src/main.rs".into(), "Cargo.toml".into()]),
             active_file: Some("src/main.rs".into()),
             wrap: Some(true),
+            scroll: Some(FileScroll {
+                top_line: 270,
+                rows: 30,
+                total_lines: 300,
+            }),
             ..pane()
         };
         let json = serde_json::to_value(&file_pane).unwrap();
         assert_eq!(json["kind"], "file");
         assert_eq!(json["active_file"], "src/main.rs");
         assert_eq!(json["wrap"], true);
+        assert_eq!(json["scroll"]["top_line"], 270);
+        assert_eq!(json["scroll"]["rows"], 30);
+        assert_eq!(json["scroll"]["total_lines"], 300);
+        assert!(
+            serde_json::to_value(pane())
+                .unwrap()
+                .get("scroll")
+                .is_none()
+        );
         let back: PaneState = serde_json::from_value(json).unwrap();
         assert_eq!(back, file_pane);
     }

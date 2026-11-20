@@ -10,6 +10,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::file_preview::{FileFrame, FileLine, FileNotice};
+use yien_proto::test_control::FileScroll;
 use yien_proto::{ClientMsg, Command, PaneId};
 
 use crate::bridge::{Link, Sent, deliver};
@@ -287,6 +288,11 @@ impl FilePaneView {
             size: (80, height),
             frame_at_ms: self.frame_at_ms,
             rows,
+            scroll: Some(FileScroll {
+                top_line: frame.top_line,
+                rows: self.page_rows(),
+                total_lines: frame.total_lines,
+            }),
         })
     }
 
