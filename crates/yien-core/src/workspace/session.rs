@@ -7,11 +7,11 @@ use yien_proto::{
     AgentState, PaneId, ProjectId, SideBar, SideBars, TabId, is_shell_profile, same_folder,
 };
 use yien_session::{
-    AgentRecord, LayoutRecord, PaneRecord, ProjectRecord, ResumeAction, Selection, SessionRef,
-    SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord, resume_plan,
+    AgentRecord, FilePaneRecord, LayoutRecord, PaneRecord, ProjectRecord, ResumeAction, Selection,
+    SessionRef, SessionSnapshot, SideBarRecord, SideBarsRecord, TabRecord, resume_plan,
 };
 
-use super::{Effect, Pane, Project, Tab, Workspace};
+use super::{Effect, FilePane, Pane, Project, Tab, Workspace, file_leaf_name};
 use crate::CoreError;
 use crate::launch::LaunchPlan;
 
@@ -211,11 +211,40 @@ impl Workspace {
         if !order.contains(&record.focused) {
             return false;
         }
+        enum RestoredPane<'a> {
+            Terminal {
+                pane: &'a PaneRecord,
+                plan: Box<LaunchPlan>,
+                cwd: String,
+                resume: Option<String>,
+                kept: Option<Kept>,
+            },
+            File {
+                pane: &'a PaneRecord,
+                files: FilePane,
+            },
+        }
+
         let mut panes = Vec::new();
         for id in &order {
             let Some(pane) = record.panes.iter().find(|p| p.id == *id) else {
                 return false;
             };
+            if let Some(saved_files) = pane.files.as_ref().filter(|f| !f.files.is_empty()) {
+                let active = saved_files
+                    .active
+                    .unwrap_or(0)
+                    .min(saved_files.files.len() - 1);
+                panes.push(RestoredPane::File {
+                    pane,
+                    files: FilePane {
+                        files: saved_files.files.clone(),
+                        active,
+                        wrap: saved_files.wrap,
+                    },
+                });
+                continue;
+            }
             let profile = yien_proto::ProfileId::new(pane.profile.as_str());
             let plan = match resolve(Some(&profile)) {
                 Ok(plan) => plan,
@@ -256,59 +285,115 @@ impl Workspace {
                 cwd: pane.cwd.clone(),
                 agent: pane.agent.clone(),
             });
-            panes.push((pane, plan, cwd, resume, kept));
+            panes.push(RestoredPane::Terminal {
+                pane,
+                plan: Box::new(plan),
+                cwd,
+                resume,
+                kept,
+            });
         }
 
         let dir = disk.pick(&[&record.dir, &project.root]);
         if dir != record.dir {
             notes.missing.insert(record.dir.clone());
         }
-        for (pane, plan, cwd, resume, kept) in panes {
-            // A session the user ended is not resumed: the pane starts a
-            // new one, which this launch has not ended.
-            let agent = pane
-                .agent
-                .as_ref()
-                .filter(|a| kept.is_none() && !a.ended_explicitly);
-            self.panes.insert(
-                pane.id,
-                Pane {
-                    tab: record.id,
-                    profile: plan.profile.clone(),
-                    launch_cwd: cwd.clone(),
-                    ended_explicitly: false,
-                    launch: 0,
+        for restored in panes {
+            match restored {
+                RestoredPane::Terminal {
+                    pane,
+                    plan,
+                    cwd,
+                    resume,
                     kept,
-                    custom_name: pane.name.clone().filter(|n| !n.trim().is_empty()),
-                    default_name: plan.default_name.clone(),
-                    profile_name: plan.profile_name.clone(),
-                    title: None,
-                    title_ours: false,
-                    cwd: None,
-                    state: AgentState::Idle,
-                    running: false,
-                    exit_code: None,
-                    // Kept until the resumed program reports one, so a quit
-                    // before that still saves the session it resumes.
-                    session_id: agent
-                        .and_then(|a| a.session_id.as_ref())
-                        .map(|s| s.as_str().to_owned()),
-                    attention_since: None,
-                    question: None,
-                    signal_lost: false,
-                    visible: false,
-                    seen: false,
-                    standin: None,
-                    program: None,
-                    stopped: false,
-                },
-            );
-            fx.push(Effect::Spawn {
-                pane: pane.id,
-                plan: Box::new(plan),
-                cwd,
-                resume,
-            });
+                } => {
+                    // A session the user ended is not resumed: the pane starts a
+                    // new one, which this launch has not ended.
+                    let agent = pane
+                        .agent
+                        .as_ref()
+                        .filter(|a| kept.is_none() && !a.ended_explicitly);
+                    self.panes.insert(
+                        pane.id,
+                        Pane {
+                            tab: record.id,
+                            profile: plan.profile.clone(),
+                            launch_cwd: cwd.clone(),
+                            ended_explicitly: false,
+                            launch: 0,
+                            kept,
+                            custom_name: pane.name.clone().filter(|n| !n.trim().is_empty()),
+                            default_name: plan.default_name.clone(),
+                            profile_name: plan.profile_name.clone(),
+                            title: None,
+                            title_ours: false,
+                            cwd: None,
+                            state: AgentState::Idle,
+                            running: false,
+                            exit_code: None,
+                            // Kept until the resumed program reports one, so a quit
+                            // before that still saves the session it resumes.
+                            session_id: agent
+                                .and_then(|a| a.session_id.as_ref())
+                                .map(|s| s.as_str().to_owned()),
+                            attention_since: None,
+                            question: None,
+                            signal_lost: false,
+                            visible: false,
+                            seen: false,
+                            standin: None,
+                            program: None,
+                            stopped: false,
+                            files: None,
+                        },
+                    );
+                    fx.push(Effect::Spawn {
+                        pane: pane.id,
+                        plan,
+                        cwd,
+                        resume,
+                    });
+                }
+                RestoredPane::File { pane, files } => {
+                    let active_path = files.active_file().unwrap_or_default().to_owned();
+                    let default_name = file_leaf_name(&active_path);
+                    self.panes.insert(
+                        pane.id,
+                        Pane {
+                            tab: record.id,
+                            profile: pane.profile.as_str().to_owned(),
+                            launch_cwd: dir.clone(),
+                            ended_explicitly: false,
+                            launch: 0,
+                            kept: None,
+                            custom_name: pane.name.clone().filter(|n| !n.trim().is_empty()),
+                            default_name,
+                            profile_name: "Files".to_owned(),
+                            title: None,
+                            title_ours: false,
+                            cwd: Some(dir.clone()),
+                            state: AgentState::Idle,
+                            running: false,
+                            exit_code: None,
+                            session_id: None,
+                            attention_since: None,
+                            question: None,
+                            signal_lost: false,
+                            visible: false,
+                            seen: false,
+                            standin: None,
+                            program: None,
+                            stopped: true,
+                            files: Some(files),
+                        },
+                    );
+                    fx.push(Effect::LoadFile {
+                        pane: pane.id,
+                        root: dir.clone(),
+                        path: active_path,
+                    });
+                }
+            }
         }
         let kept_dir = (dir != record.dir).then(|| record.dir.clone());
         let (branch, kept_branch) = match kept_dir {
@@ -406,6 +491,22 @@ fn list<'a>(items: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
+    if let Some(files) = &p.files {
+        return PaneRecord {
+            id,
+            name: p.custom_name.clone(),
+            profile: yien_session::ProfileId::new(p.profile.clone()),
+            cwd: p.cwd.clone().unwrap_or_else(|| p.launch_cwd.clone()),
+            agent: None,
+            last_command: None,
+            files: Some(FilePaneRecord {
+                files: files.files.clone(),
+                active: (!files.files.is_empty())
+                    .then_some(files.active.min(files.files.len() - 1)),
+                wrap: files.wrap,
+            }),
+        };
+    }
     if let Some(kept) = &p.kept {
         // A folder the pane reports other than the one it was started in is
         // the user moving on; the fallback folder itself is never saved.
@@ -1252,6 +1353,50 @@ mod tests {
         let (back, _, _) = restore(&saved, &all_exist(&saved));
         assert!(back.snapshot().projects[0].collapsed);
         assert_eq!(back.to_session(), saved);
+    }
+
+    #[test]
+    fn rf_ctx_02_file_preview_panes_survive_session_save_and_restore() {
+        let (mut ws, term_pane) = workspace("claude");
+        let tab = ws.tabs[1].id;
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "src/main.rs".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "Cargo.toml".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        let file_pane = ws.tabs[1].focused;
+        assert_ne!(file_pane, term_pane);
+        ws.apply(Command::ToggleFileWrap { pane: file_pane }, &resolve)
+            .unwrap();
+
+        let saved = ws.to_session();
+        let bytes = yien_session::serialize(&saved).unwrap();
+        let decoded = yien_session::deserialize(&bytes).unwrap();
+        let (back, fx, notes) = restore(&decoded, &all_exist(&decoded));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(back.snapshot(), ws.snapshot());
+        assert_eq!(back.to_session(), saved);
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::Spawn { pane, .. } if *pane == file_pane)),
+            "file preview pane must not spawn a PTY"
+        );
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { pane, root, path }
+            if *pane == file_pane && root == ROOT && path == "Cargo.toml"
+        )));
     }
 
     #[test]
