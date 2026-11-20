@@ -99,6 +99,7 @@ pub(crate) const ARGUMENT_COMMANDS: &[&str] = &[
     "pane.focus",
     "tab.select",
     "project.select",
+    "file.open",
 ];
 
 /// What a command id runs.
@@ -170,6 +171,26 @@ pub(crate) fn resolve_command(
                 return Err(format!("no project {}", project.get()));
             }
             Target::Project(project)
+        }
+        "file.open" => {
+            let path = args
+                .path
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| format!("{id} needs args.path"))?;
+            let tab = match args.tab {
+                Some(tab) => {
+                    if ws.tab(tab).is_none() {
+                        return Err(format!("no tab {}", tab.get()));
+                    }
+                    tab
+                }
+                None => ws
+                    .selected_tab()
+                    .map(|t| t.id)
+                    .ok_or_else(|| "no tab is selected".to_owned())?,
+            };
+            Target::OpenFile { tab, path }
         }
         _ => {
             return Err(format!(
@@ -262,6 +283,15 @@ pub(crate) fn workspace_state(
             for id in ids {
                 let pane = ws.pane(id);
                 let facts = terminal(id);
+                let (kind, open_files, active_file, wrap) = match pane.file_pane() {
+                    Some(file) => (
+                        "file".to_owned(),
+                        Some(file.files.clone()),
+                        file.active_file().map(str::to_owned),
+                        Some(file.wrap),
+                    ),
+                    None => ("terminal".to_owned(), None, None, None),
+                };
                 panes.push(PaneState {
                     id,
                     tab: tab.id,
@@ -282,10 +312,10 @@ pub(crate) fn workspace_state(
                     size: facts.as_ref().map(|f| f.size),
                     frame_at_ms: facts.as_ref().and_then(|f| f.frame_at_ms),
                     rows: facts.and_then(|f| f.rows).map(VisibleRows::new),
-                    kind: "terminal".to_owned(),
-                    open_files: None,
-                    active_file: None,
-                    wrap: None,
+                    kind,
+                    open_files,
+                    active_file,
+                    wrap,
                 });
             }
         }
@@ -644,12 +674,17 @@ mod tests {
             project: Some(ProjectId::new(1)),
             ..CommandArgs::default()
         }),
+        ("path", || CommandArgs {
+            path: Some("src/main.rs".into()),
+            ..CommandArgs::default()
+        }),
         ("everything", || CommandArgs {
             profile: Some(ProfileId::new("shell")),
             direction: Some(SplitWay::Right),
             pane: Some(PaneId::new(3)),
             tab: Some(TabId::new(2)),
             project: Some(ProjectId::new(1)),
+            path: Some("src/main.rs".into()),
         }),
     ];
 
@@ -747,6 +782,7 @@ mod tests {
             pane: Some(PaneId::new(99)),
             tab: Some(TabId::new(99)),
             project: Some(ProjectId::new(99)),
+            path: None,
         };
         for id in ARGUMENT_COMMANDS {
             assert!(resolve_command(id, &unknown, &ws).is_err(), "{id}");
@@ -776,6 +812,52 @@ mod tests {
         let refused = expired_reply();
         assert!(!refused.ok);
         assert!(refused.error.unwrap().starts_with("expired"));
+    }
+
+    #[test]
+    fn rf_ctx_02_test_control_exposes_file_pane_state_and_resolves_file_open_and_wrap() {
+        let mut ws = workspace();
+        ws.pane_updated(&PaneInfo {
+            name: "main.rs".into(),
+            profile: "Files".into(),
+            profile_id: ProfileId::new("file"),
+            running: false,
+            runs_session: false,
+            kind: yien_proto::PaneKind::File(yien_proto::FilePaneInfo {
+                files: vec!["src/main.rs".into(), "Cargo.toml".into()],
+                active: Some(0),
+                wrap: true,
+            }),
+            ..pane_info(4, 2, "file", "main.rs", yien_proto::AgentState::Idle)
+        });
+        let (_, _, panes) = workspace_state(&ws, Some(PaneId::new(4)), &|_| None);
+        let file_pane = panes.iter().find(|p| p.id == PaneId::new(4)).unwrap();
+        assert_eq!(file_pane.kind, "file");
+        assert_eq!(
+            file_pane.open_files,
+            Some(vec!["src/main.rs".into(), "Cargo.toml".into()])
+        );
+        assert_eq!(file_pane.active_file.as_deref(), Some("src/main.rs"));
+        assert_eq!(file_pane.wrap, Some(true));
+
+        assert_eq!(
+            resolve_command(
+                "file.open",
+                &CommandArgs {
+                    path: Some("src/lib.rs".into()),
+                    ..CommandArgs::default()
+                },
+                &ws
+            ),
+            Ok(Run::Target(Target::OpenFile {
+                tab: TabId::new(2),
+                path: "src/lib.rs".into(),
+            }))
+        );
+        assert_eq!(
+            resolve_command("file.toggle_wrap", &CommandArgs::default(), &ws),
+            Ok(Run::Catalog("file.toggle_wrap"))
+        );
     }
 
     #[test]
