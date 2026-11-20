@@ -7,7 +7,8 @@ use std::time::Duration;
 use yien_agent::{
     AgentState, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason, ScreenRule,
     ScreenVerdict, SessionEndReason, SessionStartSource, Signal, TurnScreen, builtin_profiles,
-    evaluate_screen, evaluate_typed_startup, has_in_turn_rules, has_turn_rules,
+    evaluate_screen, evaluate_typed_startup, evaluate_typed_turn_start, has_in_turn_rules,
+    has_turn_rules,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -521,7 +522,11 @@ impl Settled {
                         } else if self.machine.reads_typed_agent() {
                             let rows = self.rows();
                             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-                            evaluate_typed_startup(&self.rules, &rows)
+                            if self.machine.typed_repl_ready() {
+                                evaluate_typed_turn_start(&self.rules, &rows)
+                            } else {
+                                evaluate_typed_startup(&self.rules, &rows)
+                            }
                         } else {
                             read_screen(&self.engine, &self.rules)
                         };
@@ -529,6 +534,9 @@ impl Settled {
                     }
                     _ => {}
                 }
+            }
+            if signal == Signal::Screen(ScreenVerdict::InTurn) {
+                self.observe_in_turn();
             }
         }
     }
@@ -944,6 +952,56 @@ fn rn_02_a_stale_interrupt_line_in_a_shell_does_not_suppress_claude_trust_screen
     );
     pane.feed(&drawn(&screen));
     assert_eq!(pane.states, [AgentState::Working, SCREEN_RED]);
+}
+
+/// Typed `claude` in PowerShell when Claude 2.1.328 sends no OSC 7501 records
+/// at all: reaches Idle at its prompt, reaches and keeps Working throughout a
+/// streaming turn, goes Idle on Ctrl+C mid-turn (never Done, never red), and
+/// returns to PowerShell as Idle on exit.
+#[test]
+fn rf_age_05_typed_claude_without_osc_7501_reaches_and_keeps_working_then_idles_on_ctrl_c() {
+    const IDLE_PROMPT: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} \u{2190} for agents";
+    const INTERRUPTED_PROMPT: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F} please answer slow\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    pane.feed(&drawn(IDLE_PROMPT));
+    assert_eq!(pane.states, [AgentState::Working, AgentState::Idle]);
+    // Prompt submitted: streams for 5 s with `esc to interrupt` and zero OSC 7501.
+    for i in 0..20 {
+        let frame = format!(
+            "\u{276F} please answer slow\n\u{25CF} token {i}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt \u{00B7} \u{2190} for agents"
+        );
+        pane.feed(&drawn(&frame));
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working],
+        "typed claude must reach and keep Working during a turn without OSC 7501"
+    );
+    // Ctrl+C mid-turn restores the prompt and drops the hint -> Idle.
+    pane.feed(&drawn(INTERRUPTED_PROMPT));
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+    // Exit back to PowerShell stays Idle.
+    pane.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+    pane.step(Signal::TypedAgent(false));
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
 }
 
 /// PowerShell's prompt and the `codex` typed at it, with its marks.
