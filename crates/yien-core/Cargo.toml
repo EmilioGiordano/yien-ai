@@ -18,6 +18,7 @@ yien-session = { workspace = true }
 yien-git = { workspace = true }
 yien-which = { workspace = true }
 getrandom = { workspace = true }
+synoptic = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
