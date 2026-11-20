@@ -4,7 +4,10 @@
 //! sources. The Claude Code screens are laid out from the 2.1.325 binary's
 //! strings and components; no live capture of them exists.
 
-use yien_agent::{ScreenRule, ScreenVerdict, Version, builtin_profiles, evaluate_screen};
+use yien_agent::{
+    ScreenRule, ScreenVerdict, TurnScreen, Version, builtin_profiles, evaluate_screen,
+    evaluate_typed_startup, has_in_turn_rules, has_turn_rules,
+};
 
 const CODEX: Version = Version::new(0, 167, 2);
 const CLAUDE: Version = Version::new(2, 1, 325);
@@ -328,4 +331,80 @@ fn rn_02_a_plain_command_s_output_never_matches_a_typed_agent_s_screens() {
             );
         }
     }
+}
+
+#[test]
+fn rn_02_stale_interrupt_line_does_not_suppress_startup_trust_screen() {
+    let claude = typed("claude");
+    let mut rows = vec![
+        "  \u{23bf} \u{a0}Interrupted \u{b7} What should Claude do instead?",
+        "",
+    ];
+    rows.extend(CLAUDE_TRUST.lines());
+    assert_eq!(evaluate_screen(&claude, &rows), ScreenVerdict::NeedsYou);
+    assert_eq!(
+        evaluate_typed_startup(&claude, &rows),
+        ScreenVerdict::NeedsYou
+    );
+}
+
+#[test]
+fn rn_02_turn_screen_rules_are_scoped_to_claude_and_anchored_to_the_status_bar() {
+    let claude = rules("claude", CLAUDE);
+    let codex = rules("codex", CODEX);
+    assert!(has_turn_rules(&claude) && has_in_turn_rules(&claude));
+    assert!(!has_turn_rules(&codex) && !has_in_turn_rules(&codex));
+
+    // Codex ignores `"esc to interrupt"` even if printed on the bottom row.
+    let mut codex_turn = TurnScreen::default();
+    let hint_row = "  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle) \u{b7} esc to interrupt";
+    codex_turn.begin_turn(&codex, &[hint_row]);
+    codex_turn.observe_in_turn(&codex, &[hint_row]);
+    assert!(!codex_turn.in_turn_seen());
+    assert_eq!(
+        codex_turn.evaluate(&codex, &["done"]),
+        ScreenVerdict::NoMatch
+    );
+
+    // Claude ignores pre-turn stale text and transcript/file text above the input box.
+    let mut claude_turn = TurnScreen::default();
+    claude_turn.begin_turn(&claude, &[hint_row]);
+    assert!(
+        !claude_turn.in_turn_seen(),
+        "begin_turn must never seed in_turn_seen from pre-turn rows"
+    );
+    let transcript_with_phrase = [
+        "const INTERRUPT_MARKER = \"esc to interrupt\";",
+        "the hint esc to interrupt sits on the status row",
+        hint_row,
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{276f} ",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)",
+    ];
+    claude_turn.observe_in_turn(&claude, &transcript_with_phrase);
+    assert!(!claude_turn.in_turn_seen());
+    assert_eq!(
+        claude_turn.evaluate(
+            &claude,
+            &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)"]
+        ),
+        ScreenVerdict::NoMatch
+    );
+
+    // A permission prompt replacing the status bar does not fire TurnEnded.
+    claude_turn.observe_in_turn(&claude, &[hint_row]);
+    assert!(claude_turn.in_turn_seen());
+    assert_eq!(
+        claude_turn.evaluate(&claude, &["  Do you want to proceed?", "  \u{276f} 1. Yes"]),
+        ScreenVerdict::NoMatch
+    );
+    // Once the prompt is gone and the idle bar shows, TurnEnded fires.
+    assert_eq!(
+        claude_turn.evaluate(
+            &claude,
+            &["  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)"]
+        ),
+        ScreenVerdict::TurnEnded
+    );
 }

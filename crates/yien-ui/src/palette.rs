@@ -534,6 +534,48 @@ pub(crate) fn keyboard_after_close(ws: &WorkspaceView) -> KeyboardTo {
     keyboard_pane(ws).map_or(KeyboardTo::Window, KeyboardTo::Pane)
 }
 
+/// What the shell does with GPUI focus when `Target::Pane` runs before sending
+/// `Command::FocusPane` to the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneFocusNow {
+    /// `pane` is already drawn on the selected tab and has a terminal view:
+    /// focus it now, because the core emits nothing when `pane` is already
+    /// focused and the keyboard may have moved to the window root or a bar.
+    Terminal(PaneId),
+    /// `pane` is on another tab, hidden behind a maximized sibling, or has no
+    /// view yet: clear `keyboard_on` so `sync_focus` moves focus once the core
+    /// makes it current.
+    WaitForCore,
+}
+
+pub(crate) fn pane_focus_now(ws: &WorkspaceView, pane: PaneId, has_view: bool) -> PaneFocusNow {
+    let drawn = ws
+        .selected_tab()
+        .is_some_and(|tab| tab.rects().iter().any(|(p, _)| *p == pane));
+    if drawn && has_view {
+        PaneFocusNow::Terminal(pane)
+    } else {
+        PaneFocusNow::WaitForCore
+    }
+}
+
+/// What `sync_focus` focuses and records in `keyboard_on` when the workspace
+/// wants `target`. Returns `None` when focus should stay put; never records
+/// `Some(pane)` while its terminal view is still missing.
+pub(crate) fn sync_focus_move(
+    target: Option<PaneId>,
+    keyboard_on: Option<PaneId>,
+    has_view: bool,
+) -> Option<(KeyboardTo, Option<PaneId>)> {
+    if target == keyboard_on {
+        return None;
+    }
+    match target.filter(|_| has_view) {
+        Some(pane) => Some((KeyboardTo::Pane(pane), Some(pane))),
+        None => Some((KeyboardTo::Window, None)),
+    }
+}
+
 /// How each stretch of a row's text is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ink {
@@ -1034,6 +1076,56 @@ mod tests {
             keyboard_after_close(&WorkspaceView::default()),
             KeyboardTo::Window
         );
+    }
+
+    #[test]
+    fn adr_21_pane_focus_targets_drawn_pane_immediately_and_waits_for_hidden_tabs() {
+        let mut ws = workspace();
+        let focused = PaneId::new(100);
+        let sibling = PaneId::new(101);
+        let other_tab = PaneId::new(102);
+        // Selected tab's already-focused pane and its drawn sibling focus at once.
+        assert_eq!(
+            pane_focus_now(&ws, focused, true),
+            PaneFocusNow::Terminal(focused)
+        );
+        assert_eq!(
+            pane_focus_now(&ws, sibling, true),
+            PaneFocusNow::Terminal(sibling)
+        );
+        // A pane on another tab or without a terminal view waits for the core.
+        assert_eq!(
+            pane_focus_now(&ws, other_tab, true),
+            PaneFocusNow::WaitForCore
+        );
+        assert_eq!(
+            pane_focus_now(&ws, focused, false),
+            PaneFocusNow::WaitForCore
+        );
+        // A pane hidden behind a maximized sibling waits for the core to restore it.
+        let mut maximized = tab(10, 1, "editor", &[100, 101]);
+        maximized.maximized = Some(focused);
+        ws.tab_updated(&maximized);
+        assert_eq!(
+            pane_focus_now(&ws, sibling, true),
+            PaneFocusNow::WaitForCore
+        );
+    }
+
+    #[test]
+    fn rf_nav_01_sync_focus_does_not_poison_keyboard_on_before_view_exists() {
+        let pane = PaneId::new(5);
+        // Missing view focuses the window without claiming `keyboard_on = Some(5)`.
+        let first = sync_focus_move(Some(pane), Some(PaneId::new(3)), false);
+        assert_eq!(first, Some((KeyboardTo::Window, None)));
+        let keyboard_on = first.unwrap().1;
+        // Once the view exists, the next sync focuses the pane instead of returning early.
+        assert_eq!(
+            sync_focus_move(Some(pane), keyboard_on, true),
+            Some((KeyboardTo::Pane(pane), Some(pane)))
+        );
+        // Already focused on the same pane: no-op.
+        assert_eq!(sync_focus_move(Some(pane), Some(pane), true), None);
     }
 
     #[test]
