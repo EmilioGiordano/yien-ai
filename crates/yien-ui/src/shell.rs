@@ -2793,51 +2793,71 @@ impl Shell {
         let t = self.theme;
         let Some(badge) = badge else {
             return self
-                .mark_glyph(mark)
+                .mark_element(mark, agent_badge::SIDE)
                 .size(px(agent_badge::SIDE))
                 .line_height(px(agent_badge::SIDE));
         };
-        let corner = assets::corner_mark_glyph(mark, self.spinner.frame()).map(|glyph| {
-            div()
-                .bg(ground)
-                .when_some(hover_group, |d, group| {
-                    d.group_hover(group, move |s| s.bg(t.hover))
-                })
-                .text_size(px(glyph.size))
-                .line_height(px(agent_badge::CORNER))
-                .font_weight(if glyph.bold {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(t.tab_mark_color(mark))
-                .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                .child(glyph.text)
+        let corner = assets::corner_mark_visual(mark, self.spinner.frame()).map(|visual| {
+            let color = t.tab_mark_color(mark);
+            let disc = div().bg(ground).when_some(hover_group, |d, group| {
+                d.group_hover(group, move |s| s.bg(t.hover))
+            });
+            match visual {
+                assets::MarkVisual::Glyph(glyph) => disc
+                    .text_size(px(glyph.size))
+                    .line_height(px(agent_badge::CORNER))
+                    .font_weight(if glyph.bold {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(color)
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(glyph.text),
+                assets::MarkVisual::Spinner(path) => disc.child(
+                    svg()
+                        .path(path)
+                        .size(px(agent_badge::CORNER))
+                        .flex_none()
+                        .text_color(color),
+                ),
+            }
         });
         agent_badge::badge(badge, corner, self.fonts.mono.clone())
     }
 
-    /// A state's mark outside the tab rows, the same glyph and colour as a
+    /// A state's mark outside the tab rows, the same visual and colour as a
     /// tab row's in a 14 px square, so every surface tells error from
     /// "needs you" by shape (RN-01). No id, like the tab row's.
     fn state_mark(&self, state: AgentState) -> Div {
-        self.mark_glyph(TabMark::State(state))
+        self.mark_element(TabMark::State(state), 14.0)
             .size(px(14.0))
             .line_height(self.theme.text(14.0))
     }
 
-    /// A mark's glyph, centred in a slot the caller sizes.
-    fn mark_glyph(&self, mark: TabMark) -> Div {
+    /// A mark's visual, centred in a slot the caller sizes.
+    fn mark_element(&self, mark: TabMark, slot_size: f32) -> Div {
         let t = self.theme;
         let slot = div().flex().flex_none().items_center().justify_center();
-        let Some(glyph) = assets::tab_mark_glyph(mark, self.spinner.frame()) else {
+        let Some(visual) = assets::tab_mark_visual(mark, self.spinner.frame()) else {
             return slot;
         };
-        slot.text_size(t.text(glyph.size))
-            .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
-            .text_color(t.tab_mark_color(mark))
-            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-            .child(glyph.text)
+        let color = t.tab_mark_color(mark);
+        match visual {
+            assets::MarkVisual::Glyph(glyph) => slot
+                .text_size(t.text(glyph.size))
+                .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
+                .text_color(color)
+                .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                .child(glyph.text),
+            assets::MarkVisual::Spinner(path) => slot.child(
+                svg()
+                    .path(path)
+                    .size(px(slot_size))
+                    .flex_none()
+                    .text_color(color),
+            ),
+        }
     }
 
     /// The tab's name, or the field editing it.
