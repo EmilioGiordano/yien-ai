@@ -53,7 +53,7 @@ pub(crate) struct Theme {
     pub(crate) shu_wash: Rgba,
     pub(crate) ai: Rgba,
     pub(crate) ochre: Rgba,
-    /// A tab row's spinner, and its state words but the red ones.
+    /// A tab row's state words other than the red ones.
     pub(crate) mark_dim: Rgba,
     /// A tab row's mark and words while it needs the user or failed (RN-01).
     pub(crate) mark_red: Rgba,
@@ -204,13 +204,15 @@ impl Theme {
     }
 
     /// The colour of a tab row's mark: red for "needs you" and an error,
-    /// told apart by shape (RN-01), green when done, orange when idle.
+    /// told apart by shape (RN-01), green when done, orange when idle,
+    /// indigo (`ai`) while working.
     pub(crate) fn tab_mark_color(&self, mark: TabMark) -> Rgba {
         match mark {
             TabMark::State(AgentState::NeedsYou | AgentState::Error) => self.mark_red,
             TabMark::State(AgentState::Done) => self.mark_done,
             TabMark::State(AgentState::Idle) => self.mark_idle,
-            TabMark::State(AgentState::Working) | TabMark::Shell => self.mark_dim,
+            TabMark::State(AgentState::Working) => self.ai,
+            TabMark::Shell => self.mark_dim,
         }
     }
 
@@ -246,6 +248,16 @@ impl Theme {
     /// Indigo, never red: red means an agent needs the user or failed (RN-01).
     pub(crate) fn focus_ring(&self) -> Rgba {
         self.ai
+    }
+
+    /// A file pane's scrollbar thumb: faint at rest, stronger while hovered
+    /// or dragged. Neutral, never red (RN-01).
+    pub(crate) fn scroll_thumb(&self, strong: bool) -> Rgba {
+        if strong {
+            self.term_strong
+        } else {
+            self.term_line
+        }
     }
 
     /// The syntax token colour for a previewed file's span (RF-CTX-02, RN-01).
@@ -444,7 +456,7 @@ mod tests {
             assert_eq!(color(AgentState::Error), t.mark_red, "{:?}", t.kind);
             assert_eq!(color(AgentState::Done), t.mark_done, "{:?}", t.kind);
             assert_eq!(color(AgentState::Idle), t.mark_idle, "{:?}", t.kind);
-            assert_eq!(color(AgentState::Working), t.mark_dim, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Working), t.ai, "{:?}", t.kind);
             for state in [AgentState::Done, AgentState::Working, AgentState::Idle] {
                 assert_eq!(t.tab_word_color(state), t.mark_dim, "{state:?}");
             }
@@ -459,13 +471,32 @@ mod tests {
                 ("red", t.mark_red),
                 ("done", t.mark_done),
                 ("idle", t.mark_idle),
-                ("working", t.mark_dim),
+                (
+                    "working",
+                    t.tab_mark_color(TabMark::State(AgentState::Working)),
+                ),
             ];
             for (name, mark) in marks {
                 for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
                     let ratio = contrast(mark, bg);
                     assert!(ratio >= 3.0, "{:?}: {name} is {ratio:.2}:1", t.kind);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn rnf_17_working_spinner_uses_ai_token_with_contrast_and_never_red() {
+        let working = TabMark::State(AgentState::Working);
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let color = t.tab_mark_color(working);
+            assert_eq!(color, t.ai, "{kind:?}");
+            assert_ne!(color, t.mark_red, "{kind:?}: working is never red (RN-01)");
+            assert_ne!(color, t.shu, "{kind:?}: working is never red (RN-01)");
+            for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
+                let ratio = contrast(color, bg);
+                assert!(ratio >= 3.0, "{kind:?}: ai on disc bg is {ratio:.2}:1");
             }
         }
     }
@@ -529,6 +560,27 @@ mod tests {
         assert_eq!(big.text(12.5), px(25.0));
         assert_eq!(big.kind, t.kind);
         assert_eq!(big.shu, t.shu);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_scroll_thumb_is_neutral_and_stronger_on_hover() {
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let (rest, strong) = (t.scroll_thumb(false), t.scroll_thumb(true));
+            for c in [rest, strong] {
+                for red in [t.shu, t.mark_red, t.word_red] {
+                    assert_ne!(c, red, "{kind:?}: the thumb is never red (RN-01)");
+                }
+            }
+            assert!(
+                contrast(rest, t.term_bg) > 1.2,
+                "{kind:?}: the thumb shows at rest"
+            );
+            assert!(
+                contrast(strong, t.term_bg) > contrast(rest, t.term_bg),
+                "{kind:?}: hover makes the thumb stronger"
+            );
+        }
     }
 
     #[test]

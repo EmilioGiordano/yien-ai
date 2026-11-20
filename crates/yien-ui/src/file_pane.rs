@@ -1,6 +1,6 @@
 //! The read-only file preview pane body (RF-CTX-02, ADR-06): draws only the
 //! visible line slice from [`FileFrame`], with line numbers, syntax highlights,
-//! soft wrap toggle, and wheel/keyboard scrolling.
+//! soft wrap toggle, and scrolling by wheel, keys and scrollbar.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -10,6 +10,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yien_proto::file_preview::{FileFrame, FileLine, FileNotice};
+use yien_proto::test_control::FileScroll;
 use yien_proto::{ClientMsg, Command, PaneId};
 
 use crate::bridge::{Link, Sent, deliver};
@@ -19,6 +20,24 @@ use crate::theme::Theme;
 const FALLBACK_MONO: &str = "Consolas";
 /// The code area's padding above and below the lines.
 const CODE_PAD_Y: f32 = 4.0;
+/// The gutter's space right of its numbers; its 1 px border comes on top.
+const GUTTER_PAD_RIGHT: f32 = 9.0;
+/// The gutter never narrows below this many digits.
+const MIN_GUTTER_DIGITS: usize = 3;
+
+/// The gutter's outer width for a file of `total_lines`: its widest number
+/// at `digit_w` (the font's measured advance of "0"; 0.6 of `font_size`
+/// when unknown), plus its padding and border.
+pub(crate) fn gutter_width(total_lines: usize, digit_w: Option<f32>, font_size: f32) -> f32 {
+    let digits = total_lines
+        .checked_ilog10()
+        .map_or(1, |log| log as usize + 1)
+        .max(MIN_GUTTER_DIGITS);
+    let digit_w = digit_w
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(font_size * 0.6);
+    (digits as f32 * digit_w).ceil() + GUTTER_PAD_RIGHT + 1.0
+}
 
 /// The whole lines that fit in a code area `height` pixels tall; at least one.
 pub(crate) fn rows_in(height: f32, line_h: f32) -> usize {
@@ -50,6 +69,98 @@ pub(crate) fn scroll_key(key: &str, top: usize, rows: usize, total: usize) -> Op
     Some(to.min(last_top(rows, total)))
 }
 
+/// The scrollbar's width at the right edge of the code area.
+const SCROLLBAR_W: f32 = 10.0;
+/// The thumb's width, centred in the scrollbar.
+const THUMB_W: f32 = 6.0;
+/// The shortest thumb, so a long file still leaves one to grab.
+const MIN_THUMB_H: f32 = 24.0;
+const SCROLLBAR_GROUP: &str = "file-scrollbar";
+
+/// Where the thumb sits in the scrollbar's track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ScrollThumb {
+    /// Its top edge, in pixels below the track's top.
+    pub(crate) top: f32,
+    pub(crate) height: f32,
+}
+
+/// The thumb in a track `track` pixels tall for a page of `rows` lines
+/// from line `top` of `total`, or `None` when the whole file fits.
+pub(crate) fn scroll_thumb(
+    track: f32,
+    top: usize,
+    rows: usize,
+    total: usize,
+) -> Option<ScrollThumb> {
+    let max_top = last_top(rows, total);
+    if !track.is_finite() || track <= 0.0 || rows == 0 || max_top == 0 {
+        return None;
+    }
+    let track = f64::from(track);
+    let height = (track * rows as f64 / total as f64)
+        .max(f64::from(MIN_THUMB_H))
+        .min(track);
+    let top = (track - height) * top.min(max_top) as f64 / max_top as f64;
+    Some(ScrollThumb {
+        top: top as f32,
+        height: height as f32,
+    })
+}
+
+/// The first line once a drag has moved the thumb `dy` pixels from where
+/// it sat at line `from`.
+pub(crate) fn dragged_line(track: f32, from: usize, dy: f32, rows: usize, total: usize) -> usize {
+    let max_top = last_top(rows, total);
+    let Some(thumb) = scroll_thumb(track, from, rows, total) else {
+        return 0;
+    };
+    let room = f64::from(track) - f64::from(thumb.height);
+    if room <= 0.0 || !dy.is_finite() {
+        return from.min(max_top);
+    }
+    let at = ((f64::from(thumb.top) + f64::from(dy)) / room).clamp(0.0, 1.0);
+    (at * max_top as f64).round() as usize
+}
+
+/// What a press at `y` pixels below the track's top hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackHit {
+    PageUp,
+    Thumb,
+    PageDown,
+}
+
+pub(crate) fn track_hit(y: f32, thumb: ScrollThumb) -> TrackHit {
+    if y < thumb.top {
+        TrackHit::PageUp
+    } else if y >= thumb.top + thumb.height {
+        TrackHit::PageDown
+    } else {
+        TrackHit::Thumb
+    }
+}
+
+/// What a drag of a scrollbar thumb carries: its pane.
+struct ThumbDrag(PaneId);
+
+/// A thumb drag draws nothing under the pointer.
+struct NoGhost;
+
+impl Render for NoGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Where the pointer took the thumb: its window `y` and the first line
+/// shown then.
+#[derive(Debug, Clone, Copy)]
+struct ThumbGrab {
+    y: f32,
+    from: usize,
+}
+
 /// Events a [`FilePaneView`] emits to the window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum FilePaneEvent {
@@ -75,6 +186,11 @@ pub(crate) struct FilePaneView {
     /// The rows the core was last told, so a resize is sent once.
     sent_rows: Option<usize>,
     wheel_rest: f32,
+    /// The code area's window top and height at its last paint: the
+    /// scrollbar's track.
+    track: Option<(f32, f32)>,
+    /// The thumb the pointer holds, from its press to its release.
+    grab: Option<ThumbGrab>,
 }
 
 impl FilePaneView {
@@ -106,6 +222,8 @@ impl FilePaneView {
             rows: None,
             sent_rows: None,
             wheel_rest: 0.0,
+            track: None,
+            grab: None,
         }
     }
 
@@ -170,6 +288,11 @@ impl FilePaneView {
             size: (80, height),
             frame_at_ms: self.frame_at_ms,
             rows,
+            scroll: Some(FileScroll {
+                top_line: frame.top_line,
+                rows: self.page_rows(),
+                total_lines: frame.total_lines,
+            }),
         })
     }
 
@@ -194,9 +317,13 @@ impl FilePaneView {
             .map_or((0, 0), |f| (f.top_line, f.total_lines))
     }
 
-    /// Takes the code area's height at a paint; a new number of rows goes
+    /// Takes the code area's bounds at a paint; a new number of rows goes
     /// to the core, which slices its frames to it.
-    fn measured(&mut self, height: f32, cx: &mut Context<Self>) {
+    fn measured(&mut self, top: f32, height: f32, cx: &mut Context<Self>) {
+        if self.track.is_none_or(|(_, h)| h != height) {
+            cx.notify();
+        }
+        self.track = Some((top, height));
         let rows = rows_in(height, self.code_metrics().1);
         if self.rows != Some(rows) {
             self.rows = Some(rows);
@@ -266,6 +393,104 @@ impl FilePaneView {
         }
     }
 
+    fn on_track_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.grab = None;
+        let Some((track_top, track_h)) = self.track else {
+            return;
+        };
+        let (top, total) = self.top_and_total();
+        let rows = self.page_rows();
+        let Some(thumb) = scroll_thumb(track_h, top, rows, total) else {
+            return;
+        };
+        let y = event.position.y.as_f32();
+        let key = match track_hit(y - track_top, thumb) {
+            TrackHit::Thumb => {
+                self.grab = Some(ThumbGrab { y, from: top });
+                cx.notify();
+                return;
+            }
+            TrackHit::PageUp => "pageup",
+            TrackHit::PageDown => "pagedown",
+        };
+        if let Some(to) = scroll_key(key, top, rows, total) {
+            self.scroll_to(to, cx);
+        }
+    }
+
+    fn on_track_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.grab.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn on_thumb_drag(
+        &mut self,
+        event: &DragMoveEvent<ThumbDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.drag(cx).0 != self.id {
+            return;
+        }
+        let Some(grab) = self.grab else {
+            return;
+        };
+        let (_, total) = self.top_and_total();
+        let to = dragged_line(
+            event.bounds.size.height.as_f32(),
+            grab.from,
+            event.event.position.y.as_f32() - grab.y,
+            self.page_rows(),
+            total,
+        );
+        self.scroll_to(to, cx);
+    }
+
+    /// The vertical scrollbar over the code area's right padding, or `None`
+    /// when the whole file fits.
+    fn render_scrollbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, track_h) = self.track?;
+        let frame = self.frame.as_ref().filter(|f| !f.lines.is_empty())?;
+        let rows = self.page_rows();
+        let thumb = scroll_thumb(track_h, frame.top_line, rows, frame.total_lines)?;
+        let t = self.theme;
+        let thumb = div()
+            .id(("file-scroll-thumb", self.id.get()))
+            .absolute()
+            .top(px(thumb.top))
+            .left(px((SCROLLBAR_W - THUMB_W) / 2.0))
+            .w(px(THUMB_W))
+            .h(px(thumb.height))
+            .rounded_full()
+            .bg(t.scroll_thumb(self.grab.is_some()))
+            .group_hover(SCROLLBAR_GROUP, move |s| s.bg(t.scroll_thumb(true)))
+            .on_drag(ThumbDrag(self.id), |_, _, _, cx| cx.new(|_| NoGhost));
+        Some(
+            div()
+                .id(("file-scrollbar", self.id.get()))
+                .group(SCROLLBAR_GROUP)
+                .role(Role::ScrollBar)
+                .aria_label("Scroll")
+                .aria_orientation(accesskit::Orientation::Vertical)
+                .aria_min_numeric_value(0.0)
+                .aria_max_numeric_value(last_top(rows, frame.total_lines) as f64)
+                .aria_numeric_value(frame.top_line as f64)
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(SCROLLBAR_W))
+                .bg(t.term_bg)
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_track_down))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_track_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_track_up))
+                .on_drag_move(cx.listener(Self::on_thumb_drag))
+                .child(thumb)
+                .into_any_element(),
+        )
+    }
+
     fn render_line(&self, line: &FileLine, gutter_w: f32) -> AnyElement {
         let t = self.theme;
         let text = if line.text.is_empty() {
@@ -302,7 +527,7 @@ impl FilePaneView {
                 div()
                     .flex_none()
                     .w(px(gutter_w))
-                    .pr(px(9.0))
+                    .pr(px(GUTTER_PAD_RIGHT))
                     .mr(px(10.0))
                     .border_r_1()
                     .border_color(t.term_line)
@@ -314,7 +539,7 @@ impl FilePaneView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pr(px(10.0))
+                    .pr(px(SCROLLBAR_W))
                     .when(!self.wrap, |d| d.whitespace_nowrap().overflow_x_hidden())
                     .child(styled),
             )
@@ -323,17 +548,16 @@ impl FilePaneView {
 }
 
 impl Render for FilePaneView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let (font_size, line_h) = self.code_metrics();
         let total_lines = self.frame.as_ref().map_or(0, |f| f.total_lines);
-        let gutter_w = if total_lines >= 10_000 {
-            48.0
-        } else if total_lines >= 1_000 {
-            42.0
-        } else {
-            36.0
-        };
+        let text = window.text_system();
+        let digit_w = text
+            .ch_advance(text.resolve_font(&font(self.family.clone())), px(font_size))
+            .ok()
+            .map(|w| w.as_f32());
+        let gutter_w = gutter_width(total_lines, digit_w, font_size);
 
         let banner = self
             .frame
@@ -404,13 +628,14 @@ impl Render for FilePaneView {
         let view = cx.entity().downgrade();
         let measure = canvas(
             move |bounds, _, cx| {
-                let height = bounds.size.height.as_f32();
-                let _ = view.update(cx, |this, cx| this.measured(height, cx));
+                let (top, height) = (bounds.origin.y.as_f32(), bounds.size.height.as_f32());
+                let _ = view.update(cx, |this, cx| this.measured(top, height, cx));
             },
             |_, _, _, _| {},
         )
         .absolute()
         .size_full();
+        let scrollbar = self.render_scrollbar(cx);
         let label = self.frame.as_ref().map_or_else(
             || "File preview".to_owned(),
             |f| format!("{}, read-only", f.path),
@@ -457,7 +682,8 @@ impl Render for FilePaneView {
                     .w_full()
                     .overflow_hidden()
                     .child(body)
-                    .child(measure),
+                    .child(measure)
+                    .children(scrollbar),
             )
     }
 }
@@ -496,7 +722,10 @@ fn stamp_frame(enabled: bool) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_top, rows_in, scroll_key};
+    use super::{
+        MIN_THUMB_H, ScrollThumb, TrackHit, dragged_line, gutter_width, last_top, rows_in,
+        scroll_key, scroll_thumb, track_hit,
+    };
 
     #[test]
     fn rf_ctx_02_the_rows_follow_the_code_area_height() {
@@ -528,5 +757,116 @@ mod tests {
         // A file shorter than the pane never scrolls.
         assert_eq!(scroll_key("end", 0, 90, 40), Some(0));
         assert_eq!(last_top(90, 40), 0);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_gutter_fits_the_widest_line_number() {
+        // 9 px of padding and a 1 px border right of the numbers.
+        let w = |total, digit| gutter_width(total, Some(digit), 13.0);
+        assert_eq!(w(0, 7.0), 31.0);
+        assert_eq!(w(1, 7.0), 31.0);
+        assert_eq!(w(999, 7.0), 31.0);
+        assert_eq!(w(1_000, 7.0), 38.0);
+        assert_eq!(w(9_999, 7.0), 38.0);
+        assert_eq!(w(10_000, 7.0), 45.0);
+        assert_eq!(w(99_999, 7.0), 45.0);
+        assert_eq!(w(123_456, 7.0), 52.0);
+        // A fractional advance rounds up so the last digit is never clipped.
+        assert_eq!(w(123_456, 7.2), 54.0);
+        // Zoom: the width follows the measured advance, digit for digit.
+        assert_eq!(w(123_456, 12.0), 82.0);
+        assert!(w(123_456, 12.0) > w(123_456, 7.2));
+        // No metrics: 0.6 of the font size per digit.
+        for bad in [None, Some(0.0), Some(-1.0), Some(f32::NAN)] {
+            assert_eq!(gutter_width(10_000, bad, 20.0), 70.0, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn rf_ctx_02_the_thumb_is_the_visible_share_of_the_track() {
+        // 30 of 300 lines in a 600 px track: a tenth of it.
+        let at = |top| scroll_thumb(600.0, top, 30, 300).unwrap();
+        assert_eq!(
+            at(0),
+            ScrollThumb {
+                top: 0.0,
+                height: 60.0
+            }
+        );
+        // Halfway down the scrollable range, halfway down the free track.
+        assert_eq!(at(135).top, 270.0);
+        // The last page puts the thumb against the bottom.
+        assert_eq!(
+            at(270),
+            ScrollThumb {
+                top: 540.0,
+                height: 60.0
+            }
+        );
+        // A top past the last page (the core clamps it) still stays inside.
+        assert_eq!(at(10_000).top, 540.0);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_thumb_never_shrinks_below_its_minimum() {
+        let thumb = scroll_thumb(600.0, 0, 30, 1_000_000).unwrap();
+        assert_eq!(thumb.height, MIN_THUMB_H);
+        let last = scroll_thumb(600.0, 999_970, 30, 1_000_000).unwrap();
+        assert_eq!(last.top + last.height, 600.0);
+        // A track shorter than the minimum is filled, never overflowed.
+        let tiny = scroll_thumb(10.0, 5, 2, 100).unwrap();
+        assert_eq!(
+            tiny,
+            ScrollThumb {
+                top: 0.0,
+                height: 10.0
+            }
+        );
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_that_fits_the_pane_has_no_thumb() {
+        assert_eq!(scroll_thumb(600.0, 0, 30, 30), None);
+        assert_eq!(scroll_thumb(600.0, 0, 30, 12), None);
+        assert_eq!(scroll_thumb(600.0, 0, 30, 0), None);
+        for track in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(scroll_thumb(track, 0, 30, 300), None, "{track}");
+        }
+    }
+
+    #[test]
+    fn rf_ctx_02_dragging_the_thumb_scrolls_in_step_with_it() {
+        let (track, rows, total) = (600.0, 30, 300);
+        // Not moved: the same line, for every line.
+        for from in 0..=270 {
+            assert_eq!(dragged_line(track, from, 0.0, rows, total), from);
+        }
+        // 540 px of free track for 270 lines: 2 px a line.
+        assert_eq!(dragged_line(track, 0, 20.0, rows, total), 10);
+        assert_eq!(dragged_line(track, 100, -40.0, rows, total), 80);
+        // Past either end of the track it stops at the first or last page.
+        assert_eq!(dragged_line(track, 10, -5_000.0, rows, total), 0);
+        assert_eq!(dragged_line(track, 10, 5_000.0, rows, total), 270);
+        // The minimum thumb on a huge file still reaches both ends.
+        let total = 1_000_000;
+        assert_eq!(dragged_line(track, 0, 576.0, rows, total), 999_970);
+        assert_eq!(dragged_line(track, 999_970, -576.0, rows, total), 0);
+        // A thumb that fills its track cannot move the page.
+        assert_eq!(dragged_line(10.0, 5, 3.0, 2, 100), 5);
+        assert_eq!(dragged_line(track, 0, 50.0, 30, 30), 0);
+    }
+
+    #[test]
+    fn rf_ctx_02_a_press_on_the_track_pages_toward_it() {
+        let thumb = ScrollThumb {
+            top: 100.0,
+            height: 60.0,
+        };
+        assert_eq!(track_hit(0.0, thumb), TrackHit::PageUp);
+        assert_eq!(track_hit(99.5, thumb), TrackHit::PageUp);
+        assert_eq!(track_hit(100.0, thumb), TrackHit::Thumb);
+        assert_eq!(track_hit(159.5, thumb), TrackHit::Thumb);
+        assert_eq!(track_hit(160.0, thumb), TrackHit::PageDown);
+        assert_eq!(track_hit(599.0, thumb), TrackHit::PageDown);
     }
 }

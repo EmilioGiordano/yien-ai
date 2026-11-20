@@ -22,12 +22,14 @@ capture here yet; the Codex screen fixtures live in
 | Claude Code | 2.1.325 | permission prompt | `claude-2.1.325-permission.bin` | `claude-2.1.325-permission.steps` |
 | Claude Code | 2.1.325 | API error (mock `mockerror` trigger) | `claude-2.1.325-error.bin` | `claude-2.1.325-error.steps` |
 | Claude Code | 2.1.325 | normal exit (`/exit`) | `claude-2.1.325-exit.bin` | `claude-2.1.325-exit.steps` |
+| Claude Code | 2.1.326 | Ctrl+C at turn start / Ctrl+C twice to exit | `claude-2.1.326-ctrl-c.bin` | `claude-2.1.326-ctrl-c.steps` |
 | OpenCode | 2.3.0 | startup until it reports idle | `opencode-2.3.0-startup.bin` | `opencode-2.3.0-startup.steps` |
 | OpenCode | 2.3.0 | Esc mid-turn (this build aborts on the second Esc) | `opencode-2.3.0-esc.bin` | `opencode-2.3.0-esc.steps` |
 | OpenCode | 2.3.0 | Ctrl+C once mid-turn, which also quits (no "three times" case exists) | `opencode-2.3.0-ctrl-c.bin` | `opencode-2.3.0-ctrl-c.steps` |
 | OpenCode | 2.3.0 | permission prompt | `opencode-2.3.0-permission.bin` | `opencode-2.3.0-permission.steps` |
 | OpenCode | 2.3.0 | API error (mock `mockerror` trigger) | `opencode-2.3.0-error.bin` | `opencode-2.3.0-error.steps` |
 | OpenCode | 2.3.0 | normal exit (Ctrl+C at the idle prompt) | `opencode-2.3.0-exit.bin` | `opencode-2.3.0-exit.steps` |
+| Claude Code | 2.1.327 | full turn: `state=working`, then `state=done` at the mock's end (shows `esc to interrupt` on the bottom status bar while streaming and drops it at rest) | `claude-2.1.327-turn.bin` | `claude-2.1.327-turn.steps` |
 
 `claude-2.1.325-ctrl-c.bin` also carries the exit (`clear` records): reused,
 not redone. `claude-2.1.325-typed-in-powershell.bin` and
@@ -37,6 +39,24 @@ and stay as they are.
 The user name inside the 2.1.325 captures is the build machine's slot path,
 not a person; the permission and error fixtures send their turn to the mock,
 and the reply is synthetic.
+
+The 2.1.326 capture ran against the real OS profile, not a throwaway one:
+this version ignores `CLAUDE_CONFIG_DIR` for trust decisions and answered a
+folder trust screen and a "custom API key" question on first launch (the
+answers were given through the capture, and Claude persisted them itself).
+The model went to the mock; no account or quota was involved. Its turn was
+interrupted before the first token streamed (the capture's `wait-for`
+matched the interrupt hint the turn draws as it starts), so the turn was
+still inside its startup latency when Ctrl+C landed: the mock saw no
+request and no `UserPromptSubmit` hook fired. What it shows, against
+2.1.325: the first `state=idle` after the status query is gone (325 sent
+one at rest, 326 does not), the interrupt still travels as
+`state=working` then `state=idle` about 110 bytes apart, the folder trust
+screen answers `state=blocked:kind=permission:msg=trust this folder`, no
+`Stop` hook ever fires, and the exit sends one `state=clear` with the
+`SessionEnd(prompt_input_exit)` hook. The capture cannot speak for a
+turn already streaming when Ctrl+C lands; the interrupted line the turn
+draws is covered by the screen rule and replay tests instead.
 
 ## Recapturing for a new CLI version
 

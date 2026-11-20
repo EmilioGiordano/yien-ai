@@ -42,8 +42,9 @@ use crate::model::{
 use crate::os_tray::{OsTray, TrayEvent};
 use crate::os_window::OsWindow;
 use crate::palette::{
-    Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
+    Entry, Ink, KeyboardTo, Mode, Palette, PaneFocusNow, Row, Target, command_entries, ink_runs,
+    keyboard_after_close, keyboard_pane, pane_focus_now, session_entries, switcher_entries,
+    switcher_home, sync_focus_move,
 };
 use crate::pane_head::{
     self, HeadText, PaneHeadLayout, head_mark, names_agent, pane_badge, program_tag,
@@ -880,13 +881,19 @@ impl Shell {
             return;
         }
         let target = keyboard_pane(&self.workspace);
-        if target == self.keyboard_on {
+        let has_view = target
+            .is_some_and(|p| self.terminals.contains_key(&p) || self.file_panes.contains_key(&p));
+        let Some((to, next_on)) = sync_focus_move(target, self.keyboard_on, has_view) else {
             return;
-        }
-        self.keyboard_on = target;
-        match target.and_then(|p| self.pane_focus_handle(p, cx)) {
-            Some(handle) => window.focus(&handle, cx),
-            None => window.focus(&self.focus, cx),
+        };
+        self.keyboard_on = next_on;
+        match to {
+            KeyboardTo::Pane(pane) => {
+                if let Some(handle) = self.pane_focus_handle(pane, cx) {
+                    window.focus(&handle, cx);
+                }
+            }
+            KeyboardTo::Window => window.focus(&self.focus, cx),
         }
     }
 
@@ -1559,7 +1566,7 @@ impl Shell {
                     self.select_tab(tab, window, cx);
                 }
             }
-            Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
+            Target::Pane(pane) => self.focus_pane_target(pane, window, cx),
             Target::Split(profile, orientation) => {
                 if let Some(pane) = self.focused_pane() {
                     self.split_pane(pane, orientation, false, Some(profile), cx);
@@ -2941,51 +2948,71 @@ impl Shell {
         let t = self.theme;
         let Some(badge) = badge else {
             return self
-                .mark_glyph(mark)
+                .mark_element(mark, agent_badge::SIDE)
                 .size(px(agent_badge::SIDE))
                 .line_height(px(agent_badge::SIDE));
         };
-        let corner = assets::corner_mark_glyph(mark, self.spinner.frame()).map(|glyph| {
-            div()
-                .bg(ground)
-                .when_some(hover_group, |d, group| {
-                    d.group_hover(group, move |s| s.bg(t.hover))
-                })
-                .text_size(px(glyph.size))
-                .line_height(px(agent_badge::CORNER))
-                .font_weight(if glyph.bold {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(t.tab_mark_color(mark))
-                .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-                .child(glyph.text)
+        let corner = assets::corner_mark_visual(mark, self.spinner.frame()).map(|visual| {
+            let color = t.tab_mark_color(mark);
+            let disc = div().bg(ground).when_some(hover_group, |d, group| {
+                d.group_hover(group, move |s| s.bg(t.hover))
+            });
+            match visual {
+                assets::MarkVisual::Glyph(glyph) => disc
+                    .text_size(px(glyph.size))
+                    .line_height(px(agent_badge::CORNER))
+                    .font_weight(if glyph.bold {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(color)
+                    .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                    .child(glyph.text),
+                assets::MarkVisual::Spinner(path) => disc.child(
+                    svg()
+                        .path(path)
+                        .size(px(agent_badge::CORNER))
+                        .flex_none()
+                        .text_color(color),
+                ),
+            }
         });
         agent_badge::badge(badge, corner, self.fonts.mono.clone())
     }
 
-    /// A state's mark outside the tab rows, the same glyph and colour as a
+    /// A state's mark outside the tab rows, the same visual and colour as a
     /// tab row's in a 14 px square, so every surface tells error from
     /// "needs you" by shape (RN-01). No id, like the tab row's.
     fn state_mark(&self, state: AgentState) -> Div {
-        self.mark_glyph(TabMark::State(state))
+        self.mark_element(TabMark::State(state), 14.0)
             .size(px(14.0))
             .line_height(self.theme.text(14.0))
     }
 
-    /// A mark's glyph, centred in a slot the caller sizes.
-    fn mark_glyph(&self, mark: TabMark) -> Div {
+    /// A mark's visual, centred in a slot the caller sizes.
+    fn mark_element(&self, mark: TabMark, slot_size: f32) -> Div {
         let t = self.theme;
         let slot = div().flex().flex_none().items_center().justify_center();
-        let Some(glyph) = assets::tab_mark_glyph(mark, self.spinner.frame()) else {
+        let Some(visual) = assets::tab_mark_visual(mark, self.spinner.frame()) else {
             return slot;
         };
-        slot.text_size(t.text(glyph.size))
-            .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
-            .text_color(t.tab_mark_color(mark))
-            .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
-            .child(glyph.text)
+        let color = t.tab_mark_color(mark);
+        match visual {
+            assets::MarkVisual::Glyph(glyph) => slot
+                .text_size(t.text(glyph.size))
+                .when(glyph.bold, |d| d.font_weight(FontWeight::BOLD))
+                .text_color(color)
+                .when_some(self.fonts.mono.clone(), |d, family| d.font_family(family))
+                .child(glyph.text),
+            assets::MarkVisual::Spinner(path) => slot.child(
+                svg()
+                    .path(path)
+                    .size(px(slot_size))
+                    .flex_none()
+                    .text_color(color),
+            ),
+        }
     }
 
     /// The tab's name, or the field editing it.
@@ -3707,6 +3734,24 @@ impl Shell {
                 this.toggle_split_menu(id, orientation, cx);
             }))
             .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// Gives `pane` the focus and the keyboard (palette or `pane.focus`).
+    /// Focusing an already-focused pane on the active tab emits nothing from
+    /// the core, so its terminal is focused directly when drawn.
+    fn focus_pane_target(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_in_bar = false;
+        let drawn = self.terminals.contains_key(&pane) || self.file_panes.contains_key(&pane);
+        match pane_focus_now(&self.workspace, pane, drawn) {
+            PaneFocusNow::Terminal(id) => {
+                if let Some(handle) = self.pane_focus_handle(id, cx) {
+                    window.focus(&handle, cx);
+                    self.keyboard_on = Some(id);
+                }
+            }
+            PaneFocusNow::WaitForCore => self.keyboard_on = None,
+        }
+        self.command(Command::FocusPane { pane }, cx);
     }
 
     /// A click on a pane head gives that pane the focus and the keyboard,

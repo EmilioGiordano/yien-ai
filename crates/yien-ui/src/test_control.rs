@@ -8,7 +8,8 @@ use gpui_kit::Keystroke;
 use tokio::sync::mpsc;
 use yien_proto::frame::Frame;
 use yien_proto::test_control::{
-    CommandArgs, PaneState, ProjectState, Reply, Request, SplitWay, TabState, VisibleRows,
+    CommandArgs, FileScroll, PaneState, ProjectState, Reply, Request, SplitWay, TabState,
+    VisibleRows,
 };
 use yien_proto::{Orientation, PaneId};
 
@@ -252,6 +253,8 @@ pub(crate) struct TerminalFacts {
     pub(crate) frame_at_ms: Option<u64>,
     /// Its visible rows, when asked for.
     pub(crate) rows: Option<Vec<String>>,
+    /// A file pane's scroll position.
+    pub(crate) scroll: Option<FileScroll>,
 }
 
 impl TerminalFacts {
@@ -260,6 +263,7 @@ impl TerminalFacts {
             size: (frame.size.cols, frame.size.rows),
             frame_at_ms,
             rows: with_text.then(|| (0..frame.lines.len()).map(|r| frame.line_text(r)).collect()),
+            scroll: None,
         }
     }
 }
@@ -339,6 +343,7 @@ pub(crate) fn workspace_state(
                     visible: drawn.contains(&id),
                     size: facts.as_ref().map(|f| f.size),
                     frame_at_ms: facts.as_ref().and_then(|f| f.frame_at_ms),
+                    scroll: facts.as_ref().and_then(|f| f.scroll),
                     rows: facts.and_then(|f| f.rows).map(VisibleRows::new),
                     kind,
                     open_files,
@@ -898,9 +903,23 @@ mod tests {
             }),
             ..pane_info(4, 2, "file", "main.rs", yien_proto::AgentState::Idle)
         });
-        let (_, _, panes) = workspace_state(&ws, Some(PaneId::new(4)), &|_| None);
+        let scroll = FileScroll {
+            top_line: 40,
+            rows: 30,
+            total_lines: 300,
+        };
+        let facts = |p: PaneId| {
+            (p == PaneId::new(4)).then_some(TerminalFacts {
+                size: (80, 30),
+                frame_at_ms: None,
+                rows: None,
+                scroll: Some(scroll),
+            })
+        };
+        let (_, _, panes) = workspace_state(&ws, Some(PaneId::new(4)), &facts);
         let file_pane = panes.iter().find(|p| p.id == PaneId::new(4)).unwrap();
         assert_eq!(file_pane.kind, "file");
+        assert_eq!(file_pane.scroll, Some(scroll));
         assert_eq!(
             file_pane.open_files,
             Some(vec!["src/main.rs".into(), "Cargo.toml".into()])

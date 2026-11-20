@@ -1,0 +1,10 @@
+# Claude Code 2.1.327, trusted folder, mock Messages API: a full slow turn
+# streaming to completion (`state=working` then `state=done`), followed by one
+# Ctrl+C at rest (`Press Ctrl-C again to exit`).
+wait-for 60000 effort
+text slow please
+key enter
+wait-for 60000 done
+wait 500
+key ctrl-c
+wait 3000

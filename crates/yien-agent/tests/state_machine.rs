@@ -553,11 +553,11 @@ fn rf_age_05_watchdog_rechecks_but_never_reds_by_time() {
     p.at(ms(30_000)).send(Signal::Tick);
     assert_eq!(
         p.fx,
-        vec![Effect::WakeAt(ms(40_000))],
-        "activity pushes the watchdog"
+        vec![Effect::CheckScreen, Effect::WakeAt(ms(40_000))],
+        "the interrupt read fires on the way, activity pushes the watchdog"
     );
     p.at(ms(40_000)).send(Signal::Tick);
-    assert_eq!(p.fx, vec![Effect::CheckScreen, Effect::WakeAt(ms(70_000))]);
+    assert_eq!(p.fx, vec![Effect::WakeAt(ms(70_000))]);
     p.send(Signal::Screen(ScreenVerdict::NoMatch));
     for minute in 1..=60 {
         p.at(ms(minute * 60_000)).send(Signal::Tick);
@@ -1544,7 +1544,11 @@ fn rf_age_05_the_first_osc_7501_record_ends_a_typed_agent_s_startup() {
     let mut p = Pane::typed_in_powershell();
     p.send(status(AgentStatus::Working)).send(Signal::Output);
     assert!(!p.m.reads_typed_agent());
-    assert_eq!(p.m.next_wake(), None);
+    assert!(p.m.reads_interrupt_screen());
+    assert_eq!(p.fx, vec![Effect::WakeAt(ms(300))]);
+    p.at(ms(300)).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    p.send(Signal::Screen(ScreenVerdict::NoMatch));
 }
 
 #[test]
@@ -2125,4 +2129,228 @@ fn rn_01_a_service_error_never_marks_red() {
             assert!(!run(&config, seq), "red from {seq:?}");
         });
     }
+}
+
+#[test]
+fn rf_age_05_an_interrupted_turn_goes_idle_in_a_hooked_pane() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    p.send(Signal::Screen(ScreenVerdict::Interrupted));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Screen),
+    }));
+    assert!(!p.fx.contains(&Effect::MarkRed));
+    // The next turn starts clean.
+    p.send(hook(HookEvent::UserPromptSubmit));
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn rf_age_05_turn_ended_in_a_hooked_pane_is_idle_when_unseen() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    // An interrupt always ends the turn as Idle, never Done and never red.
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::Transition {
+        from: AgentState::Working,
+        to: AgentState::Idle,
+        cause: Cause::Source(Source::Screen),
+    }));
+    assert!(!p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_turn_ended_in_a_hooked_pane_is_idle_when_seen() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true));
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rf_age_05_turn_ended_during_pending_permission_keeps_red() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Output);
+    let read_at = p.m.next_wake().expect("the turn arms a read");
+    p.at(read_at).send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    // A permission prompt arrives before the screen verdict comes back.
+    p.send(hook(HookEvent::PermissionRequest));
+    assert!(p.m.needs_you_pending());
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.m.needs_you_pending());
+    p.at(p.m.next_wake().expect("pending confirmation"))
+        .send(Signal::Tick);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+    assert!(p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_typed_agent_ready_screen_clears_shell_working_to_idle() {
+    // Startup trust screen answered straight to the ready prompt clears red to Idle.
+    let mut p = Pane::typed_in_powershell();
+    assert_eq!(p.state(), AgentState::Working);
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), SCREEN_RED);
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+    assert!(p.m.reads_typed_agent() && p.m.typed_repl_ready());
+    // Once the REPL is ready, screen rules must never raise red (RN-02).
+    p.settled_screen(ScreenVerdict::NeedsYou);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.contains(&Effect::MarkRed));
+}
+
+#[test]
+fn rf_age_05_typed_agent_in_turn_verdict_enters_working_and_arms_interrupt_reads() {
+    let mut p = Pane::typed_in_powershell();
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Idle);
+    // A turn starts without OSC 7501: InTurn transitions Idle -> Working.
+    p.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.m.typed_repl_ready());
+    // While Working in the REPL, Output arms an interrupt read (not startup).
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("interrupt read armed"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    assert!(p.m.screen_read_is_interrupt());
+    // Interrupt ends the turn as Idle, never Done and never red.
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.contains(&Effect::MarkRed));
+    // A second turn can still enter Working via InTurn.
+    p.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(p.state(), AgentState::Working);
+    // InTurn outside a typed shell pane does nothing.
+    let mut hooked = Pane::spawned(claude());
+    hooked.settled_screen(ScreenVerdict::InTurn);
+    assert_eq!(hooked.state(), AgentState::Idle);
+}
+
+#[test]
+fn rn_02_ready_verdict_outside_typed_startup_changes_nothing() {
+    let mut p = Pane::working_claude();
+    p.settled_screen(ScreenVerdict::Ready);
+    assert_eq!(p.state(), AgentState::Working);
+}
+
+#[test]
+fn rf_age_05_exit_after_turn_ended_in_a_seen_pane_stays_idle() {
+    let mut p = Pane::working_claude();
+    p.send(Signal::Seen(true));
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(hook(HookEvent::SessionEnd(
+        SessionEndReason::PromptInputExit,
+    )))
+    .send(Signal::Exited { code: Some(0) });
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.m.is_red());
+}
+
+#[test]
+fn rf_age_05_turn_ended_at_a_permission_prompt_stays_needs_you() {
+    let mut p = Pane::needs_you_claude();
+    p.settled_screen(ScreenVerdict::TurnEnded);
+    assert_eq!(p.state(), AgentState::NeedsYou(NeedsReason::Permission));
+    assert!(!p.fx.contains(&Effect::ClearRed));
+    assert!(p.fx.iter().all(|e| !matches!(
+        e,
+        Effect::Transition {
+            to: AgentState::Idle,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn rf_age_05_turn_ended_from_an_idle_pane_stays_idle() {
+    let mut p = Pane::new(claude());
+    p.send(Signal::Spawned);
+    p.send(Signal::Screen(ScreenVerdict::TurnEnded));
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(!p.fx.iter().any(|e| matches!(
+        e,
+        Effect::Transition {
+            to: AgentState::Idle,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn rf_age_05_an_interrupted_turn_at_a_permission_prompt_goes_idle() {
+    let mut p = Pane::needs_you_claude();
+    p.settled_screen(ScreenVerdict::Interrupted);
+    assert_eq!(p.state(), AgentState::Idle);
+    assert!(p.fx.contains(&Effect::ClearRed));
+}
+
+#[test]
+fn rf_age_05_the_interrupt_line_never_ends_a_finished_turn() {
+    for end in [hook(HookEvent::Stop), hook(HookEvent::StopFailure)] {
+        let mut p = Pane::working_claude();
+        p.send(end.clone());
+        let ended = p.state();
+        p.send(Signal::Screen(ScreenVerdict::Interrupted));
+        assert_eq!(p.state(), ended, "{end:?}");
+    }
+}
+
+#[test]
+fn rf_age_05_the_interrupt_line_is_not_needed_once_the_record_ends_the_turn() {
+    // Claude 2.1.325 always records its interrupts; the screen line rule
+    // only sees turns nothing else ended (2.1.326 mid-stream).
+    let mut p = Pane::working_claude();
+    p.send(osc(OscSignal::Status7501(AgentStatus::Idle(
+        Reporter::ClaudeCode,
+    ))));
+    assert_eq!(p.state(), AgentState::Idle);
+}
+
+#[test]
+fn rn_02_an_interrupted_verdict_when_no_turn_is_open_changes_nothing() {
+    let mut p = Pane::spawned(claude());
+    p.send(Signal::Screen(ScreenVerdict::Interrupted));
+    assert_eq!(p.state(), AgentState::Idle);
+    p.send(hook(HookEvent::UserPromptSubmit))
+        .send(hook(HookEvent::Stop));
+    let ended = p.state();
+    p.send(Signal::Screen(ScreenVerdict::Interrupted));
+    assert_eq!(p.state(), ended);
+}
+
+#[test]
+fn rf_age_05_a_typed_agent_s_turn_is_read_for_the_interrupt_line_after_its_report() {
+    let mut p = Pane::typed_in_powershell();
+    p.send(status(AgentStatus::Working));
+    assert_eq!(p.state(), AgentState::Working);
+    assert!(p.m.reads_interrupt_screen());
+    // The caller was told to read; the line matches; the turn ends.
+    p.send(Signal::Output);
+    p.at(p.m.next_wake().expect("the turn arms a read"))
+        .send(Signal::Tick);
+    assert_eq!(p.fx, vec![Effect::CheckScreen]);
+    p.send(Signal::Screen(ScreenVerdict::Interrupted));
+    assert_eq!(p.state(), AgentState::Idle);
 }
