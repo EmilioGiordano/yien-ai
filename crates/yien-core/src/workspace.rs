@@ -3858,6 +3858,7 @@ mod tests {
             &resolve,
         )
         .unwrap();
+        assert!((first_share(&ws, tab) - 0.4).abs() < 0.01);
 
         ws.apply(
             Command::MovePane {
@@ -3869,6 +3870,154 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ws.tabs[0].panes(), vec![term_pane, file_pane]);
+        assert_eq!(ws.check(), Ok(()));
+    }
+
+    /// The first child's part of the tab's top split.
+    fn first_share(ws: &Workspace, tab: TabId) -> f32 {
+        let LayoutNode::Split { children, .. } = ws.tab_info(ws.tab(tab).unwrap()).layout else {
+            panic!("expected a split");
+        };
+        let total: f32 = children.iter().map(|c| c.flex).sum();
+        children[0].flex / total
+    }
+
+    fn open(ws: &mut Workspace, tab: TabId, path: &str) -> Vec<Effect> {
+        run(
+            ws,
+            Command::OpenFile {
+                tab,
+                path: path.into(),
+            },
+        )
+    }
+
+    fn loads(fx: &[Effect]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::LoadFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn active_file(ws: &Workspace, pane: PaneId) -> Option<String> {
+        ws.panes[&pane]
+            .files
+            .as_ref()
+            .and_then(|f| f.active_file().map(str::to_owned))
+    }
+
+    #[test]
+    fn rf_ctx_02_selecting_a_file_tab_loads_it_only_when_it_changes() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        open(&mut ws, tab, "a.rs");
+        open(&mut ws, tab, "b.rs");
+        let file = ws.tab(tab).unwrap().focused;
+        let fx = run(
+            &mut ws,
+            Command::SelectFileTab {
+                pane: file,
+                path: "a.rs".into(),
+            },
+        );
+        assert_eq!(loads(&fx), ["a.rs"]);
+        assert_eq!(active_file(&ws, file).as_deref(), Some("a.rs"));
+        let again = Command::SelectFileTab {
+            pane: file,
+            path: "a.rs".into(),
+        };
+        assert!(loads(&run(&mut ws, again)).is_empty());
+        let unknown = Command::SelectFileTab {
+            pane: file,
+            path: "c.rs".into(),
+        };
+        assert!(run(&mut ws, unknown).is_empty());
+        assert_eq!(active_file(&ws, file).as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_resizes_maximizes_and_takes_the_focus_like_any_pane() {
+        let mut ws = Workspace::new();
+        let (tab, term) = project(&mut ws);
+        open(&mut ws, tab, "src/lib.rs");
+        let file = ws.tab(tab).unwrap().focused;
+        assert_eq!(ws.tab(tab).unwrap().panes(), [term, file]);
+
+        run(
+            &mut ws,
+            Command::ResizeSplit {
+                pane: file,
+                delta: 0.2,
+            },
+        );
+        assert!((first_share(&ws, tab) - 0.3).abs() < 0.01);
+
+        let fx = run(&mut ws, Command::ToggleMaximize { pane: file });
+        assert_eq!(ws.tab_info(ws.tab(tab).unwrap()).maximized, Some(file));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: false, .. } if *pane == term
+        )));
+        run(&mut ws, Command::ToggleMaximize { pane: file });
+        assert_eq!(ws.tab_info(ws.tab(tab).unwrap()).maximized, None);
+
+        run(
+            &mut ws,
+            Command::FocusDirection {
+                direction: Direction::Left,
+            },
+        );
+        assert_eq!(ws.tab(tab).unwrap().focused, term);
+        run(
+            &mut ws,
+            Command::FocusDirection {
+                direction: Direction::Right,
+            },
+        );
+        assert_eq!(ws.tab(tab).unwrap().focused, file);
+        assert_eq!(ws.check(), Ok(()));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_follows_its_tab_and_closes_like_any_pane() {
+        let mut ws = Workspace::new();
+        let (tab, term) = project(&mut ws);
+        open(&mut ws, tab, "src/lib.rs");
+        let file = ws.tab(tab).unwrap().focused;
+
+        let project = ws.tab(tab).unwrap().project;
+        let other = run(
+            &mut ws,
+            Command::NewTab {
+                project,
+                name: None,
+                profile: None,
+            },
+        );
+        assert!(other.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: false, .. } if *pane == file
+        )));
+        let fx = run(&mut ws, Command::SelectTab { tab });
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: true, .. } if *pane == file
+        )));
+        assert_eq!(ws.tab(tab).unwrap().focused, file);
+
+        let fx = run(&mut ws, Command::ClosePane { pane: file });
+        assert_eq!(stopped(&fx), [file]);
+        assert_eq!(ws.tab(tab).unwrap().panes(), [term]);
+        assert!(!ws.panes.contains_key(&file));
+
+        open(&mut ws, tab, "Cargo.toml");
+        let file = ws.tab(tab).unwrap().focused;
+        let fx = run(&mut ws, Command::CloseTab { tab });
+        let gone: HashSet<PaneId> = stopped(&fx).into_iter().collect();
+        assert_eq!(gone, HashSet::from([term, file]));
+        assert!(!ws.panes.contains_key(&file));
         assert_eq!(ws.check(), Ok(()));
     }
 
