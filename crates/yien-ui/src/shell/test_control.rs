@@ -126,12 +126,18 @@ impl Shell {
         }
     }
 
-    /// The pane whose terminal holds the keyboard now, if one does.
+    /// The pane whose terminal or file preview holds the keyboard now, if one does.
     fn keyboard_pane_now(&self, window: &Window, cx: &App) -> Option<PaneId> {
         self.terminals
             .iter()
             .find(|(_, terminal)| terminal.read(cx).handle().is_focused(window))
             .map(|(pane, _)| *pane)
+            .or_else(|| {
+                self.file_panes
+                    .iter()
+                    .find(|(_, file_pane)| file_pane.read(cx).handle().is_focused(window))
+                    .map(|(pane, _)| *pane)
+            })
     }
 
     /// `pane`, when its terminal holds the keyboard: a user types only into
@@ -157,6 +163,11 @@ impl Shell {
             self.terminals
                 .get(&pane)
                 .and_then(|t| t.read(cx).facts(with_text))
+                .or_else(|| {
+                    self.file_panes
+                        .get(&pane)
+                        .and_then(|f| f.read(cx).facts(with_text))
+                })
         };
         let (projects, tabs, panes) = workspace_state(&self.workspace, keyboard, &terminal);
         let viewport = window.viewport_size();

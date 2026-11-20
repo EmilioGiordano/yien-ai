@@ -1,5 +1,6 @@
-//! The context bar's Files view (RF-CTX-01, RF-CTX-03): the tree of the
-//! selected tab's folder with its filter, and opening files in the editor.
+//! The context bar's Files view (RF-CTX-01, RF-CTX-02, RF-CTX-03): the tree
+//! of the selected tab's folder with its filter; a file opens in the preview
+//! pane, or in the editor.
 //! What the tree shows is decided in `crate::file_tree`.
 
 use std::collections::HashMap;
@@ -289,7 +290,18 @@ impl Shell {
 
     fn act(&mut self, tab: TabId, activation: Activation, cx: &mut Context<Self>) {
         match activation {
-            Activation::Open(rel) => {
+            Activation::Preview(rel) => {
+                if self
+                    .files
+                    .trees
+                    .get(&tab)
+                    .and_then(|t| t.path_of(&rel))
+                    .is_some()
+                {
+                    self.command(yien_proto::Command::OpenFile { tab, path: rel }, cx);
+                }
+            }
+            Activation::Edit(rel) => {
                 let file = self.files.trees.get(&tab).and_then(|t| t.path_of(&rel));
                 if let Some(file) = file {
                     self.open_file(file, cx);
@@ -440,6 +452,18 @@ impl Shell {
         self.modality = Modality::Keyboard;
         let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         self.with_tree(cx, FileTree::activate);
+        self.sync_filter_text(was_filtering, window, cx);
+    }
+
+    pub(super) fn file_tree_open_in_editor(
+        &mut self,
+        _: &FileTreeOpenInEditor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.modality = Modality::Keyboard;
+        let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
+        self.with_tree(cx, FileTree::activate_in_editor);
         self.sync_filter_text(was_filtering, window, cx);
     }
 
@@ -647,11 +671,12 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some((_, tree)) = self.shown_tree() else {
+        let Some((tab, tree)) = self.shown_tree() else {
             return Vec::new();
         };
         let rows = tree.rows();
         let cursor = tree.cursor_index(&rows);
+        let active_preview = self.workspace.active_preview_file(tab).map(str::to_owned);
         let t = self.theme;
         let mono = self.fonts.mono.clone();
         let ringed = self.ringed(Region::ContextBar);
@@ -661,6 +686,12 @@ impl Shell {
             .skip(range.start)
             .take(range.len())
             .map(|(at, row)| {
+                let is_open_file = match &row {
+                    Row::Entry { path, kind, .. } | Row::Hit { path, kind } if !kind.is_dir() => {
+                        active_preview.as_deref() == Some(path.as_str())
+                    }
+                    _ => false,
+                };
                 let base = h_flex()
                     .id(("file-row", at))
                     .h(px(ROW_HEIGHT))
@@ -671,7 +702,10 @@ impl Shell {
                     .border_1()
                     .border_color(transparent_black())
                     .text_size(t.text(12.5))
-                    .aria_selected(cursor == Some(at))
+                    .aria_selected(cursor == Some(at) || is_open_file)
+                    .when(is_open_file && cursor != Some(at), |row| {
+                        row.bg(t.raised).font_weight(FontWeight::MEDIUM)
+                    })
                     .when(cursor == Some(at), |row| {
                         row.bg(t.hover).when(ringed, |row| row.border_color(t.ai))
                     });

@@ -38,6 +38,10 @@ impl Shell {
             let family = self.fonts.terminal.clone();
             terminal.update(cx, |t, cx| t.set_font(family, size, window, cx));
         }
+        for file_pane in self.file_panes.values() {
+            let family = self.fonts.terminal.clone();
+            file_pane.update(cx, |f, cx| f.set_font(family, size, cx));
+        }
         cx.notify();
     }
 

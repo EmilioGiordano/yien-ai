@@ -228,6 +228,7 @@ pub struct ProjectRecord {
 ///         agent: None,
 ///         last_command: None,
 ///         name: None,
+///         files: None,
 ///     }],
 ///     focused: pane,
 ///     branch: None,
@@ -268,7 +269,7 @@ pub struct TabRecord {
     pub focused: PaneId,
 }
 
-/// One terminal pane.
+/// One pane in a tab's layout: a terminal pane or a read-only file preview pane.
 ///
 /// ```
 /// let pane = yien_session::PaneRecord {
@@ -278,6 +279,7 @@ pub struct TabRecord {
 ///     agent: None,
 ///     last_command: Some("cargo test".into()),
 ///     name: None,
+///     files: None,
 /// };
 /// assert!(pane.agent.is_none());
 /// ```
@@ -296,6 +298,32 @@ pub struct PaneRecord {
     pub agent: Option<AgentRecord>,
     /// The last command typed in a shell pane, offered for rerun on restore (RF-SES-05).
     pub last_command: Option<String>,
+    /// The open file tabs and wrap preference when this pane is a read-only file preview pane (RF-CTX-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<FilePaneRecord>,
+}
+
+/// The saved state of a read-only file preview pane (RF-CTX-02).
+///
+/// ```
+/// let files = yien_session::FilePaneRecord {
+///     files: vec!["src/main.rs".into(), "Cargo.toml".into()],
+///     active: Some(0),
+///     wrap: true,
+/// };
+/// assert_eq!(files.files.len(), 2);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FilePaneRecord {
+    /// Project-relative paths of the open file tabs, in horizontal tab order.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Zero-based index of the active file tab in `files`.
+    #[serde(default)]
+    pub active: Option<usize>,
+    /// Whether soft line wrapping is enabled for this file preview pane.
+    #[serde(default)]
+    pub wrap: bool,
 }
 
 /// The agent session a pane holds.

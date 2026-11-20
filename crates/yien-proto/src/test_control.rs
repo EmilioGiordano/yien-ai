@@ -147,6 +147,17 @@ impl Request {
                 if let Some(profile) = &args.profile {
                     name("profile", profile.as_str())?;
                 }
+                if let Some(path) = &args.path {
+                    if path.is_empty() {
+                        return Err("path is empty".to_owned());
+                    }
+                    if path.len() > MAX_TEXT_LEN {
+                        return Err(format!("path is longer than {MAX_TEXT_LEN} bytes"));
+                    }
+                    if path.chars().any(char::is_control) {
+                        return Err("path has a control character".to_owned());
+                    }
+                }
                 Ok(())
             }
             Self::Text { text, .. } => {
@@ -219,6 +230,9 @@ pub struct CommandArgs {
     /// The project to select.
     #[serde(default)]
     pub project: Option<ProjectId>,
+    /// The project-relative file path for `file.open` (RF-CTX-02).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Which way a split with a profile goes, as the split menu offers.
@@ -499,6 +513,43 @@ pub struct PaneState {
     /// Its visible rows, when the request asked for text and a frame came.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<VisibleRows>,
+    /// The pane kind: `"terminal"` or `"file"` (RF-CTX-02).
+    #[serde(default = "default_pane_kind")]
+    pub kind: String,
+    /// Open file tabs in horizontal tab order, when `kind` is `"file"` (RF-CTX-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<Vec<String>>,
+    /// The active file tab's relative path, when `kind` is `"file"` (RF-CTX-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_file: Option<String>,
+    /// Whether soft line wrap is enabled, when `kind` is `"file"` (RF-CTX-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<bool>,
+    /// Where its scrollbar stands, when `kind` is `"file"` and a frame came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<FileScroll>,
+}
+
+/// A file pane's scroll position: the scrollbar's offset is `top_line`,
+/// its range `0..=total_lines - rows`, and it shows a thumb only when
+/// `total_lines > rows` (RF-CTX-02).
+///
+/// ```
+/// let scroll = yien_proto::test_control::FileScroll { top_line: 0, rows: 30, total_lines: 300 };
+/// assert!(scroll.total_lines > scroll.rows);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileScroll {
+    /// The first line shown, from 0.
+    pub top_line: usize,
+    /// The lines a page holds.
+    pub rows: usize,
+    /// The lines in the file.
+    pub total_lines: usize,
+}
+
+fn default_pane_kind() -> String {
+    "terminal".to_owned()
 }
 
 /// A pane's visible rows, top to bottom. Its `Debug` shows only the count:
@@ -564,6 +615,11 @@ mod tests {
             size: None,
             frame_at_ms: None,
             rows: None,
+            kind: "terminal".into(),
+            open_files: None,
+            active_file: None,
+            wrap: None,
+            scroll: None,
         }
     }
 
@@ -803,6 +859,59 @@ mod tests {
         assert_eq!(json["frame_at_ms"], 1_700_000_000_000u64);
         let back: PaneState = serde_json::from_value(json).unwrap();
         assert_eq!(back.frame_at_ms, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn rf_ctx_02_file_pane_state_and_file_open_args_round_trip() {
+        let req =
+            parse(r#"{"op":"command","id":"file.open","args":{"path":"src/main.rs"}}"#).unwrap();
+        assert_eq!(req.check(), Ok(()));
+        assert_eq!(
+            req,
+            Request::Command {
+                id: "file.open".into(),
+                args: CommandArgs {
+                    path: Some("src/main.rs".into()),
+                    ..CommandArgs::default()
+                },
+            }
+        );
+        let bad_req = Request::Command {
+            id: "file.open".into(),
+            args: CommandArgs {
+                path: Some(String::new()),
+                ..CommandArgs::default()
+            },
+        };
+        assert!(bad_req.check().is_err());
+
+        let file_pane = PaneState {
+            kind: "file".into(),
+            open_files: Some(vec!["src/main.rs".into(), "Cargo.toml".into()]),
+            active_file: Some("src/main.rs".into()),
+            wrap: Some(true),
+            scroll: Some(FileScroll {
+                top_line: 270,
+                rows: 30,
+                total_lines: 300,
+            }),
+            ..pane()
+        };
+        let json = serde_json::to_value(&file_pane).unwrap();
+        assert_eq!(json["kind"], "file");
+        assert_eq!(json["active_file"], "src/main.rs");
+        assert_eq!(json["wrap"], true);
+        assert_eq!(json["scroll"]["top_line"], 270);
+        assert_eq!(json["scroll"]["rows"], 30);
+        assert_eq!(json["scroll"]["total_lines"], 300);
+        assert!(
+            serde_json::to_value(pane())
+                .unwrap()
+                .get("scroll")
+                .is_none()
+        );
+        let back: PaneState = serde_json::from_value(json).unwrap();
+        assert_eq!(back, file_pane);
     }
 
     #[test]

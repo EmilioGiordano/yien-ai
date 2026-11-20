@@ -5,8 +5,8 @@ mod common;
 use common::{basic, sample};
 use serde_json::{Map, Value, json};
 use yien_session::{
-    CodecError, MemStore, Migration, SCHEMA_VERSION, SideBarRecord, SideBarsRecord, deserialize,
-    deserialize_with, load, migrate_with, serialize, validate,
+    CodecError, FilePaneRecord, MemStore, Migration, SCHEMA_VERSION, SideBarRecord, SideBarsRecord,
+    deserialize, deserialize_with, load, migrate_with, serialize, validate,
 };
 
 const V0: &[u8] = include_bytes!("fixtures/workspace.v0.json");
@@ -202,6 +202,37 @@ fn a_migration_that_refuses_the_document_is_reported() {
         .remove("directory");
     let err = migrate_with(doc, 0, FAKE_TABLE).unwrap_err();
     assert!(matches!(err, CodecError::Migration { from: 0, .. }));
+}
+
+#[test]
+fn rf_ctx_02_file_pane_record_round_trips_in_schema_1() {
+    assert_eq!(SCHEMA_VERSION, 1, "file preview panes need no new schema");
+    let old = deserialize(V1).unwrap();
+    assert!(
+        old.projects[0]
+            .tabs
+            .iter()
+            .flat_map(|t| &t.panes)
+            .all(|p| p.files.is_none())
+    );
+
+    let mut with_files = sample(1_000);
+    with_files.projects[0].tabs[0].panes[1].files = Some(FilePaneRecord {
+        files: vec![
+            "crates/yien-core/src/workspace.rs".into(),
+            "Cargo.toml".into(),
+        ],
+        active: Some(1),
+        wrap: true,
+    });
+    let bytes = serialize(&with_files).unwrap();
+    let doc: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(
+        doc["projects"][0]["tabs"][0]["panes"][1]["files"]["wrap"],
+        true
+    );
+    assert_eq!(deserialize(&bytes).unwrap(), with_files);
 }
 
 #[test]

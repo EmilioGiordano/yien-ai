@@ -122,6 +122,9 @@ impl Shell {
             for terminal in self.terminals.values() {
                 terminal.update(cx, |t, cx| t.set_theme(theme, cx));
             }
+            for file_pane in self.file_panes.values() {
+                file_pane.update(cx, |f, cx| f.set_theme(theme, cx));
+            }
         }
         let size = crate::zoom::size(config.terminal_font.size, self.terminal_zoom);
         if fonts.terminal != self.fonts.terminal || size != self.terminal_size {
@@ -129,6 +132,10 @@ impl Shell {
             for terminal in self.terminals.values() {
                 let family = fonts.terminal.clone();
                 terminal.update(cx, |t, cx| t.set_font(family, size, window, cx));
+            }
+            for file_pane in self.file_panes.values() {
+                let family = fonts.terminal.clone();
+                file_pane.update(cx, |f, cx| f.set_font(family, size, cx));
             }
         }
         self.fonts = fonts;

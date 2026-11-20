@@ -54,6 +54,10 @@ impl CoreClient for Client {
     fn take_clipboard(&self, pane: PaneId) -> Option<String> {
         self.0.take_clipboard(pane)
     }
+
+    fn take_file_frame(&self, pane: PaneId) -> Option<yien_proto::file_preview::FileFrame> {
+        self.0.take_file_frame(pane)
+    }
 }
 
 fn main() -> ExitCode {

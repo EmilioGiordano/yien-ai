@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::{
-    AgentState, Command, CoreMsg, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PendingQuestion, ProfileId,
-    ProfileInfo, ProjectId, ProjectInfo, SessionTitle, SideBars, TabId, TabInfo, WorkspaceSnapshot,
-    is_shell_profile, same_folder,
+    AgentState, Command, CoreMsg, FilePaneInfo, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PaneKind,
+    PendingQuestion, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SessionTitle, SideBars, TabId,
+    TabInfo, WorkspaceSnapshot, is_shell_profile, same_folder,
 };
 use yien_session::is_session_id;
 
@@ -76,6 +76,13 @@ pub(crate) enum Effect {
         pane: PaneId,
         launch: u64,
         program: Option<String>,
+    },
+    /// Read and syntax-highlight `path` under `root` for a file preview `pane`
+    /// off the command loop, publishing [`CoreMsg::FileFrameReady`] (RF-CTX-02).
+    LoadFile {
+        pane: PaneId,
+        root: String,
+        path: String,
     },
 }
 
@@ -245,19 +252,56 @@ struct Pane {
     /// Its program exited, failed to start or lost its actor, and has not
     /// started again.
     stopped: bool,
+    /// Open file tabs and wrap preference when this pane is a read-only file
+    /// preview pane (RF-CTX-02).
+    files: Option<FilePane>,
+}
+
+/// The state of a read-only file preview pane in a tab's layout (RF-CTX-02).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FilePane {
+    /// Project-relative paths of the open file tabs, in horizontal tab order.
+    pub files: Vec<String>,
+    /// Zero-based index of the active file tab in `files`.
+    pub active: usize,
+    /// Whether soft line wrapping is enabled for this pane.
+    pub wrap: bool,
+}
+
+impl FilePane {
+    pub fn active_file(&self) -> Option<&str> {
+        self.files.get(self.active).map(String::as_str)
+    }
+
+    /// The active tab's index, clamped to the open tabs; `None` with no tab.
+    pub fn active_index(&self) -> Option<usize> {
+        let last = self.files.len().checked_sub(1)?;
+        Some(self.active.min(last))
+    }
+
+    pub fn to_info(&self) -> FilePaneInfo {
+        FilePaneInfo {
+            files: self.files.clone(),
+            active: self.active_index(),
+            wrap: self.wrap,
+        }
+    }
 }
 
 impl Pane {
     /// Whether its own program is starting or running, so its session id
     /// names a session that runs here (RF-SES-07).
     fn runs_session(&self) -> bool {
-        !self.stopped && self.standin.is_none()
+        self.files.is_none() && !self.stopped && self.standin.is_none()
     }
 
     /// The session title its head shows (RF-PAN-12): only while an agent
     /// runs, its profile's or one typed in its shell, and the user has not
     /// named the pane.
     fn session_title(&self) -> Option<SessionTitle> {
+        if self.files.is_some() {
+            return None;
+        }
         let agent =
             self.program.is_some() || (!is_shell_profile(&self.profile) && self.runs_session());
         // The actor owns every title of an agent profile's own program, not
@@ -667,6 +711,9 @@ impl Workspace {
                     .panes
                     .get_mut(&pane)
                     .ok_or(CoreError::UnknownPane(pane))?;
+                if p.files.is_some() {
+                    return Ok(fx);
+                }
                 // A new session until the new launch names one, so a quit
                 // before that never resumes the one the user ended.
                 p.launch += 1;
@@ -683,6 +730,9 @@ impl Workspace {
                     .panes
                     .get_mut(&pane)
                     .ok_or(CoreError::UnknownPane(pane))?;
+                if p.files.is_some() {
+                    return Ok(fx);
+                }
                 p.ended_explicitly = true;
                 fx.push(Effect::Terminate { pane });
             }
@@ -707,6 +757,10 @@ impl Workspace {
                 profile,
                 session_id,
             } => self.resume_session(project, &profile, session_id, resolve, &mut fx)?,
+            Command::OpenFile { tab, path } => self.open_file(tab, path, &mut fx)?,
+            Command::SelectFileTab { pane, path } => self.select_file_tab(pane, &path, &mut fx)?,
+            Command::CloseFileTab { pane, path } => self.close_file_tab(pane, &path, &mut fx)?,
+            Command::ToggleFileWrap { pane } => self.toggle_file_wrap(pane, &mut fx)?,
         }
         self.refresh_views(&mut fx);
         debug_assert_eq!(self.check(), Ok(()));
@@ -976,6 +1030,7 @@ impl Workspace {
                 standin: None,
                 program: None,
                 stopped: false,
+                files: None,
             },
         );
         fx.push(Effect::Spawn {
@@ -984,6 +1039,218 @@ impl Workspace {
             cwd,
             resume,
         });
+    }
+
+    /// Opens `path` in `tab`'s read-only file preview pane, creating one next
+    /// to the focused pane when the tab has none yet, or adding/focusing a
+    /// horizontal file tab when it does (RF-CTX-02).
+    fn open_file(
+        &mut self,
+        tab_id: TabId,
+        path: String,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let path = clean_rel_path(&path);
+        if path.is_empty() {
+            return Ok(());
+        }
+        let tab = self.tab(tab_id)?;
+        let root = tab.dir.clone();
+        let existing = tab
+            .panes()
+            .into_iter()
+            .find(|id| self.panes.get(id).is_some_and(|p| p.files.is_some()));
+
+        if let Some(pane) = existing {
+            let active_path = {
+                let p = self
+                    .panes
+                    .get_mut(&pane)
+                    .ok_or(CoreError::UnknownPane(pane))?;
+                let Some(files) = &mut p.files else {
+                    return Err(CoreError::UnknownPane(pane));
+                };
+                if let Some(idx) = files.files.iter().position(|f| same_rel_path(f, &path)) {
+                    files.active = idx;
+                } else {
+                    files.files.push(path.clone());
+                    files.active = files.files.len() - 1;
+                }
+                let active_path = files.active_file().unwrap_or(&path).to_owned();
+                p.default_name = file_leaf_name(&active_path);
+                active_path
+            };
+            self.focus(pane, fx)?;
+            self.emit_pane(pane, fx);
+            fx.push(Effect::LoadFile {
+                pane,
+                root,
+                path: active_path,
+            });
+            return Ok(());
+        }
+
+        let new = PaneId::new(self.next()?);
+        let tab = self.tab_mut(tab_id)?;
+        let focused = tab.focused;
+        let leaf = tab
+            .leaf_of(focused)
+            .ok_or(CoreError::UnknownPane(focused))?;
+        let new_leaf = tab
+            .tree
+            .split_towards(leaf, yien_layout::DropZone::Right)
+            .ok_or(CoreError::UnknownPane(focused))?;
+        tab.leaves.insert(new_leaf, new);
+        tab.maximized = None;
+        self.panes.insert(
+            new,
+            Pane {
+                tab: tab_id,
+                profile: "file".to_owned(),
+                launch_cwd: root.clone(),
+                ended_explicitly: false,
+                launch: 0,
+                kept: None,
+                custom_name: None,
+                default_name: file_leaf_name(&path),
+                profile_name: "Files".to_owned(),
+                title: None,
+                title_ours: false,
+                cwd: Some(root.clone()),
+                state: AgentState::Idle,
+                running: false,
+                exit_code: None,
+                session_id: None,
+                attention_since: None,
+                question: None,
+                signal_lost: false,
+                visible: false,
+                seen: false,
+                standin: None,
+                program: None,
+                stopped: true,
+                files: Some(FilePane {
+                    files: vec![path.clone()],
+                    active: 0,
+                    wrap: false,
+                }),
+            },
+        );
+        self.focus(new, fx)?;
+        self.emit_pane(new, fx);
+        fx.push(Effect::LoadFile {
+            pane: new,
+            root,
+            path,
+        });
+        Ok(())
+    }
+
+    fn select_file_tab(
+        &mut self,
+        pane: PaneId,
+        path: &str,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let tab_id = self.tab_of(pane)?;
+        let root = self.tab(tab_id)?.dir.clone();
+        let switched = {
+            let p = self
+                .panes
+                .get_mut(&pane)
+                .ok_or(CoreError::UnknownPane(pane))?;
+            let Some(files) = &mut p.files else {
+                return Ok(());
+            };
+            let Some(idx) = files.files.iter().position(|f| same_rel_path(f, path)) else {
+                return Ok(());
+            };
+            let changed = files.active != idx;
+            files.active = idx;
+            let active_path = files.files[idx].clone();
+            p.default_name = file_leaf_name(&active_path);
+            (changed, active_path)
+        };
+        self.focus(pane, fx)?;
+        self.emit_pane(pane, fx);
+        if switched.0 {
+            fx.push(Effect::LoadFile {
+                pane,
+                root,
+                path: switched.1,
+            });
+        }
+        Ok(())
+    }
+
+    fn close_file_tab(
+        &mut self,
+        pane: PaneId,
+        path: &str,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        let tab_id = self.tab_of(pane)?;
+        let root = self.tab(tab_id)?.dir.clone();
+        enum Outcome {
+            ClosePane,
+            Remaining { reload: Option<String> },
+        }
+        let outcome = {
+            let p = self
+                .panes
+                .get_mut(&pane)
+                .ok_or(CoreError::UnknownPane(pane))?;
+            let Some(files) = &mut p.files else {
+                return Ok(());
+            };
+            let Some(idx) = files.files.iter().position(|f| same_rel_path(f, path)) else {
+                return Ok(());
+            };
+            if files.files.len() <= 1 {
+                Outcome::ClosePane
+            } else {
+                let was_active = files.active == idx;
+                files.files.remove(idx);
+                if files.active >= files.files.len() {
+                    files.active = files.files.len() - 1;
+                } else if files.active > idx {
+                    files.active -= 1;
+                }
+                let active_path = files.active_file().unwrap_or_default().to_owned();
+                p.default_name = file_leaf_name(&active_path);
+                Outcome::Remaining {
+                    reload: was_active.then_some(active_path),
+                }
+            }
+        };
+        match outcome {
+            Outcome::ClosePane => self.close_pane(pane, fx)?,
+            Outcome::Remaining { reload } => {
+                self.emit_pane(pane, fx);
+                if let Some(active_path) = reload {
+                    fx.push(Effect::LoadFile {
+                        pane,
+                        root,
+                        path: active_path,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn toggle_file_wrap(&mut self, pane: PaneId, fx: &mut Vec<Effect>) -> Result<(), CoreError> {
+        self.tab_of(pane)?;
+        let p = self
+            .panes
+            .get_mut(&pane)
+            .ok_or(CoreError::UnknownPane(pane))?;
+        let Some(files) = &mut p.files else {
+            return Ok(());
+        };
+        files.wrap = !files.wrap;
+        self.emit_pane(pane, fx);
+        Ok(())
     }
 
     fn focus(&mut self, pane: PaneId, fx: &mut Vec<Effect>) -> Result<(), CoreError> {
@@ -1352,6 +1619,32 @@ impl Workspace {
     }
 }
 
+fn clean_rel_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_owned()
+}
+
+fn same_rel_path(a: &str, b: &str) -> bool {
+    let a = clean_rel_path(a);
+    let b = clean_rel_path(b);
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a == b
+    }
+}
+
+pub(crate) fn file_leaf_name(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Files")
+        .to_owned()
+}
+
 fn folder_name(root: &str) -> String {
     root.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -1398,6 +1691,10 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
         question: p.question.clone().filter(|_| p.state.is_red()),
         signal_lost: p.signal_lost,
         runs_session: p.runs_session(),
+        kind: match &p.files {
+            Some(files) => PaneKind::File(files.to_info()),
+            None => PaneKind::Terminal,
+        },
     }
 }
 
@@ -3311,6 +3608,417 @@ mod tests {
             },
             Op::Window(_) | Op::Exit(_) => return None,
         })
+    }
+
+    #[test]
+    fn rf_ctx_02_opening_a_file_creates_a_file_pane_and_second_file_opens_a_tab_and_reopen_focuses()
+    {
+        let mut ws = Workspace::new();
+        ws.apply(
+            Command::NewProject {
+                root: "C:/Code/yien".into(),
+                name: None,
+            },
+            &resolve,
+        )
+        .unwrap();
+        let tab = ws.tabs[0].id;
+        let term_pane = ws.tabs[0].focused;
+
+        // 1. Opening a file from Files creates a file preview pane next to the terminal pane.
+        let fx = ws
+            .apply(
+                Command::OpenFile {
+                    tab,
+                    path: "src/main.rs".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(ws.tabs[0].panes().len(), 2);
+        let file_pane = ws.tabs[0].focused;
+        assert_ne!(file_pane, term_pane);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { pane, root, path }
+            if *pane == file_pane && root == "C:/Code/yien" && path == "src/main.rs"
+        )));
+        let snap = ws.snapshot();
+        let info = snap.panes.iter().find(|p| p.id == file_pane).unwrap();
+        assert_eq!(
+            info.kind,
+            PaneKind::File(FilePaneInfo {
+                files: vec!["src/main.rs".into()],
+                active: Some(0),
+                wrap: false,
+            })
+        );
+
+        // 2. Opening a second file adds a second horizontal file tab in the existing file pane.
+        let fx = ws
+            .apply(
+                Command::OpenFile {
+                    tab,
+                    path: "Cargo.toml".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(ws.tabs[0].panes().len(), 2);
+        assert_eq!(ws.tabs[0].focused, file_pane);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { pane, path, .. }
+            if *pane == file_pane && path == "Cargo.toml"
+        )));
+        let snap = ws.snapshot();
+        let info = snap.panes.iter().find(|p| p.id == file_pane).unwrap();
+        assert_eq!(
+            info.kind,
+            PaneKind::File(FilePaneInfo {
+                files: vec!["src/main.rs".into(), "Cargo.toml".into()],
+                active: Some(1),
+                wrap: false,
+            })
+        );
+
+        // 3. Re-opening an already-open file focuses its horizontal tab and focuses the file pane.
+        ws.apply(Command::FocusPane { pane: term_pane }, &resolve)
+            .unwrap();
+        assert_eq!(ws.tabs[0].focused, term_pane);
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "src/main.rs".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(ws.tabs[0].focused, file_pane);
+        let snap = ws.snapshot();
+        let info = snap.panes.iter().find(|p| p.id == file_pane).unwrap();
+        assert_eq!(
+            info.kind,
+            PaneKind::File(FilePaneInfo {
+                files: vec!["src/main.rs".into(), "Cargo.toml".into()],
+                active: Some(0),
+                wrap: false,
+            })
+        );
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_without_tabs_has_no_active_tab() {
+        let empty = FilePane {
+            files: Vec::new(),
+            active: 0,
+            wrap: false,
+        };
+        assert_eq!(empty.to_info().active, None);
+        let stale = FilePane {
+            files: vec!["a.rs".into(), "b.rs".into()],
+            active: 7,
+            wrap: false,
+        };
+        assert_eq!(stale.to_info().active, Some(1));
+    }
+
+    #[test]
+    fn rf_ctx_02_closing_file_tabs_and_closing_last_tab_closes_the_file_pane() {
+        let mut ws = Workspace::new();
+        ws.apply(
+            Command::NewProject {
+                root: "C:/Code/yien".into(),
+                name: None,
+            },
+            &resolve,
+        )
+        .unwrap();
+        let tab = ws.tabs[0].id;
+        let term_pane = ws.tabs[0].focused;
+
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "src/a.rs".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "src/b.rs".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        let file_pane = ws.tabs[0].focused;
+
+        // Close active tab "src/b.rs" -> "src/a.rs" remains active.
+        let fx = ws
+            .apply(
+                Command::CloseFileTab {
+                    pane: file_pane,
+                    path: "src/b.rs".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(ws.tabs[0].panes(), vec![term_pane, file_pane]);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { pane, path, .. }
+            if *pane == file_pane && path == "src/a.rs"
+        )));
+
+        // Close the last file tab -> the file pane closes and focus returns to the terminal pane.
+        let fx = ws
+            .apply(
+                Command::CloseFileTab {
+                    pane: file_pane,
+                    path: "src/a.rs".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(ws.tabs[0].panes(), vec![term_pane]);
+        assert_eq!(ws.tabs[0].focused, term_pane);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Emit(CoreMsg::PaneClosed { pane }) if *pane == file_pane
+        )));
+    }
+
+    #[test]
+    fn rf_ctx_02_file_pane_toggles_wrap_and_moves_swaps_and_resizes_like_any_pane() {
+        let mut ws = Workspace::new();
+        ws.apply(
+            Command::NewProject {
+                root: "C:/Code/yien".into(),
+                name: None,
+            },
+            &resolve,
+        )
+        .unwrap();
+        let tab = ws.tabs[0].id;
+        let term_pane = ws.tabs[0].focused;
+
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "src/lib.rs".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        let file_pane = ws.tabs[0].focused;
+
+        // Toggle wrap on and off.
+        ws.apply(Command::ToggleFileWrap { pane: file_pane }, &resolve)
+            .unwrap();
+        assert!(matches!(
+            ws.snapshot()
+                .panes
+                .iter()
+                .find(|p| p.id == file_pane)
+                .unwrap()
+                .kind,
+            PaneKind::File(FilePaneInfo { wrap: true, .. })
+        ));
+        ws.apply(Command::ToggleFileWrap { pane: file_pane }, &resolve)
+            .unwrap();
+        assert!(matches!(
+            ws.snapshot()
+                .panes
+                .iter()
+                .find(|p| p.id == file_pane)
+                .unwrap()
+                .kind,
+            PaneKind::File(FilePaneInfo { wrap: false, .. })
+        ));
+
+        // Swap, resize, and move work on file panes identically to terminal panes.
+        ws.apply(
+            Command::SwapPanes {
+                a: term_pane,
+                b: file_pane,
+            },
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(ws.tabs[0].panes(), vec![file_pane, term_pane]);
+
+        ws.apply(
+            Command::SetDivider {
+                before: file_pane,
+                after: term_pane,
+                share: 0.4,
+            },
+            &resolve,
+        )
+        .unwrap();
+        assert!((first_share(&ws, tab) - 0.4).abs() < 0.01);
+
+        ws.apply(
+            Command::MovePane {
+                pane: file_pane,
+                target: term_pane,
+                zone: yien_proto::DropZone::Bottom,
+            },
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(ws.tabs[0].panes(), vec![term_pane, file_pane]);
+        assert_eq!(ws.check(), Ok(()));
+    }
+
+    /// The first child's part of the tab's top split.
+    fn first_share(ws: &Workspace, tab: TabId) -> f32 {
+        let LayoutNode::Split { children, .. } = ws.tab_info(ws.tab(tab).unwrap()).layout else {
+            panic!("expected a split");
+        };
+        let total: f32 = children.iter().map(|c| c.flex).sum();
+        children[0].flex / total
+    }
+
+    fn open(ws: &mut Workspace, tab: TabId, path: &str) -> Vec<Effect> {
+        run(
+            ws,
+            Command::OpenFile {
+                tab,
+                path: path.into(),
+            },
+        )
+    }
+
+    fn loads(fx: &[Effect]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::LoadFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn active_file(ws: &Workspace, pane: PaneId) -> Option<String> {
+        ws.panes[&pane]
+            .files
+            .as_ref()
+            .and_then(|f| f.active_file().map(str::to_owned))
+    }
+
+    #[test]
+    fn rf_ctx_02_selecting_a_file_tab_loads_it_only_when_it_changes() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        open(&mut ws, tab, "a.rs");
+        open(&mut ws, tab, "b.rs");
+        let file = ws.tab(tab).unwrap().focused;
+        let fx = run(
+            &mut ws,
+            Command::SelectFileTab {
+                pane: file,
+                path: "a.rs".into(),
+            },
+        );
+        assert_eq!(loads(&fx), ["a.rs"]);
+        assert_eq!(active_file(&ws, file).as_deref(), Some("a.rs"));
+        let again = Command::SelectFileTab {
+            pane: file,
+            path: "a.rs".into(),
+        };
+        assert!(loads(&run(&mut ws, again)).is_empty());
+        let unknown = Command::SelectFileTab {
+            pane: file,
+            path: "c.rs".into(),
+        };
+        assert!(run(&mut ws, unknown).is_empty());
+        assert_eq!(active_file(&ws, file).as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_resizes_maximizes_and_takes_the_focus_like_any_pane() {
+        let mut ws = Workspace::new();
+        let (tab, term) = project(&mut ws);
+        open(&mut ws, tab, "src/lib.rs");
+        let file = ws.tab(tab).unwrap().focused;
+        assert_eq!(ws.tab(tab).unwrap().panes(), [term, file]);
+
+        run(
+            &mut ws,
+            Command::ResizeSplit {
+                pane: file,
+                delta: 0.2,
+            },
+        );
+        assert!((first_share(&ws, tab) - 0.3).abs() < 0.01);
+
+        let fx = run(&mut ws, Command::ToggleMaximize { pane: file });
+        assert_eq!(ws.tab_info(ws.tab(tab).unwrap()).maximized, Some(file));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: false, .. } if *pane == term
+        )));
+        run(&mut ws, Command::ToggleMaximize { pane: file });
+        assert_eq!(ws.tab_info(ws.tab(tab).unwrap()).maximized, None);
+
+        run(
+            &mut ws,
+            Command::FocusDirection {
+                direction: Direction::Left,
+            },
+        );
+        assert_eq!(ws.tab(tab).unwrap().focused, term);
+        run(
+            &mut ws,
+            Command::FocusDirection {
+                direction: Direction::Right,
+            },
+        );
+        assert_eq!(ws.tab(tab).unwrap().focused, file);
+        assert_eq!(ws.check(), Ok(()));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_follows_its_tab_and_closes_like_any_pane() {
+        let mut ws = Workspace::new();
+        let (tab, term) = project(&mut ws);
+        open(&mut ws, tab, "src/lib.rs");
+        let file = ws.tab(tab).unwrap().focused;
+
+        let project = ws.tab(tab).unwrap().project;
+        let other = run(
+            &mut ws,
+            Command::NewTab {
+                project,
+                name: None,
+                profile: None,
+            },
+        );
+        assert!(other.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: false, .. } if *pane == file
+        )));
+        let fx = run(&mut ws, Command::SelectTab { tab });
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::View { pane, visible: true, .. } if *pane == file
+        )));
+        assert_eq!(ws.tab(tab).unwrap().focused, file);
+
+        let fx = run(&mut ws, Command::ClosePane { pane: file });
+        assert_eq!(stopped(&fx), [file]);
+        assert_eq!(ws.tab(tab).unwrap().panes(), [term]);
+        assert!(!ws.panes.contains_key(&file));
+
+        open(&mut ws, tab, "Cargo.toml");
+        let file = ws.tab(tab).unwrap().focused;
+        let fx = run(&mut ws, Command::CloseTab { tab });
+        let gone: HashSet<PaneId> = stopped(&fx).into_iter().collect();
+        assert_eq!(gone, HashSet::from([term, file]));
+        assert!(!ws.panes.contains_key(&file));
+        assert_eq!(ws.check(), Ok(()));
     }
 
     proptest! {

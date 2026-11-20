@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::Context;
+use yien_proto::file_preview::FileFrame;
 use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, PaneId};
 
@@ -40,6 +41,7 @@ pub enum Refused {
 /// over the core's handle, so the UI never sees core types (ADR-03).
 ///
 /// ```
+/// use yien_proto::file_preview::FileFrame;
 /// use yien_proto::frame::Frame;
 /// use yien_proto::{ClientMsg, PaneId};
 /// use yien_ui::{CoreClient, Refused};
@@ -53,6 +55,9 @@ pub enum Refused {
 ///         None
 ///     }
 ///     fn take_clipboard(&self, _pane: PaneId) -> Option<String> {
+///         None
+///     }
+///     fn take_file_frame(&self, _pane: PaneId) -> Option<FileFrame> {
 ///         None
 ///     }
 /// }
@@ -70,6 +75,11 @@ pub trait CoreClient: 'static {
     /// The newest text a program in `pane` asked to put on the clipboard and
     /// the UI has not taken yet. Called after `CoreMsg::ClipboardReady`.
     fn take_clipboard(&self, pane: PaneId) -> Option<String>;
+
+    /// The newest visible line frame of a file preview `pane` not taken yet,
+    /// if any. Called after `CoreMsg::FileFrameReady` and when a file pane
+    /// comes into view (ADR-06, RF-CTX-02).
+    fn take_file_frame(&self, pane: PaneId) -> Option<FileFrame>;
 }
 
 /// What became of a message handed to the [`Link`].
@@ -285,6 +295,12 @@ impl Link {
         self.client.take_clipboard(pane)
     }
 
+    /// The newest visible line frame of a file preview `pane` the core holds
+    /// for the UI.
+    pub(crate) fn take_file_frame(&self, pane: PaneId) -> Option<FileFrame> {
+        self.client.take_file_frame(pane)
+    }
+
     #[cfg(test)]
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.get()
@@ -400,6 +416,10 @@ mod tests {
         }
 
         fn take_clipboard(&self, _pane: PaneId) -> Option<String> {
+            None
+        }
+
+        fn take_file_frame(&self, _pane: PaneId) -> Option<FileFrame> {
             None
         }
     }

@@ -55,6 +55,7 @@ mod tests {
             session_id: None,
             runs_session,
             title: None,
+            kind: yien_proto::PaneKind::Terminal,
         }
     }
 

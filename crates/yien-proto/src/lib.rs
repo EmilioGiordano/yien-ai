@@ -6,7 +6,7 @@
 //! ```
 //! use yien_proto::{ClientMsg, Command, Orientation, PaneId, PROTO_VERSION};
 //!
-//! assert_eq!(PROTO_VERSION, 17);
+//! assert_eq!(PROTO_VERSION, 18);
 //! let split = ClientMsg::Command(Command::SplitPane {
 //!     pane: PaneId::new(7),
 //!     orientation: Orientation::Horizontal,
@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod file_preview;
 pub mod files;
 pub mod frame;
 mod git;
@@ -33,9 +34,10 @@ use serde::{Deserialize, Serialize};
 pub use git::{GitFacts, GitFile, GitFileStatus, GitHead, GitUpstream, MAX_GIT_FILES, TabGit};
 pub use msg::{
     AgentSession, AgentState, ClientMsg, Command, CoreMsg, Direction, DropZone, ErrorReason,
-    InputBytes, LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo, PendingQuestion,
-    ProfileId, ProfileInfo, ProjectInfo, SessionTitle, SideBar, SideBars, TabInfo, TerminalPalette,
-    WorkspaceSnapshot, WorktreeCheck, WorktreeFiles, WorktreeWork,
+    FilePaneInfo, InputBytes, LayoutChild, LayoutNode, NeedsReason, Orientation, PaneInfo,
+    PaneKind, PendingQuestion, ProfileId, ProfileInfo, ProjectInfo, SessionTitle, SideBar,
+    SideBars, TabInfo, TerminalPalette, WorkspaceSnapshot, WorktreeCheck, WorktreeFiles,
+    WorktreeWork,
 };
 pub use path::{folder_key, same_folder};
 pub use shell::{ShellKind, is_shell_profile};
@@ -46,7 +48,7 @@ pub use title::{SESSION_TITLE_MAX, session_title};
 /// ```
 /// assert!(yien_proto::PROTO_VERSION >= 1);
 /// ```
-pub const PROTO_VERSION: u32 = 17;
+pub const PROTO_VERSION: u32 = 18;
 
 /// The least part of a pair of neighbouring panes either one keeps when
 /// [`Command::SetDivider`] moves the divider between them: a share closer to

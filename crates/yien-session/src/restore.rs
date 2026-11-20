@@ -50,6 +50,7 @@ pub enum ResumeAction {
 ///     }),
 ///     last_command: None,
 ///     name: None,
+///     files: None,
 /// };
 /// assert_eq!(
 ///     resume_plan(&pane),
@@ -113,6 +114,7 @@ mod tests {
             }),
             last_command: Some("claude".into()),
             name: None,
+            files: None,
         }
     }
 
@@ -124,6 +126,7 @@ mod tests {
             agent: None,
             last_command: last.map(str::to_owned),
             name: None,
+            files: None,
         }
     }
 

@@ -491,6 +491,37 @@ pub enum Command {
         /// The CLI's session id.
         session_id: String,
     },
+    /// Opens a project-relative file in the tab's read-only file preview pane,
+    /// creating the file pane next to the focused pane when the tab does not
+    /// have one yet, or adding/focusing a horizontal file tab when it does
+    /// (RF-CTX-02).
+    OpenFile {
+        /// The tab whose file preview pane opens the file.
+        tab: TabId,
+        /// The project-relative path of the file.
+        path: String,
+    },
+    /// Selects an already-open horizontal file tab inside a file preview pane
+    /// (RF-CTX-02).
+    SelectFileTab {
+        /// The file preview pane.
+        pane: PaneId,
+        /// The project-relative path of the file tab to activate.
+        path: String,
+    },
+    /// Closes one horizontal file tab inside a file preview pane; closing the
+    /// last open file tab closes the pane itself (RF-CTX-02).
+    CloseFileTab {
+        /// The file preview pane.
+        pane: PaneId,
+        /// The project-relative path of the file tab to close.
+        path: String,
+    },
+    /// Toggles soft line wrapping in a file preview pane (RF-CTX-02).
+    ToggleFileWrap {
+        /// The file preview pane.
+        pane: PaneId,
+    },
 }
 
 /// Everything the UI sends to the core: catalog commands, plus the
@@ -593,6 +624,17 @@ pub enum ClientMsg {
         shell: Option<ShellKind>,
         /// Whether shells report their folder and mark their commands.
         integration: bool,
+    },
+    /// Moves or resizes the visible line window of a read-only file preview
+    /// pane so the core emits a [`CoreMsg::FileFrameReady`] with only the
+    /// visible rows (ADR-06, RF-CTX-02).
+    SetFileViewport {
+        /// The file preview pane.
+        pane: PaneId,
+        /// Zero-based first visible line index.
+        top_line: usize,
+        /// Maximum number of visible lines to slice.
+        rows: usize,
     },
 }
 
@@ -888,6 +930,65 @@ pub struct PaneInfo {
     /// a stand-in shell after a failed resume. Only then does `session_id`
     /// name a session that runs here (RF-SES-07).
     pub runs_session: bool,
+    /// Whether this pane is a terminal or a read-only file preview pane
+    /// (RF-CTX-02).
+    #[serde(default)]
+    pub kind: PaneKind,
+}
+
+/// What kind of content a pane hosts inside the tab's split tree.
+///
+/// ```
+/// use yien_proto::{FilePaneInfo, PaneKind};
+///
+/// assert_eq!(PaneKind::default(), PaneKind::Terminal);
+/// let file = PaneKind::File(FilePaneInfo {
+///     files: vec!["src/main.rs".into()],
+///     active: Some(0),
+///     wrap: false,
+/// });
+/// assert!(matches!(file, PaneKind::File(_)));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaneKind {
+    /// A PTY-backed terminal or agent pane.
+    #[default]
+    Terminal,
+    /// A read-only syntax-highlighted file preview pane (RF-CTX-02).
+    File(FilePaneInfo),
+}
+
+/// The open file tabs and wrap preference of a read-only file preview pane
+/// (RF-CTX-02).
+///
+/// ```
+/// use yien_proto::FilePaneInfo;
+///
+/// let info = FilePaneInfo {
+///     files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
+///     active: Some(1),
+///     wrap: true,
+/// };
+/// assert_eq!(info.active_file(), Some("Cargo.toml"));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FilePaneInfo {
+    /// Project-relative paths of the open file tabs, in horizontal tab order.
+    pub files: Vec<String>,
+    /// Zero-based index of the active file tab in `files`.
+    pub active: Option<usize>,
+    /// Whether soft line wrapping is enabled for this pane.
+    pub wrap: bool,
+}
+
+impl FilePaneInfo {
+    /// The project-relative path of the active file tab, if any.
+    pub fn active_file(&self) -> Option<&str> {
+        self.active
+            .and_then(|idx| self.files.get(idx))
+            .map(String::as_str)
+    }
 }
 
 /// An agent profile a pane can be started with (RF-AGE-01, RF-PAN-18).
@@ -1005,6 +1106,12 @@ pub enum CoreMsg {
     /// replace it and no further notice is sent.
     PaneFrameReady {
         /// The pane.
+        pane: PaneId,
+    },
+    /// A read-only file preview pane has a new visible line frame to draw
+    /// (ADR-06, RF-CTX-02). Take it with the core handle's `take_file_frame`.
+    FileFrameReady {
+        /// The file preview pane.
         pane: PaneId,
     },
     /// The agent state of a pane changed (RF-PAN-12). A delta; the pane's
@@ -1132,6 +1239,7 @@ mod tests {
             question: Some(PendingQuestion::new("Permission to use Bash")),
             signal_lost: false,
             runs_session: true,
+            kind: PaneKind::Terminal,
         };
         let msg = CoreMsg::PaneUpdated(info);
         assert_eq!(round_trip(&msg), msg);
@@ -1263,6 +1371,21 @@ mod tests {
                 profile: ProfileId::new("claude"),
                 session_id: "4f1c2a3b-0000-4000-8000-0123456789ab".into(),
             },
+            Command::OpenFile {
+                tab: TabId::new(2),
+                path: "crates/yien-core/src/workspace.rs".into(),
+            },
+            Command::SelectFileTab {
+                pane: PaneId::new(4),
+                path: "Cargo.toml".into(),
+            },
+            Command::CloseFileTab {
+                pane: PaneId::new(4),
+                path: "Cargo.toml".into(),
+            },
+            Command::ToggleFileWrap {
+                pane: PaneId::new(4),
+            },
         ];
         for command in commands {
             assert_eq!(round_trip(&command), command);
@@ -1303,6 +1426,11 @@ mod tests {
             ClientMsg::SetShell {
                 shell: Some(ShellKind::GitBash),
                 integration: false,
+            },
+            ClientMsg::SetFileViewport {
+                pane: PaneId::new(4),
+                top_line: 120,
+                rows: 45,
             },
         ];
         for msg in msgs {
@@ -1350,6 +1478,9 @@ mod tests {
             CoreMsg::PaneFrameReady {
                 pane: PaneId::new(3),
             },
+            CoreMsg::FileFrameReady {
+                pane: PaneId::new(4),
+            },
             CoreMsg::TabUpdated(tab),
             CoreMsg::ProjectUpdated(ProjectInfo {
                 id: ProjectId::new(1),
@@ -1378,6 +1509,30 @@ mod tests {
                 question: None,
                 signal_lost: false,
                 runs_session: true,
+                kind: PaneKind::Terminal,
+            }),
+            CoreMsg::PaneUpdated(PaneInfo {
+                id: PaneId::new(4),
+                tab: TabId::new(2),
+                name: "workspace.rs".into(),
+                profile: "Files".into(),
+                profile_id: ProfileId::new("file"),
+                title: None,
+                cwd: Some("C:/Code/yien".into()),
+                state: AgentState::Idle,
+                running: false,
+                exit_code: None,
+                session_id: None,
+                needs_you_since: None,
+                attention_since: None,
+                question: None,
+                signal_lost: false,
+                runs_session: false,
+                kind: PaneKind::File(FilePaneInfo {
+                    files: vec!["crates/yien-core/src/workspace.rs".into()],
+                    active: Some(0),
+                    wrap: true,
+                }),
             }),
             CoreMsg::NotificationsMuted { muted: true },
             CoreMsg::WorktreeChecked {
@@ -1578,6 +1733,7 @@ mod tests {
             question: None,
             signal_lost: false,
             runs_session: true,
+            kind: PaneKind::Terminal,
         };
         // The same bytes an `Option<String>` title had: no protocol change.
         let json = serde_json::to_string(&info).unwrap();

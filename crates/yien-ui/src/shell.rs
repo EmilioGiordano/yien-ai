@@ -16,8 +16,8 @@ use gpui_kit::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::{
-    ClientMsg, Command, CoreMsg, Direction, Orientation, PaneId, ProfileId, ProjectId,
-    SHELL_PROFILE, SideBars, TabGit, TabId, TerminalPalette,
+    ClientMsg, Command, CoreMsg, Direction, FilePaneInfo, Orientation, PaneId, ProfileId,
+    ProjectId, SHELL_PROFILE, SideBars, TabGit, TabId, TerminalPalette,
 };
 
 use crate::actions::*;
@@ -26,6 +26,7 @@ use crate::assets;
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, shortcut};
+use crate::file_pane::{FilePaneEvent, FilePaneView};
 use crate::file_tree::join_relative;
 use crate::files::Files;
 use crate::fonts::Fonts;
@@ -34,8 +35,8 @@ use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView, folder_label,
-    frames_to_take, typed_tab_name,
+    AgentState, FileTabStep, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView,
+    folder_label, frames_to_take, typed_tab_name,
 };
 use crate::os_tray::{OsTray, TrayEvent};
 use crate::os_window::OsWindow;
@@ -163,6 +164,9 @@ pub(crate) struct Shell {
     terminals: HashMap<PaneId, Entity<TerminalPane>>,
     /// The window's subscription to each terminal's right clicks.
     terminal_events: HashMap<PaneId, Subscription>,
+    /// One read-only file preview view per file pane (RF-CTX-02).
+    file_panes: HashMap<PaneId, Entity<FilePaneView>>,
+    file_pane_events: HashMap<PaneId, Subscription>,
     /// The pane the keyboard was last moved to.
     keyboard_on: Option<PaneId>,
     /// Test control is on: frames get a wall-clock stamp for its dump.
@@ -430,6 +434,8 @@ impl Shell {
             link,
             terminals: HashMap::new(),
             terminal_events: HashMap::new(),
+            file_panes: HashMap::new(),
+            file_pane_events: HashMap::new(),
             keyboard_on: None,
             test_control_on,
             notice: None,
@@ -496,12 +502,17 @@ impl Shell {
     fn apply(&mut self, batch: Vec<CoreMsg>, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_palette(cx);
         let mut ready: BTreeSet<PaneId> = BTreeSet::new();
+        let mut ready_files: BTreeSet<PaneId> = BTreeSet::new();
         let mut changed = false;
         let mut git_changed = Vec::new();
         for msg in batch {
             match msg {
                 CoreMsg::PaneFrameReady { pane } => {
                     ready.insert(pane);
+                    continue;
+                }
+                CoreMsg::FileFrameReady { pane } => {
+                    ready_files.insert(pane);
                     continue;
                 }
                 CoreMsg::WorkspaceSnapshot(snapshot) => {
@@ -516,6 +527,7 @@ impl Shell {
                 CoreMsg::ProjectClosed { project } => {
                     for pane in self.workspace.project_closed(project) {
                         ready.remove(&pane);
+                        ready_files.remove(&pane);
                     }
                 }
                 CoreMsg::TabUpdated(info) => {
@@ -525,12 +537,14 @@ impl Shell {
                 CoreMsg::TabClosed { tab } => {
                     for pane in self.workspace.tab_closed(tab) {
                         ready.remove(&pane);
+                        ready_files.remove(&pane);
                     }
                 }
                 CoreMsg::ActiveTab { tab } => self.workspace.set_active(tab),
                 CoreMsg::PaneUpdated(info) => self.workspace.pane_updated(&info),
                 CoreMsg::PaneClosed { pane } => {
                     ready.remove(&pane);
+                    ready_files.remove(&pane);
                     self.workspace.pane_closed(pane);
                 }
                 CoreMsg::PaneState { pane, state } => {
@@ -609,10 +623,15 @@ impl Shell {
             self.sync_tray();
             self.sync_terminals(window, cx);
         }
-        let take = frames_to_take(&ready, changed, &self.visible_panes(), |p| {
+        let visible = self.visible_panes();
+        let take = frames_to_take(&ready, changed, &visible, |p| {
             self.terminals.contains_key(&p)
         });
         self.take_frames(take, cx);
+        let take_files = frames_to_take(&ready_files, changed, &visible, |p| {
+            self.file_panes.contains_key(&p)
+        });
+        self.take_file_frames(take_files, cx);
         if changed {
             self.sync_focus(window, cx);
             self.update_alerts(window, cx);
@@ -684,15 +703,65 @@ impl Shell {
         }
     }
 
-    /// One terminal view per pane the workspace holds; views of closed panes go.
+    fn take_file_frames(&self, panes: impl IntoIterator<Item = PaneId>, cx: &mut Context<Self>) {
+        for pane in panes {
+            let Some(file_pane) = self.file_panes.get(&pane) else {
+                continue;
+            };
+            if let Some(frame) = self.link.take_file_frame(pane) {
+                file_pane.update(cx, |f, cx| f.set_frame(frame, cx));
+            }
+        }
+    }
+
+    /// One terminal view or file preview view per pane the workspace holds;
+    /// views of closed panes go.
     fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panes = self.workspace.all_panes();
-        self.terminals.retain(|id, _| panes.contains(id));
-        self.terminal_events.retain(|id, _| panes.contains(id));
+        let ws = &self.workspace;
+        self.terminals
+            .retain(|id, _| panes.contains(id) && !ws.pane(*id).is_file());
+        self.terminal_events
+            .retain(|id, _| panes.contains(id) && !ws.pane(*id).is_file());
+        self.file_panes
+            .retain(|id, _| panes.contains(id) && ws.pane(*id).is_file());
+        self.file_pane_events
+            .retain(|id, _| panes.contains(id) && ws.pane(*id).is_file());
         self.pane_heads
             .borrow_mut()
             .retain(|id, _| panes.contains(id));
         for pane in panes {
+            let info = self.workspace.pane(pane);
+            if let Some(file_info) = info.file_pane() {
+                let wrap = file_info.wrap;
+                if let Some(existing) = self.file_panes.get(&pane) {
+                    existing.update(cx, |f, cx| f.set_wrap(wrap, cx));
+                    continue;
+                }
+                let link = Rc::clone(&self.link);
+                let family = self.fonts.terminal.clone();
+                let size = self.terminal_size;
+                let theme = self.theme;
+                let view = cx.new(|cx| {
+                    FilePaneView::new(
+                        pane,
+                        link,
+                        family,
+                        size,
+                        theme,
+                        wrap,
+                        self.test_control_on,
+                        cx,
+                    )
+                });
+                let events = cx.subscribe_in(&view, window, move |this, _, event, window, cx| {
+                    let FilePaneEvent::ContextMenu { at } = *event;
+                    this.open_menu(pane, MenuKind::Pane, at, false, window, cx);
+                });
+                self.file_pane_events.insert(pane, events);
+                self.file_panes.insert(pane, view);
+                continue;
+            }
             if self.terminals.contains_key(&pane) {
                 continue;
             }
@@ -791,20 +860,31 @@ impl Shell {
             return;
         }
         let target = keyboard_pane(&self.workspace);
-        let has_view = target.is_some_and(|p| self.terminals.contains_key(&p));
+        let has_view = target
+            .is_some_and(|p| self.terminals.contains_key(&p) || self.file_panes.contains_key(&p));
         let Some((to, next_on)) = sync_focus_move(target, self.keyboard_on, has_view) else {
             return;
         };
         self.keyboard_on = next_on;
         match to {
             KeyboardTo::Pane(pane) => {
-                if let Some(terminal) = self.terminals.get(&pane) {
-                    let handle = terminal.read(cx).handle().clone();
+                if let Some(handle) = self.pane_focus_handle(pane, cx) {
                     window.focus(&handle, cx);
                 }
             }
             KeyboardTo::Window => window.focus(&self.focus, cx),
         }
+    }
+
+    fn pane_focus_handle(&self, pane: PaneId, cx: &App) -> Option<FocusHandle> {
+        self.terminals
+            .get(&pane)
+            .map(|t| t.read(cx).handle().clone())
+            .or_else(|| {
+                self.file_panes
+                    .get(&pane)
+                    .map(|f| f.read(cx).handle().clone())
+            })
     }
 
     fn focused_pane(&self) -> Option<PaneId> {
@@ -1407,14 +1487,13 @@ impl Shell {
     /// window when no tab is open, after an overlay held it.
     fn give_back_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keyboard_in_bar = false;
-        let terminal = match keyboard_after_close(&self.workspace) {
-            KeyboardTo::Pane(pane) => self.terminals.get(&pane).map(|t| (pane, t)),
+        let target = match keyboard_after_close(&self.workspace) {
+            KeyboardTo::Pane(pane) => self.pane_focus_handle(pane, cx).map(|h| (pane, h)),
             KeyboardTo::Window => None,
         };
-        match terminal {
-            Some((pane, terminal)) => {
+        match target {
+            Some((pane, handle)) => {
                 self.keyboard_on = Some(pane);
-                let handle = terminal.read(cx).handle().clone();
                 window.focus(&handle, cx);
             }
             None => {
@@ -1483,6 +1562,38 @@ impl Shell {
                 },
                 cx,
             ),
+            Target::OpenFile { tab, path } => {
+                self.command(Command::OpenFile { tab, path }, cx);
+            }
+        }
+    }
+
+    fn toggle_file_wrap(&mut self, _: &ToggleFileWrap, _: &mut Window, cx: &mut Context<Self>) {
+        let pane = self
+            .focused_pane()
+            .filter(|p| self.workspace.pane(*p).is_file())
+            .or_else(|| {
+                let tab = self.workspace.selected_tab()?.id;
+                self.workspace.file_pane_of_tab(tab).map(|(p, _)| p)
+            });
+        if let Some(pane) = pane {
+            self.command(Command::ToggleFileWrap { pane }, cx);
+        } else {
+            self.say("There is no file preview pane in this tab.".to_owned(), cx);
+        }
+    }
+
+    fn file_tab(&mut self, step: FileTabStep, cx: &mut Context<Self>) {
+        if let Some(command) = self.workspace.file_tab_command(step) {
+            self.command(command, cx);
+            return;
+        }
+        let ws = &self.workspace;
+        let has_file_pane = ws
+            .selected_tab()
+            .is_some_and(|t| ws.file_pane_of_tab(t.id).is_some());
+        if !has_file_pane {
+            self.say("There is no file preview pane in this tab.".to_owned(), cx);
         }
     }
 
@@ -3016,11 +3127,14 @@ impl Shell {
         pane: &PaneView,
         cell: f32,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let t = self.theme;
         let focused = pane.id == tab.focused;
         let needs = pane.state.needs_you();
         let (border, border_color) = t.pane_border(focused, needs);
+        if let Some(file_info) = pane.file_pane() {
+            return self.render_file_pane(pane, file_info, focused, border, border_color, cx);
+        }
         let state_color = t.pane_word_color(pane.state);
         let id = pane.id;
         let folder = pane.cwd.as_deref().unwrap_or(&tab.dir);
@@ -3250,6 +3364,284 @@ impl Shell {
             .children(menu)
     }
 
+    /// Renders a read-only file preview pane in Option B — Compact rail
+    /// (`var-b` in `file-preview.html`, RF-CTX-02).
+    fn render_file_pane(
+        &self,
+        pane: &PaneView,
+        file_info: &FilePaneInfo,
+        focused: bool,
+        border: f32,
+        border_color: Rgba,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.theme;
+        let id = pane.id;
+        let mono = self.fonts.mono.clone();
+        let hover = t.term_raised;
+        let active_idx = file_info.active;
+        let active_path = file_info.active_file().unwrap_or(&pane.name);
+
+        let tabs: Vec<AnyElement> = file_info
+            .files
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let is_active = active_idx == Some(idx);
+                let leaf = path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(path.as_str())
+                    .to_owned();
+                let select_path = path.clone();
+                let close_path = path.clone();
+                h_flex()
+                    .id(("file-tab", (id.get() as usize) * 1024 + idx))
+                    .role(Role::Tab)
+                    .aria_label(format!("File tab {path}"))
+                    .aria_selected(is_active)
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(9.0))
+                    .pr(px(7.0))
+                    .border_b_2()
+                    .border_color(if is_active {
+                        t.text
+                    } else {
+                        transparent_black().into()
+                    })
+                    .text_size(t.text(11.5))
+                    .when_some(mono.clone(), |d, family| d.font_family(family))
+                    .text_color(if is_active { t.term_text } else { t.term_muted })
+                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.focus_pane_from_head(id, window, cx);
+                        this.command(
+                            Command::SelectFileTab {
+                                pane: id,
+                                path: select_path.clone(),
+                            },
+                            cx,
+                        );
+                    }))
+                    .child(
+                        div()
+                            .max_w(px(160.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(leaf),
+                    )
+                    .child(
+                        div()
+                            .id(("file-tab-close", (id.get() as usize) * 1024 + idx))
+                            .occlude()
+                            .role(Role::Button)
+                            .aria_label(format!("Close {path}"))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(16.0))
+                            .rounded(px(3.0))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.command(
+                                    Command::CloseFileTab {
+                                        pane: id,
+                                        path: close_path.clone(),
+                                    },
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                svg()
+                                    .path(assets::CLOSE)
+                                    .size(px(10.0))
+                                    .text_color(t.term_muted),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let wrap_on = file_info.wrap;
+        let wrap_btn = div()
+            .id(("file-wrap", id.get()))
+            .occlude()
+            .role(Role::Button)
+            .aria_label(format!("Toggle line wrap for {}", pane.name))
+            .aria_toggled(toggled(wrap_on))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .h(px(20.0))
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(if wrap_on {
+                t.term_strong
+            } else {
+                transparent_black().into()
+            })
+            .when(wrap_on, |d| d.bg(t.term_raised))
+            .text_size(t.text(11.0))
+            .when_some(mono.clone(), |d, family| d.font_family(family))
+            .text_color(if wrap_on { t.term_text } else { t.term_muted })
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.command(Command::ToggleFileWrap { pane: id }, cx);
+            }))
+            .child("Wrap");
+
+        let heads = Rc::clone(&self.pane_heads);
+        let top_rail = h_flex()
+            .relative()
+            .flex_none()
+            .h(px(28.0))
+            .items_stretch()
+            .min_w_0()
+            .overflow_hidden()
+            .bg(if focused { t.term_raised } else { t.panel })
+            .border_b_1()
+            .border_color(t.term_line)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.open_menu(id, MenuKind::Pane, event.position, false, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.focus_pane_from_head(id, window, cx);
+                }),
+            )
+            .child(
+                h_flex()
+                    .id(("file-tablist", id.get()))
+                    .role(Role::TabList)
+                    .aria_label("Open files")
+                    .flex_1()
+                    .min_w_0()
+                    .items_stretch()
+                    .gap(px(2.0))
+                    .pl(px(4.0))
+                    .overflow_x_hidden()
+                    .children(tabs),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .child(wrap_btn)
+                    .child(self.split_button(pane, Orientation::Horizontal, cx))
+                    .child(self.split_button(pane, Orientation::Vertical, cx))
+                    .child(self.pane_menu_button(pane, cx))
+                    .child(self.pane_close_button(pane, cx)),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        heads.borrow_mut().insert(id, bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+
+        let parts: Vec<&str> = active_path
+            .split(['/', '\\'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut crumb_items: Vec<AnyElement> = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                crumb_items.push(
+                    div()
+                        .flex_none()
+                        .text_color(t.term_faint)
+                        .child("›")
+                        .into_any_element(),
+                );
+            }
+            let is_last = i + 1 == parts.len();
+            crumb_items.push(
+                div()
+                    .when(!is_last, |d| d.text_color(t.term_faint))
+                    .when(is_last, |d| d.text_color(t.term_muted))
+                    .child((*part).to_owned())
+                    .into_any_element(),
+            );
+        }
+
+        let crumb_rail = h_flex()
+            .id(("file-crumb", id.get()))
+            .flex_none()
+            .h(px(22.0))
+            .items_center()
+            .gap(px(5.0))
+            .px(px(10.0))
+            .border_b_1()
+            .border_color(t.term_line)
+            .bg(t.term_raised)
+            .text_size(t.text(11.0))
+            .when_some(mono, |d, family| d.font_family(family))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(5.0))
+                    .overflow_hidden()
+                    .children(crumb_items),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(t.term_faint)
+                    .child("Read-only"),
+            );
+
+        let menu = self
+            .split_menu
+            .filter(|(p, _)| *p == id)
+            .map(|(_, orientation)| self.render_split_menu(id, orientation, cx));
+        let body = match self.file_panes.get(&id) {
+            Some(file_pane) => file_pane.clone().into_any_element(),
+            None => div().flex_1().into_any_element(),
+        };
+
+        v_flex()
+            .id(("pane", id.get()))
+            .role(Role::Group)
+            .aria_label(format!("{} file preview pane, Read-only", pane.name))
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .rounded(px(8.0))
+            .bg(t.term_bg)
+            .text_color(t.term_text)
+            .border(px(border))
+            .border_color(border_color)
+            .child(top_rail)
+            .child(crumb_rail)
+            .child(body)
+            .children(menu)
+    }
+
     /// A pane head button that opens the profile chooser for a split
     /// (RF-PAN-18), as in the prototype.
     fn split_button(
@@ -3305,10 +3697,10 @@ impl Shell {
     /// the core, so its terminal is focused directly when drawn.
     fn focus_pane_target(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         self.keyboard_in_bar = false;
-        match pane_focus_now(&self.workspace, pane, self.terminals.contains_key(&pane)) {
+        let drawn = self.terminals.contains_key(&pane) || self.file_panes.contains_key(&pane);
+        match pane_focus_now(&self.workspace, pane, drawn) {
             PaneFocusNow::Terminal(id) => {
-                if let Some(terminal) = self.terminals.get(&id) {
-                    let handle = terminal.read(cx).handle().clone();
+                if let Some(handle) = self.pane_focus_handle(id, cx) {
                     window.focus(&handle, cx);
                     self.keyboard_on = Some(id);
                 }
@@ -3321,8 +3713,7 @@ impl Shell {
     /// A click on a pane head gives that pane the focus and the keyboard,
     /// not the window root.
     fn focus_pane_from_head(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminals.get(&pane) {
-            let handle = terminal.read(cx).handle().clone();
+        if let Some(handle) = self.pane_focus_handle(pane, cx) {
             window.focus(&handle, cx);
             self.keyboard_on = Some(pane);
             self.keyboard_in_bar = false;
@@ -3917,7 +4308,18 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_collapse))
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
+            .on_action(cx.listener(Self::file_tree_open_in_editor))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::toggle_file_wrap))
+            .on_action(cx.listener(|this, _: &NextFileTab, _, cx| {
+                this.file_tab(FileTabStep::Next, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousFileTab, _, cx| {
+                this.file_tab(FileTabStep::Previous, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseActiveFileTab, _, cx| {
+                this.file_tab(FileTabStep::Close, cx);
+            }))
             .on_action(cx.listener(Self::show_whats_new))
             .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
@@ -4072,6 +4474,11 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("context bar's Files tab", "files.show"),
     ("file tree rows", "files.show"),
     ("changed file double-click", "files.show"),
+    ("file tree row double-click", "files.show"),
+    ("file pane wrap button", "file.toggle_wrap"),
+    ("file pane tab", "file.next_tab"),
+    ("file pane tab", "file.previous_tab"),
+    ("file pane tab close button", "file.close_tab"),
 ];
 
 #[cfg(test)]

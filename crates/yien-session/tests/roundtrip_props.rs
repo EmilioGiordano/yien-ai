@@ -3,9 +3,9 @@
 use proptest::prelude::*;
 use yien_proto::{PaneId, ProjectId, TabId};
 use yien_session::{
-    AgentRecord, LayoutRecord, MemStore, Orientation, PaneRecord, ProfileId, ProjectRecord,
-    Selection, SessionRef, SessionSnapshot, TabRecord, deserialize, load, save, serialize,
-    validate,
+    AgentRecord, FilePaneRecord, LayoutRecord, MemStore, Orientation, PaneRecord, ProfileId,
+    ProjectRecord, Selection, SessionRef, SessionSnapshot, TabRecord, deserialize, load, save,
+    serialize, validate,
 };
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,7 @@ struct PaneSeed {
     agent: Option<(String, Option<String>, bool)>,
     last_command: Option<String>,
     name: Option<String>,
+    files: Option<FilePaneRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,19 @@ fn text() -> impl Strategy<Value = String> {
     "\\PC{0,12}"
 }
 
+fn file_pane_seed() -> impl Strategy<Value = FilePaneRecord> {
+    (
+        prop::collection::vec(text(), 1..4),
+        proptest::option::of(0usize..3),
+        any::<bool>(),
+    )
+        .prop_map(|(files, active, wrap)| FilePaneRecord {
+            active: active.map(|i| i % files.len()),
+            files,
+            wrap,
+        })
+}
+
 fn pane_seed() -> impl Strategy<Value = PaneSeed> {
     (
         text(),
@@ -44,14 +58,18 @@ fn pane_seed() -> impl Strategy<Value = PaneSeed> {
         proptest::option::of((text(), proptest::option::of(text()), any::<bool>())),
         proptest::option::of(text()),
         proptest::option::of(text()),
+        proptest::option::of(file_pane_seed()),
     )
-        .prop_map(|(profile, cwd, agent, last_command, name)| PaneSeed {
-            profile,
-            cwd,
-            agent,
-            last_command,
-            name,
-        })
+        .prop_map(
+            |(profile, cwd, agent, last_command, name, files)| PaneSeed {
+                profile,
+                cwd,
+                agent,
+                last_command,
+                name,
+                files,
+            },
+        )
 }
 
 fn tab_seed() -> impl Strategy<Value = TabSeed> {
@@ -170,6 +188,7 @@ fn build(
                                 }),
                                 last_command: p.last_command,
                                 name: p.name,
+                                files: p.files,
                             })
                             .collect();
                         let ids: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
