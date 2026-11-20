@@ -546,3 +546,186 @@ fn reveal_and_trash_refuse_before_reaching_the_shell() {
         Err(FileOpError::Missing(_))
     ));
 }
+
+#[test]
+fn rnf_14_a_path_part_win32_reads_as_another_item_is_found() {
+    for path in [
+        r"\\?\C:\proj\...",
+        r"\\?\C:\proj\foo.",
+        r"\\?\C:\proj\.git.",
+        r"\\?\C:\proj\. ",
+        r"\\?\C:\proj\nul.txt",
+        r"\\?\C:\dir.\a.txt",
+    ] {
+        assert!(shell_rewrites(Path::new(path)), "{path}");
+    }
+    for path in [
+        r"\\?\C:\proj\a.txt",
+        r"\\?\C:\proj\.git",
+        r"C:\x\.gitignore",
+    ] {
+        assert!(!shell_rewrites(Path::new(path)), "{path}");
+    }
+}
+
+/// Names only a `\\?\` path can make: the shell would read each as another
+/// item. Never sent to the shell: only the target it would get is checked.
+#[cfg(windows)]
+#[test]
+fn rnf_14_trash_and_reveal_refuse_names_the_shell_reads_as_another_item() {
+    let s = Scratch::new("shell-names");
+    let real = fs::canonicalize(&s.root).unwrap();
+    fs::write(real.join("foo"), "keep").unwrap();
+    fs::write(real.join("foo."), "dot").unwrap();
+    fs::write(real.join(". "), "dot space").unwrap();
+    fs::create_dir(real.join("...")).unwrap();
+    fs::create_dir(real.join(".git.")).unwrap();
+    fs::create_dir(real.join(".git")).unwrap();
+    fs::write(real.join("plain.txt"), "plain").unwrap();
+    let folder = Folder::open(&s.root).unwrap();
+    for rel in ["...", "foo.", ".git.", ". "] {
+        for writes in [true, false] {
+            let target = folder.shell_target(rel, writes);
+            assert!(
+                matches!(target, Err(FileOpError::ShellName(_))),
+                "{rel:?} {writes}: {target:?}"
+            );
+        }
+    }
+    assert!(folder.shell_target("plain.txt", true).is_ok());
+    // Writes that never reach the shell act on the exact entry.
+    s.run(rename("foo.", "renamed")).unwrap();
+    assert_eq!(fs::read_to_string(real.join("renamed")).unwrap(), "dot");
+    assert_eq!(fs::read_to_string(real.join("foo")).unwrap(), "keep");
+    s.run(FileAction::Delete { path: "...".into() }).unwrap();
+    assert!(real.join("plain.txt").exists(), "the folder's files stay");
+    assert!(fs::symlink_metadata(real.join("...")).is_err());
+}
+
+/// The short name Windows gives `.git` when 8.3 names are on.
+#[cfg(windows)]
+#[test]
+fn rnf_14_git_through_its_short_name_is_refused() {
+    let s = Scratch::new("short-name");
+    s.file(".git/HEAD", "ref: refs/heads/main");
+    s.dir("sub");
+    if fs::symlink_metadata(s.root.join("GIT~1")).is_err() {
+        eprintln!("skipped: no 8.3 names on this volume");
+        return;
+    }
+    let before = s.snapshot();
+    for action in [
+        FileAction::Delete {
+            path: "GIT~1".into(),
+        },
+        FileAction::Delete {
+            path: "GIT~1/HEAD".into(),
+        },
+        rename("GIT~1", "moved"),
+        paste("GIT~1", "sub", true),
+        paste("GIT~1/HEAD", "sub", true),
+        new_file("GIT~1", "x"),
+    ] {
+        let result = s.run(action.clone());
+        assert!(
+            matches!(result, Err(FileOpError::GitFolder)),
+            "{action:?}: {result:?}"
+        );
+    }
+    let folder = Folder::open(&s.root).unwrap();
+    assert!(matches!(
+        folder.shell_target("GIT~1", true),
+        Err(FileOpError::GitFolder)
+    ));
+    assert_eq!(s.snapshot(), before);
+}
+
+#[test]
+fn rnf_14_a_gitignore_link_is_never_written_through() {
+    let s = Scratch::new("ignore-link");
+    s.file("a.txt", "a");
+    let missing = s.base.join("outside").join("created-through-link");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&missing, s.root.join(".gitignore")).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&missing, s.root.join(".gitignore")).is_ok()
+        || link_dir(&missing, &s.root.join(".gitignore"));
+    if !linked {
+        eprintln!("skipped: cannot create a link here");
+        return;
+    }
+    let result = s.run(FileAction::Ignore {
+        path: "a.txt".into(),
+    });
+    assert!(
+        matches!(result, Err(FileOpError::GitignoreLink)),
+        "{result:?}"
+    );
+    assert!(fs::symlink_metadata(&missing).is_err(), "nothing was made");
+}
+
+#[test]
+fn rnf_14_control_characters_are_refused_in_every_path() {
+    let s = Scratch::new("control");
+    s.file("a.txt", "a");
+    for action in [
+        FileAction::Ignore {
+            path: "a\n!secret".into(),
+        },
+        new_file("a\tb", "x"),
+        paste("a.txt", "dst\r", false),
+        FileAction::Delete {
+            path: "a.txt\u{7}".into(),
+        },
+    ] {
+        assert!(
+            matches!(s.run(action.clone()), Err(FileOpError::BadName(_))),
+            "{action:?}"
+        );
+    }
+    assert!(!s.exists(".gitignore"));
+    assert!(matches!(
+        terminal_folder(&s.root, "a\nb"),
+        Err(FileOpError::BadName(_))
+    ));
+}
+
+#[test]
+fn a_folder_nested_too_deep_is_not_copied_and_nothing_is_made() {
+    let s = Scratch::new("deep");
+    let chain = |levels: usize| vec!["d"; levels].join("/");
+    s.dir(&format!("ok/{}", chain(MAX_COPY_DEPTH)));
+    s.dir(&format!("deep/{}", chain(MAX_COPY_DEPTH + 1)));
+    s.dir("dst");
+    let before = s.snapshot();
+    assert!(matches!(
+        s.run(paste("deep", "dst", false)),
+        Err(FileOpError::TooDeep(_))
+    ));
+    assert_eq!(s.snapshot(), before);
+    s.run(paste("ok", "dst", false)).unwrap();
+    assert!(s.exists(&format!("dst/ok/{}", chain(MAX_COPY_DEPTH))));
+}
+
+#[test]
+fn rnf_14_a_terminal_starts_only_in_a_folder_inside_the_tab_folder() {
+    let s = Scratch::new("terminal");
+    s.file("src/a.txt", "a");
+    let real = fs::canonicalize(&s.root).unwrap();
+    assert_eq!(terminal_folder(&s.root, "").unwrap(), real);
+    assert_eq!(terminal_folder(&s.root, "src").unwrap(), real.join("src"));
+    assert!(matches!(
+        terminal_folder(&s.root, "src/a.txt"),
+        Err(FileOpError::NotAFolder(_))
+    ));
+    assert!(matches!(
+        terminal_folder(&s.root, ".."),
+        Err(FileOpError::Outside(_))
+    ));
+    if link_dir(&s.base.join("outside"), &s.root.join("out")) {
+        assert!(matches!(
+            terminal_folder(&s.root, "out"),
+            Err(FileOpError::Outside(_))
+        ));
+    }
+}
