@@ -200,6 +200,7 @@ impl Shell {
         self.menu = None;
         self.tab_menu.forget();
         self.new_tab_menu.forget();
+        self.file_menu.forget();
         let maximized = tab.maximized == Some(pane);
         let alone = tab.layout.panes().len() == 1;
         let focused = tab.focused == pane;

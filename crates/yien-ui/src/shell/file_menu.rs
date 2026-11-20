@@ -61,6 +61,11 @@ impl FileMenuState {
     pub(super) fn is_editing(&self) -> bool {
         self.field.is_some()
     }
+
+    /// Drops the menu without moving the keyboard, for a menu opening now.
+    pub(super) fn forget(&mut self) {
+        self.open = None;
+    }
 }
 
 /// What the question before Delete Permanently says.
