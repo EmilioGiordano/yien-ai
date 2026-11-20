@@ -296,8 +296,8 @@ actions!(
         FileTreeCollapse,
         /// Expands the folder under the cursor, or goes into it.
         FileTreeExpand,
-        /// Opens the file under the cursor in the editor (RF-CTX-03), or
-        /// expands or collapses the folder.
+        /// Opens the file under the cursor in the file preview pane (RF-CTX-02),
+        /// or expands or collapses the folder.
         FileTreeOpen,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,

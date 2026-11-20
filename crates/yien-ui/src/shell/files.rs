@@ -290,9 +290,14 @@ impl Shell {
     fn act(&mut self, tab: TabId, activation: Activation, cx: &mut Context<Self>) {
         match activation {
             Activation::Open(rel) => {
-                let file = self.files.trees.get(&tab).and_then(|t| t.path_of(&rel));
-                if let Some(file) = file {
-                    self.open_file(file, cx);
+                if self
+                    .files
+                    .trees
+                    .get(&tab)
+                    .and_then(|t| t.path_of(&rel))
+                    .is_some()
+                {
+                    self.command(yien_proto::Command::OpenFile { tab, path: rel }, cx);
                 }
             }
             Activation::List(dirs) => self.list_folders(tab, dirs, cx),
@@ -647,11 +652,12 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some((_, tree)) = self.shown_tree() else {
+        let Some((tab, tree)) = self.shown_tree() else {
             return Vec::new();
         };
         let rows = tree.rows();
         let cursor = tree.cursor_index(&rows);
+        let active_preview = self.workspace.active_preview_file(tab).map(str::to_owned);
         let t = self.theme;
         let mono = self.fonts.mono.clone();
         let ringed = self.ringed(Region::ContextBar);
@@ -661,6 +667,12 @@ impl Shell {
             .skip(range.start)
             .take(range.len())
             .map(|(at, row)| {
+                let is_open_file = match &row {
+                    Row::Entry { path, kind, .. } | Row::Hit { path, kind } if !kind.is_dir() => {
+                        active_preview.as_deref() == Some(path.as_str())
+                    }
+                    _ => false,
+                };
                 let base = h_flex()
                     .id(("file-row", at))
                     .h(px(ROW_HEIGHT))
@@ -671,7 +683,10 @@ impl Shell {
                     .border_1()
                     .border_color(transparent_black())
                     .text_size(t.text(12.5))
-                    .aria_selected(cursor == Some(at))
+                    .aria_selected(cursor == Some(at) || is_open_file)
+                    .when(is_open_file && cursor != Some(at), |row| {
+                        row.bg(t.raised).font_weight(FontWeight::MEDIUM)
+                    })
                     .when(cursor == Some(at), |row| {
                         row.bg(t.hover).when(ringed, |row| row.border_color(t.ai))
                     });
