@@ -19,6 +19,24 @@ use crate::theme::Theme;
 const FALLBACK_MONO: &str = "Consolas";
 /// The code area's padding above and below the lines.
 const CODE_PAD_Y: f32 = 4.0;
+/// The gutter's space right of its numbers; its 1 px border comes on top.
+const GUTTER_PAD_RIGHT: f32 = 9.0;
+/// The gutter never narrows below this many digits.
+const MIN_GUTTER_DIGITS: usize = 3;
+
+/// The gutter's outer width for a file of `total_lines`: its widest number
+/// at `digit_w` (the font's measured advance of "0"; 0.6 of `font_size`
+/// when unknown), plus its padding and border.
+pub(crate) fn gutter_width(total_lines: usize, digit_w: Option<f32>, font_size: f32) -> f32 {
+    let digits = total_lines
+        .checked_ilog10()
+        .map_or(1, |log| log as usize + 1)
+        .max(MIN_GUTTER_DIGITS);
+    let digit_w = digit_w
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(font_size * 0.6);
+    (digits as f32 * digit_w).ceil() + GUTTER_PAD_RIGHT + 1.0
+}
 
 /// The whole lines that fit in a code area `height` pixels tall; at least one.
 pub(crate) fn rows_in(height: f32, line_h: f32) -> usize {
@@ -302,7 +320,7 @@ impl FilePaneView {
                 div()
                     .flex_none()
                     .w(px(gutter_w))
-                    .pr(px(9.0))
+                    .pr(px(GUTTER_PAD_RIGHT))
                     .mr(px(10.0))
                     .border_r_1()
                     .border_color(t.term_line)
@@ -323,17 +341,16 @@ impl FilePaneView {
 }
 
 impl Render for FilePaneView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let (font_size, line_h) = self.code_metrics();
         let total_lines = self.frame.as_ref().map_or(0, |f| f.total_lines);
-        let gutter_w = if total_lines >= 10_000 {
-            48.0
-        } else if total_lines >= 1_000 {
-            42.0
-        } else {
-            36.0
-        };
+        let text = window.text_system();
+        let digit_w = text
+            .ch_advance(text.resolve_font(&font(self.family.clone())), px(font_size))
+            .ok()
+            .map(|w| w.as_f32());
+        let gutter_w = gutter_width(total_lines, digit_w, font_size);
 
         let banner = self
             .frame
@@ -496,7 +513,7 @@ fn stamp_frame(enabled: bool) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_top, rows_in, scroll_key};
+    use super::{gutter_width, last_top, rows_in, scroll_key};
 
     #[test]
     fn rf_ctx_02_the_rows_follow_the_code_area_height() {
@@ -528,5 +545,28 @@ mod tests {
         // A file shorter than the pane never scrolls.
         assert_eq!(scroll_key("end", 0, 90, 40), Some(0));
         assert_eq!(last_top(90, 40), 0);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_gutter_fits_the_widest_line_number() {
+        // 9 px of padding and a 1 px border right of the numbers.
+        let w = |total, digit| gutter_width(total, Some(digit), 13.0);
+        assert_eq!(w(0, 7.0), 31.0);
+        assert_eq!(w(1, 7.0), 31.0);
+        assert_eq!(w(999, 7.0), 31.0);
+        assert_eq!(w(1_000, 7.0), 38.0);
+        assert_eq!(w(9_999, 7.0), 38.0);
+        assert_eq!(w(10_000, 7.0), 45.0);
+        assert_eq!(w(99_999, 7.0), 45.0);
+        assert_eq!(w(123_456, 7.0), 52.0);
+        // A fractional advance rounds up so the last digit is never clipped.
+        assert_eq!(w(123_456, 7.2), 54.0);
+        // Zoom: the width follows the measured advance, digit for digit.
+        assert_eq!(w(123_456, 12.0), 82.0);
+        assert!(w(123_456, 12.0) > w(123_456, 7.2));
+        // No metrics: 0.6 of the font size per digit.
+        for bad in [None, Some(0.0), Some(-1.0), Some(f32::NAN)] {
+            assert_eq!(gutter_width(10_000, bad, 20.0), 70.0, "{bad:?}");
+        }
     }
 }
