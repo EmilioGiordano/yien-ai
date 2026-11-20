@@ -2000,3 +2000,32 @@ fn rnf_14_a_file_action_outside_the_tab_folder_is_refused_with_an_error() {
     assert!(!dir.parent().unwrap().join("escaped.txt").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rnf_14_open_in_terminal_starts_only_in_a_real_folder_of_the_tab() {
+    let mut h = Harness::start();
+    let (tab, dir) = scratch_project(&mut h, "terminal");
+    let _first = h.child();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    h.command(Command::OpenTerminal {
+        tab,
+        path: "absent".into(),
+    });
+    let message = h.wait_for(|m| match m {
+        CoreMsg::Error {
+            pane: None,
+            message,
+        } => Some(message.clone()),
+        _ => None,
+    });
+    assert!(message.contains("absent"), "{message}");
+    assert!(h.backend.take_spawned().is_empty(), "no shell started");
+    h.command(Command::OpenTerminal {
+        tab,
+        path: "src".into(),
+    });
+    let child = h.child();
+    let cwd = child.spec().cwd.clone().unwrap();
+    assert!(cwd.ends_with("src"), "{}", cwd.display());
+    let _ = std::fs::remove_dir_all(&dir);
+}
