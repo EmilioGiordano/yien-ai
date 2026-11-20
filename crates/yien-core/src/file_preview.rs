@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use synoptic::TokOpt;
 use yien_proto::PaneId;
@@ -56,6 +56,73 @@ impl FileFrames {
     /// Drops any waiting frame for a closed pane.
     pub fn forget(&self, pane: PaneId) {
         self.slots().remove(&pane);
+    }
+}
+
+/// Each file pane's document and visible window: decides which finished loads
+/// and viewport moves become a frame for the UI.
+#[derive(Debug, Default)]
+pub(crate) struct FileViews(HashMap<PaneId, FileView>);
+
+#[derive(Debug)]
+struct FileView {
+    top_line: usize,
+    rows: usize,
+    /// The load the pane waits for; an older one finishing late is dropped.
+    request: u64,
+    doc: Option<Arc<LoadedDocument>>,
+}
+
+impl FileViews {
+    /// Starts a new load in `pane` at its top, keeping the rows the UI last
+    /// reported. Returns the request number the load's result must carry.
+    pub fn start(&mut self, pane: PaneId) -> u64 {
+        let view = self.0.entry(pane).or_insert(FileView {
+            top_line: 0,
+            rows: DEFAULT_VIEWPORT_ROWS,
+            request: 0,
+            doc: None,
+        });
+        view.request = view.request.wrapping_add(1);
+        view.top_line = 0;
+        view.doc = None;
+        view.request
+    }
+
+    /// A finished load: the frame to show, or `None` when the pane is gone or
+    /// a newer load replaced it.
+    pub fn loaded(
+        &mut self,
+        pane: PaneId,
+        request: u64,
+        doc: Arc<LoadedDocument>,
+    ) -> Option<FileFrame> {
+        let view = self.0.get_mut(&pane).filter(|v| v.request == request)?;
+        let frame = doc.frame(view.top_line, view.rows);
+        view.top_line = frame.top_line;
+        view.doc = Some(doc);
+        Some(frame)
+    }
+
+    /// Moves or resizes `pane`'s visible window: the new frame once its file
+    /// is loaded. Unknown panes keep no state.
+    pub fn viewport(&mut self, pane: PaneId, top_line: usize, rows: usize) -> Option<FileFrame> {
+        let view = self.0.get_mut(&pane)?;
+        view.rows = rows.max(1);
+        view.top_line = top_line;
+        let frame = view.doc.as_ref()?.frame(view.top_line, view.rows);
+        view.top_line = frame.top_line;
+        Some(frame)
+    }
+
+    /// Forgets a closed pane, so its late load is dropped.
+    pub fn forget(&mut self, pane: PaneId) {
+        self.0.remove(&pane);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -618,6 +685,64 @@ mod tests {
                 doc.notice
             );
         }
+    }
+
+    fn numbered(path: &str, lines: usize) -> Arc<LoadedDocument> {
+        let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        Arc::new(load_bytes(path, text.as_bytes(), text.len() as u64, false))
+    }
+
+    #[test]
+    fn rf_ctx_02_a_load_replaced_by_a_newer_one_is_dropped() {
+        let pane = PaneId::new(4);
+        let mut views = FileViews::default();
+        let first = views.start(pane);
+        let second = views.start(pane);
+        assert_eq!(
+            views
+                .loaded(pane, second, numbered("b.txt", 3))
+                .unwrap()
+                .path,
+            "b.txt"
+        );
+        assert_eq!(views.loaded(pane, first, numbered("a.txt", 3)), None);
+        let frame = views.viewport(pane, 1, 1).unwrap();
+        assert_eq!((frame.path.as_str(), frame.top_line), ("b.txt", 1));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_load_that_ends_after_its_pane_closed_is_dropped() {
+        let pane = PaneId::new(4);
+        let mut views = FileViews::default();
+        let request = views.start(pane);
+        views.forget(pane);
+        assert_eq!(views.loaded(pane, request, numbered("a.txt", 3)), None);
+        assert_eq!(views.len(), 0);
+    }
+
+    #[test]
+    fn rf_ctx_02_the_viewport_slices_the_rows_the_ui_reported() {
+        let pane = PaneId::new(4);
+        let mut views = FileViews::default();
+        let request = views.start(pane);
+        // Rows reported before the file is read apply to its first frame.
+        assert_eq!(views.viewport(pane, 0, 12), None);
+        let frame = views.loaded(pane, request, numbered("a.txt", 100)).unwrap();
+        assert_eq!((frame.top_line, frame.lines.len()), (0, 12));
+        let frame = views.viewport(pane, 40, 5).unwrap();
+        assert_eq!((frame.top_line, frame.lines.len()), (40, 5));
+        assert_eq!(frame.lines[0].number, 41);
+        // A new file starts at its top with the same rows.
+        let request = views.start(pane);
+        let frame = views.loaded(pane, request, numbered("b.txt", 100)).unwrap();
+        assert_eq!((frame.top_line, frame.lines.len()), (0, 5));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_viewport_for_an_unknown_pane_keeps_no_state() {
+        let mut views = FileViews::default();
+        assert_eq!(views.viewport(PaneId::new(9), 3, 20), None);
+        assert_eq!(views.len(), 0);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use yien_vt::Palette;
 use crate::clipboards::Clipboards;
 use crate::consoles::Consoles;
 use crate::convert;
-use crate::file_preview::{DEFAULT_VIEWPORT_ROWS, FileFrames, LoadedDocument, load_file};
+use crate::file_preview::{FileFrames, FileViews, LoadedDocument, load_file};
 use crate::git::{GitReport, GitThread};
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
@@ -116,16 +116,9 @@ struct PaneHandle {
     screen: Arc<ScreenSource>,
 }
 
-struct FileViewState {
-    top_line: usize,
-    rows: usize,
-    request_seq: u64,
-    doc: Option<Arc<LoadedDocument>>,
-}
-
 struct FileLoadDone {
     pane: PaneId,
-    seq: u64,
+    request: u64,
     doc: Arc<LoadedDocument>,
 }
 
@@ -133,7 +126,7 @@ struct Service {
     ws: Workspace,
     ctx: Ctx,
     panes: HashMap<PaneId, PaneHandle>,
-    file_views: HashMap<PaneId, FileViewState>,
+    file_views: FileViews,
     file_frames: Arc<FileFrames>,
     file_loads: mpsc::Sender<FileLoadDone>,
     links: Links,
@@ -206,7 +199,7 @@ pub(crate) async fn run(
         ws: Workspace::new().with_profiles(profiles),
         ctx,
         panes: HashMap::new(),
-        file_views: HashMap::new(),
+        file_views: FileViews::default(),
         file_frames,
         file_loads,
         links,
@@ -582,7 +575,7 @@ impl Service {
     fn stop_pane(&mut self, pane: PaneId) {
         hooks::revoke(self.ctx.hooks.as_deref(), pane);
         self.panes.remove(&pane);
-        self.file_views.remove(&pane);
+        self.file_views.forget(pane);
         links(&self.links).remove(&pane);
         self.ctx.clipboards.forget(pane);
         self.file_frames.forget(pane);
@@ -593,16 +586,7 @@ impl Service {
     }
 
     async fn start_file_load(&mut self, pane: PaneId, root: String, path: String) {
-        let state = self.file_views.entry(pane).or_insert(FileViewState {
-            top_line: 0,
-            rows: DEFAULT_VIEWPORT_ROWS,
-            request_seq: 0,
-            doc: None,
-        });
-        state.request_seq = state.request_seq.wrapping_add(1);
-        state.top_line = 0;
-        state.doc = None;
-        let seq = state.request_seq;
+        let request = self.file_views.start(pane);
         let loading = FileFrame {
             path: path.clone(),
             language: None,
@@ -617,23 +601,17 @@ impl Service {
         let tx = self.file_loads.clone();
         tokio::task::spawn_blocking(move || {
             let doc = Arc::new(load_file(Path::new(&root), &path));
-            let _ = tx.blocking_send(FileLoadDone { pane, seq, doc });
+            let _ = tx.blocking_send(FileLoadDone { pane, request, doc });
         });
     }
 
     async fn on_file_loaded(&mut self, loaded: FileLoadDone) {
-        let Some(state) = self.file_views.get_mut(&loaded.pane) else {
+        let FileLoadDone { pane, request, doc } = loaded;
+        let Some(frame) = self.file_views.loaded(pane, request, doc) else {
             return;
         };
-        if state.request_seq != loaded.seq {
-            return;
-        }
-        let frame = loaded.doc.frame(state.top_line, state.rows);
-        state.top_line = frame.top_line;
-        state.doc = Some(loaded.doc);
-        if self.file_frames.put(loaded.pane, frame) {
-            self.emit(CoreMsg::FileFrameReady { pane: loaded.pane })
-                .await;
+        if self.file_frames.put(pane, frame) {
+            self.emit(CoreMsg::FileFrameReady { pane }).await;
         }
     }
 
@@ -733,21 +711,10 @@ impl Service {
                 top_line,
                 rows,
             } => {
-                let rows = rows.max(1);
-                let state = self.file_views.entry(pane).or_insert(FileViewState {
-                    top_line: 0,
-                    rows,
-                    request_seq: 0,
-                    doc: None,
-                });
-                state.top_line = top_line;
-                state.rows = rows;
-                if let Some(doc) = &state.doc {
-                    let frame = doc.frame(state.top_line, state.rows);
-                    state.top_line = frame.top_line;
-                    if self.file_frames.put(pane, frame) {
-                        self.emit(CoreMsg::FileFrameReady { pane }).await;
-                    }
+                if let Some(frame) = self.file_views.viewport(pane, top_line, rows)
+                    && self.file_frames.put(pane, frame)
+                {
+                    self.emit(CoreMsg::FileFrameReady { pane }).await;
                 }
             }
         }
