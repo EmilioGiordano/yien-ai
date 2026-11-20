@@ -13,6 +13,10 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use yien_proto::file_ops::{FileAction, check_name, rel_name};
 use yien_proto::files::EntryKind;
+use yien_proto::test_control::{
+    FileClipboardState, FileEditState, FileMenuState as FileMenuDump, FileRowState, FilesState,
+    MenuItemState,
+};
 use yien_proto::{Command, TabGit, TabId};
 
 use super::menu::{EDGE_MARGIN, Menu, MenuEntry, MenuEvent, MenuItem, MenuOutcome, OpenMenu};
@@ -24,7 +28,7 @@ use crate::file_menu::{
     FileClip, FileEffect, FileMenuAction, FileMenuEntry, FileTarget, MenuFacts, file_effect,
     file_menu, palette_actions,
 };
-use crate::file_tree::NameEdit;
+use crate::file_tree::{NameEdit, Row};
 use crate::palette::{Entry, Target};
 
 /// The key the blank part of the tree records its place under, for a menu
@@ -127,6 +131,15 @@ fn item_keys_action(action: FileMenuAction) -> Option<Box<dyn Action>> {
         FileMenuAction::Delete => Box::new(FileTreeDelete),
         _ => return None,
     })
+}
+
+fn kind_name(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Dir => "folder",
+        EntryKind::File => "file",
+        EntryKind::Link { dir: true } => "folder_link",
+        EntryKind::Link { dir: false } => "link",
+    }
 }
 
 impl Shell {
@@ -682,6 +695,167 @@ impl Shell {
     pub(super) fn name_field_input(&self) -> Option<&Entity<InputState>> {
         self.file_menu.field.as_ref().map(|f| &f.input)
     }
+
+    /// The Files view for the test control's state dump.
+    pub(super) fn files_test_state(&self, cx: &App) -> Option<FilesState> {
+        let (tab, root) = self.files_shown()?;
+        let menu = self.file_menu.open.as_ref().map(|open| FileMenuDump {
+            path: open.target.path.clone(),
+            items: open_items(&open.menu),
+        });
+        let clipboard = self.file_menu.clip.as_ref().map(|c| FileClipboardState {
+            path: c.path.clone(),
+            cut: c.cut,
+        });
+        let text = self
+            .file_menu
+            .field
+            .as_ref()
+            .map(|f| f.input.read(cx).value().to_string());
+        let (_, tree) = self.shown_tree_ref()?;
+        let editing = tree.editing().map(|edit| {
+            let (kind, path) = match edit {
+                NameEdit::New { dir, folder: false } => ("new_file", dir.clone()),
+                NameEdit::New { dir, folder: true } => ("new_folder", dir.clone()),
+                NameEdit::Rename { path } => ("rename", path.clone()),
+            };
+            FileEditState {
+                kind: kind.to_owned(),
+                path,
+                text: text.clone().unwrap_or_default(),
+            }
+        });
+        let rows = tree
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Entry {
+                    path,
+                    kind,
+                    depth,
+                    expanded,
+                    ..
+                } => Some(FileRowState {
+                    path,
+                    kind: kind_name(kind).to_owned(),
+                    depth,
+                    expanded,
+                }),
+                Row::Hit { path, kind } => Some(FileRowState {
+                    path,
+                    kind: kind_name(kind).to_owned(),
+                    depth: 0,
+                    expanded: false,
+                }),
+                _ => None,
+            })
+            .collect();
+        Some(FilesState {
+            tab: Some(tab),
+            root,
+            query: tree.query().to_owned(),
+            cursor: tree.cursor().map(str::to_owned),
+            rows,
+            menu,
+            editing,
+            clipboard,
+        })
+    }
+
+    /// `files.menu`: opens the menu of the drawn entry `path`, or of the
+    /// folder itself, as a right click on it does.
+    pub(super) fn test_open_file_menu(
+        &mut self,
+        path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.files_shown().is_none() {
+            self.open_files_view(window, cx);
+        }
+        let target = match path {
+            None => FileTarget::root(),
+            Some(path) => {
+                let (_, tree) = self
+                    .shown_tree()
+                    .ok_or_else(|| "the Files view shows no folder".to_owned())?;
+                let kind = tree
+                    .kind_of(&path)
+                    .ok_or_else(|| format!("no row shows {path}; expand its folder first"))?;
+                FileTarget { path, kind }
+            }
+        };
+        let at = self
+            .file_menu
+            .rows
+            .borrow()
+            .get(&target.path)
+            .map_or(point(px(EDGE_MARGIN), px(EDGE_MARGIN)), |b| {
+                point(b.left() + px(24.0), b.bottom())
+            });
+        self.open_file_menu(target, at, window, cx);
+        if self.file_menu.is_open() {
+            Ok(())
+        } else {
+            Err("the menu did not open: a question or prompt is in the way".to_owned())
+        }
+    }
+
+    /// `files.menu_pick`: runs the open menu's item `item` as a click does;
+    /// with `name`, types it into the field the item opened and confirms it.
+    pub(super) fn test_pick_file_menu(
+        &mut self,
+        item: &str,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let open = self
+            .file_menu
+            .open
+            .as_mut()
+            .ok_or_else(|| "no file menu is open; run files.menu first".to_owned())?;
+        let at = open
+            .menu
+            .model()
+            .entries()
+            .iter()
+            .position(|e| {
+                matches!(e, MenuEntry::Item(i) if i.label == item || i.label.trim_end_matches('…') == item)
+            })
+            .ok_or_else(|| format!("the menu has no item {item}"))?;
+        if open.menu.model().pick(at).is_none() {
+            return Err(format!("{item} cannot run now"));
+        }
+        self.on_file_menu_event(MenuEvent::Pick(at), window, cx);
+        let Some(name) = name else {
+            return Ok(());
+        };
+        let input = self
+            .name_field_input()
+            .cloned()
+            .ok_or_else(|| format!("{item} opened no name field"))?;
+        input.update(cx, |state, cx| state.set_value(name, window, cx));
+        self.check_name_field(cx)?;
+        self.finish_name_field(true, window, cx);
+        Ok(())
+    }
+}
+
+/// The open menu's items, for the state dump.
+fn open_items(menu: &OpenMenu<FileMenuAction>) -> Vec<MenuItemState> {
+    menu.model()
+        .entries()
+        .iter()
+        .filter_map(|e| match e {
+            MenuEntry::Item(i) => Some(MenuItemState {
+                label: i.label.clone(),
+                enabled: i.enabled,
+                keys: i.keys.clone(),
+            }),
+            MenuEntry::Separator => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

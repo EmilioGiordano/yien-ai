@@ -100,6 +100,8 @@ pub(crate) const ARGUMENT_COMMANDS: &[&str] = &[
     "tab.select",
     "project.select",
     "file.open",
+    "files.menu",
+    "files.menu_pick",
 ];
 
 /// What a command id runs.
@@ -110,6 +112,12 @@ pub(crate) enum Run {
     Catalog(&'static str),
     /// A palette row that takes arguments.
     Target(Target),
+    /// Open the Files view's context menu on the drawn entry `path`, or on
+    /// the tab's folder itself for `.` (RF-CTX-01).
+    FilesMenu { path: String },
+    /// Run the open Files menu's item with this label, typing `name` into
+    /// the name field it opens and confirming it.
+    FilesMenuPick { item: String, name: Option<String> },
 }
 
 /// Which command `id` runs with `args`, checked against what the window
@@ -191,6 +199,26 @@ pub(crate) fn resolve_command(
                     .ok_or_else(|| "no tab is selected".to_owned())?,
             };
             Target::OpenFile { tab, path }
+        }
+        "files.menu" => {
+            let path = args
+                .path
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.path: a drawn row, or . for the folder"))?;
+            if ws.selected_tab().is_none() {
+                return Err("no tab is selected".to_owned());
+            }
+            return Ok(Run::FilesMenu { path });
+        }
+        "files.menu_pick" => {
+            let item = args
+                .item
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.item: the label of a menu item"))?;
+            return Ok(Run::FilesMenuPick {
+                item,
+                name: args.name.clone(),
+            });
         }
         _ => {
             return Err(format!(
@@ -685,6 +713,8 @@ mod tests {
             tab: Some(TabId::new(2)),
             project: Some(ProjectId::new(1)),
             path: Some("src/main.rs".into()),
+            item: Some("Rename…".into()),
+            name: Some("lib.rs".into()),
         }),
     ];
 
@@ -768,6 +798,42 @@ mod tests {
     }
 
     #[test]
+    fn rf_ctx_01_the_file_menu_opens_on_a_row_and_picks_an_item_by_label() {
+        let ws = workspace();
+        let args = |path: Option<&str>, item: Option<&str>, name: Option<&str>| CommandArgs {
+            path: path.map(str::to_owned),
+            item: item.map(str::to_owned),
+            name: name.map(str::to_owned),
+            ..CommandArgs::default()
+        };
+        assert_eq!(
+            resolve_command("files.menu", &args(Some("src/main.rs"), None, None), &ws),
+            Ok(Run::FilesMenu {
+                path: "src/main.rs".into()
+            })
+        );
+        assert_eq!(
+            resolve_command("files.menu", &args(Some("."), None, None), &ws),
+            Ok(Run::FilesMenu { path: ".".into() })
+        );
+        assert_eq!(
+            resolve_command(
+                "files.menu_pick",
+                &args(None, Some("New File…"), Some("notes.md")),
+                &ws
+            ),
+            Ok(Run::FilesMenuPick {
+                item: "New File…".into(),
+                name: Some("notes.md".into())
+            })
+        );
+        assert!(resolve_command("files.menu", &args(None, None, None), &ws).is_err());
+        assert!(resolve_command("files.menu_pick", &args(None, None, None), &ws).is_err());
+        let empty = WorkspaceView::from_snapshot(&Default::default());
+        assert!(resolve_command("files.menu", &args(Some("a"), None, None), &empty).is_err());
+    }
+
+    #[test]
     fn adr_21_unknown_ids_missing_args_and_unknown_things_are_refused() {
         let ws = workspace();
         let none = CommandArgs::default();
@@ -783,6 +849,8 @@ mod tests {
             tab: Some(TabId::new(99)),
             project: Some(ProjectId::new(99)),
             path: None,
+            item: None,
+            name: None,
         };
         for id in ARGUMENT_COMMANDS {
             assert!(resolve_command(id, &unknown, &ws).is_err(), "{id}");

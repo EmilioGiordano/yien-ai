@@ -204,6 +204,10 @@ impl<A> OpenMenu<A> {
         &mut self.model
     }
 
+    pub(crate) fn model(&self) -> &Menu<A> {
+        &self.model
+    }
+
     /// The menu, drawn over everything at its position and kept inside the
     /// window. Every key and click goes to `on_event`.
     pub(crate) fn render<V: 'static>(
