@@ -43,6 +43,9 @@ pub(crate) enum Target {
         profile: ProfileId,
         session_id: String,
     },
+    /// Open a project-relative file in the tab's read-only file preview pane
+    /// (RF-CTX-02).
+    OpenFile { tab: TabId, path: String },
 }
 
 /// One row the palette can show. Its `Debug` leaves the text out: a past
