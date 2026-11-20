@@ -9,7 +9,8 @@
 //! keeps one YIEN per data dir ([`single_instance`]), the settings file
 //! on disk ([`config_file`]), the read-only listing of each agent CLI's
 //! past sessions ([`agent_sessions`]), the user's agent profile files
-//! ([`user_profiles`]), a tab's folder for the file tree ([`file_tree`]),
+//! ([`user_profiles`]), a tab's folder for the file tree ([`file_tree`])
+//! and the file actions of its context menu ([`file_ops`]),
 //! the agent CLI running under a shell ([`programs`]), where OpenCode's
 //! background service registers ([`opencode_service`]), and the pipe a test
 //! script drives the window through ([`test_control`]), and the
@@ -30,6 +31,7 @@ pub mod attention;
 pub mod badge;
 pub mod config_file;
 pub mod dll_search;
+pub mod file_ops;
 pub mod file_tree;
 pub mod hook_pipe;
 pub mod http;
