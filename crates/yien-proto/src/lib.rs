@@ -39,7 +39,7 @@ pub use msg::{
     SideBars, TabInfo, TerminalPalette, WorkspaceSnapshot, WorktreeCheck, WorktreeFiles,
     WorktreeWork,
 };
-pub use path::{folder_key, same_folder};
+pub use path::{folder_key, path_within, same_folder};
 pub use shell::{ShellKind, is_shell_profile};
 pub use title::{SESSION_TITLE_MAX, session_title};
 
