@@ -40,8 +40,9 @@ use crate::model::{
 use crate::os_tray::{OsTray, TrayEvent};
 use crate::os_window::OsWindow;
 use crate::palette::{
-    Entry, Ink, KeyboardTo, Mode, Palette, Row, Target, command_entries, ink_runs,
-    keyboard_after_close, keyboard_pane, session_entries, switcher_entries, switcher_home,
+    Entry, Ink, KeyboardTo, Mode, Palette, PaneFocusNow, Row, Target, command_entries, ink_runs,
+    keyboard_after_close, keyboard_pane, pane_focus_now, session_entries, switcher_entries,
+    switcher_home, sync_focus_move,
 };
 use crate::pane_head::{
     self, HeadText, PaneHeadLayout, head_mark, names_agent, pane_badge, program_tag,
@@ -790,16 +791,19 @@ impl Shell {
             return;
         }
         let target = keyboard_pane(&self.workspace);
-        if target == self.keyboard_on {
+        let has_view = target.is_some_and(|p| self.terminals.contains_key(&p));
+        let Some((to, next_on)) = sync_focus_move(target, self.keyboard_on, has_view) else {
             return;
-        }
-        self.keyboard_on = target;
-        match target.and_then(|p| self.terminals.get(&p)) {
-            Some(terminal) => {
-                let handle = terminal.read(cx).handle().clone();
-                window.focus(&handle, cx);
+        };
+        self.keyboard_on = next_on;
+        match to {
+            KeyboardTo::Pane(pane) => {
+                if let Some(terminal) = self.terminals.get(&pane) {
+                    let handle = terminal.read(cx).handle().clone();
+                    window.focus(&handle, cx);
+                }
             }
-            None => window.focus(&self.focus, cx),
+            KeyboardTo::Window => window.focus(&self.focus, cx),
         }
     }
 
@@ -1460,7 +1464,7 @@ impl Shell {
                     self.select_tab(tab, window, cx);
                 }
             }
-            Target::Pane(pane) => self.command(Command::FocusPane { pane }, cx),
+            Target::Pane(pane) => self.focus_pane_target(pane, window, cx),
             Target::Split(profile, orientation) => {
                 if let Some(pane) = self.focused_pane() {
                     self.split_pane(pane, orientation, false, Some(profile), cx);
@@ -3274,6 +3278,24 @@ impl Shell {
                 this.toggle_split_menu(id, orientation, cx);
             }))
             .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+    }
+
+    /// Gives `pane` the focus and the keyboard (palette or `pane.focus`).
+    /// Focusing an already-focused pane on the active tab emits nothing from
+    /// the core, so its terminal is focused directly when drawn.
+    fn focus_pane_target(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_in_bar = false;
+        match pane_focus_now(&self.workspace, pane, self.terminals.contains_key(&pane)) {
+            PaneFocusNow::Terminal(id) => {
+                if let Some(terminal) = self.terminals.get(&id) {
+                    let handle = terminal.read(cx).handle().clone();
+                    window.focus(&handle, cx);
+                    self.keyboard_on = Some(id);
+                }
+            }
+            PaneFocusNow::WaitForCore => self.keyboard_on = None,
+        }
+        self.command(Command::FocusPane { pane }, cx);
     }
 
     /// A click on a pane head gives that pane the focus and the keyboard,

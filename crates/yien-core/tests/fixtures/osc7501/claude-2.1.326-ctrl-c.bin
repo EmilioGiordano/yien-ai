@@ -1,0 +1,28 @@
+[1t[6n[c[?1004h[?9001h[1;1H]0;claude\7[r8[?25h[?25l[?2004h[?2031h[?1004h[?9001l[?9001h]0;✳ Claude Code\[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[12G[39m[49m[1mClaude[19GCode[24G[22m[38;2;153;153;153mv2.1.326[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[12G[38;2;153;153;153mHaiku[18G5.5[22Gwith[27Ghigh[32Geffort[39G·[41GAPI[45GUsage[51GBilling[39m
+[38;2;215;119;87m ▝▝[7G▝▝[12G[38;2;153;153;153mC:\yien-compiled\slot-5\run\claude-326\work[39m
+
+
+[38;2;255;204;0m⚠[3GBoth[8Gclaude.ai[18Gand[22GANTHROPIC_API_KEY[40Gset[44G·[46Gauth[51Gmay[55Gnot[59Gwork[64Gas[67Gexpected[39m
+[3G[38;2;153;153;153m·[5Gto[8Guse[12Gclaude.ai:[23GUnset[29GANTHROPIC_API_KEY,[48Gor[51Gturn[56Goff[60G"Use[65Gcustom[72GAPI[76Gkey"[81Gin[84G/config.[39m
+[3G[38;2;153;153;153m·[5Gto[8Guse[12GANTHROPIC_API_KEY:[31Gclaude[38G/logout[46Gto[49Gsign[54Gout[58Gof[61Gclaude.ai.[39m
+
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+❯ [7m [27m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;204;0m⏵⏵[6Gauto[11Gmode[16Gon[103G[38;2;153;153;153m●[105Ghigh[110G·[112G/effort[39m
+[2C[3A[2D[3B[17C[1A[38;2;153;153;153m (shift+tab to cycle) · ← for agents[103G[39m[K
+[3G[38;2;255;204;0m⚠[5Gclaude.ai[15Gconnectors[26Gare[30Gdisabled[39Gbecause[47GANTHROPIC_API_KEY[65Gor[68Ganother[76Gauth[81Gsource[88Gis[91Gset[95Gand[99Gtakes[105Gprecedence[116Gov…[39m
+[2C[4A[>0q[?u]7501;?[c]0;◐ Claude Code\[2D[4B[5A[48;2;55;55;55m[38;2;153;153;153m❯ [38;2;255;255;255mslow please[39m                                                                                                           [1B[49m[K[1B[38;2;255;153;51m✢[39m [38;2;255;153;51mSynthesizing… [38;2;153;153;153m(running SessionStart hooks… 0/2 · 0s)[39m[K[2C[1B[K[1B[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[38;2;153;153;153m❯ [39m[7m [27m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;2;255;204;0m⏵⏵[6Gauto[11Gmode[16Gon[38;2;153;153;153m (shift+tab[30Gto[33Gcycle)[40G·[42Gesc[46Gto[49Ginterrupt[59G·[61G←[63Gfor[67Gagents[39m
+[3G[38;2;255;204;0m⚠[5Gclaude.ai[15Gconnectors[26Gare[30Gdisabled[39Gbecause[47GANTHROPIC_API_KEY[65Gor[68Ganother[76Gauth[81Gsource[88Gis[91Gset[95Gand[99Gtakes[105Gprecedence[116Gov…[39m
+[2C[4A[<u[>5u[>4;2m]7501;state=working:app=claude-code]0;Claude Code\[2D[4B[45C[7A[38;2;153;153;153m1[39m
+
+
+
+
+
+
+[2C[4A]7501;state=idle:app=claude-code[2D[4B[2K[1A[2K[1A[2K[1A[2K[G[1A[5A[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[1B[39m❯ slow[8Gplease[7m [1B[27m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[2C[1B[38;2;255;204;0m⏵⏵ auto mode on[38;2;153;153;153m (shift+tab to cycle)[1B[39m  [38;2;255;204;0m⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence ov…[39m[K[1B[K[1B[K[1B[K[1B[K[3A[13C[4A[13D[4B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[K[1B[K[1B[K[1B[K[1B[K[1B[K[5A[?1006l[?1003l[?1002l[?1000l[?1004l[?1004h[>4m[<u[?2031l[?2004l(B[?1016l[?1006l[?1003l[?1002l[?1000l[?7h[?25h7[r8]7501;state=clear]0;\

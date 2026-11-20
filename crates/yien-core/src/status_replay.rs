@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use yien_agent::{
     AgentState, Effect, ErrorReason, HookEvent, Machine, MachineConfig, NeedsReason, ScreenRule,
-    ScreenVerdict, SessionEndReason, SessionStartSource, Signal, builtin_profiles, evaluate_screen,
+    ScreenVerdict, SessionEndReason, SessionStartSource, Signal, TurnScreen, builtin_profiles,
+    evaluate_screen, evaluate_typed_startup, evaluate_typed_turn_start, has_in_turn_rules,
+    has_turn_rules,
 };
 use yien_vt::osc_scan::STATUS_QUERY_REPLY;
 use yien_vt::{AlacrittyEngine, VtConfig, VtEngine};
@@ -24,6 +26,9 @@ const CLAUDE_IN_POWERSHELL: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-typed-in-powershell.bin");
 /// A slow turn stopped by Ctrl+C, then Ctrl+C twice more to exit.
 const CLAUDE_CTRL_C: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c.bin");
+/// The same on 2.1.326, against the mock with YIEN's hooks logged by a stub.
+const CLAUDE_326_CTRL_C: &[u8] =
+    include_bytes!("../tests/fixtures/osc7501/claude-2.1.326-ctrl-c.bin");
 /// The same typed in PowerShell with YIEN's prompt marks.
 const CLAUDE_CTRL_C_IN_POWERSHELL: &[u8] =
     include_bytes!("../tests/fixtures/osc7501/claude-2.1.325-ctrl-c-typed-in-powershell.bin");
@@ -125,6 +130,27 @@ fn states(capture: &[u8], profile: &str) -> Vec<AgentState> {
 
 fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `capture` with the `skip`-th occurrence of `needle` removed: bytes as the
+/// CLI sent them, minus a record it stopped sending.
+fn excise(capture: &[u8], needle: &[u8], skip: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capture.len());
+    let mut rest = capture;
+    let mut index = 0;
+    loop {
+        let Some(at) = position(rest, needle) else {
+            out.extend_from_slice(rest);
+            return out;
+        };
+        if index == skip {
+            out.extend_from_slice(&rest[..at]);
+        } else {
+            out.extend_from_slice(&rest[..at + needle.len()]);
+        }
+        rest = &rest[at + needle.len()..];
+        index += 1;
+    }
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
@@ -429,22 +455,88 @@ struct Settled {
     rules: Vec<ScreenRule>,
     now: Duration,
     states: Vec<AgentState>,
+    turn_screen: TurnScreen,
 }
 
 impl Settled {
+    fn rows(&self) -> Vec<String> {
+        let frame = self.engine.frame();
+        (0..frame.lines.len()).map(|r| frame.line_text(r)).collect()
+    }
+
+    fn begin_turn(&mut self) {
+        if !has_turn_rules(&self.rules) {
+            self.turn_screen.reset();
+            return;
+        }
+        let rows = self.rows();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        self.turn_screen.begin_turn(&self.rules, &rows);
+    }
+
+    fn observe_in_turn(&mut self) {
+        if self.machine.state() != AgentState::Working
+            || self.turn_screen.in_turn_seen()
+            || !has_in_turn_rules(&self.rules)
+        {
+            return;
+        }
+        let rows = self.rows();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        self.turn_screen.observe_in_turn(&self.rules, &rows);
+    }
+
     fn step(&mut self, signal: Signal) {
         let mut queue = vec![signal];
         while let Some(signal) = queue.pop() {
+            let was_reported = self.machine.in_reported_turn();
+            let was_working = self.machine.state() == AgentState::Working;
             let (next, effects) = self.machine.clone().step(&signal, self.now);
             self.machine = next;
+            if !was_reported
+                && self.machine.in_reported_turn()
+                && was_working
+                && self.machine.state() == AgentState::Working
+            {
+                self.begin_turn();
+            }
             for effect in effects {
                 match effect {
-                    Effect::Transition { to, .. } => self.states.push(to),
+                    Effect::Transition { to, .. } => {
+                        self.states.push(to);
+                        if to == AgentState::Working {
+                            self.begin_turn();
+                        } else if !matches!(to, AgentState::NeedsYou(_)) {
+                            self.turn_screen.reset();
+                        }
+                    }
                     Effect::CheckScreen => {
-                        queue.push(Signal::Screen(read_screen(&self.engine, &self.rules)));
+                        let verdict = if self.machine.screen_read_is_interrupt() {
+                            if has_turn_rules(&self.rules) {
+                                let rows = self.rows();
+                                let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                                self.turn_screen.evaluate(&self.rules, &rows)
+                            } else {
+                                ScreenVerdict::NoMatch
+                            }
+                        } else if self.machine.reads_typed_agent() {
+                            let rows = self.rows();
+                            let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                            if self.machine.typed_repl_ready() {
+                                evaluate_typed_turn_start(&self.rules, &rows)
+                            } else {
+                                evaluate_typed_startup(&self.rules, &rows)
+                            }
+                        } else {
+                            read_screen(&self.engine, &self.rules)
+                        };
+                        queue.push(Signal::Screen(verdict));
                     }
                     _ => {}
                 }
+            }
+            if signal == Signal::Screen(ScreenVerdict::InTurn) {
+                self.observe_in_turn();
             }
         }
     }
@@ -457,6 +549,7 @@ impl Settled {
             rules,
             now: Duration::ZERO,
             states: Vec::new(),
+            turn_screen: TurnScreen::default(),
         };
         pane.step(Signal::Spawned);
         pane
@@ -464,6 +557,12 @@ impl Settled {
 
     /// One read of output, let settle.
     fn feed(&mut self, part: &[u8]) {
+        self.feed_without_settle(part);
+        self.wait();
+    }
+
+    /// One read of output without advancing the settle timer yet.
+    fn feed_without_settle(&mut self, part: &[u8]) {
         let out = self.engine.feed(part);
         for found in &out.signals {
             let Some(osc) = convert::osc_signal(found) else {
@@ -475,7 +574,7 @@ impl Settled {
             }
         }
         self.step(Signal::Output);
-        self.wait();
+        self.observe_in_turn();
     }
 
     /// Lets the wake the machine asked for come.
@@ -544,6 +643,8 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (CLAUDE_ERROR, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CLAUDE_CTRL_C, "claude"),
+        (CLAUDE_326_CTRL_C, "claude"),
+        (CLAUDE_327_TURN, "claude"),
         (CLAUDE_325_PERMISSION, "claude"),
         (CLAUDE_325_ESC, "claude"),
         (CLAUDE_325_ERROR, "claude"),
@@ -558,13 +659,14 @@ fn rn_02_real_sessions_never_show_a_startup_screen() {
         (OPENCODE_230_ERROR, "opencode"),
     ] {
         // Claude's first rule is its permission prompt, which a turn shows.
+        // Non-needs-you rules are ignored by evaluate_screen itself.
         let skip = usize::from(profile == "claude");
-        let startup = &screen_rules(profile)[skip..];
+        let startup: Vec<_> = screen_rules(profile).into_iter().skip(skip).collect();
         let mut engine = AlacrittyEngine::new(VtConfig::default(), 120, 40);
         for (i, bytes) in capture.chunks(64).enumerate() {
             engine.feed(bytes);
             assert_eq!(
-                read_screen(&engine, startup),
+                read_screen(&engine, &startup),
                 ScreenVerdict::NoMatch,
                 "{profile}, read {i}"
             );
@@ -588,7 +690,9 @@ fn rf_age_05_agents_typed_in_a_shell_report_as_in_their_own_pane() {
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
         (CLAUDE_CTRL_C, "claude"),
+        (CLAUDE_326_CTRL_C, "claude"),
     ] {
+        // Found at once, so every read until its first record is made.
         assert_eq!(
             states(capture, "shell"),
             states(capture, profile),
@@ -604,8 +708,307 @@ fn typed_rules(program: &str) -> Vec<ScreenRule> {
     found.typed_startup_screens().to_vec()
 }
 
+/// The interrupt the 2.1.326 fix targets, replayed through a shell pane
+/// that runs a detected `claude`: the bytes are the real 2.1.325 capture
+/// with the interrupt `idle` record taken out, played under shell marks and
+/// the CLI's startup-screen rules as the pane does. The turn starts at the
+/// shell's command-start mark, with nothing on screen; the user interrupts
+/// mid-stream in 2.1.326, which sends nothing.
+#[test]
+fn rnf_23_claude_2_1_326_interrupted_turn_ends_idle_in_a_typed_shell() {
+    let needle = b"\x1b]7501;state=idle:app=claude-code\x07";
+    // The startup-rest record stays; the interrupted turn's does not.
+    let silent = excise(CLAUDE_CTRL_C_IN_POWERSHELL, needle, 1);
+    let end = position(&silent, b"\x1b]7501;state=clear").expect("the exit sends clear");
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    // The shell poller finds `claude` under the shell a moment after boot,
+    // as in the real pane.
+    pane.step(Signal::TypedAgent(true));
+    for part in silent[..end].chunks(64) {
+        pane.feed(part);
+    }
+    pane.wait();
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ],
+        "the typed shell pane must leave Working on the interrupt line"
+    );
+}
+
+/// The same typed shell pane with the interrupt line left on screen from a
+/// previous interrupt: its first match is history and the running turn
+/// stays Working while the mock streams. The startup-rest record ends the
+/// shell's command-start phase, a working record opens a fresh turn, and
+/// the stale line is on screen for all of it.
+#[test]
+fn rf_age_05_a_typed_shell_turn_runs_normally_with_the_interrupt_line_still_on_screen() {
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    // The frame put on screen as the startup-rest frame cleared and
+    // redrawn: the interrupt line from the previous interrupt, visible.
+    pane.feed(&drawn(
+        "  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    // The startup-rest record closes the startup window; a working record
+    // opens the turn the user is about to interrupt.
+    pane.feed(b"\x1b]7501;state=idle:app=claude-code\x07");
+    pane.feed(b"\x1b]7501;state=working:app=claude-code\x07");
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working]
+    );
+    // The mock streams a turn's worth of output for five seconds, the
+    // stale line still on screen.
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working],
+        "a stale interrupt line must not end a typed shell pane's turn"
+    );
+}
+
+/// The 2.1.327 turn capture's whole arc: spawn, working record, the mock
+/// streams to its end, the done record.
+const CLAUDE_327_TURN: &[u8] = include_bytes!("../tests/fixtures/osc7501/claude-2.1.327-turn.bin");
+
+#[test]
+fn rnf_23_claude_2_1_327_the_captured_turn_ends_on_its_record() {
+    assert_eq!(
+        states(CLAUDE_327_TURN, "claude"),
+        [AgentState::Working, AgentState::Done]
+    );
+    assert_eq!(
+        states(CLAUDE_327_TURN, "shell"),
+        [AgentState::Working, AgentState::Done]
+    );
+    let parts: Vec<&[u8]> = CLAUDE_327_TURN.chunks(64).collect();
+    assert_eq!(
+        replay_settled(&parts, "claude"),
+        [AgentState::Working, AgentState::Done]
+    );
+    let mut typed = Settled::spawned(config("shell"), typed_rules("claude"));
+    typed.step(Signal::TypedAgent(true));
+    for part in CLAUDE_327_TURN.chunks(64) {
+        typed.feed(part);
+    }
+    assert_eq!(typed.states, [AgentState::Working, AgentState::Done]);
+}
+
+/// Claude 2.1.327 mid-turn Ctrl+C in a profile pane: restores the prompt into
+/// the input box, drops the bottom status bar's `esc to interrupt` hint, draws
+/// no interrupt line and sends no OSC 7501 record. Must end as Idle even when
+/// unseen, never Done and never red, and exiting afterwards while seen stays
+/// Idle.
+#[test]
+fn rf_age_05_a_silent_turn_with_the_hint_gone_is_idle() {
+    const WITH_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\u{2726} Architecting\u{2026} (10s \u{00B7} \u{2193} 34 tokens)\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt";
+    const WITHOUT_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\n\u{2726} Saut\u{00E9}ed for 41s \u{00B7} done 1:42\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    pane.feed(b"\x1b]7501;state=working:app=claude-code\x07");
+    pane.feed(&drawn(WITH_HINT));
+    assert_eq!(pane.states, [AgentState::Working]);
+    // The turn's hint is gone and no output arrives: the turn is Idle.
+    pane.feed(&drawn(WITHOUT_HINT));
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle],
+        "an unseen silent interrupt must end as Idle, never Done"
+    );
+    pane.step(Signal::Seen(true));
+    pane.step(Signal::Hook(HookEvent::SessionEnd(
+        SessionEndReason::PromptInputExit,
+    )));
+    pane.step(Signal::Exited { code: Some(0) });
+    assert_eq!(pane.states, [AgentState::Working, AgentState::Idle]);
+}
+
+/// The same 2.1.327 silent Ctrl+C in a PowerShell pane where `claude` was
+/// typed: no startup `state=idle`, prompt restored and hint gone before the
+/// settle timer fires, then clean exit back to the shell.
+#[test]
+fn rf_age_05_a_silent_typed_shell_pane_with_the_hint_gone_is_idle() {
+    const WITH_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\u{2726} Architecting\u{2026} (10s \u{00B7} \u{2193} 34 tokens)\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt";
+    const WITHOUT_HINT: &str = "\u{276F} slow please\n\n\u{25CF} word word word\n\n\u{2726} Saut\u{00E9}ed for 41s \u{00B7} done 1:42\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    const IDLE_PROMPT: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} \u{2190} for agents";
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    pane.feed(&drawn(IDLE_PROMPT));
+    assert_eq!(pane.states, [AgentState::Working, AgentState::Idle]);
+    // Fast Ctrl+C: hint is drawn and erased before the settle timer fires.
+    pane.feed_without_settle(b"\x1b]7501;state=working:app=claude-code\x07");
+    pane.feed_without_settle(&drawn(WITH_HINT));
+    pane.feed(&drawn(WITHOUT_HINT));
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ],
+        "the typed shell pane must go Idle on a silent 2.1.327 interrupt"
+    );
+    pane.feed(b"\x1b]7501;state=clear\x07\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+}
+
+/// Stale or printed `"esc to interrupt"` text must never end a normal turn
+/// early — in Claude (above the input box or as prose), in Codex, or in
+/// OpenCode typed in a shell.
+#[test]
+fn rf_age_05_a_normal_turn_with_stale_in_turn_marker_text_stays_working() {
+    let mut claude = Settled::spawned(config("claude"), screen_rules("claude"));
+    claude.feed(&drawn(
+        "  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt\n",
+    ));
+    claude.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(claude.states, [AgentState::Working]);
+    claude.feed(&drawn(
+        "const INTERRUPT_MARKER = \"esc to interrupt\";\n\
+         the hint esc to interrupt sits on the status row\n\
+         \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
+           \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)\n",
+    ));
+    for i in 0..20 {
+        claude.feed(format!("line {i}\r\n").as_bytes());
+    }
+    assert_eq!(claude.states, [AgentState::Working]);
+
+    let mut codex = Settled::spawned(config("codex"), screen_rules("codex"));
+    codex.feed(b"\x1b]7501;state=working:app=codex\x07");
+    codex.feed(&drawn(
+        "  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt",
+    ));
+    codex.feed(&drawn("streaming codex output\n"));
+    assert_eq!(codex.states, [AgentState::Working]);
+
+    let mut opencode = Settled::spawned(config("shell"), typed_rules("opencode"));
+    opencode.feed(b"\x1b]7501;state=working:app=opencode\x07");
+    opencode.feed(&drawn(
+        "  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt",
+    ));
+    opencode.feed(&drawn("streaming opencode output\n"));
+    assert_eq!(opencode.states, [AgentState::Working]);
+}
+
+/// A permission prompt drawn mid-turn (replacing the status bar before a
+/// delayed `PermissionRequest` hook arrives) must not end the turn early or
+/// drop the red mark.
+#[test]
+fn rf_age_05_a_permission_prompt_replacing_the_in_turn_hint_still_raises_needs_you() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    pane.feed(&drawn(
+        "\u{276F} run tool\n\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt",
+    ));
+    assert_eq!(pane.states, [AgentState::Working]);
+    pane.feed(&drawn(
+        "Bash command\nDo you want to proceed?\n\u{276F} 1. Yes\n  2. No\nEsc to cancel",
+    ));
+    assert_eq!(
+        pane.states,
+        [AgentState::Working],
+        "the permission screen must not end Working early"
+    );
+    pane.step(Signal::Hook(HookEvent::PermissionRequest));
+    pane.wait();
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::NeedsYou(NeedsReason::Permission)
+        ]
+    );
+}
+
+/// A stale interrupt line from an earlier Claude run in a shell pane must not
+/// suppress a startup folder-trust screen when Claude is started again.
+#[test]
+fn rn_02_a_stale_interrupt_line_in_a_shell_does_not_suppress_claude_trust_screen() {
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    let screen = format!(
+        "  \u{23bf} \u{a0}Interrupted \u{b7} What should Claude do instead?\n\n{CLAUDE_TRUST}"
+    );
+    pane.feed(&drawn(&screen));
+    assert_eq!(pane.states, [AgentState::Working, SCREEN_RED]);
+}
+
+/// Typed `claude` in PowerShell when Claude 2.1.328 sends no OSC 7501 records
+/// at all: reaches Idle at its prompt, reaches and keeps Working throughout a
+/// streaming turn, goes Idle on Ctrl+C mid-turn (never Done, never red), and
+/// returns to PowerShell as Idle on exit.
+#[test]
+fn rf_age_05_typed_claude_without_osc_7501_reaches_and_keeps_working_then_idles_on_ctrl_c() {
+    const IDLE_PROMPT: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} \u{2190} for agents";
+    const INTERRUPTED_PROMPT: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F} please answer slow\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)";
+    let mut pane = Settled::spawned(config("shell"), typed_rules("claude"));
+    pane.feed(CLAUDE_TYPED);
+    pane.step(Signal::TypedAgent(true));
+    pane.feed(&drawn(IDLE_PROMPT));
+    assert_eq!(pane.states, [AgentState::Working, AgentState::Idle]);
+    // Prompt submitted: streams for 5 s with `esc to interrupt` and zero OSC 7501.
+    for i in 0..20 {
+        let frame = format!(
+            "\u{276F} please answer slow\n\u{25CF} token {i}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle) \u{00B7} esc to interrupt \u{00B7} \u{2190} for agents"
+        );
+        pane.feed(&drawn(&frame));
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working, AgentState::Idle, AgentState::Working],
+        "typed claude must reach and keep Working during a turn without OSC 7501"
+    );
+    // Ctrl+C mid-turn restores the prompt and drops the hint -> Idle.
+    pane.feed(&drawn(INTERRUPTED_PROMPT));
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+    // Exit back to PowerShell stays Idle.
+    pane.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\work> ");
+    pane.step(Signal::TypedAgent(false));
+    assert_eq!(
+        pane.states,
+        [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle
+        ]
+    );
+}
+
 /// PowerShell's prompt and the `codex` typed at it, with its marks.
 const CODEX_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> codex\r\n\x1b]133;C\x07";
+
+/// PowerShell's prompt and the `claude` typed at it, with its marks.
+const CLAUDE_TYPED: &[u8] = b"\x1b]133;A\x07PS C:\\work> claude\r\n\x1b]133;C\x07";
 
 #[test]
 fn rf_age_05_codex_typed_in_a_shell_needs_you_on_its_trust_screen_once_found() {
@@ -640,6 +1043,7 @@ fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
         (CLAUDE_CTRL_C_IN_POWERSHELL, "claude"),
         (CLAUDE_QUESTION, "claude"),
         (CLAUDE_INTERRUPT, "claude"),
+        (CLAUDE_327_TURN, "claude"),
         (CODEX_PERMISSION, "codex"),
         (CODEX_STARTUP, "codex"),
     ] {
@@ -649,7 +1053,12 @@ fn rn_02_agents_typed_in_a_shell_show_no_startup_screen_on_their_way_in() {
         for part in capture.chunks(64) {
             pane.feed(part);
         }
-        assert_eq!(pane.states, states(capture, "shell"), "{program}");
+        assert_eq!(
+            pane.states,
+            states(capture, "shell"),
+            "{program} ({} bytes)",
+            capture.len()
+        );
     }
 }
 
@@ -709,6 +1118,123 @@ fn rnf_23_claude_2_1_325_exit_sends_clear_and_ends_idle() {
     assert_eq!(replay.states, []);
     assert!(!replay.machine.agent_reporting());
     assert_eq!(replay.machine.state(), AgentState::Idle);
+}
+
+#[test]
+fn rnf_23_claude_2_1_326_ctrl_c_interrupt_is_idle_and_its_exit_changes_nothing() {
+    assert_query_answered_in_order(CLAUDE_326_CTRL_C, "claude");
+    // Ctrl+C at turn start gives `idle` (113 bytes after `working`); two
+    // more exit with `clear`, which changes nothing.
+    assert_eq!(
+        states(CLAUDE_326_CTRL_C, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+/// The interrupt line a previous turn left on screen: a new turn running
+/// with it visible must not end early. This is the stale-line case from
+/// the field: interrupt, submit the follow-up prompt, and the turn stays
+/// Working while Claude streams.
+#[test]
+fn rf_age_05_a_turn_runs_normally_with_the_interrupt_line_still_on_screen() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    // A previous interrupt's line, still on screen when the follow-up
+    // prompt arrives (a resumed session keeps it in the same place).
+    pane.feed(&drawn(
+        "  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    // The mock streams a turn's worth of output for five seconds, the
+    // stale line still on screen.
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(
+        pane.states,
+        [AgentState::Working],
+        "a normal turn must not end while the stream runs"
+    );
+}
+
+/// The phrase printed inside ordinary content — a file's or a reply's
+/// words, or a bare phrase row — is not Claude's drawn interrupt line and
+/// must not end the turn.
+#[test]
+fn rf_age_05_a_turn_with_the_phrase_in_its_content_stays_working() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    pane.feed(
+        b"the file you asked about says: Interrupted \xc2\xb7 What should Claude do instead?\r\nInterrupted \xc2\xb7 What should Claude do instead?\r\n",
+    );
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(pane.states, [AgentState::Working]);
+}
+
+/// A resumed session whose restored screen already holds the line: its
+/// first turn must not end early either.
+#[test]
+fn rf_age_05_a_resumed_session_with_the_interrupt_line_on_screen_stays_working_on_its_first_turn() {
+    let mut pane = Settled::spawned(config("claude"), screen_rules("claude"));
+    // What a `--resume` after an interrupt shows at the bottom before any
+    // new turn runs, as a restored screen holds it.
+    pane.feed(&drawn(
+        "  \u{276F} slow please\n  ⎿ \u{a0}Interrupted \u{b7} What should Claude do instead?\n> \n",
+    ));
+    pane.step(Signal::Hook(HookEvent::UserPromptSubmit));
+    assert_eq!(pane.states, [AgentState::Working]);
+    for i in 0..50 {
+        pane.feed(format!("token {i} ").as_bytes());
+        pane.now += Duration::from_millis(100);
+        pane.step(Signal::Tick);
+    }
+    assert_eq!(pane.states, [AgentState::Working]);
+}
+
+/// The interrupt the 2.1.326 fix targets: a turn already running when
+/// Ctrl+C lands sends nothing at all, and the only sign is the interrupt
+/// line Claude draws. The bytes are the real 2.1.325 capture with the
+/// OSC 7501 idle record of the interrupt taken out — the exact difference
+/// 2.1.326 shows mid-stream — cut before the exit's `clear`, which would
+/// end the turn on its own.
+#[test]
+fn rnf_23_claude_2_1_326_interrupted_turn_ends_idle_without_a_record() {
+    let needle = b"\x1b]7501;state=idle:app=claude-code\x07";
+    let silent = excise(CLAUDE_CTRL_C, needle, 1);
+    assert_eq!(position(&silent, needle), position(CLAUDE_CTRL_C, needle));
+    let end = position(&silent, b"\x1b]7501;state=clear").expect("the exit sends clear");
+    let parts: Vec<&[u8]> = silent[..end].chunks(64).collect();
+    assert_eq!(
+        replay_settled(&parts, "claude"),
+        [AgentState::Working, AgentState::Idle]
+    );
+}
+
+#[test]
+fn rf_age_05_claude_2_1_326_ctrl_c_in_a_hooked_pane_goes_idle_then_ends_cleanly() {
+    for chunk in [1, 7, 64, CLAUDE_326_CTRL_C.len()] {
+        let (states, before_exit) = replay_hooked(CLAUDE_326_CTRL_C, chunk, false);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads");
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle, AgentState::Done],
+            "{chunk}-byte reads"
+        );
+        let (states, before_exit) = replay_hooked(CLAUDE_326_CTRL_C, chunk, true);
+        assert_eq!(before_exit, AgentState::Idle, "{chunk}-byte reads, seen");
+        assert_eq!(
+            states,
+            [AgentState::Working, AgentState::Idle],
+            "{chunk}-byte reads, seen"
+        );
+    }
 }
 
 #[test]
