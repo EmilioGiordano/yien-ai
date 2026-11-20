@@ -352,6 +352,19 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleFileWrap,
         []
     ),
+    command!("file.next_tab", "file: next file tab", NextFileTab, []),
+    command!(
+        "file.previous_tab",
+        "file: previous file tab",
+        PreviousFileTab,
+        []
+    ),
+    command!(
+        "file.close_tab",
+        "file: close file tab",
+        CloseActiveFileTab,
+        []
+    ),
     command!(
         "changes.show",
         "changes: show changed files",

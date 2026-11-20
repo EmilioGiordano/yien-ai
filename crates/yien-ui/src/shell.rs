@@ -35,8 +35,8 @@ use crate::key_quirks::pane_key_quirks;
 use crate::keys::Rebinds;
 use crate::layout::neighbor;
 use crate::model::{
-    AgentState, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView, folder_label,
-    frames_to_take, typed_tab_name,
+    AgentState, FileTabStep, FolderTarget, PaneView, ProjectView, TabMark, TabView, WorkspaceView,
+    folder_label, frames_to_take, typed_tab_name,
 };
 use crate::os_tray::{OsTray, TrayEvent};
 use crate::os_window::OsWindow;
@@ -1572,6 +1572,20 @@ impl Shell {
         if let Some(pane) = pane {
             self.command(Command::ToggleFileWrap { pane }, cx);
         } else {
+            self.say("There is no file preview pane in this tab.".to_owned(), cx);
+        }
+    }
+
+    fn file_tab(&mut self, step: FileTabStep, cx: &mut Context<Self>) {
+        if let Some(command) = self.workspace.file_tab_command(step) {
+            self.command(command, cx);
+            return;
+        }
+        let ws = &self.workspace;
+        let has_file_pane = ws
+            .selected_tab()
+            .is_some_and(|t| ws.file_pane_of_tab(t.id).is_some());
+        if !has_file_pane {
             self.say("There is no file preview pane in this tab.".to_owned(), cx);
         }
     }
@@ -4252,6 +4266,15 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_open_in_editor))
             .on_action(cx.listener(Self::file_tree_escape))
             .on_action(cx.listener(Self::toggle_file_wrap))
+            .on_action(cx.listener(|this, _: &NextFileTab, _, cx| {
+                this.file_tab(FileTabStep::Next, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousFileTab, _, cx| {
+                this.file_tab(FileTabStep::Previous, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseActiveFileTab, _, cx| {
+                this.file_tab(FileTabStep::Close, cx);
+            }))
             .on_action(cx.listener(Self::show_whats_new))
             .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
@@ -4408,7 +4431,9 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("changed file double-click", "files.show"),
     ("file tree row double-click", "files.show"),
     ("file pane wrap button", "file.toggle_wrap"),
-    ("file pane tab close button", "pane.close"),
+    ("file pane tab", "file.next_tab"),
+    ("file pane tab", "file.previous_tab"),
+    ("file pane tab close button", "file.close_tab"),
 ];
 
 #[cfg(test)]

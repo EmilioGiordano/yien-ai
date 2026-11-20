@@ -7,9 +7,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    FilePaneInfo, LayoutNode, NeedsReason, PaneId, PaneInfo, PaneKind, PendingQuestion, ProfileId,
-    ProfileInfo, ProjectId, ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile,
-    same_folder,
+    Command, FilePaneInfo, LayoutNode, NeedsReason, PaneId, PaneInfo, PaneKind, PendingQuestion,
+    ProfileId, ProfileInfo, ProjectId, ProjectInfo, SessionTitle, TabGit, TabId, TabInfo,
+    is_shell_profile, same_folder,
 };
 
 use crate::agent_badge::Badge;
@@ -273,6 +273,14 @@ impl PaneView {
     pub fn runs_typed_agent(&self) -> bool {
         self.running && yien_proto::is_known_program(&self.name)
     }
+}
+
+/// What a file tab command does in a file preview pane (RF-CTX-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileTabStep {
+    Next,
+    Previous,
+    Close,
 }
 
 /// What a tab row's mark shows.
@@ -1186,6 +1194,26 @@ impl WorkspaceView {
     pub fn active_preview_file(&self, tab: TabId) -> Option<&str> {
         self.file_pane_of_tab(tab)
             .and_then(|(_, f)| f.active_file())
+    }
+
+    /// The command a file tab command runs on the selected tab's file pane
+    /// (RF-NAV-02): next and previous wrap around; close takes the active
+    /// tab. `None` without a file pane, or with one tab to move between.
+    pub(crate) fn file_tab_command(&self, step: FileTabStep) -> Option<Command> {
+        let (pane, info) = self.file_pane_of_tab(self.selected_tab()?.id)?;
+        let count = info.files.len();
+        let active = info.active?;
+        let to = match step {
+            FileTabStep::Close => {
+                let path = info.files.get(active)?.clone();
+                return Some(Command::CloseFileTab { pane, path });
+            }
+            _ if count < 2 => return None,
+            FileTabStep::Next => (active + 1) % count,
+            FileTabStep::Previous => (active + count - 1) % count,
+        };
+        let path = info.files.get(to)?.clone();
+        Some(Command::SelectFileTab { pane, path })
     }
 
     /// Whether a tab row the tab bar draws is working, so its mark spins.
@@ -2923,6 +2951,53 @@ mod tests {
         let tab_view = view.tab(TabId::new(10)).unwrap();
         assert_eq!(view.tab_mark(tab_view), TabMark::Shell);
         assert!(view.tab_badge(tab_view).is_some());
+    }
+
+    #[test]
+    fn rf_nav_02_file_tab_commands_cycle_and_close_the_active_file_tab() {
+        let mut view = demo();
+        for step in [FileTabStep::Next, FileTabStep::Close] {
+            assert_eq!(view.file_tab_command(step), None, "no file pane");
+        }
+        let files = |files: &[&str], active| PaneInfo {
+            profile_id: ProfileId::new("file"),
+            kind: PaneKind::File(FilePaneInfo {
+                files: files.iter().map(|f| (*f).to_owned()).collect(),
+                active: Some(active),
+                wrap: false,
+            }),
+            ..pane(101, 10, P::Idle)
+        };
+        let pane = PaneId::new(101);
+        view.pane_updated(&files(&["a.rs"], 0));
+        assert_eq!(view.file_tab_command(FileTabStep::Next), None, "one tab");
+        assert_eq!(
+            view.file_tab_command(FileTabStep::Close),
+            Some(Command::CloseFileTab {
+                pane,
+                path: "a.rs".into()
+            })
+        );
+        view.pane_updated(&files(&["a.rs", "b.rs", "c.rs"], 2));
+        let select = |path: &str| {
+            Some(Command::SelectFileTab {
+                pane,
+                path: path.into(),
+            })
+        };
+        assert_eq!(view.file_tab_command(FileTabStep::Next), select("a.rs"));
+        assert_eq!(view.file_tab_command(FileTabStep::Previous), select("b.rs"));
+        view.pane_updated(&files(&["a.rs", "b.rs", "c.rs"], 0));
+        assert_eq!(view.file_tab_command(FileTabStep::Previous), select("c.rs"));
+        assert_eq!(
+            view.file_tab_command(FileTabStep::Close),
+            Some(Command::CloseFileTab {
+                pane,
+                path: "a.rs".into()
+            })
+        );
+        view.set_active(Some(TabId::new(11)));
+        assert_eq!(view.file_tab_command(FileTabStep::Close), None, "other tab");
     }
 
     #[test]

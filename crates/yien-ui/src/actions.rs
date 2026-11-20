@@ -307,6 +307,13 @@ actions!(
         /// Toggles soft line wrapping in the selected tab's file preview pane
         /// (RF-CTX-02).
         ToggleFileWrap,
+        /// Shows the next file tab of the selected tab's file preview pane.
+        NextFileTab,
+        /// Shows the previous file tab of the selected tab's file preview pane.
+        PreviousFileTab,
+        /// Closes the shown file tab of the selected tab's file preview pane;
+        /// the pane closes with its last file tab.
+        CloseActiveFileTab,
         /// Shows the notes of the newer YIEN the update check found.
         ShowWhatsNew,
         /// Downloads the newer YIEN, checks it, quits and installs it.
