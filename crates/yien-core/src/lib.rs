@@ -330,6 +330,9 @@ pub enum CoreError {
     /// A worktree command named a tab that is not on a worktree of its own.
     #[error("tab {} is not on a worktree of its own", .0.get())]
     NoWorktree(TabId),
+    /// A folder path leaves the tab's folder.
+    #[error("{0} is not a folder inside the tab's folder")]
+    OutsideFolder(String),
 }
 
 /// Why a message did not reach the core. The message is handed back.

@@ -605,6 +605,7 @@ impl Shell {
                     continue;
                 }
                 CoreMsg::Notice { message } => self.say(message, cx),
+                CoreMsg::FilesChanged { .. } => continue,
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {
                     project,

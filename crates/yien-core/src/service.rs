@@ -14,6 +14,8 @@ use tokio::sync::{mpsc, watch};
 use yien_agent::SessionReader;
 use yien_agent::{HookError, HookEvent};
 use yien_platform::agent_sessions::{self, MAX_SESSIONS};
+use yien_platform::file_ops;
+use yien_proto::file_ops::FileAction;
 use yien_proto::file_preview::{FileFrame, FileNotice};
 use yien_proto::{
     AgentSession, ClientMsg, Command, CoreMsg, PaneId, PendingQuestion, ProfileId, ProfileInfo,
@@ -448,6 +450,34 @@ impl Service {
         self.emit(msg).await;
     }
 
+    /// Runs a Files context menu action on a blocking thread and answers
+    /// from there, so the command loop never waits on the disk (RF-CTX-01).
+    /// Logs name the action only, never a path.
+    fn run_file_action(&self, tab: TabId, root: String, action: FileAction) {
+        let events = self.ctx.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let kind = action.kind();
+            let msg = match file_ops::run(Path::new(&root), &action) {
+                Ok(done) => {
+                    tracing::info!(action = kind, "file action done");
+                    CoreMsg::FilesChanged {
+                        tab,
+                        dirs: done.dirs,
+                        select: done.select,
+                    }
+                }
+                Err(error) => {
+                    tracing::info!(action = kind, "file action refused or failed");
+                    CoreMsg::Error {
+                        pane: None,
+                        message: error.to_string(),
+                    }
+                }
+            };
+            let _ = events.blocking_send(msg);
+        });
+    }
+
     /// Lists the project's past agent sessions on a blocking thread with the
     /// reader each profile declares, and sends them to the UI from there, so
     /// the command loop never waits on the disk (RF-SES-07).
@@ -810,6 +840,9 @@ impl Service {
                 Effect::LoadFile { pane, root, path } => {
                     self.start_file_load(pane, root, path).await;
                 }
+                Effect::FileAction { tab, root, action } => {
+                    self.run_file_action(tab, root, action);
+                }
             }
         }
     }
@@ -938,7 +971,9 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::FocusDirection { .. }
         | Command::ListAgentSessions { .. }
         | Command::ResumeAgentSession { .. }
-        | Command::OpenFile { .. } => None,
+        | Command::OpenFile { .. }
+        | Command::FileAction { .. }
+        | Command::OpenTerminal { .. } => None,
     }
 }
 
