@@ -30,6 +30,7 @@
 mod clipboards;
 mod consoles;
 mod convert;
+pub mod file_preview;
 mod git;
 mod hooks;
 mod launch;
@@ -61,12 +62,14 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use yien_agent::Profile;
 use yien_platform::agent_sessions::CliDirs;
+use yien_proto::file_preview::FileFrame;
 use yien_proto::frame::Frame;
 use yien_proto::{ClientMsg, CoreMsg, PaneId, ProjectId, ShellKind, TabId};
 use yien_pty::PtyBackend;
 use yien_vt::VtConfig;
 
 use crate::consoles::Consoles;
+use crate::file_preview::FileFrames;
 use crate::pane::{EngineFactory, PaneInput};
 use crate::service::{Links, links};
 use crate::shell::ShellSetup;
@@ -429,6 +432,7 @@ impl Core {
             screens::Screens::start(store, config.screen_interval, Arc::clone(&config.clock))
         });
         let clipboards = Arc::<clipboards::Clipboards>::default();
+        let file_frames = Arc::<FileFrames>::default();
         let opencode = config.opencode.clone().map(opencode::OpenCodeWatch::new);
         let ctx = service::Ctx {
             backend,
@@ -449,8 +453,11 @@ impl Core {
             Arc::clone(&panes),
             command_rx,
             hooks_error,
-            writer.clone(),
-            screens.clone(),
+            service::Stores {
+                writer: writer.clone(),
+                screens: screens.clone(),
+                file_frames: Arc::clone(&file_frames),
+            },
             (shells, shell_notice),
         ));
         let handle = CoreHandle {
@@ -461,6 +468,7 @@ impl Core {
             screens,
             consoles,
             clipboards,
+            file_frames,
             _runtime: Arc::new(RuntimeGuard(Some(runtime))),
         };
         Ok((handle, event_rx))
@@ -496,6 +504,7 @@ pub struct CoreHandle {
     screens: Option<Arc<screens::Screens>>,
     consoles: Arc<Consoles>,
     clipboards: Arc<clipboards::Clipboards>,
+    file_frames: Arc<FileFrames>,
     _runtime: Arc<RuntimeGuard>,
 }
 
@@ -679,6 +688,22 @@ impl CoreHandle {
     /// ```
     pub fn take_clipboard(&self, pane: PaneId) -> Option<String> {
         self.clipboards.take(pane)
+    }
+
+    /// Takes the latest visible line frame of a read-only file preview `pane`,
+    /// announced by [`CoreMsg::FileFrameReady`] (ADR-06, RF-CTX-02). `None`
+    /// when it was already taken or the pane is gone.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use yien_core::{Core, CoreConfig};
+    /// # use yien_proto::PaneId;
+    /// # let (core, _events) = Core::start(Arc::new(yien_pty::FakePty::new()), CoreConfig::default())?;
+    /// assert!(core.take_file_frame(PaneId::new(99)).is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn take_file_frame(&self, pane: PaneId) -> Option<FileFrame> {
+        self.file_frames.take(pane)
     }
 }
 

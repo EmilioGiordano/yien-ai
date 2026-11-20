@@ -6,7 +6,7 @@
 //! closes a cycle.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use yien_agent::SessionReader;
 use yien_agent::{HookError, HookEvent};
 use yien_platform::agent_sessions::{self, MAX_SESSIONS};
+use yien_proto::file_preview::{FileFrame, FileNotice};
 use yien_proto::{
     AgentSession, ClientMsg, Command, CoreMsg, PaneId, PendingQuestion, ProfileId, ProfileInfo,
     ProjectId, SessionTitle, ShellKind, TabGit, TabId, is_shell_profile,
@@ -24,6 +25,7 @@ use yien_vt::Palette;
 use crate::clipboards::Clipboards;
 use crate::consoles::Consoles;
 use crate::convert;
+use crate::file_preview::{DEFAULT_VIEWPORT_ROWS, FileFrames, LoadedDocument, load_file};
 use crate::git::{GitReport, GitThread};
 use crate::hooks::{self, Hooks};
 use crate::launch::{self, LaunchPlan, SHELL_PROFILE};
@@ -114,10 +116,26 @@ struct PaneHandle {
     screen: Arc<ScreenSource>,
 }
 
+struct FileViewState {
+    top_line: usize,
+    rows: usize,
+    request_seq: u64,
+    doc: Option<Arc<LoadedDocument>>,
+}
+
+struct FileLoadDone {
+    pane: PaneId,
+    seq: u64,
+    doc: Arc<LoadedDocument>,
+}
+
 struct Service {
     ws: Workspace,
     ctx: Ctx,
     panes: HashMap<PaneId, PaneHandle>,
+    file_views: HashMap<PaneId, FileViewState>,
+    file_frames: Arc<FileFrames>,
+    file_loads: mpsc::Sender<FileLoadDone>,
     links: Links,
     /// Saves the workspace; `None` without a session store.
     writer: Option<Arc<Writer>>,
@@ -142,15 +160,25 @@ struct Service {
 /// Worktree jobs waiting for the service; a job waits for room.
 const WORKTREE_JOBS: usize = 16;
 
+pub(crate) struct Stores {
+    pub writer: Option<Arc<Writer>>,
+    pub screens: Option<Arc<Screens>>,
+    pub file_frames: Arc<FileFrames>,
+}
+
 pub(crate) async fn run(
     ctx: Ctx,
     links: Links,
     mut commands: mpsc::Receiver<ClientMsg>,
     hooks_error: Option<String>,
-    writer: Option<Arc<Writer>>,
-    screens: Option<Arc<Screens>>,
+    stores: Stores,
     (shells, shell_notice): (ShellSetup, Option<String>),
 ) {
+    let Stores {
+        writer,
+        screens,
+        file_frames,
+    } = stores;
     let reports = Arc::clone(&ctx.reports);
     let profiles = profile_list(&ctx.config);
     let (opened, open_failed) = match ctx.config.session.clone() {
@@ -172,11 +200,15 @@ pub(crate) async fn run(
         ));
     }
     let (jobs, mut done) = mpsc::channel(WORKTREE_JOBS);
+    let (file_loads, mut file_loaded) = mpsc::channel(WORKTREE_JOBS);
     let ctx_palette = ctx.config.vt.palette;
     let mut service = Service {
         ws: Workspace::new().with_profiles(profiles),
         ctx,
         panes: HashMap::new(),
+        file_views: HashMap::new(),
+        file_frames,
+        file_loads,
         links,
         writer,
         git,
@@ -264,6 +296,7 @@ pub(crate) async fn run(
                 None => git_reports = None,
             },
             Some(job) = done.recv() => service.on_worktree(job).await,
+            Some(loaded) = file_loaded.recv() => service.on_file_loaded(loaded).await,
         }
         service.sync_git();
     }
@@ -549,11 +582,58 @@ impl Service {
     fn stop_pane(&mut self, pane: PaneId) {
         hooks::revoke(self.ctx.hooks.as_deref(), pane);
         self.panes.remove(&pane);
+        self.file_views.remove(&pane);
         links(&self.links).remove(&pane);
         self.ctx.clipboards.forget(pane);
+        self.file_frames.forget(pane);
         self.restored_screens.remove(&pane);
         if let Some(screens) = &self.screens {
             screens.forget(pane);
+        }
+    }
+
+    async fn start_file_load(&mut self, pane: PaneId, root: String, path: String) {
+        let state = self.file_views.entry(pane).or_insert(FileViewState {
+            top_line: 0,
+            rows: DEFAULT_VIEWPORT_ROWS,
+            request_seq: 0,
+            doc: None,
+        });
+        state.request_seq = state.request_seq.wrapping_add(1);
+        state.top_line = 0;
+        state.doc = None;
+        let seq = state.request_seq;
+        let loading = FileFrame {
+            path: path.clone(),
+            language: None,
+            top_line: 0,
+            total_lines: 0,
+            lines: Vec::new(),
+            notice: Some(FileNotice::Loading),
+        };
+        if self.file_frames.put(pane, loading) {
+            self.emit(CoreMsg::FileFrameReady { pane }).await;
+        }
+        let tx = self.file_loads.clone();
+        tokio::task::spawn_blocking(move || {
+            let doc = Arc::new(load_file(Path::new(&root), &path));
+            let _ = tx.blocking_send(FileLoadDone { pane, seq, doc });
+        });
+    }
+
+    async fn on_file_loaded(&mut self, loaded: FileLoadDone) {
+        let Some(state) = self.file_views.get_mut(&loaded.pane) else {
+            return;
+        };
+        if state.request_seq != loaded.seq {
+            return;
+        }
+        let frame = loaded.doc.frame(state.top_line, state.rows);
+        state.top_line = frame.top_line;
+        state.doc = Some(loaded.doc);
+        if self.file_frames.put(loaded.pane, frame) {
+            self.emit(CoreMsg::FileFrameReady { pane: loaded.pane })
+                .await;
         }
     }
 
@@ -648,6 +728,28 @@ impl Service {
                     }
                 }
             }
+            ClientMsg::SetFileViewport {
+                pane,
+                top_line,
+                rows,
+            } => {
+                let rows = rows.max(1);
+                let state = self.file_views.entry(pane).or_insert(FileViewState {
+                    top_line: 0,
+                    rows,
+                    request_seq: 0,
+                    doc: None,
+                });
+                state.top_line = top_line;
+                state.rows = rows;
+                if let Some(doc) = &state.doc {
+                    let frame = doc.frame(state.top_line, state.rows);
+                    state.top_line = frame.top_line;
+                    if self.file_frames.put(pane, frame) {
+                        self.emit(CoreMsg::FileFrameReady { pane }).await;
+                    }
+                }
+            }
         }
     }
 
@@ -737,6 +839,9 @@ impl Service {
                 } => {
                     self.to_pane(pane, PaneCmd::Program { launch, program })
                         .await
+                }
+                Effect::LoadFile { pane, root, path } => {
+                    self.start_file_load(pane, root, path).await;
                 }
             }
         }
@@ -842,7 +947,10 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::ToggleMaximize { pane }
         | Command::RenamePane { pane, .. }
         | Command::RelaunchPane { pane }
-        | Command::TerminatePane { pane } => Some(*pane),
+        | Command::TerminatePane { pane }
+        | Command::SelectFileTab { pane, .. }
+        | Command::CloseFileTab { pane, .. }
+        | Command::ToggleFileWrap { pane } => Some(*pane),
         Command::SwapPanes { a, .. } => Some(*a),
         Command::SetDivider { before, .. } => Some(*before),
         Command::NewProject { .. }
@@ -862,7 +970,8 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::SelectTab { .. }
         | Command::FocusDirection { .. }
         | Command::ListAgentSessions { .. }
-        | Command::ResumeAgentSession { .. } => None,
+        | Command::ResumeAgentSession { .. }
+        | Command::OpenFile { .. } => None,
     }
 }
 
