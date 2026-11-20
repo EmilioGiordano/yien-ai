@@ -175,7 +175,9 @@ impl MenuFacts {
 fn offered(action: FileMenuAction, target: &FileTarget, facts: MenuFacts) -> bool {
     use FileMenuAction::*;
     match action {
-        Preview | Edit | OpenDefault | Duplicate => target.is_file(),
+        Preview | Edit | OpenDefault => target.is_file(),
+        // A link is never copied (the platform refuses it).
+        Duplicate => target.kind == EntryKind::File,
         Cut | Copy | CopyRelativePath | Rename | Trash | Delete => !target.is_root(),
         Ignore => facts.git && !target.is_root(),
         CollapseAll => target.kind.is_dir(),
@@ -395,7 +397,7 @@ mod tests {
         }
         assert!(shown.contains(&CollapseAll));
         assert!(!actions(&file("a"), GIT).contains(&CollapseAll));
-        // A link to a folder is a folder here; a link to a file is a file.
+        // A link to a folder is a folder here; a link to a file opens as a file.
         let dir_link = FileTarget {
             path: "l".into(),
             kind: EntryKind::Link { dir: true },
@@ -405,7 +407,10 @@ mod tests {
             path: "l".into(),
             kind: EntryKind::Link { dir: false },
         };
-        assert!(actions(&file_link, GIT).contains(&Duplicate));
+        let shown = actions(&file_link, GIT);
+        assert!(shown.contains(&Preview) && shown.contains(&Edit));
+        assert!(!shown.contains(&Duplicate), "a link is never copied");
+        assert_eq!(file_effect(Duplicate, &file_link, GIT, "C:/p", None), None);
     }
 
     #[test]
