@@ -397,6 +397,52 @@ fn collect_capped_lines(text: &str) -> (Vec<String>, usize, bool) {
     (lines, bytes_shown.min(text.len()), capped_by_lines)
 }
 
+/// Whole file names with a language of their own: (lowercase name, label,
+/// synoptic extension).
+const NAMED_FILES: &[(&str, &str, &str)] = &[
+    ("cargo.lock", "TOML", "toml"),
+    ("dockerfile", "Shell", "sh"),
+    ("makefile", "Shell", "sh"),
+    ("gnumakefile", "Shell", "sh"),
+    (".gitignore", "Config", "sh"),
+    (".gitattributes", "Config", "sh"),
+    (".yien-local", "Config", "sh"),
+    (".yien-local.example", "Config", "sh"),
+];
+
+/// File extensions and their language: (lowercase extensions, label, synoptic
+/// extension).
+const EXTENSIONS: &[(&[&str], &str, &str)] = &[
+    (&["rs"], "Rust", "rs"),
+    (&["toml", "lock"], "TOML", "toml"),
+    (&["json", "jsonl"], "JSON", "json"),
+    (&["md", "markdown"], "Markdown", "md"),
+    (&["yaml", "yml"], "YAML", "yaml"),
+    (&["html", "htm", "xhtml"], "HTML", "html"),
+    (&["css"], "CSS", "css"),
+    (&["js", "jsx", "mjs", "cjs"], "JavaScript", "js"),
+    (&["ts", "tsx", "mts", "cts"], "TypeScript", "ts"),
+    (&["py", "pyw"], "Python", "py"),
+    (&["sh", "bash", "zsh", "fish"], "Shell", "sh"),
+    (&["ps1", "psm1", "psd1"], "PowerShell", "sh"),
+    (&["go"], "Go", "go"),
+    (&["c", "h"], "C", "c"),
+    (&["cpp", "hpp", "cc", "cxx", "c++"], "C++", "cpp"),
+    (&["cs", "csproj"], "C#", "cs"),
+    (&["java"], "Java", "java"),
+    (&["kt"], "Kotlin", "kt"),
+    (&["swift"], "Swift", "swift"),
+    (&["rb"], "Ruby", "rb"),
+    (&["lua"], "Lua", "lua"),
+    (&["sql"], "SQL", "sql"),
+    (&["xml", "svg"], "XML", "xml"),
+    (&["diff", "patch"], "Diff", "diff"),
+    (&["csv"], "CSV", "csv"),
+    (&["nu"], "Nushell", "nu"),
+    (&["tex"], "TeX", "tex"),
+    (&["asm", "s"], "Assembly", "asm"),
+];
+
 /// Returns `(display_language, synoptic_extension_key)` for `rel_path`.
 fn detect_language(rel_path: &str) -> (Option<String>, Option<&'static str>) {
     let file_name = Path::new(rel_path)
@@ -404,51 +450,20 @@ fn detect_language(rel_path: &str) -> (Option<String>, Option<&'static str>) {
         .and_then(|n| n.to_str())
         .unwrap_or(rel_path);
     let lower_name = file_name.to_ascii_lowercase();
-    match lower_name.as_str() {
-        "cargo.lock" => return (Some("TOML".into()), Some("toml")),
-        "dockerfile" => return (Some("Shell".into()), Some("sh")),
-        "makefile" | "gnumakefile" => return (Some("Shell".into()), Some("sh")),
-        ".gitignore" | ".gitattributes" | ".yien-local" | ".yien-local.example" => {
-            return (Some("Config".into()), Some("sh"));
-        }
-        _ => {}
+    if let Some((_, label, key)) = NAMED_FILES.iter().find(|(name, ..)| *name == lower_name) {
+        return (Some((*label).to_owned()), Some(*key));
     }
     let ext = Path::new(file_name)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    match ext.as_str() {
-        "rs" => (Some("Rust".into()), Some("rs")),
-        "toml" | "lock" => (Some("TOML".into()), Some("toml")),
-        "json" | "jsonl" => (Some("JSON".into()), Some("json")),
-        "md" | "markdown" => (Some("Markdown".into()), Some("md")),
-        "yaml" | "yml" => (Some("YAML".into()), Some("yaml")),
-        "html" | "htm" | "xhtml" => (Some("HTML".into()), Some("html")),
-        "css" => (Some("CSS".into()), Some("css")),
-        "js" | "jsx" | "mjs" | "cjs" => (Some("JavaScript".into()), Some("js")),
-        "ts" | "tsx" | "mts" | "cts" => (Some("TypeScript".into()), Some("ts")),
-        "py" | "pyw" => (Some("Python".into()), Some("py")),
-        "sh" | "bash" | "zsh" | "fish" => (Some("Shell".into()), Some("sh")),
-        "ps1" | "psm1" | "psd1" => (Some("PowerShell".into()), Some("sh")),
-        "go" => (Some("Go".into()), Some("go")),
-        "c" | "h" => (Some("C".into()), Some("c")),
-        "cpp" | "hpp" | "cc" | "cxx" | "c++" => (Some("C++".into()), Some("cpp")),
-        "cs" | "csproj" => (Some("C#".into()), Some("cs")),
-        "java" => (Some("Java".into()), Some("java")),
-        "kt" => (Some("Kotlin".into()), Some("kt")),
-        "swift" => (Some("Swift".into()), Some("swift")),
-        "rb" => (Some("Ruby".into()), Some("rb")),
-        "lua" => (Some("Lua".into()), Some("lua")),
-        "sql" => (Some("SQL".into()), Some("sql")),
-        "xml" | "svg" => (Some("XML".into()), Some("xml")),
-        "diff" | "patch" => (Some("Diff".into()), Some("diff")),
-        "csv" => (Some("CSV".into()), Some("csv")),
-        "nu" => (Some("Nushell".into()), Some("nu")),
-        "tex" => (Some("TeX".into()), Some("tex")),
-        "asm" | "s" => (Some("Assembly".into()), Some("asm")),
-        _ => (None, None),
-    }
+    EXTENSIONS
+        .iter()
+        .find(|(exts, ..)| exts.contains(&ext.as_str()))
+        .map_or((None, None), |(_, label, key)| {
+            (Some((*label).to_owned()), Some(*key))
+        })
 }
 
 fn highlight_lines(raw_lines: &[String], ext_key: Option<&'static str>) -> Vec<FileLine> {
@@ -757,31 +772,67 @@ mod tests {
         assert_eq!((short.top_line, short.lines.len()), (0, 100));
     }
 
+    /// A path for every file name and extension with a language, and one
+    /// without.
+    fn every_mapped_path() -> Vec<String> {
+        let mut paths: Vec<String> = NAMED_FILES
+            .iter()
+            .map(|(name, ..)| format!("dir/{name}"))
+            .collect();
+        for (exts, ..) in EXTENSIONS {
+            paths.extend(exts.iter().map(|ext| format!("src/sample.{ext}")));
+        }
+        paths.push("notes.txt".to_owned());
+        paths
+    }
+
+    fn assert_spans_fit(doc: &LoadedDocument) {
+        for line in &doc.lines {
+            for span in &line.spans {
+                assert!(span.start <= span.end);
+                assert!(span.end <= line.text.len());
+                assert!(line.text.is_char_boundary(span.start));
+                assert!(line.text.is_char_boundary(span.end));
+            }
+        }
+    }
+
+    #[test]
+    fn rf_ctx_02_every_mapped_language_highlights_without_panicking() {
+        let samples: [&[u8]; 6] = [
+            b"",
+            b"fn main() { let s = \"hi\"; // note\n    return 0x1F + 2.5e3; }\n",
+            b"\"unterminated\n/* open comment\n<!-- open tag\n`tick\n'q\n#",
+            "\ttab\tsé\u{1F600} \"ü\" <a href='x'>é</a>\n".as_bytes(),
+            b"\\\\\\\"\n'''\n\"\"\"\n$(x) ${y} @z %w &v\n[[a]]\n{\"k\": [1, true, null]}\n",
+            b"\xff\xfe\x80 bad utf8 \"\xc3\"\n",
+        ];
+        for path in every_mapped_path() {
+            let (language, key) = detect_language(&path);
+            if path != "notes.txt" {
+                assert!(language.is_some(), "{path} has no language");
+                let key = key.unwrap();
+                assert!(synoptic::from_extension(key, 4).is_some(), "{path}: {key}");
+            }
+            for sample in samples {
+                assert_spans_fit(&load_bytes(&path, sample, sample.len() as u64, false));
+            }
+        }
+    }
+
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+        #![proptest_config(ProptestConfig::with_cases(256))]
 
         #[test]
         fn rf_ctx_02_arbitrary_bytes_and_extensions_never_panic(
-            ext in prop::sample::select(vec!["rs", "toml", "json", "md", "ts", "py", "sh", "txt", ""]),
+            path in prop::sample::select(every_mapped_path()),
             bytes in prop::collection::vec(any::<u8>(), 0..4096),
             truncated in any::<bool>(),
             top in 0usize..100,
             rows in 1usize..80,
         ) {
-            let path = if ext.is_empty() {
-                "Makefile".to_owned()
-            } else {
-                format!("src/sample.{ext}")
-            };
             let doc = load_bytes(&path, &bytes, bytes.len() as u64, truncated);
-            for line in &doc.lines {
-                for span in &line.spans {
-                    prop_assert!(span.start <= span.end);
-                    prop_assert!(span.end <= line.text.len());
-                    prop_assert!(line.text.is_char_boundary(span.start));
-                    prop_assert!(line.text.is_char_boundary(span.end));
-                }
-            }
+            assert_spans_fit(&doc);
             let frame = doc.frame(top, rows);
             prop_assert!(frame.lines.len() <= rows);
         }
