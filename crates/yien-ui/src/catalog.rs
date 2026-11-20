@@ -347,6 +347,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         []
     ),
     command!(
+        "file.toggle_wrap",
+        "file: toggle line wrap",
+        ToggleFileWrap,
+        []
+    ),
+    command!(
         "changes.show",
         "changes: show changed files",
         ShowChanges,

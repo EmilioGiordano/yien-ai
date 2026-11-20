@@ -1561,6 +1561,21 @@ impl Shell {
         }
     }
 
+    fn toggle_file_wrap(&mut self, _: &ToggleFileWrap, _: &mut Window, cx: &mut Context<Self>) {
+        let pane = self
+            .focused_pane()
+            .filter(|p| self.workspace.pane(*p).is_file())
+            .or_else(|| {
+                let tab = self.workspace.selected_tab()?.id;
+                self.workspace.file_pane_of_tab(tab).map(|(p, _)| p)
+            });
+        if let Some(pane) = pane {
+            self.command(Command::ToggleFileWrap { pane }, cx);
+        } else {
+            self.say("There is no file preview pane in this tab.".to_owned(), cx);
+        }
+    }
+
     /// Relaunches the focused pane's program once it has stopped
     /// (RF-PAN-19); a running program is left alone.
     fn relaunch_pane(&mut self, _: &RelaunchPane, _: &mut Window, cx: &mut Context<Self>) {
@@ -4235,6 +4250,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_expand))
             .on_action(cx.listener(Self::file_tree_open))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::toggle_file_wrap))
             .on_action(cx.listener(Self::show_whats_new))
             .on_action(cx.listener(Self::install_update))
             .on_action(cx.listener(|this, _: &GoToTab1, w, cx| this.go_to_tab(1, w, cx)))
@@ -4389,6 +4405,8 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("context bar's Files tab", "files.show"),
     ("file tree rows", "files.show"),
     ("changed file double-click", "files.show"),
+    ("file pane wrap button", "file.toggle_wrap"),
+    ("file pane tab close button", "pane.close"),
 ];
 
 #[cfg(test)]

@@ -301,6 +301,9 @@ actions!(
         FileTreeOpen,
         /// Clears the file filter, or leaves the context bar.
         FileTreeEscape,
+        /// Toggles soft line wrapping in the selected tab's file preview pane
+        /// (RF-CTX-02).
+        ToggleFileWrap,
         /// Shows the notes of the newer YIEN the update check found.
         ShowWhatsNew,
         /// Downloads the newer YIEN, checks it, quits and installs it.
