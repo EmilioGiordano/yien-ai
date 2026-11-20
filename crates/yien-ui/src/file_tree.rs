@@ -31,6 +31,8 @@ pub(crate) enum Row {
     Failed { depth: usize, reason: String },
     /// A search match.
     Hit { path: String, kind: EntryKind },
+    /// The field naming a new entry, first in its folder.
+    NewEntry { depth: usize, folder: bool },
 }
 
 impl Row {
@@ -42,7 +44,7 @@ impl Row {
         }
     }
 
-    fn kind(&self) -> Option<EntryKind> {
+    pub(crate) fn kind(&self) -> Option<EntryKind> {
         match self {
             Row::Entry { kind, .. } | Row::Hit { kind, .. } => Some(*kind),
             _ => None,
@@ -55,6 +57,15 @@ impl Row {
 pub(crate) struct SearchRequest {
     pub(crate) id: u64,
     pub(crate) query: String,
+}
+
+/// A name being typed in the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NameEdit {
+    /// A new file or folder in the folder `dir` (`""` for the root).
+    New { dir: String, folder: bool },
+    /// A new name for the entry.
+    Rename { path: String },
 }
 
 /// What Enter, Ctrl+Enter or a click on a row does.
@@ -113,6 +124,7 @@ pub(crate) struct FileTree {
     query: String,
     search: Search,
     searches: u64,
+    edit: Option<NameEdit>,
 }
 
 impl FileTree {
@@ -131,6 +143,7 @@ impl FileTree {
             query: String::new(),
             search: Search::Idle,
             searches: 0,
+            edit: None,
         };
         (tree, String::new())
     }
@@ -230,6 +243,27 @@ impl FileTree {
         requests
     }
 
+    /// The listings of `dirs` to ask for again after a file action changed
+    /// them; folders the tree never listed are left alone.
+    pub(crate) fn relist(&mut self, dirs: &[String]) -> Vec<String> {
+        let known: Vec<String> = dirs
+            .iter()
+            .filter(|d| self.dirs.contains_key(d.as_str()))
+            .cloned()
+            .collect();
+        self.ask(known, true)
+    }
+
+    /// Folds every folder; a cursor inside one moves onto its top folder.
+    pub(crate) fn collapse_all(&mut self) {
+        self.expanded.clear();
+        if let Some(cursor) = &self.tree_cursor
+            && let Some((top, _)) = cursor.split_once('/')
+        {
+            self.tree_cursor = Some(top.to_owned());
+        }
+    }
+
     /// The listings to ask for again: the root and every expanded folder.
     /// Collapsed folders forget their listing.
     pub(crate) fn refresh(&mut self) -> Vec<String> {
@@ -262,6 +296,14 @@ impl FileTree {
     }
 
     fn flatten(&self, dir: &str, depth: usize, rows: &mut Vec<Row>) {
+        if let Some(NameEdit::New { dir: into, folder }) = &self.edit
+            && into == dir
+        {
+            rows.push(Row::NewEntry {
+                depth,
+                folder: *folder,
+            });
+        }
         match self.dirs.get(dir) {
             None | Some(Dir::Loading) => rows.push(Row::Loading { depth }),
             Some(Dir::Failed(reason)) => rows.push(Row::Failed {
@@ -288,6 +330,44 @@ impl FileTree {
                 }
             }
         }
+    }
+
+    /// What the drawn entry `path` is, `None` when no row shows it.
+    pub(crate) fn kind_of(&self, path: &str) -> Option<EntryKind> {
+        self.rows()
+            .iter()
+            .find(|r| r.path() == Some(path))
+            .and_then(Row::kind)
+    }
+
+    /// Opens the name field: the filter goes, and the folder of a new entry
+    /// is expanded with the field first in it, or the renamed entry shown.
+    /// Returns the listings to ask for.
+    pub(crate) fn start_edit(&mut self, edit: NameEdit) -> Vec<String> {
+        self.set_query("");
+        let requests = match &edit {
+            NameEdit::New { dir, .. } if dir.is_empty() => Vec::new(),
+            NameEdit::New { dir, .. } => self.reveal(dir, true),
+            NameEdit::Rename { path } => self.reveal(path, false),
+        };
+        self.edit = Some(edit);
+        requests
+    }
+
+    /// The name field, while open.
+    pub(crate) fn editing(&self) -> Option<&NameEdit> {
+        self.edit.as_ref()
+    }
+
+    /// Closes the name field, handing back what it was for.
+    pub(crate) fn end_edit(&mut self) -> Option<NameEdit> {
+        self.edit.take()
+    }
+
+    /// A new search for the filter's text after the folder changed, while
+    /// filtering.
+    pub(crate) fn search_again(&mut self) -> Option<SearchRequest> {
+        self.filtering().then(|| self.new_search())
     }
 
     /// Whether the root was listed and holds nothing.
@@ -625,6 +705,11 @@ mod tests {
                 Row::More { depth } => format!("{}… more", "  ".repeat(*depth)),
                 Row::Failed { depth, reason } => format!("{}! {reason}", "  ".repeat(*depth)),
                 Row::Hit { path, .. } => format!("= {path}"),
+                Row::NewEntry { depth, folder } => format!(
+                    "{}[new {}]",
+                    "  ".repeat(*depth),
+                    if *folder { "folder" } else { "file" }
+                ),
             })
             .collect()
     }
@@ -1002,5 +1087,109 @@ mod tests {
         assert_eq!(tree.cursor(), Some("src/main.rs"));
         tree.collapse("src");
         assert_eq!(tree.cursor(), Some("src"));
+    }
+
+    #[test]
+    fn rf_ctx_01_a_new_entry_field_opens_first_in_its_expanded_folder() {
+        let mut tree = sample();
+        assert_eq!(
+            tree.start_edit(NameEdit::New {
+                dir: "src".into(),
+                folder: false
+            }),
+            ["src"]
+        );
+        tree.listed("src", listing(&[("main.rs", F)]));
+        assert_eq!(
+            shown(&tree),
+            [
+                "assets/",
+                "+src/",
+                "  [new file]",
+                "  main.rs",
+                "Zeta/",
+                "Build.rs",
+                "readme.md"
+            ]
+        );
+        assert_eq!(
+            tree.end_edit(),
+            Some(NameEdit::New {
+                dir: "src".into(),
+                folder: false
+            })
+        );
+        assert!(tree.editing().is_none());
+        assert!(!shown(&tree).iter().any(|r| r.contains("[new")));
+        // At the root, the field comes first.
+        assert!(
+            tree.start_edit(NameEdit::New {
+                dir: String::new(),
+                folder: true
+            })
+            .is_empty()
+        );
+        assert_eq!(shown(&tree)[0], "[new folder]");
+    }
+
+    #[test]
+    fn rf_ctx_01_a_name_field_ends_the_filter_and_shows_its_entry() {
+        let mut tree = sample();
+        let search = tree.set_query("lib").unwrap();
+        tree.searched(
+            search.id,
+            SearchResult {
+                hits: vec![SearchHit {
+                    path: "src/ui/lib.rs".into(),
+                    kind: F,
+                }],
+                end: SearchEnd::Complete,
+            },
+        );
+        assert_eq!(tree.kind_of("src/ui/lib.rs"), Some(F));
+        let asked = tree.start_edit(NameEdit::Rename {
+            path: "src/ui/lib.rs".into(),
+        });
+        assert!(!tree.filtering());
+        assert_eq!(asked, ["src", "src/ui"]);
+        assert_eq!(tree.cursor(), Some("src/ui/lib.rs"));
+        assert_eq!(
+            tree.editing(),
+            Some(&NameEdit::Rename {
+                path: "src/ui/lib.rs".into()
+            })
+        );
+    }
+
+    #[test]
+    fn rf_ctx_01_after_a_file_action_only_listed_folders_are_asked_for_again() {
+        let mut tree = sample();
+        tree.expand("src");
+        tree.listed("src", listing(&[("main.rs", F)]));
+        assert_eq!(
+            tree.relist(&["src".into(), "never/listed".into(), String::new()]),
+            ["src", ""]
+        );
+        assert!(tree.search_again().is_none(), "not filtering");
+        tree.set_query("main");
+        assert!(tree.search_again().is_some());
+    }
+
+    #[test]
+    fn rf_ctx_01_collapse_all_folds_every_folder_and_keeps_the_cursor_visible() {
+        let mut tree = sample();
+        tree.expand("src");
+        tree.listed("src", listing(&[("ui", D)]));
+        tree.expand("src/ui");
+        tree.listed("src/ui", listing(&[("a.rs", F)]));
+        tree.set_cursor("src/ui/a.rs");
+        tree.collapse_all();
+        assert_eq!(
+            shown(&tree),
+            ["assets/", "src/", "Zeta/", "Build.rs", "readme.md"]
+        );
+        assert_eq!(tree.cursor(), Some("src"));
+        assert_eq!(tree.kind_of("src"), Some(D));
+        assert_eq!(tree.kind_of("src/ui"), None, "not drawn");
     }
 }

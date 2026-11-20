@@ -790,6 +790,8 @@ impl Shell {
                     Row::Failed { depth, reason } => {
                         note_row(base, depth, &format!("Cannot list: {reason}"), t.muted)
                     }
+                    // Drawn once the name field exists.
+                    Row::NewEntry { .. } => base.into_any_element(),
                 }
             })
             .collect()
