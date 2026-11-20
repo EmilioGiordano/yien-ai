@@ -110,8 +110,13 @@ pub(super) fn pane_menu(
         item("Split up", SplitUp, true, keys),
         MenuEntry::Separator,
         item(maximize, ToggleMaximize, maximized || !alone, keys),
-        item("Relaunch", Relaunch, pane.exited, keys),
-        item("Terminate", Terminate, !pane.exited, keys),
+        item("Relaunch", Relaunch, !pane.is_file() && pane.exited, keys),
+        item(
+            "Terminate",
+            Terminate,
+            !pane.is_file() && !pane.exited,
+            keys,
+        ),
         item(
             "Copy session id",
             CopySessionId,
@@ -445,6 +450,7 @@ mod tests {
             signal_lost: false,
             session_id: None,
             runs_session: true,
+            kind: yien_proto::PaneKind::Terminal,
         }
     }
 

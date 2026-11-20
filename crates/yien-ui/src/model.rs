@@ -7,8 +7,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_proto::{
-    LayoutNode, NeedsReason, PaneId, PaneInfo, PendingQuestion, ProfileId, ProfileInfo, ProjectId,
-    ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile, same_folder,
+    FilePaneInfo, LayoutNode, NeedsReason, PaneId, PaneInfo, PaneKind, PendingQuestion, ProfileId,
+    ProfileInfo, ProjectId, ProjectInfo, SessionTitle, TabGit, TabId, TabInfo, is_shell_profile,
+    same_folder,
 };
 
 use crate::agent_badge::Badge;
@@ -150,6 +151,9 @@ pub struct PaneView {
     pub session_id: Option<String>,
     /// Its own program is starting or running, so that session runs here.
     pub runs_session: bool,
+    /// Whether this pane is a terminal or a read-only file preview pane
+    /// (RF-CTX-02).
+    pub kind: PaneKind,
 }
 
 impl PaneView {
@@ -173,6 +177,7 @@ impl PaneView {
             signal_lost: false,
             session_id: None,
             runs_session: false,
+            kind: PaneKind::Terminal,
         }
     }
 
@@ -195,6 +200,21 @@ impl PaneView {
             signal_lost: info.signal_lost,
             session_id: info.session_id.clone(),
             runs_session: info.runs_session,
+            kind: info.kind.clone(),
+        }
+    }
+
+    /// Whether this pane is a read-only file preview pane (RF-CTX-02).
+    pub fn is_file(&self) -> bool {
+        matches!(self.kind, PaneKind::File(_))
+    }
+
+    /// The open file tabs and wrap preference when this pane is a file preview
+    /// pane (RF-CTX-02).
+    pub fn file_pane(&self) -> Option<&FilePaneInfo> {
+        match &self.kind {
+            PaneKind::File(info) => Some(info),
+            PaneKind::Terminal => None,
         }
     }
 
@@ -227,12 +247,16 @@ impl PaneView {
     ///     signal_lost: false,
     ///     session_id: None,
     ///     runs_session: true,
+    ///     kind: yien_proto::PaneKind::Terminal,
     /// };
     /// assert!(!shell.is_busy());
     /// let claude = PaneView { profile_id: yien_proto::ProfileId::new("claude"), ..shell };
     /// assert!(claude.is_busy());
     /// ```
     pub fn is_busy(&self) -> bool {
+        if self.is_file() {
+            return false;
+        }
         let agent = !is_shell_profile(self.profile_id.as_str());
         let active = matches!(self.state, AgentState::Working | AgentState::NeedsYou);
         active || (self.running && agent) || self.runs_typed_agent()
@@ -1115,8 +1139,11 @@ impl WorkspaceView {
     /// with nothing to report.
     pub(crate) fn tab_mark(&self, tab: &TabView) -> TabMark {
         let panes = tab.layout.panes();
-        let shells_only =
-            !panes.is_empty() && panes.into_iter().all(|p| is_shell_pane(&self.pane(p)));
+        let shells_only = !panes.is_empty()
+            && panes.into_iter().all(|p| {
+                let pv = self.pane(p);
+                is_shell_pane(&pv) || pv.is_file()
+            });
         match self.tab_state(tab) {
             AgentState::Idle if shells_only => TabMark::Shell,
             state => TabMark::State(state),
@@ -1132,16 +1159,33 @@ impl WorkspaceView {
         let focused = panes.contains(&tab.focused).then(|| self.pane(tab.focused));
         let decider = focused
             .clone()
-            .filter(|p| p.state.urgency() == urgency)
+            .filter(|p| !p.is_file() && p.state.urgency() == urgency)
             .or_else(|| {
                 panes
-                    .into_iter()
-                    .map(|p| self.pane(p))
-                    .find(|p| p.state.urgency() == urgency)
+                    .iter()
+                    .map(|p| self.pane(*p))
+                    .find(|p| !p.is_file() && p.state.urgency() == urgency)
             });
         decider
             .and_then(|p| pane_badge(&p))
             .or_else(|| focused.and_then(|p| pane_badge(&p)))
+    }
+
+    /// The file preview pane in `tab`, if `tab` has one (RF-CTX-02).
+    pub fn file_pane_of_tab(&self, tab: TabId) -> Option<(PaneId, &FilePaneInfo)> {
+        let tab = self.tab(tab)?;
+        tab.layout.panes().into_iter().find_map(|id| {
+            self.panes
+                .get(&id)
+                .and_then(|p| p.file_pane().map(|f| (id, f)))
+        })
+    }
+
+    /// The project-relative path of the active file tab in `tab`'s file
+    /// preview pane, if any (RF-CTX-02).
+    pub fn active_preview_file(&self, tab: TabId) -> Option<&str> {
+        self.file_pane_of_tab(tab)
+            .and_then(|(_, f)| f.active_file())
     }
 
     /// Whether a tab row the tab bar draws is working, so its mark spins.
@@ -2846,6 +2890,39 @@ mod tests {
 
         let shown = frames_to_take(&BTreeSet::new(), true, &[pane], |p| views.contains(&p));
         assert_eq!(shown, vec![pane]);
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_is_never_busy_and_keeps_the_tab_badge_and_mark() {
+        let mut view = demo();
+        let file = PaneInfo {
+            name: "main.rs".into(),
+            profile: "Files".into(),
+            profile_id: ProfileId::new("file"),
+            running: false,
+            runs_session: false,
+            kind: PaneKind::File(FilePaneInfo {
+                files: vec!["src/main.rs".into()],
+                active: Some(0),
+                wrap: true,
+            }),
+            ..pane(101, 10, P::Idle)
+        };
+        view.pane_updated(&pane(100, 10, P::Idle));
+        view.pane_updated(&file);
+        let pv = view.pane(PaneId::new(101));
+        assert!(pv.is_file());
+        assert!(!pv.is_busy());
+        assert_eq!(
+            view.active_preview_file(TabId::new(10)),
+            Some("src/main.rs")
+        );
+        let mut t = tab(10, 1, &[100, 101]);
+        t.focused = PaneId::new(101);
+        view.tab_updated(&t);
+        let tab_view = view.tab(TabId::new(10)).unwrap();
+        assert_eq!(view.tab_mark(tab_view), TabMark::Shell);
+        assert!(view.tab_badge(tab_view).is_some());
     }
 
     #[test]
