@@ -1418,13 +1418,15 @@ impl Shell {
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
-            command_entries(
+            let mut commands = command_entries(
                 |at| {
                     let spec = CATALOG.get(at)?;
                     shortcut(&keymap, (spec.action)().as_ref())
                 },
                 self.workspace.profiles(),
-            )
+            );
+            commands.extend(self.file_palette_entries(&|action| shortcut(&keymap, action)));
+            commands
         };
         let commands: Vec<Entry> = commands
             .into_iter()
@@ -1579,6 +1581,7 @@ impl Shell {
             Target::OpenFile { tab, path } => {
                 self.command(Command::OpenFile { tab, path }, cx);
             }
+            Target::File(action) => self.run_file_action_on_cursor(action, window, cx),
         }
     }
 

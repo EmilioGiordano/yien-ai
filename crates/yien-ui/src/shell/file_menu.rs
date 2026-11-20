@@ -22,9 +22,10 @@ use crate::actions::*;
 use crate::catalog::shortcut;
 use crate::file_menu::{
     FileClip, FileEffect, FileMenuAction, FileMenuEntry, FileTarget, MenuFacts, file_effect,
-    file_menu,
+    file_menu, palette_actions,
 };
 use crate::file_tree::NameEdit;
+use crate::palette::{Entry, Target};
 
 /// The key the blank part of the tree records its place under, for a menu
 /// on the folder itself opened by keyboard.
@@ -449,6 +450,47 @@ impl Shell {
                 cx.notify();
             }
         }
+    }
+
+    /// Runs `action` on the entry under the Files view's cursor: the
+    /// palette's file commands (RF-NAV-02).
+    pub(super) fn run_file_action_on_cursor(
+        &mut self,
+        action: FileMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.files_shown().map(|(tab, _)| tab);
+        match (tab, self.cursor_target()) {
+            (Some(tab), Some(target)) => self.run_file_action(tab, &target, action, window, cx),
+            _ => self.say("Show the Files view to act on its files.".to_owned(), cx),
+        }
+    }
+
+    /// The palette rows for what the Files view's cursor entry offers now.
+    pub(super) fn file_palette_entries(
+        &self,
+        keys: &dyn Fn(&dyn Action) -> Option<String>,
+    ) -> Vec<Entry> {
+        let Some((_, _, facts)) = self.files_menu_facts() else {
+            return Vec::new();
+        };
+        let Some(target) = self.cursor_target() else {
+            return Vec::new();
+        };
+        palette_actions(&target, facts)
+            .into_iter()
+            .map(|action| Entry {
+                text: action.title().to_owned(),
+                dim: "files:".len(),
+                hint: item_keys_action(action)
+                    .and_then(|a| keys(a.as_ref()))
+                    .unwrap_or_default(),
+                state: None,
+                target: Target::File(action),
+                depth: 0,
+            })
+            .collect()
     }
 
     /// F2 in the Files view: renames the entry under the cursor.
