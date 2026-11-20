@@ -282,6 +282,10 @@ pub(crate) fn workspace_state(
                     size: facts.as_ref().map(|f| f.size),
                     frame_at_ms: facts.as_ref().and_then(|f| f.frame_at_ms),
                     rows: facts.and_then(|f| f.rows).map(VisibleRows::new),
+                    kind: "terminal".to_owned(),
+                    open_files: None,
+                    active_file: None,
+                    wrap: None,
                 });
             }
         }
@@ -346,6 +350,7 @@ mod tests {
             question: None,
             signal_lost: false,
             runs_session: true,
+            kind: yien_proto::PaneKind::Terminal,
         }
     }
 

@@ -1398,6 +1398,7 @@ fn pane_info(id: PaneId, p: &Pane) -> PaneInfo {
         question: p.question.clone().filter(|_| p.state.is_red()),
         signal_lost: p.signal_lost,
         runs_session: p.runs_session(),
+        kind: yien_proto::PaneKind::Terminal,
     }
 }
 

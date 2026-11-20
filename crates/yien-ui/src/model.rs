@@ -1427,6 +1427,7 @@ mod tests {
             question: None,
             signal_lost: false,
             runs_session: true,
+            kind: yien_proto::PaneKind::Terminal,
         }
     }
 
