@@ -52,7 +52,7 @@ pub(crate) struct Theme {
     pub(crate) shu_wash: Rgba,
     pub(crate) ai: Rgba,
     pub(crate) ochre: Rgba,
-    /// A tab row's spinner, and its state words but the red ones.
+    /// A tab row's state words other than the red ones.
     pub(crate) mark_dim: Rgba,
     /// A tab row's mark and words while it needs the user or failed (RN-01).
     pub(crate) mark_red: Rgba,
@@ -181,13 +181,15 @@ impl Theme {
     }
 
     /// The colour of a tab row's mark: red for "needs you" and an error,
-    /// told apart by shape (RN-01), green when done, orange when idle.
+    /// told apart by shape (RN-01), green when done, orange when idle,
+    /// indigo (`ai`) while working.
     pub(crate) fn tab_mark_color(&self, mark: TabMark) -> Rgba {
         match mark {
             TabMark::State(AgentState::NeedsYou | AgentState::Error) => self.mark_red,
             TabMark::State(AgentState::Done) => self.mark_done,
             TabMark::State(AgentState::Idle) => self.mark_idle,
-            TabMark::State(AgentState::Working) | TabMark::Shell => self.mark_dim,
+            TabMark::State(AgentState::Working) => self.ai,
+            TabMark::Shell => self.mark_dim,
         }
     }
 
@@ -259,7 +261,7 @@ pub(crate) fn sync_component_theme(theme: &Theme, cx: &mut App) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn luminance(c: Rgba) -> f32 {
@@ -273,7 +275,7 @@ mod tests {
         0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
     }
 
-    fn contrast(a: Rgba, b: Rgba) -> f32 {
+    pub(crate) fn contrast(a: Rgba, b: Rgba) -> f32 {
         let (la, lb) = (luminance(a), luminance(b));
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
@@ -407,7 +409,7 @@ mod tests {
             assert_eq!(color(AgentState::Error), t.mark_red, "{:?}", t.kind);
             assert_eq!(color(AgentState::Done), t.mark_done, "{:?}", t.kind);
             assert_eq!(color(AgentState::Idle), t.mark_idle, "{:?}", t.kind);
-            assert_eq!(color(AgentState::Working), t.mark_dim, "{:?}", t.kind);
+            assert_eq!(color(AgentState::Working), t.ai, "{:?}", t.kind);
             for state in [AgentState::Done, AgentState::Working, AgentState::Idle] {
                 assert_eq!(t.tab_word_color(state), t.mark_dim, "{state:?}");
             }
@@ -422,13 +424,32 @@ mod tests {
                 ("red", t.mark_red),
                 ("done", t.mark_done),
                 ("idle", t.mark_idle),
-                ("working", t.mark_dim),
+                (
+                    "working",
+                    t.tab_mark_color(TabMark::State(AgentState::Working)),
+                ),
             ];
             for (name, mark) in marks {
                 for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
                     let ratio = contrast(mark, bg);
                     assert!(ratio >= 3.0, "{:?}: {name} is {ratio:.2}:1", t.kind);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn rnf_17_working_spinner_uses_ai_token_with_contrast_and_never_red() {
+        let working = TabMark::State(AgentState::Working);
+        for kind in [ThemeKind::Sumi, ThemeKind::Washi] {
+            let t = Theme::of(kind);
+            let color = t.tab_mark_color(working);
+            assert_eq!(color, t.ai, "{kind:?}");
+            assert_ne!(color, t.mark_red, "{kind:?}: working is never red (RN-01)");
+            assert_ne!(color, t.shu, "{kind:?}: working is never red (RN-01)");
+            for bg in [t.panel, t.raised, t.hover, t.term_bg, t.term_raised] {
+                let ratio = contrast(color, bg);
+                assert!(ratio >= 3.0, "{kind:?}: ai on disc bg is {ratio:.2}:1");
             }
         }
     }
