@@ -1,8 +1,14 @@
 //! The side bars (RF-NAV-10): which ones the user hid, the widths they
 //! dragged them to, review mode, and how wide each one is drawn in a window
 //! of a given width. Decided here without drawing; the shell draws.
+//!
+//! Widths are kept at the default interface size (`ui.font.size` 13) and
+//! drawn times the interface's scale, so a larger interface widens the bars
+//! the user dragged as much as the defaults.
 
 use yien_proto::{SideBar, SideBars};
+
+use crate::theme::scaled;
 
 /// The tab bar's width until the user drags it, as the prototype's.
 pub(crate) const TAB_BAR_DEFAULT: f32 = 264.0;
@@ -17,7 +23,8 @@ pub(crate) const CONTEXT_BAR_MIN: f32 = 280.0;
 pub(crate) const MAX_SHARE: f32 = 0.5;
 /// The context bar's share of the window in review mode, as the prototype's.
 pub(crate) const REVIEW_SHARE: f32 = 0.62;
-/// The pane area keeps at least this width; the bars give way first.
+/// The pane area keeps at least this width; the bars give way first. Not
+/// scaled: the panes hold terminals, which do not follow the interface size.
 pub(crate) const PANES_MIN: f32 = 320.0;
 
 /// A tab row's fixed geometry, which the shell draws with: the tab list's
@@ -31,16 +38,19 @@ pub(crate) const TAB_ROW_BRANCH: f32 = 12.0;
 pub(crate) const TAB_ROW_CLOSE: f32 = 18.0;
 
 /// What a tab row leaves its name (and a project prefix, which shrinks
-/// with it) in a tab bar `bar` px wide; the fixed pieces never shrink.
+/// with it) in a tab bar `bar` px wide at the interface `scale`; the fixed
+/// pieces never shrink.
 #[cfg(test)]
-pub(crate) fn tab_name_room(bar: f32, worktree: bool) -> f32 {
-    // The bar's right border and the row's border, each side.
+pub(crate) fn tab_name_room(bar: f32, worktree: bool, scale: f32) -> f32 {
+    let s = |base: f32| scaled(base, scale);
+    // The bar's right border and the row's border, each side: hairlines.
     let borders = 1.0 + 2.0;
-    let mut fixed = crate::agent_badge::SIDE + TAB_ROW_GAP + TAB_ROW_GAP + TAB_ROW_CLOSE;
+    let gap = s(TAB_ROW_GAP);
+    let mut fixed = s(crate::agent_badge::SIDE) + gap + gap + s(TAB_ROW_CLOSE);
     if worktree {
-        fixed += TAB_ROW_GAP + TAB_ROW_BRANCH;
+        fixed += gap + s(TAB_ROW_BRANCH);
     }
-    bar - borders - 2.0 * TAB_LIST_PAD - 2.0 * TAB_ROW_PAD - fixed
+    bar - borders - 2.0 * s(TAB_LIST_PAD) - 2.0 * s(TAB_ROW_PAD) - fixed
 }
 
 /// One of the two side bars.
@@ -53,18 +63,20 @@ pub(crate) enum Bar {
 }
 
 impl Bar {
-    fn default_width(self) -> f32 {
-        match self {
+    fn default_width(self, scale: f32) -> f32 {
+        let base = match self {
             Bar::Tab => TAB_BAR_DEFAULT,
             Bar::Context => CONTEXT_BAR_DEFAULT,
-        }
+        };
+        scaled(base, scale)
     }
 
-    fn min_width(self) -> f32 {
-        match self {
+    fn min_width(self, scale: f32) -> f32 {
+        let base = match self {
             Bar::Tab => TAB_BAR_MIN,
             Bar::Context => CONTEXT_BAR_MIN,
-        }
+        };
+        scaled(base, scale)
     }
 
     fn of(self, bars: &SideBars) -> &SideBar {
@@ -128,21 +140,24 @@ pub(crate) fn draggable(bars: &SideBars, bar: Bar) -> bool {
     shown(bars, bar) && !(bar == Bar::Context && bars.review)
 }
 
-/// Where `bar`'s inner edge is drawn in a window `window` wide: the tab
-/// bar's right edge, the context bar's left one. `None` while it is hidden.
-pub(crate) fn edge_x(bars: &SideBars, bar: Bar, window: f32) -> Option<f32> {
-    let d = drawn(bars, window);
+/// Where `bar`'s inner edge is drawn in a window `window` wide, at the
+/// interface `scale`: the tab bar's right edge, the context bar's left one.
+/// `None` while it is hidden.
+pub(crate) fn edge_x(bars: &SideBars, bar: Bar, window: f32, scale: f32) -> Option<f32> {
+    let d = drawn(bars, window, scale);
     match bar {
         Bar::Tab => d.tab_bar,
         Bar::Context => d.context_bar.map(|w| window - w),
     }
 }
 
-/// Moves `bar`'s inner edge to `x` in a window `window` wide. Returns whether
-/// the width changed. Besides the bar's minimum and half the window, the
-/// width stops where the panes would get less than [`PANES_MIN`] beside the
-/// other bar as drawn, so a drag never narrows the other bar.
-pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32) -> bool {
+/// Moves `bar`'s inner edge to `x` in a window `window` wide, at the
+/// interface `scale`. Returns whether the width changed. Besides the bar's
+/// minimum and half the window, the width stops where the panes would get
+/// less than [`PANES_MIN`] beside the other bar as drawn, so a drag never
+/// narrows the other bar. The width is kept unscaled.
+pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32, scale: f32) -> bool {
+    let scale = valid_scale(scale);
     if !draggable(bars, bar) || !x.is_finite() || !window.is_finite() {
         return false;
     }
@@ -150,16 +165,17 @@ pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32) -> boo
         Bar::Tab => x,
         Bar::Context => window - x,
     };
-    let d = drawn(bars, window);
+    let d = drawn(bars, window, scale);
     let other = match bar {
         Bar::Tab => d.context_bar,
         Bar::Context => d.tab_bar,
     };
     let room = window - PANES_MIN - other.unwrap_or(0.0);
-    let width = clamp(bar, wanted, window)
+    let width = clamp(bar, wanted, window, scale)
         .min(room)
-        .max(bar.min_width())
-        .round();
+        .max(bar.min_width(scale))
+        .round()
+        / scale;
     let side = bar.of_mut(bars);
     if side.width == Some(width) {
         return false;
@@ -168,14 +184,16 @@ pub(crate) fn drag_to(bars: &mut SideBars, bar: Bar, x: f32, window: f32) -> boo
     true
 }
 
-/// How wide each bar is drawn in a window `window` wide. A saved width is
-/// clamped between the bar's minimum and half the window; review mode takes
+/// How wide each bar is drawn in a window `window` wide, at the interface
+/// `scale`. A saved width, times the scale, is clamped between the bar's
+/// scaled minimum and half the window; review mode takes
 /// its share of the window. When the bars would leave the panes less than
 /// [`PANES_MIN`], each gives up width in proportion to what it has above its
 /// minimum, so a bar reaches its minimum only when both do; below that they
 /// shrink in proportion. The saved widths are never
 /// changed, so a window that grows again gets them back.
-pub(crate) fn drawn(bars: &SideBars, window: f32) -> Drawn {
+pub(crate) fn drawn(bars: &SideBars, window: f32, scale: f32) -> Drawn {
+    let scale = valid_scale(scale);
     let window = if window.is_finite() {
         window.max(0.0)
     } else {
@@ -192,14 +210,14 @@ pub(crate) fn drawn(bars: &SideBars, window: f32) -> Drawn {
             .of(bars)
             .width
             .filter(|w| w.is_finite() && *w > 0.0)
-            .unwrap_or(bar.default_width());
-        clamp(bar, saved, window)
+            .map_or(bar.default_width(scale), |w| w * scale);
+        clamp(bar, saved, window, scale)
     };
     let (tab, context) = fit(
         (wanted(Bar::Tab), wanted(Bar::Context)),
         (
-            min_if_shown(bars, Bar::Tab),
-            min_if_shown(bars, Bar::Context),
+            min_if_shown(bars, Bar::Tab, scale),
+            min_if_shown(bars, Bar::Context, scale),
         ),
         (window - PANES_MIN).max(0.0),
     );
@@ -209,11 +227,20 @@ pub(crate) fn drawn(bars: &SideBars, window: f32) -> Drawn {
     }
 }
 
-fn min_if_shown(bars: &SideBars, bar: Bar) -> f32 {
+fn min_if_shown(bars: &SideBars, bar: Bar, scale: f32) -> f32 {
     if shown(bars, bar) {
-        bar.min_width()
+        bar.min_width(scale)
     } else {
         0.0
+    }
+}
+
+/// A scale a width can be divided by.
+fn valid_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
     }
 }
 
@@ -240,8 +267,8 @@ fn fit((a, b): (f32, f32), (min_a, min_b): (f32, f32), room: f32) -> (f32, f32) 
     (a * scale, b * scale)
 }
 
-fn clamp(bar: Bar, width: f32, window: f32) -> f32 {
-    let min = bar.min_width();
+fn clamp(bar: Bar, width: f32, window: f32, scale: f32) -> f32 {
+    let min = bar.min_width(scale);
     width.clamp(min, (MAX_SHARE * window).max(min))
 }
 
@@ -252,17 +279,75 @@ mod tests {
 
     const WINDOW: f32 = 1440.0;
 
+    const SCALES: [f32; 5] = [8.0 / 13.0, 1.0, 15.0 / 13.0, 17.0 / 13.0, 20.0 / 13.0];
+
     #[test]
     fn rf_nav_10_the_narrowest_tab_bar_leaves_a_tab_name_room() {
         // The badge, the worktree mark and the close button never shrink;
-        // at the narrowest bar the name still shows several letters.
-        let letters = 6.0 * 0.6 * 13.0;
-        assert!(tab_name_room(TAB_BAR_MIN, true) >= letters);
-        assert!(tab_name_room(TAB_BAR_MIN, false) > tab_name_room(TAB_BAR_MIN, true));
+        // at the narrowest bar the name still shows several letters, at
+        // every interface size.
+        for scale in SCALES {
+            let letters = 6.0 * 0.6 * 13.0 * scale;
+            let min = drawn(&sized(Some(1.0), None), WINDOW, scale)
+                .tab_bar
+                .unwrap();
+            assert!(tab_name_room(min, true, scale) >= letters, "{scale}");
+            assert!(tab_name_room(min, false, scale) > tab_name_room(min, true, scale));
+        }
         assert_eq!(
-            tab_name_room(TAB_BAR_DEFAULT, true) - tab_name_room(TAB_BAR_MIN, true),
+            tab_name_room(TAB_BAR_DEFAULT, true, 1.0) - tab_name_room(TAB_BAR_MIN, true, 1.0),
             TAB_BAR_DEFAULT - TAB_BAR_MIN
         );
+    }
+
+    #[test]
+    fn rf_cfg_02_the_bars_open_at_the_prototype_widths_times_the_scale() {
+        let scale = 17.0 / 13.0;
+        let d = drawn(&SideBars::default(), WINDOW, scale);
+        assert_eq!(d.tab_bar, Some(345.0), "264 x 17/13");
+        assert_eq!(d.context_bar, Some(497.0), "380 x 17/13");
+        // A width the user dragged scales the same way.
+        let bars = sized(Some(300.0), Some(400.0));
+        let d = drawn(&bars, WINDOW, scale);
+        assert!((d.tab_bar.unwrap() - 300.0 * scale).abs() < 1e-3);
+        assert!((d.context_bar.unwrap() - 400.0 * scale).abs() < 1e-3);
+        assert_eq!(drawn(&bars, WINDOW, 1.0).tab_bar, Some(300.0));
+    }
+
+    #[test]
+    fn rf_cfg_02_a_drag_at_a_larger_size_follows_the_pointer_and_is_kept_unscaled() {
+        let scale = 17.0 / 13.0;
+        let mut bars = SideBars::default();
+        assert!(drag_to(&mut bars, Bar::Tab, 400.0, WINDOW, scale));
+        let d = drawn(&bars, WINDOW, scale);
+        assert!((d.tab_bar.unwrap() - 400.0).abs() < 1e-3, "{d:?}");
+        let edge = edge_x(&bars, Bar::Tab, WINDOW, scale).unwrap();
+        assert!((edge - 400.0).abs() < 1e-3, "the edge is where it is drawn");
+        assert!((bars.tab_bar.width.unwrap() - 400.0 / scale).abs() < 1e-3);
+        // The same drag again changes nothing, so nothing is saved.
+        assert!(!drag_to(&mut bars, Bar::Tab, 400.0, WINDOW, scale));
+        // Back at 13 px the bar keeps its share of the interface.
+        let at_13 = drawn(&bars, WINDOW, 1.0).tab_bar.unwrap();
+        assert!((at_13 - 400.0 / scale).abs() < 1e-3, "{at_13}");
+        // The minimum scales too.
+        drag_to(&mut bars, Bar::Tab, 20.0, WINDOW, scale);
+        let min = drawn(&bars, WINDOW, scale).tab_bar.unwrap();
+        assert!((min - 235.0).abs() < 1e-3, "180 x 17/13 is {min}");
+        let x = WINDOW - 300.0;
+        drag_to(&mut bars, Bar::Context, x, WINDOW, scale);
+        let context = drawn(&bars, WINDOW, scale).context_bar.unwrap();
+        assert_eq!(context.round(), 366.0, "280 x 17/13, the scaled minimum");
+    }
+
+    #[test]
+    fn rf_cfg_02_a_bad_scale_draws_the_prototype_widths() {
+        for bad in [f32::NAN, 0.0, -1.0, f32::INFINITY] {
+            let d = drawn(&SideBars::default(), WINDOW, bad);
+            assert_eq!(d.tab_bar, Some(TAB_BAR_DEFAULT), "{bad}");
+            let mut bars = SideBars::default();
+            assert!(drag_to(&mut bars, Bar::Tab, 300.0, WINDOW, bad));
+            assert_eq!(bars.tab_bar.width, Some(300.0), "{bad}");
+        }
     }
 
     fn sized(tab: Option<f32>, context: Option<f32>) -> SideBars {
@@ -281,7 +366,7 @@ mod tests {
 
     #[test]
     fn rf_nav_10_the_bars_open_at_the_prototype_widths() {
-        let drawn = drawn(&SideBars::default(), WINDOW);
+        let drawn = drawn(&SideBars::default(), WINDOW, 1.0);
         assert_eq!(drawn.tab_bar, Some(TAB_BAR_DEFAULT));
         assert_eq!(drawn.context_bar, Some(CONTEXT_BAR_DEFAULT));
     }
@@ -291,50 +376,65 @@ mod tests {
         let mut bars = SideBars::default();
         toggle(&mut bars, Bar::Context);
         assert!(!shown(&bars, Bar::Context));
-        let d = drawn(&bars, WINDOW);
+        let d = drawn(&bars, WINDOW, 1.0);
         assert_eq!((d.tab_bar, d.context_bar), (Some(TAB_BAR_DEFAULT), None));
         toggle(&mut bars, Bar::Tab);
-        assert_eq!(drawn(&bars, WINDOW).tab_bar, None);
+        assert_eq!(drawn(&bars, WINDOW, 1.0).tab_bar, None);
         // A hidden bar cannot be dragged.
-        assert!(!drag_to(&mut bars, Bar::Tab, 400.0, WINDOW));
+        assert!(!drag_to(&mut bars, Bar::Tab, 400.0, WINDOW, 1.0));
         toggle(&mut bars, Bar::Tab);
         show(&mut bars, Bar::Context);
-        assert_eq!(drawn(&bars, WINDOW).context_bar, Some(CONTEXT_BAR_DEFAULT));
+        assert_eq!(
+            drawn(&bars, WINDOW, 1.0).context_bar,
+            Some(CONTEXT_BAR_DEFAULT)
+        );
     }
 
     #[test]
     fn rf_nav_10_dragging_the_inner_edge_sets_the_width() {
         let mut bars = SideBars::default();
-        assert!(drag_to(&mut bars, Bar::Tab, 300.4, WINDOW));
+        assert!(drag_to(&mut bars, Bar::Tab, 300.4, WINDOW, 1.0));
         assert_eq!(bars.tab_bar.width, Some(300.0));
         // The context bar's inner edge is its left one.
-        assert!(drag_to(&mut bars, Bar::Context, WINDOW - 450.0, WINDOW));
+        assert!(drag_to(
+            &mut bars,
+            Bar::Context,
+            WINDOW - 450.0,
+            WINDOW,
+            1.0
+        ));
         assert_eq!(bars.context_bar.width, Some(450.0));
         // The same width again is no change, so nothing is saved.
-        assert!(!drag_to(&mut bars, Bar::Context, WINDOW - 450.0, WINDOW));
-        let d = drawn(&bars, WINDOW);
+        assert!(!drag_to(
+            &mut bars,
+            Bar::Context,
+            WINDOW - 450.0,
+            WINDOW,
+            1.0
+        ));
+        let d = drawn(&bars, WINDOW, 1.0);
         assert_eq!((d.tab_bar, d.context_bar), (Some(300.0), Some(450.0)));
     }
 
     #[test]
     fn rf_nav_10_a_drag_stops_at_the_minimum_and_at_half_the_window() {
         let mut bars = SideBars::default();
-        drag_to(&mut bars, Bar::Tab, 20.0, WINDOW);
+        drag_to(&mut bars, Bar::Tab, 20.0, WINDOW, 1.0);
         assert_eq!(bars.tab_bar.width, Some(TAB_BAR_MIN));
-        drag_to(&mut bars, Bar::Tab, 1300.0, WINDOW);
+        drag_to(&mut bars, Bar::Tab, 1300.0, WINDOW, 1.0);
         assert_eq!(bars.tab_bar.width, Some(WINDOW * MAX_SHARE));
         // The context bar then gets what the panes leave beside the wide tab bar.
-        drag_to(&mut bars, Bar::Context, 0.0, WINDOW);
+        drag_to(&mut bars, Bar::Context, 0.0, WINDOW, 1.0);
         assert_eq!(
             bars.context_bar.width,
             Some(WINDOW - PANES_MIN - WINDOW * MAX_SHARE)
         );
         reset(&mut bars, Bar::Tab);
-        drag_to(&mut bars, Bar::Context, WINDOW - 10.0, WINDOW);
+        drag_to(&mut bars, Bar::Context, WINDOW - 10.0, WINDOW, 1.0);
         assert_eq!(bars.context_bar.width, Some(CONTEXT_BAR_MIN));
-        drag_to(&mut bars, Bar::Context, -500.0, WINDOW);
+        drag_to(&mut bars, Bar::Context, -500.0, WINDOW, 1.0);
         assert_eq!(bars.context_bar.width, Some(WINDOW * MAX_SHARE));
-        assert!(!drag_to(&mut bars, Bar::Tab, f32::NAN, WINDOW));
+        assert!(!drag_to(&mut bars, Bar::Tab, f32::NAN, WINDOW, 1.0));
     }
 
     #[test]
@@ -342,26 +442,26 @@ mod tests {
         for (window, context) in [(960.0, 300.0), (1280.0, 380.0)] {
             let mut bars = sized(None, Some(context));
             for x in [200.0, 260.0, 330.0] {
-                drag_to(&mut bars, Bar::Tab, x, window);
-                let d = drawn(&bars, window);
+                drag_to(&mut bars, Bar::Tab, x, window, 1.0);
+                let d = drawn(&bars, window, 1.0);
                 assert_eq!(d.tab_bar, Some(x), "{window} {x}");
                 assert_eq!(d.context_bar, Some(context), "{window} {x}");
             }
             // Past the room the panes need, the edge stops; the context bar
             // stays as it was.
-            drag_to(&mut bars, Bar::Tab, window - 100.0, window);
-            let d = drawn(&bars, window);
+            drag_to(&mut bars, Bar::Tab, window - 100.0, window, 1.0);
+            let d = drawn(&bars, window, 1.0);
             let cap = (window - PANES_MIN - context).min(window * MAX_SHARE);
             assert_eq!(d.tab_bar, Some(cap), "{window}");
             assert_eq!(d.context_bar, Some(context), "{window}");
             // The same from the other side.
             let mut bars = sized(Some(264.0), None);
-            drag_to(&mut bars, Bar::Context, window - 350.0, window);
-            let d = drawn(&bars, window);
+            drag_to(&mut bars, Bar::Context, window - 350.0, window, 1.0);
+            let d = drawn(&bars, window, 1.0);
             assert_eq!(d.context_bar, Some(350.0), "{window}");
             assert_eq!(d.tab_bar, Some(264.0), "{window}");
-            drag_to(&mut bars, Bar::Context, 0.0, window);
-            let d = drawn(&bars, window);
+            drag_to(&mut bars, Bar::Context, 0.0, window, 1.0);
+            let d = drawn(&bars, window, 1.0);
             assert!(window - d.context_bar.unwrap() - 264.0 >= PANES_MIN - 0.5);
             assert_eq!(d.tab_bar, Some(264.0), "{window}");
         }
@@ -370,20 +470,23 @@ mod tests {
     #[test]
     fn rf_nav_10_the_edge_is_where_the_bar_ends() {
         let bars = sized(Some(300.0), Some(400.0));
-        assert_eq!(edge_x(&bars, Bar::Tab, WINDOW), Some(300.0));
-        assert_eq!(edge_x(&bars, Bar::Context, WINDOW), Some(WINDOW - 400.0));
+        assert_eq!(edge_x(&bars, Bar::Tab, WINDOW, 1.0), Some(300.0));
+        assert_eq!(
+            edge_x(&bars, Bar::Context, WINDOW, 1.0),
+            Some(WINDOW - 400.0)
+        );
         let mut hidden = bars;
         toggle(&mut hidden, Bar::Tab);
-        assert_eq!(edge_x(&hidden, Bar::Tab, WINDOW), None);
+        assert_eq!(edge_x(&hidden, Bar::Tab, WINDOW, 1.0), None);
     }
 
     #[test]
     fn rf_nav_10_a_saved_width_out_of_range_is_clamped_when_drawn() {
-        let d = drawn(&sized(Some(10.0), Some(5000.0)), WINDOW);
+        let d = drawn(&sized(Some(10.0), Some(5000.0)), WINDOW, 1.0);
         assert_eq!(d.tab_bar, Some(TAB_BAR_MIN));
         assert_eq!(d.context_bar, Some(WINDOW * MAX_SHARE));
         for bad in [f32::NAN, f32::INFINITY, -3.0, 0.0] {
-            let d = drawn(&sized(Some(bad), Some(bad)), WINDOW);
+            let d = drawn(&sized(Some(bad), Some(bad)), WINDOW, 1.0);
             assert_eq!(d.tab_bar, Some(TAB_BAR_DEFAULT), "{bad}");
             assert_eq!(d.context_bar, Some(CONTEXT_BAR_DEFAULT), "{bad}");
         }
@@ -399,7 +502,10 @@ mod tests {
         reset(&mut bars, Bar::Context);
         assert_eq!(bars.context_bar.width, None);
         assert!(!bars.review);
-        assert_eq!(drawn(&bars, WINDOW), drawn(&SideBars::default(), WINDOW));
+        assert_eq!(
+            drawn(&bars, WINDOW, 1.0),
+            drawn(&SideBars::default(), WINDOW, 1.0)
+        );
     }
 
     #[test]
@@ -408,20 +514,20 @@ mod tests {
         bars.context_bar.hidden = true;
         toggle_review(&mut bars);
         assert!(bars.review && shown(&bars, Bar::Context));
-        let wide = drawn(&bars, 1920.0).context_bar.unwrap();
+        let wide = drawn(&bars, 1920.0, 1.0).context_bar.unwrap();
         assert_eq!(wide, 1920.0 * REVIEW_SHARE);
         // The review width is not dragged; the saved width waits for it.
-        assert!(!drag_to(&mut bars, Bar::Context, 900.0, 1920.0));
+        assert!(!drag_to(&mut bars, Bar::Context, 900.0, 1920.0, 1.0));
         toggle_review(&mut bars);
         assert!(!bars.review);
-        assert_eq!(drawn(&bars, 1920.0).context_bar, Some(420.0));
+        assert_eq!(drawn(&bars, 1920.0, 1.0).context_bar, Some(420.0));
     }
 
     #[test]
     fn rf_nav_10_a_narrow_window_shrinks_both_bars_toward_their_minimums() {
         let bars = sized(Some(400.0), Some(600.0));
         let window = 960.0;
-        let d = drawn(&bars, window);
+        let d = drawn(&bars, window, 1.0);
         let (tab, context) = (d.tab_bar.unwrap(), d.context_bar.unwrap());
         assert!((window - tab - context - PANES_MIN).abs() < 0.01);
         // 400 and 480 (half the window) give up width in proportion to what
@@ -431,12 +537,12 @@ mod tests {
         assert!((given.0 / given.1 - slack.0 / slack.1).abs() < 1e-3);
         assert!(tab > TAB_BAR_MIN && context > CONTEXT_BAR_MIN);
         // A small tab bar is left alone while the wide context bar gives way.
-        let d = drawn(&sized(Some(TAB_BAR_MIN), Some(600.0)), window);
+        let d = drawn(&sized(Some(TAB_BAR_MIN), Some(600.0)), window, 1.0);
         assert_eq!(d.tab_bar, Some(TAB_BAR_MIN));
         assert!((d.context_bar.unwrap() - (window - PANES_MIN - TAB_BAR_MIN)).abs() < 0.01);
         // The saved widths come back once the window grows.
-        assert_eq!(drawn(&bars, 1920.0).tab_bar, Some(400.0));
-        assert_eq!(drawn(&bars, 1920.0).context_bar, Some(600.0));
+        assert_eq!(drawn(&bars, 1920.0, 1.0).tab_bar, Some(400.0));
+        assert_eq!(drawn(&bars, 1920.0, 1.0).context_bar, Some(600.0));
     }
 
     #[test]
@@ -444,17 +550,17 @@ mod tests {
         let mut bars = SideBars::default();
         toggle_review(&mut bars);
         let window = 960.0;
-        let d = drawn(&bars, window);
+        let d = drawn(&bars, window, 1.0);
         let used = d.tab_bar.unwrap() + d.context_bar.unwrap();
         assert!((window - used - PANES_MIN).abs() < 0.01, "{d:?}");
         assert!(d.context_bar.unwrap() > d.tab_bar.unwrap());
         // With the tab bar hidden the context bar alone yields.
         toggle(&mut bars, Bar::Tab);
-        let d = drawn(&bars, window);
+        let d = drawn(&bars, window, 1.0);
         assert_eq!(d.tab_bar, None);
         assert_eq!(d.context_bar, Some(window * REVIEW_SHARE));
         // A window narrower than the pane minimum draws no bar width.
-        let d = drawn(&bars, 200.0);
+        let d = drawn(&bars, 200.0, 1.0);
         assert_eq!(d.context_bar, Some(0.0));
     }
 
