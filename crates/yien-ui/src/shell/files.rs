@@ -20,7 +20,8 @@ use yien_proto::files::{EntryKind, SearchEnd, SearchResult};
 use super::Shell;
 use crate::actions::*;
 use crate::assets;
-use crate::file_tree::{Activation, FileTree, Row, SearchRequest};
+use crate::file_menu::FileTarget;
+use crate::file_tree::{Activation, FileTree, NameEdit, Row, SearchRequest};
 use crate::files::{Files, FilesHost};
 use crate::region::{Modality, Region};
 use crate::sidebars::{self, Bar};
@@ -76,9 +77,54 @@ impl FilesPanel {
 
 impl Shell {
     /// The tree of the selected tab, while the Files view shows.
-    fn shown_tree(&mut self) -> Option<(TabId, &mut FileTree)> {
+    pub(super) fn shown_tree(&mut self) -> Option<(TabId, &mut FileTree)> {
         let (tab, _) = self.files.shown.clone()?;
         self.files.trees.get_mut(&tab).map(|t| (tab, t))
+    }
+
+    /// The tree of the selected tab, while the Files view shows, to read.
+    pub(super) fn shown_tree_ref(&self) -> Option<(TabId, &FileTree)> {
+        let (tab, _) = self.files.shown.as_ref()?;
+        self.files.trees.get(tab).map(|t| (*tab, t))
+    }
+
+    /// The tab the Files view shows and its folder.
+    pub(super) fn files_shown(&self) -> Option<(TabId, String)> {
+        self.shown_tree_ref()
+            .map(|(tab, t)| (tab, t.root().to_owned()))
+    }
+
+    /// The tree of `tab`, shown or not.
+    pub(super) fn files_tree(&mut self, tab: TabId) -> Option<&mut FileTree> {
+        self.files.trees.get_mut(&tab)
+    }
+
+    /// A file action changed `tab`'s folder: the folders it names are listed
+    /// again, the cursor goes to the entry it made or moved, and a filter
+    /// searches again.
+    pub(super) fn files_changed(
+        &mut self,
+        tab: TabId,
+        dirs: &[String],
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tree) = self.files.trees.get_mut(&tab) else {
+            return;
+        };
+        let mut requests = tree.relist(dirs);
+        if let Some(path) = &select {
+            requests.extend(tree.reveal(path, false));
+        }
+        let search = tree.search_again();
+        self.list_folders(tab, requests, cx);
+        if let Some(request) = search {
+            self.start_search(tab, request, cx);
+        }
+        if self.files.shown.as_ref().is_some_and(|(t, _)| *t == tab) {
+            self.scroll_to_cursor();
+        }
+        cx.notify();
     }
 
     /// Makes the Files view follow the selected tab: a new tab or folder
@@ -141,7 +187,7 @@ impl Shell {
         }
     }
 
-    fn list_folders(&mut self, tab: TabId, dirs: Vec<String>, cx: &mut Context<Self>) {
+    pub(super) fn list_folders(&mut self, tab: TabId, dirs: Vec<String>, cx: &mut Context<Self>) {
         let Some(root) = self.files.trees.get(&tab).map(|t| t.root().to_owned()) else {
             return;
         };
@@ -251,7 +297,7 @@ impl Shell {
 
     /// After an activation: a folder match ends the search, so the filter
     /// is emptied to match.
-    fn sync_filter_text(
+    pub(super) fn sync_filter_text(
         &mut self,
         was_filtering: bool,
         window: &mut Window,
@@ -270,6 +316,23 @@ impl Shell {
     /// (RF-CTX-03); a failure goes to the status bar.
     pub(super) fn open_file(&mut self, file: PathBuf, cx: &mut Context<Self>) {
         let editor = self.settings.config().editor.clone();
+        self.open_file_with(file, editor, cx);
+    }
+
+    /// Opens the tree's file `rel` in `editor`, or the OS default app when
+    /// `None`.
+    pub(super) fn open_tree_file(
+        &mut self,
+        rel: &str,
+        editor: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(file) = self.shown_tree_ref().and_then(|(_, t)| t.path_of(rel)) {
+            self.open_file_with(file, editor, cx);
+        }
+    }
+
+    fn open_file_with(&mut self, file: PathBuf, editor: Option<String>, cx: &mut Context<Self>) {
         let (done, outcome) = oneshot::channel();
         self.files.host.open(
             file,
@@ -314,7 +377,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn scroll_to_cursor(&mut self) {
+    pub(super) fn scroll_to_cursor(&mut self) {
         let Some((_, tree)) = self.shown_tree() else {
             return;
         };
@@ -336,7 +399,7 @@ impl Shell {
         self.open_files_view(window, cx);
     }
 
-    fn open_files_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_files_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.change_side_bars(|b| sidebars::show(b, Bar::Context), window, cx);
         self.context_view = ContextView::Files;
         self.sync_files(window, cx);
@@ -388,6 +451,10 @@ impl Shell {
 
     pub(super) fn file_tree_up(&mut self, _: &FileTreeUp, _: &mut Window, cx: &mut Context<Self>) {
         self.modality = Modality::Keyboard;
+        if self.file_menu.is_editing() {
+            cx.propagate();
+            return;
+        }
         self.with_tree(cx, |tree| {
             tree.move_cursor(-1);
             Activation::Nothing
@@ -401,15 +468,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.modality = Modality::Keyboard;
+        if self.file_menu.is_editing() {
+            cx.propagate();
+            return;
+        }
         self.with_tree(cx, |tree| {
             tree.move_cursor(1);
             Activation::Nothing
         });
     }
 
-    /// Left and right move the filter's caret while it holds text.
+    /// Left and right move the filter's caret while it holds text, and the
+    /// name field's always.
     fn filter_has_text(&mut self) -> bool {
-        self.shown_tree().is_none_or(|(_, tree)| tree.filtering())
+        self.file_menu.is_editing() || self.shown_tree().is_none_or(|(_, tree)| tree.filtering())
     }
 
     pub(super) fn file_tree_collapse(
@@ -450,6 +522,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.modality = Modality::Keyboard;
+        if self.file_menu.is_editing() {
+            cx.propagate();
+            return;
+        }
         let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         self.with_tree(cx, FileTree::activate);
         self.sync_filter_text(was_filtering, window, cx);
@@ -462,6 +538,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.modality = Modality::Keyboard;
+        if self.file_menu.is_editing() {
+            cx.propagate();
+            return;
+        }
         let was_filtering = self.shown_tree().is_some_and(|(_, t)| t.filtering());
         self.with_tree(cx, FileTree::activate_in_editor);
         self.sync_filter_text(was_filtering, window, cx);
@@ -474,6 +554,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.file_menu.is_editing() {
+            cx.propagate();
+            return;
+        }
         if self.shown_tree().is_some_and(|(_, t)| t.filtering()) {
             self.files
                 .input
@@ -599,6 +683,7 @@ impl Shell {
 
     /// The Files view: the filter, the tree or the matches, and a note.
     pub(super) fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.forget_file_rows();
         let t = self.theme;
         let tree = self
             .files
@@ -631,26 +716,30 @@ impl Shell {
                     .child(Input::new(&self.files.input).aria_label("Find file by name")),
             )
             .child(
-                v_flex()
-                    .id("file-tree-box")
-                    .role(Role::Tree)
-                    .aria_label("Files")
+                self.file_menu_blank(
+                    v_flex()
+                        .id("file-tree-box")
+                        .role(Role::Tree)
+                        .aria_label("Files")
+                        .relative()
+                        .flex_1()
+                        .min_h_0(),
+                    cx,
+                )
+                .child(
+                    uniform_list(
+                        "file-tree",
+                        rows,
+                        cx.processor(|this, range: Range<usize>, window, cx| {
+                            this.render_file_rows(range, window, cx)
+                        }),
+                    )
+                    .track_scroll(&self.files.scroll)
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        uniform_list(
-                            "file-tree",
-                            rows,
-                            cx.processor(|this, range: Range<usize>, window, cx| {
-                                this.render_file_rows(range, window, cx)
-                            }),
-                        )
-                        .track_scroll(&self.files.scroll)
-                        .flex_1()
-                        .min_h_0()
-                        .px(px(6.0))
-                        .py(px(4.0)),
-                    ),
+                    .px(px(6.0))
+                    .py(px(4.0)),
+                ),
             )
             .when_some(note, |view, note| {
                 view.child(
@@ -676,6 +765,11 @@ impl Shell {
         };
         let rows = tree.rows();
         let cursor = tree.cursor_index(&rows);
+        let renaming = match tree.editing() {
+            Some(NameEdit::Rename { path }) => Some(path.clone()),
+            _ => None,
+        };
+        let field = self.name_field_input().cloned();
         let active_preview = self.workspace.active_preview_file(tab).map(str::to_owned);
         let t = self.theme;
         let mono = self.fonts.mono.clone();
@@ -718,7 +812,25 @@ impl Shell {
                         expanded,
                     } => {
                         let label = entry_label(&name, kind, Some(expanded));
-                        base.role(Role::TreeItem)
+                        let edited = field
+                            .as_ref()
+                            .filter(|_| renaming.as_deref() == Some(path.as_str()));
+                        let name_cell = match edited {
+                            Some(input) => name_field(input, &format!("New name for {name}"), &t),
+                            None => div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(name)
+                                .into_any_element(),
+                        };
+                        let target = FileTarget {
+                            path: path.clone(),
+                            kind,
+                        };
+                        let row = base
+                            .role(Role::TreeItem)
                             .aria_label(label)
                             .when(kind.is_dir(), |row| row.aria_expanded(expanded))
                             .pl(px(8.0 + depth as f32 * INDENT))
@@ -726,14 +838,7 @@ impl Shell {
                             .hover(move |s| s.bg(hover))
                             .child(chevron(kind, expanded, &t))
                             .child(icon(kind, &t))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(name),
-                            )
+                            .child(name_cell)
                             .when(matches!(kind, EntryKind::Link { .. }), |row| {
                                 row.child(div().flex_none().text_color(t.faint).child("link"))
                             })
@@ -744,15 +849,20 @@ impl Shell {
                                     window,
                                     cx,
                                 );
-                            }))
-                            .into_any_element()
+                            }));
+                        self.file_menu_row(row, target, cx).into_any_element()
                     }
                     Row::Hit { path, kind } => {
                         let (folder, name) = match path.rsplit_once('/') {
                             Some((folder, name)) => (format!("{folder}/"), name.to_owned()),
                             None => (String::new(), path.clone()),
                         };
-                        base.role(Role::TreeItem)
+                        let target = FileTarget {
+                            path: path.clone(),
+                            kind,
+                        };
+                        let row = base
+                            .role(Role::TreeItem)
                             .aria_label(entry_label(&path, kind, None))
                             .pl(px(8.0))
                             .cursor_pointer()
@@ -782,8 +892,25 @@ impl Shell {
                                     window,
                                     cx,
                                 );
-                            }))
-                            .into_any_element()
+                            }));
+                        self.file_menu_row(row, target, cx).into_any_element()
+                    }
+                    Row::NewEntry { depth, folder } => {
+                        let kind = if folder {
+                            EntryKind::Dir
+                        } else {
+                            EntryKind::File
+                        };
+                        let what = if folder { "folder" } else { "file" };
+                        match &field {
+                            Some(input) => base
+                                .pl(px(8.0 + depth as f32 * INDENT))
+                                .child(chevron(kind, false, &t))
+                                .child(icon(kind, &t))
+                                .child(name_field(input, &format!("Name of the new {what}"), &t))
+                                .into_any_element(),
+                            None => base.into_any_element(),
+                        }
                     }
                     Row::Loading { depth } => note_row(base, depth, "Loading…", t.faint),
                     Row::More { depth } => note_row(base, depth, "… more", t.faint),
@@ -809,6 +936,25 @@ fn entry_label(name: &str, kind: EntryKind, expanded: Option<bool>) -> String {
         Some(false) if kind.is_dir() => format!("{what} {name}, collapsed"),
         _ => format!("{what} {name}"),
     }
+}
+
+/// The name field of New File, New Folder or Rename, in its row.
+fn name_field(input: &Entity<InputState>, label: &str, t: &crate::theme::Theme) -> AnyElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .key_context(FILE_NAME_CONTEXT)
+        .px(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(t.ai)
+        .bg(t.bg)
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .aria_label(label.to_owned()),
+        )
+        .into_any_element()
 }
 
 fn note_row(row: Stateful<Div>, depth: usize, text: &str, color: Rgba) -> AnyElement {

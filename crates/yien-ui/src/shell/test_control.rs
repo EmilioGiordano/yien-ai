@@ -92,6 +92,19 @@ impl Shell {
                     self.run_target(target, window, cx);
                     Reply::done()
                 }
+                Ok(Run::FilesMenu { path }) => {
+                    let path = (path != ".").then_some(path);
+                    match self.test_open_file_menu(path, window, cx) {
+                        Ok(()) => Reply::done(),
+                        Err(error) => Reply::error(error),
+                    }
+                }
+                Ok(Run::FilesMenuPick { item, name }) => {
+                    match self.test_pick_file_menu(&item, name, window, cx) {
+                        Ok(()) => Reply::done(),
+                        Err(error) => Reply::error(error),
+                    }
+                }
                 Err(error) => Reply::error(error),
             },
             Request::Text { pane, text } => {
@@ -187,6 +200,7 @@ impl Shell {
             projects,
             tabs,
             panes,
+            files: self.files_test_state(cx),
         }
     }
 }

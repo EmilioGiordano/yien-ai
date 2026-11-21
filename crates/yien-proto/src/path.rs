@@ -65,9 +65,84 @@ pub fn same_folder(a: &str, b: &str) -> bool {
     folder_key(a, windows) == folder_key(b, windows)
 }
 
+/// Whether `path` is the folder `root` or lies inside it, both already
+/// resolved (links and `..` followed by the caller), compared as
+/// [`folder_key`] compares them. A sibling whose name starts like the root
+/// (`C:/Code/yien2` for `C:/Code/yien`) is outside.
+///
+/// ```
+/// use yien_proto::path_within;
+///
+/// assert!(path_within(r"\\?\C:\Code\Yien", r"C:\code\yien\src\main.rs", true));
+/// assert!(path_within("/home/e/proj", "/home/e/proj", false));
+/// assert!(!path_within("/home/e/proj", "/home/e/proj2/x", false));
+/// assert!(!path_within("/home/e/proj", "/home/e/Proj/x", false));
+/// ```
+pub fn path_within(root: &str, path: &str, windows: bool) -> bool {
+    let root = folder_key(root, windows);
+    let path = folder_key(path, windows);
+    if root.is_empty() || path.is_empty() {
+        return false;
+    }
+    if path == root {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix(&root) else {
+        return false;
+    };
+    // A root key ends with `/` only when it is a drive or the filesystem root.
+    root.ends_with('/') || rest.starts_with('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rnf_14_a_path_is_within_its_root_and_never_a_neighbour() {
+        let root = r"C:\Code\yien";
+        for inside in [
+            r"C:\Code\yien",
+            r"C:\Code\yien\",
+            r"C:\Code\yien\src\main.rs",
+            r"c:\code\YIEN\.claude\settings.json",
+            r"\\?\C:\Code\yien\a b\c",
+            "C:/Code//yien/x",
+        ] {
+            assert!(path_within(root, inside, true), "{inside}");
+        }
+        for outside in [
+            r"C:\Code\yien2",
+            r"C:\Code\yien2\x",
+            r"C:\Code",
+            r"C:\Code\other\yien",
+            r"D:\Code\yien\x",
+            r"\\server\share\Code\yien",
+            "",
+        ] {
+            assert!(!path_within(root, outside, true), "{outside}");
+        }
+        assert!(
+            !path_within("", r"C:\x", true),
+            "an empty root holds nothing"
+        );
+    }
+
+    #[test]
+    fn rnf_14_drive_and_filesystem_roots_hold_everything_below_them() {
+        assert!(path_within(r"C:\", r"C:\x\y", true));
+        assert!(!path_within(r"C:\", r"D:\x", true));
+        assert!(path_within("/", "/home/e", false));
+        assert!(path_within(r"\\server\share", r"\\server\share\x", true));
+        assert!(!path_within(r"\\server\share", r"\\server\shared\x", true));
+    }
+
+    #[test]
+    fn rnf_14_unix_paths_keep_case_when_checking_containment() {
+        assert!(path_within("/home/e/proj", "/home/e/proj/src", false));
+        assert!(!path_within("/home/e/proj", "/home/e/PROJ/src", false));
+        assert!(!path_within("/home/e/proj", "/home/e/proj-old", false));
+    }
 
     #[test]
     fn rf_esp_01_spellings_of_one_windows_folder_share_a_key() {

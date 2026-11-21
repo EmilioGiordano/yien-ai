@@ -21,7 +21,7 @@ use crate::{PaneId, ProfileId, ProjectId, TabId};
 /// ```
 /// assert!(yien_proto::test_control::TEST_CONTROL_VERSION >= 1);
 /// ```
-pub const TEST_CONTROL_VERSION: u32 = 2;
+pub const TEST_CONTROL_VERSION: u32 = 3;
 
 /// The longest request line, in bytes, without its newline.
 ///
@@ -148,15 +148,13 @@ impl Request {
                     name("profile", profile.as_str())?;
                 }
                 if let Some(path) = &args.path {
-                    if path.is_empty() {
-                        return Err("path is empty".to_owned());
-                    }
-                    if path.len() > MAX_TEXT_LEN {
-                        return Err(format!("path is longer than {MAX_TEXT_LEN} bytes"));
-                    }
-                    if path.chars().any(char::is_control) {
-                        return Err("path has a control character".to_owned());
-                    }
+                    text_arg("path", path)?;
+                }
+                if let Some(item) = &args.item {
+                    name("item", item)?;
+                }
+                if let Some(typed) = &args.name {
+                    text_arg("name", typed)?;
                 }
                 Ok(())
             }
@@ -190,6 +188,19 @@ impl Request {
             Self::WindowClose {} => Ok(()),
         }
     }
+}
+
+fn text_arg(what: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{what} is empty"));
+    }
+    if value.len() > MAX_TEXT_LEN {
+        return Err(format!("{what} is longer than {MAX_TEXT_LEN} bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{what} has a control character"));
+    }
+    Ok(())
 }
 
 fn name(what: &str, value: &str) -> Result<(), String> {
@@ -230,9 +241,17 @@ pub struct CommandArgs {
     /// The project to select.
     #[serde(default)]
     pub project: Option<ProjectId>,
-    /// The project-relative file path for `file.open` (RF-CTX-02).
+    /// The project-relative file path for `file.open` (RF-CTX-02), or the
+    /// Files view row for `files.menu` (`""` for the folder itself).
     #[serde(default)]
     pub path: Option<String>,
+    /// The label of the open menu's item `files.menu_pick` runs.
+    #[serde(default)]
+    pub item: Option<String>,
+    /// For `files.menu_pick`: the name typed into the field the item opens
+    /// (New File, New Folder, Rename), which is then committed as Enter does.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Which way a split with a profile goes, as the split menu offers.
@@ -388,6 +407,88 @@ pub struct UiState {
     pub tabs: Vec<TabState>,
     /// Panes, tab by tab, each tab's in layout order.
     pub panes: Vec<PaneState>,
+    /// The context bar's Files view, while it shows (RF-CTX-01).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<FilesState>,
+}
+
+/// The Files view as drawn: its rows, cursor, open menu and name field.
+///
+/// ```
+/// let files = yien_proto::test_control::FilesState::default();
+/// assert!(files.menu.is_none() && files.rows.is_empty());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesState {
+    /// The tab whose folder it shows.
+    pub tab: Option<TabId>,
+    /// That folder.
+    pub root: String,
+    /// The filter's text.
+    pub query: String,
+    /// The row under the cursor.
+    pub cursor: Option<String>,
+    /// The entries drawn, top to bottom: the tree, or the filter's matches.
+    pub rows: Vec<FileRowState>,
+    /// The context menu, while open.
+    pub menu: Option<FileMenuState>,
+    /// The name field of New File, New Folder or Rename, while open.
+    pub editing: Option<FileEditState>,
+    /// What Cut or Copy holds for Paste.
+    pub clipboard: Option<FileClipboardState>,
+}
+
+/// One entry row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRowState {
+    /// Relative to the folder, parts joined with `/`.
+    pub path: String,
+    /// `file`, `folder`, `link` or `folder_link`.
+    pub kind: String,
+    /// Folder levels below the root; 0 for a filter match.
+    pub depth: usize,
+    /// A folder shown open.
+    pub expanded: bool,
+}
+
+/// The open context menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileMenuState {
+    /// The entry it acts on, `""` for the folder itself.
+    pub path: String,
+    /// Its items, separators left out.
+    pub items: Vec<MenuItemState>,
+}
+
+/// One item of a menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuItemState {
+    /// What it says.
+    pub label: String,
+    /// It can run now.
+    pub enabled: bool,
+    /// The keys shown beside it.
+    pub keys: Option<String>,
+}
+
+/// The open name field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEditState {
+    /// `new_file`, `new_folder` or `rename`.
+    pub kind: String,
+    /// The folder a new entry goes into, or the entry renamed.
+    pub path: String,
+    /// The name typed so far.
+    pub text: String,
+}
+
+/// What Cut or Copy holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileClipboardState {
+    /// The entry, relative to the folder it was taken from.
+    pub path: String,
+    /// It moves on paste instead of being copied.
+    pub cut: bool,
 }
 
 /// The window's size and focus.
@@ -744,6 +845,27 @@ mod tests {
                 width: 800.0,
                 height: f32::INFINITY,
             },
+            Request::Command {
+                id: "files.menu_pick".into(),
+                args: CommandArgs {
+                    item: Some("i".repeat(MAX_NAME_LEN + 1)),
+                    ..CommandArgs::default()
+                },
+            },
+            Request::Command {
+                id: "files.menu_pick".into(),
+                args: CommandArgs {
+                    name: Some("a\nb".into()),
+                    ..CommandArgs::default()
+                },
+            },
+            Request::Command {
+                id: "files.menu_pick".into(),
+                args: CommandArgs {
+                    name: Some(String::new()),
+                    ..CommandArgs::default()
+                },
+            },
         ];
         for request in refused {
             assert!(request.check().is_err(), "{request:?}");
@@ -800,8 +922,38 @@ mod tests {
                 size: Some((80, 24)),
                 ..pane()
             }],
+            files: Some(FilesState {
+                tab: Some(TabId::new(2)),
+                root: "C:/work".into(),
+                query: String::new(),
+                cursor: Some("src".into()),
+                rows: vec![FileRowState {
+                    path: "src".into(),
+                    kind: "folder".into(),
+                    depth: 0,
+                    expanded: false,
+                }],
+                menu: Some(FileMenuState {
+                    path: "src".into(),
+                    items: vec![MenuItemState {
+                        label: "Rename…".into(),
+                        enabled: true,
+                        keys: Some("F2".into()),
+                    }],
+                }),
+                editing: None,
+                clipboard: Some(FileClipboardState {
+                    path: "a.txt".into(),
+                    cut: true,
+                }),
+            }),
         };
         let json = serde_json::to_value(Reply::state(state.clone())).unwrap();
+        assert_eq!(
+            json["state"]["files"]["menu"]["items"][0]["label"],
+            "Rename…"
+        );
+        assert_eq!(json["state"]["files"]["rows"][0]["kind"], "folder");
         assert_eq!(json["ok"], true);
         assert_eq!(json["state"]["keyboard_pane"], 3);
         assert_eq!(json["state"]["tabs"][0]["mark"], "needs_you");

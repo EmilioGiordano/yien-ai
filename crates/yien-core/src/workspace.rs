@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yien_layout::{Rect, Tree};
+use yien_proto::file_ops::FileAction;
 use yien_proto::{
     AgentState, Command, CoreMsg, FilePaneInfo, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PaneKind,
     PendingQuestion, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SessionTitle, SideBars, TabId,
@@ -83,6 +84,27 @@ pub(crate) enum Effect {
         pane: PaneId,
         root: String,
         path: String,
+    },
+    /// Run a Files context menu action on the folder `root` of `tab` off the
+    /// command loop, answering [`CoreMsg::FilesChanged`] or an error.
+    FileAction {
+        tab: TabId,
+        root: String,
+        action: FileAction,
+    },
+}
+
+/// The folder a new tab is opened on.
+enum TabFolder {
+    /// The project's main working copy.
+    Project,
+    /// A linked worktree, on `branch`.
+    Worktree { dir: String, branch: String },
+    /// Another tab's folder, its pane started in `cwd` below it.
+    Beside {
+        dir: String,
+        branch: Option<String>,
+        cwd: String,
     },
 }
 
@@ -441,6 +463,11 @@ impl Workspace {
         Some((tab.id, tab.dir.as_str()))
     }
 
+    /// The folder of the tab, `None` when it is gone.
+    pub fn tab_dir(&self, tab: TabId) -> Option<&str> {
+        self.tab(tab).ok().map(|t| t.dir.as_str())
+    }
+
     /// Whether `root` is the folder of a project already ([`same_folder`]).
     pub fn has_project_at(&self, root: &str) -> bool {
         self.projects.iter().any(|p| same_folder(&p.root, root))
@@ -761,6 +788,18 @@ impl Workspace {
             Command::SelectFileTab { pane, path } => self.select_file_tab(pane, &path, &mut fx)?,
             Command::CloseFileTab { pane, path } => self.close_file_tab(pane, &path, &mut fx)?,
             Command::ToggleFileWrap { pane } => self.toggle_file_wrap(pane, &mut fx)?,
+            Command::FileAction { tab, action } => {
+                let root = self.tab(tab)?.dir.clone();
+                fx.push(Effect::FileAction { tab, root, action });
+            }
+            Command::OpenTerminal { tab, path } => {
+                let t = self.tab(tab)?;
+                let (project, dir, branch) = (t.project, t.dir.clone(), t.branch.clone());
+                let cwd = folder_below(&dir, &path).ok_or(CoreError::OutsideFolder(path))?;
+                let plan = resolve(None)?;
+                let folder = TabFolder::Beside { dir, branch, cwd };
+                self.open_tab(project, None, plan, folder, None, &mut fx)?;
+            }
         }
         self.refresh_views(&mut fx);
         debug_assert_eq!(self.check(), Ok(()));
@@ -870,7 +909,11 @@ impl Workspace {
         worktree: Option<(String, String)>,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
-        self.open_tab(project, name, plan, worktree, None, fx)
+        let folder = worktree.map_or(TabFolder::Project, |(dir, branch)| TabFolder::Worktree {
+            dir,
+            branch,
+        });
+        self.open_tab(project, name, plan, folder, None, fx)
     }
 
     /// Resumes a past agent session in a new tab on the project's folder,
@@ -920,7 +963,14 @@ impl Workspace {
             }
             self.emit_pane(pane, fx);
         }
-        self.open_tab(project, None, plan, None, Some(session_id), fx)
+        self.open_tab(
+            project,
+            None,
+            plan,
+            TabFolder::Project,
+            Some(session_id),
+            fx,
+        )
     }
 
     /// [`Workspace::new_tab`], its pane resuming `resume` when set.
@@ -929,7 +979,7 @@ impl Workspace {
         project: ProjectId,
         name: Option<String>,
         plan: LaunchPlan,
-        worktree: Option<(String, String)>,
+        folder: TabFolder,
         resume: Option<String>,
         fx: &mut Vec<Effect>,
     ) -> Result<(), CoreError> {
@@ -943,9 +993,16 @@ impl Workspace {
             .ok_or(CoreError::UnknownProject(project))?;
         p.tabs.push(tab_id);
         let custom_name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-        let (default_name, dir, branch, worktree) = match worktree {
-            Some((dir, branch)) => (branch.clone(), dir.clone(), Some(branch), Some(dir)),
-            None => (automatic, p.root.clone(), None, None),
+        let (default_name, dir, branch, worktree, cwd) = match folder {
+            TabFolder::Worktree { dir, branch } => (
+                branch.clone(),
+                dir.clone(),
+                Some(branch),
+                Some(dir.clone()),
+                dir,
+            ),
+            TabFolder::Project => (automatic, p.root.clone(), None, None, p.root.clone()),
+            TabFolder::Beside { dir, branch, cwd } => (automatic, dir, branch, None, cwd),
         };
         let tree = Tree::new();
         let leaves = tree.panes().into_iter().map(|leaf| (leaf, pane)).collect();
@@ -969,7 +1026,7 @@ impl Workspace {
         if let Some(p) = self.projects.iter().find(|p| p.id == project) {
             fx.push(Effect::Emit(CoreMsg::ProjectUpdated(project_info(p))));
         }
-        self.add_pane(pane, tab_id, plan, dir, resume, fx);
+        self.add_pane(pane, tab_id, plan, cwd, resume, fx);
         self.emit_tab(tab_id, fx);
         self.emit_pane(pane, fx);
         self.set_active(Some(tab_id), fx);
@@ -1617,6 +1674,24 @@ impl Workspace {
         }
         Ok(())
     }
+}
+
+/// The folder `rel` (parts joined with `/`, `""` for `dir` itself) below
+/// `dir`; `None` for a part that would leave it: `.`, `..`, and on Windows
+/// a `\` or a drive's `:`.
+fn folder_below(dir: &str, rel: &str) -> Option<String> {
+    let mut path = dir.to_owned();
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        let foreign = cfg!(windows) && part.contains(['\\', ':']);
+        if part == "." || part == ".." || foreign {
+            return None;
+        }
+        if !path.ends_with(['/', '\\']) {
+            path.push('/');
+        }
+        path.push_str(part);
+    }
+    Some(path)
 }
 
 fn clean_rel_path(path: &str) -> String {
@@ -4019,6 +4094,142 @@ mod tests {
         assert_eq!(gone, HashSet::from([term, file]));
         assert!(!ws.panes.contains_key(&file));
         assert_eq!(ws.check(), Ok(()));
+    }
+
+    #[test]
+    fn rf_ctx_01_a_file_action_runs_on_the_tab_folder_off_the_loop() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let dir = ws.tab(tab).unwrap().dir.clone();
+        let action = FileAction::Trash {
+            path: "src/old.rs".into(),
+        };
+        let before = ws.snapshot();
+        let fx = run(
+            &mut ws,
+            Command::FileAction {
+                tab,
+                action: action.clone(),
+            },
+        );
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::FileAction { tab: t, root, action: a } if *t == tab && *root == dir && *a == action
+            )),
+            "{fx:?}"
+        );
+        assert_eq!(ws.snapshot(), before, "the workspace itself is unchanged");
+        let gone = Command::FileAction {
+            tab: TabId::new(999),
+            action,
+        };
+        assert!(matches!(
+            ws.apply(gone, &resolve),
+            Err(CoreError::UnknownTab(_))
+        ));
+    }
+
+    #[test]
+    fn rf_ctx_01_open_in_terminal_opens_a_tab_on_the_folder_started_below_it() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let dir = ws.tab(tab).unwrap().dir.clone();
+        let fx = run(
+            &mut ws,
+            Command::OpenTerminal {
+                tab,
+                path: "crates/yien-ui".into(),
+            },
+        );
+        let started = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Spawn { pane, cwd, .. } => Some((*pane, cwd.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(started.1, "C:/Code/yien/crates/yien-ui");
+        let new = ws.tab_of(started.0).unwrap();
+        assert_ne!(new, tab);
+        let snap = ws.snapshot();
+        let info = snap.tabs.iter().find(|t| t.id == new).unwrap();
+        assert_eq!(
+            info.dir, dir,
+            "the tab keeps the folder, its pane starts below"
+        );
+        assert_eq!(info.worktree, None);
+        assert_eq!(snap.active_tab, Some(new));
+        // The folder itself, from a file at the root.
+        let fx = run(
+            &mut ws,
+            Command::OpenTerminal {
+                tab,
+                path: String::new(),
+            },
+        );
+        assert!(
+            fx.iter()
+                .any(|e| matches!(e, Effect::Spawn { cwd, .. } if *cwd == dir))
+        );
+    }
+
+    #[test]
+    fn rnf_14_open_in_terminal_never_starts_outside_the_tab_folder() {
+        let mut ws = Workspace::new();
+        let (tab, _) = project(&mut ws);
+        let before = ws.snapshot();
+        for path in ["..", "src/../..", "./src"] {
+            let command = Command::OpenTerminal {
+                tab,
+                path: path.into(),
+            };
+            assert!(
+                matches!(
+                    ws.apply(command, &resolve),
+                    Err(CoreError::OutsideFolder(_))
+                ),
+                "{path}"
+            );
+        }
+        if cfg!(windows) {
+            let command = Command::OpenTerminal {
+                tab,
+                path: "C:/Windows".into(),
+            };
+            assert!(ws.apply(command, &resolve).is_err());
+        }
+        assert_eq!(ws.snapshot(), before);
+    }
+
+    #[test]
+    fn rf_ctx_01_a_terminal_opened_from_a_worktree_tab_keeps_the_worktree_alive() {
+        let mut ws = Workspace::new();
+        let (_, _) = project(&mut ws);
+        let project_id = ws.snapshot().projects[0].id;
+        ws.open_worktree_tab(
+            project_id,
+            "C:/Code/yien-wt/x".into(),
+            "feat/x".into(),
+            &resolve,
+        )
+        .unwrap();
+        let wt = ws.active_dir().unwrap().0;
+        run(
+            &mut ws,
+            Command::OpenTerminal {
+                tab: wt,
+                path: "src".into(),
+            },
+        );
+        let snap = ws.snapshot();
+        let opened = snap
+            .tabs
+            .iter()
+            .find(|t| t.id != wt && t.dir == "C:/Code/yien-wt/x");
+        let opened = opened.unwrap();
+        assert_eq!(opened.branch.as_deref(), Some("feat/x"));
+        assert!(ws.folder_used_elsewhere(wt, "C:/Code/yien-wt/x"));
     }
 
     proptest! {

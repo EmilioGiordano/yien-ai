@@ -190,6 +190,7 @@ impl Shell {
         // Dropped first, so their blur cannot close the menu opened now.
         self.tab_menu.open = None;
         self.new_tab_menu.forget();
+        self.file_menu.forget();
         self.menu = None;
         self.split_menu = None;
         self.close_tray(window, cx);

@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_ops::FileAction;
 use crate::frame::{SelectionKind, Side, ViewportPoint};
 use crate::{PaneId, ProjectId, ShellKind, TabGit, TabId};
 
@@ -521,6 +522,25 @@ pub enum Command {
     ToggleFileWrap {
         /// The file preview pane.
         pane: PaneId,
+    },
+    /// Runs a Files context menu action on the tab's folder (RF-CTX-01).
+    /// Its paths are relative to the tab's folder and must resolve inside
+    /// it; one that writes into `.git` is refused (RNF-14). Success answers
+    /// with [`CoreMsg::FilesChanged`], failure with [`CoreMsg::Error`].
+    FileAction {
+        /// The tab whose folder the paths are relative to.
+        tab: TabId,
+        /// What to do.
+        action: FileAction,
+    },
+    /// Opens a tab with the shell in the tab's project and folder, its pane
+    /// started in the folder `path` (relative to the tab's folder, `""` for
+    /// the folder itself) (RF-CTX-01).
+    OpenTerminal {
+        /// The tab whose folder `path` is relative to.
+        tab: TabId,
+        /// The folder the shell starts in.
+        path: String,
     },
 }
 
@@ -1190,6 +1210,16 @@ pub enum CoreMsg {
         /// For the user.
         message: String,
     },
+    /// A [`Command::FileAction`] changed the tab's folder: these folders
+    /// (relative, `""` for the root) list something else now.
+    FilesChanged {
+        /// The tab.
+        tab: TabId,
+        /// The folders to list again.
+        dirs: Vec<String>,
+        /// The entry the action made or moved, for the tree's cursor.
+        select: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -1385,6 +1415,25 @@ mod tests {
             },
             Command::ToggleFileWrap {
                 pane: PaneId::new(4),
+            },
+            Command::FileAction {
+                tab: TabId::new(2),
+                action: FileAction::Paste {
+                    from: "src/a b.rs".into(),
+                    into: "".into(),
+                    cut: true,
+                },
+            },
+            Command::FileAction {
+                tab: TabId::new(2),
+                action: FileAction::Rename {
+                    path: "ñandú/x".into(),
+                    name: "y".into(),
+                },
+            },
+            Command::OpenTerminal {
+                tab: TabId::new(2),
+                path: "crates/yien-ui".into(),
             },
         ];
         for command in commands {
@@ -1590,6 +1639,11 @@ mod tests {
                 state: AgentState::Error(ErrorReason::UnexpectedExit {
                     code: Some(0xC000_013A),
                 }),
+            },
+            CoreMsg::FilesChanged {
+                tab: TabId::new(2),
+                dirs: vec![String::new(), "src".into()],
+                select: Some("src/main copy.rs".into()),
             },
         ];
         for msg in msgs {

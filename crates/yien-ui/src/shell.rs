@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
+use yien_proto::file_ops::{FileAction, rel_name};
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, FilePaneInfo, Orientation, PaneId, ProfileId,
     ProjectId, SHELL_PROFILE, SideBars, TabGit, TabId, TerminalPalette,
@@ -64,6 +65,7 @@ use crate::window_close::{CloseMode, close_mode};
 mod bars;
 mod default_tab;
 mod dividers;
+mod file_menu;
 mod files;
 mod menu;
 mod new_tab_menu;
@@ -81,6 +83,7 @@ mod worktrees;
 mod zoom;
 
 use dividers::{DividerGrab, PaneArea};
+use file_menu::FileMenuState;
 use files::{ContextView, FilesPanel};
 use new_tab_menu::NewTabMenuState;
 use pane_menu::{MenuKind, PaneMenu, PaneMenuKey};
@@ -189,6 +192,9 @@ pub(crate) struct Shell {
     /// The tab menu, while open (RF-ESP-16).
     tab_menu: TabMenuState,
     new_tab_menu: NewTabMenuState,
+    /// The Files view's context menu, name field and file clipboard
+    /// (RF-CTX-01).
+    file_menu: FileMenuState,
     /// Where each pane head was painted, for the menu opened by keyboard.
     pane_heads: Rc<RefCell<HashMap<PaneId, Bounds<Pixels>>>>,
     /// The user's home folder, which pane heads show as `~`.
@@ -277,6 +283,12 @@ enum Asked {
     ClosePane { pane: PaneId, name: String },
     /// Quitting while agents work (RF-SES-13).
     Quit,
+    /// Deleting a file or folder of the Files view for good (RF-CTX-01).
+    DeleteFile {
+        tab: TabId,
+        path: String,
+        folder: bool,
+    },
 }
 
 /// The palette's model and the widgets drawing it.
@@ -447,6 +459,7 @@ impl Shell {
             menu_closed_at: None,
             tab_menu: TabMenuState::default(),
             new_tab_menu: NewTabMenuState::default(),
+            file_menu: FileMenuState::default(),
             pane_heads: Rc::default(),
             home: home_folder(),
             palette: None,
@@ -606,6 +619,10 @@ impl Shell {
                     continue;
                 }
                 CoreMsg::Notice { message } => self.say(message, cx),
+                CoreMsg::FilesChanged { tab, dirs, select } => {
+                    self.files_changed(tab, &dirs, select, cx);
+                    continue;
+                }
                 CoreMsg::WorktreeChecked { tab, check, .. } => self.worktree_checked(tab, check),
                 CoreMsg::AgentSessions {
                     project,
@@ -808,6 +825,7 @@ impl Shell {
             Asked::CloseProject { project, .. } => self.workspace.project(*project).is_none(),
             Asked::CloseTab { tab, .. } => self.workspace.tab(*tab).is_none(),
             Asked::ClosePane { pane, .. } => self.workspace.tab_of(*pane).is_none(),
+            Asked::DeleteFile { tab, .. } => self.workspace.tab(*tab).is_none(),
             Asked::Quit => false,
         });
         if gone {
@@ -825,6 +843,7 @@ impl Shell {
         self.drop_stale_worktree_question(window, cx);
         self.drop_stale_menu(window, cx);
         self.drop_stale_tab_menu(window, cx);
+        self.drop_stale_file_menu(window, cx);
     }
 
     /// Whether an overlay holds the keyboard; closing it gives it back.
@@ -838,6 +857,8 @@ impl Shell {
             (self.palette.is_some(), "palette"),
             (self.menu.is_some(), "pane_menu"),
             (self.tab_menu.is_open(), "tab_menu"),
+            (self.file_menu.is_open(), "file_menu"),
+            (self.file_menu.is_editing(), "file_name"),
             (self.new_tab_menu.is_open(), "new_tab_menu"),
             (self.tray.is_some(), "tray"),
             (self.confirm.is_some(), "confirm"),
@@ -1404,13 +1425,15 @@ impl Shell {
         let commands = {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
-            command_entries(
+            let mut commands = command_entries(
                 |at| {
                     let spec = CATALOG.get(at)?;
                     shortcut(&keymap, (spec.action)().as_ref())
                 },
                 self.workspace.profiles(),
-            )
+            );
+            commands.extend(self.file_palette_entries(&|action| shortcut(&keymap, action)));
+            commands
         };
         let commands: Vec<Entry> = commands
             .into_iter()
@@ -1565,6 +1588,7 @@ impl Shell {
             Target::OpenFile { tab, path } => {
                 self.command(Command::OpenFile { tab, path }, cx);
             }
+            Target::File(action) => self.run_file_action_on_cursor(action, window, cx),
         }
     }
 
@@ -1835,15 +1859,29 @@ impl Shell {
                 self.quit_confirmed = true;
                 window.remove_window();
             }
+            Asked::DeleteFile { tab, path, .. } => {
+                self.command(
+                    Command::FileAction {
+                        tab,
+                        action: FileAction::Delete { path },
+                    },
+                    cx,
+                );
+                self.files_take_keyboard(window, cx);
+            }
         }
     }
 
     fn confirm_cancel(&mut self, _: &ConfirmCancel, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(confirm) = self.confirm.take() {
-            if matches!(confirm.asked, Asked::Quit) {
-                self.quit_cancelled(cx);
+            match confirm.asked {
+                Asked::Quit => {
+                    self.quit_cancelled(cx);
+                    self.give_back_keyboard(window, cx);
+                }
+                Asked::DeleteFile { .. } => self.files_take_keyboard(window, cx),
+                _ => self.give_back_keyboard(window, cx),
             }
-            self.give_back_keyboard(window, cx);
         }
     }
 
@@ -1891,6 +1929,12 @@ impl Shell {
                 quit_detail(&self.workspace),
                 "Quit anyway",
                 "confirm-quit",
+            ),
+            Asked::DeleteFile { path, folder, .. } => (
+                format!("Delete {} permanently?", rel_name(path)),
+                file_menu::delete_detail(*folder).to_owned(),
+                "Delete",
+                "confirm-delete-file",
             ),
         };
         let button = |id: &'static str, label: &'static str, keys: &'static str| {
@@ -4310,6 +4354,12 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_tree_open))
             .on_action(cx.listener(Self::file_tree_open_in_editor))
             .on_action(cx.listener(Self::file_tree_escape))
+            .on_action(cx.listener(Self::file_tree_menu))
+            .on_action(cx.listener(Self::file_tree_rename))
+            .on_action(cx.listener(Self::file_tree_trash))
+            .on_action(cx.listener(Self::file_tree_delete))
+            .on_action(cx.listener(Self::file_name_confirm))
+            .on_action(cx.listener(Self::file_name_cancel))
             .on_action(cx.listener(Self::toggle_file_wrap))
             .on_action(cx.listener(|this, _: &NextFileTab, _, cx| {
                 this.file_tab(FileTabStep::Next, cx);
@@ -4357,6 +4407,7 @@ impl Render for Shell {
             .children(self.render_worktree_close(cx))
             .children(self.render_menu(cx))
             .children(self.render_tab_menu(cx))
+            .children(self.render_file_menu(cx))
             .children(self.render_new_tab_menu(cx))
             .children(self.render_whats_new(cx))
             .children(self.render_confirm(cx))

@@ -8,6 +8,7 @@ use std::ops::Range;
 use yien_proto::{AgentSession, Orientation, PaneId, ProfileId, ProfileInfo, ProjectId, TabId};
 
 use crate::catalog::{CATALOG, profile_splits, profile_tabs};
+use crate::file_menu::FileMenuAction;
 use crate::matcher::{Match, rank};
 use crate::model::{AgentState, WorkspaceView};
 
@@ -46,6 +47,9 @@ pub(crate) enum Target {
     /// Open a project-relative file in the tab's read-only file preview pane
     /// (RF-CTX-02).
     OpenFile { tab: TabId, path: String },
+    /// Run a Files context menu item on the Files view's cursor entry
+    /// (RF-CTX-01, RF-NAV-02).
+    File(FileMenuAction),
 }
 
 /// One row the palette can show. Its `Debug` leaves the text out: a past
