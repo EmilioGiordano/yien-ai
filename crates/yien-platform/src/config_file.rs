@@ -567,6 +567,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Making a file symlink needs Developer Mode or an elevated token on
+    /// Windows; without either there is nothing to refuse, and the test
+    /// passes having checked nothing.
+    #[cfg(windows)]
+    #[test]
+    fn rf_cfg_05_a_linked_settings_file_is_not_replaced_on_windows() {
+        let dir = scratch("link-win");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("dotfile.toml");
+        fs::write(&target, "theme = \"sumi\"\n").unwrap();
+        let link = dir.join("config.toml");
+        if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(write(&link, "theme = \"washi\"\n").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "theme = \"sumi\"\n");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn reading_a_missing_file_is_none_and_a_huge_one_is_refused() {
         let dir = scratch("read");
