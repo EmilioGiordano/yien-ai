@@ -9,11 +9,11 @@ use gpui_kit::*;
 use yien_proto::PaneId;
 use yien_proto::test_control::{Reply, Request, TEST_CONTROL_VERSION, UiState, WindowState};
 
-use super::Shell;
+use super::{STATUS_BAR_HEIGHT, Shell, TITLE_BAR_HEIGHT};
 use crate::catalog::spec;
 use crate::region::Region;
 use crate::test_control::{
-    Run, TestControl, expired_reply, parse_key, resolve_command, workspace_state,
+    Run, TestControl, expired_reply, layout_state, parse_key, resolve_command, workspace_state,
 };
 
 impl Shell {
@@ -55,6 +55,15 @@ impl Shell {
                                 }
                             }
                             Ok(Err(error)) => Reply::error(error),
+                            Err(_) => return,
+                        }
+                    }
+                    // Dispatched outside the shell's update, like a key: the
+                    // click runs the shell's own listeners.
+                    Request::Click { x, y } => {
+                        let at = point(px(x), px(y));
+                        match cx.update(|window, cx| click(window, at, cx)) {
+                            Ok(()) => Reply::done(),
                             Err(_) => return,
                         }
                     }
@@ -135,7 +144,9 @@ impl Shell {
                 }
                 Reply::done()
             }
-            Request::Key { .. } => Reply::error("keys are dispatched outside the shell"),
+            Request::Key { .. } | Request::Click { .. } => {
+                Reply::error("keys and clicks are dispatched outside the shell")
+            }
         }
     }
 
@@ -183,6 +194,24 @@ impl Shell {
                 })
         };
         let (projects, tabs, panes) = workspace_state(&self.workspace, keyboard, &terminal);
+        let list = self.tab_drag.scroll.bounds();
+        let painted = |tab| {
+            self.tab_menu.shown_row(tab, list).map(|b| {
+                [
+                    b.origin.x.as_f32(),
+                    b.origin.y.as_f32(),
+                    b.size.width.as_f32(),
+                    b.size.height.as_f32(),
+                ]
+            })
+        };
+        let layout = layout_state(
+            &self.theme,
+            (TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT),
+            self.bar_widths,
+            &tabs,
+            &painted,
+        );
         let viewport = window.viewport_size();
         UiState {
             version: TEST_CONTROL_VERSION,
@@ -201,8 +230,42 @@ impl Shell {
             tabs,
             panes,
             files: self.files_test_state(cx),
+            layout,
         }
     }
+}
+
+/// A left click at `at` as the pointer makes it: a move there, so hover
+/// and hit-testing see it, then a press and a release.
+fn click(window: &mut Window, at: Point<Pixels>, cx: &mut App) {
+    let modifiers = Modifiers::default();
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: at,
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers,
+            click_count: 1,
+        }),
+        cx,
+    );
 }
 
 fn region_name(region: Region) -> &'static str {

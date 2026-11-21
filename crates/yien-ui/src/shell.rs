@@ -433,7 +433,7 @@ impl Shell {
             rebinds: Rebinds::new(),
             side_bars: SideBars::default(),
             side_bars_saved: None,
-            bar_widths: sidebars::drawn(&SideBars::default(), 0.0),
+            bar_widths: sidebars::drawn(&SideBars::default(), 0.0, 1.0),
             bar_grab: 0.0,
             context_view: if files.seeded() {
                 ContextView::Files
@@ -1943,10 +1943,10 @@ impl Shell {
                 .role(Role::Button)
                 .aria_label(format!("{label} ({keys})"))
                 .items_center()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
+                .gap(t.size(8.0))
+                .px(t.size(12.0))
+                .py(t.size(5.0))
+                .rounded(t.size(6.0))
                 .border_1()
                 .border_color(t.line)
                 .cursor_pointer()
@@ -1970,12 +1970,12 @@ impl Shell {
                         .aria_label(title.clone())
                         .track_focus(&confirm.focus)
                         .key_context(CONFIRM_CONTEXT)
-                        .mt(px(PALETTE_TOP))
-                        .w(px(CONFIRM_WIDTH))
+                        .mt(t.size(PALETTE_TOP))
+                        .w(t.size(CONFIRM_WIDTH))
                         .max_w(relative(0.8))
-                        .gap(px(10.0))
-                        .p(px(16.0))
-                        .rounded(px(10.0))
+                        .gap(t.size(10.0))
+                        .p(t.size(16.0))
+                        .rounded(t.size(10.0))
                         .border_1()
                         .border_color(t.line)
                         .bg(t.raised)
@@ -1999,8 +1999,8 @@ impl Shell {
                         .child(
                             h_flex()
                                 .justify_end()
-                                .gap(px(8.0))
-                                .pt(px(4.0))
+                                .gap(t.size(8.0))
+                                .pt(t.size(4.0))
                                 .text_size(t.text(13.0))
                                 .child(button("confirm-cancel", "Cancel", "Esc").on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -2178,7 +2178,7 @@ impl Shell {
 
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.text(1.0).into());
+        let layout = TitleLayout::at(f32::from(window.viewport_size().width), t.scale());
         let crumbs = self.workspace.selected_tab().map(|tab| {
             let project = self
                 .workspace
@@ -2186,7 +2186,7 @@ impl Shell {
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
             h_flex()
-                .gap(px(4.0))
+                .gap(t.size(4.0))
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -2216,7 +2216,7 @@ impl Shell {
             .on_close_window(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.quit(&Quit, window, cx);
             }))
-            .h(px(TITLE_BAR_HEIGHT))
+            .h(t.size(TITLE_BAR_HEIGHT))
             .bg(t.panel)
             .border_color(t.line)
             .child(
@@ -2227,21 +2227,23 @@ impl Shell {
                     .overflow_x_hidden()
                     .h_full()
                     .items_center()
-                    .gap(px(12.0))
-                    .pr(px(ROW_RIGHT_PADDING))
+                    .gap(t.size(12.0))
+                    .pr(t.size(ROW_RIGHT_PADDING))
                     .child(
                         h_flex()
                             .flex_1()
-                            .when(layout.centred, |side| side.mr(px(centring_margins().0)))
+                            .when(layout.centred, |side| {
+                                side.mr(px(centring_margins(t.scale()).0))
+                            })
                             .items_center()
-                            .gap(px(12.0))
+                            .gap(t.size(12.0))
                             .child(
                                 h_flex()
                                     .flex_none()
                                     .items_center()
-                                    .gap(px(8.0))
+                                    .gap(t.size(8.0))
                                     .font_weight(FontWeight::BOLD)
-                                    .child(img(assets::MARK).size(px(20.0)))
+                                    .child(img(assets::MARK).size(t.size(20.0)))
                                     .child("YIEN"),
                             )
                             .child(div().flex_1().w_0().min_w_0().children(crumbs)),
@@ -2252,8 +2254,10 @@ impl Shell {
                             .flex_1()
                             .items_center()
                             .justify_end()
-                            .gap(px(12.0))
-                            .when(layout.centred, |side| side.ml(px(centring_margins().1)))
+                            .gap(t.size(12.0))
+                            .when(layout.centred, |side| {
+                                side.ml(px(centring_margins(t.scale()).1))
+                            })
                             .child(self.render_need_count(cx))
                             .when(layout.theme_button, |bar| {
                                 bar.child(
@@ -2307,14 +2311,14 @@ impl Shell {
             .role(Role::Button)
             .aria_label(format!("Execute a command ({PALETTE_KEYS})"))
             .flex_none()
-            .w(px(PILL_WIDTH))
+            .w(t.size(PILL_WIDTH))
             .max_w(relative(PILL_SHARE))
-            .min_w(px(PILL_LEAST))
+            .min_w(t.size(PILL_LEAST))
             .items_center()
-            .gap(px(10.0))
-            .px(px(10.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
+            .gap(t.size(10.0))
+            .px(t.size(10.0))
+            .py(t.size(4.0))
+            .rounded(t.size(6.0))
             .border_1()
             .border_color(t.line)
             .bg(t.bg)
@@ -2373,7 +2377,7 @@ impl Shell {
             .map_or("this project", |p| p.name.as_str());
         let none = rows.is_empty().then(|| {
             div()
-                .p(px(14.0))
+                .p(t.size(14.0))
                 .text_size(t.text(13.0))
                 .text_color(t.muted)
                 .child(model.empty_text(project))
@@ -2393,11 +2397,11 @@ impl Shell {
                         .role(Role::Dialog)
                         .aria_label(label)
                         .key_context(PALETTE_CONTEXT)
-                        .mt(px(PALETTE_TOP))
-                        .w(px(PALETTE_WIDTH))
+                        .mt(t.size(PALETTE_TOP))
+                        .w(t.size(PALETTE_WIDTH))
                         .max_w(relative(0.8))
                         .overflow_hidden()
-                        .rounded(px(10.0))
+                        .rounded(t.size(10.0))
                         .border_1()
                         .border_color(t.line)
                         .bg(t.raised)
@@ -2407,8 +2411,8 @@ impl Shell {
                         }))
                         .child(
                             div()
-                                .px(px(14.0))
-                                .py(px(8.0))
+                                .px(t.size(14.0))
+                                .py(t.size(8.0))
                                 .border_b_1()
                                 .border_color(t.line)
                                 .text_size(t.text(14.5))
@@ -2424,8 +2428,8 @@ impl Shell {
                                 .role(Role::ListBox)
                                 .track_scroll(&open.scroll)
                                 .overflow_y_scroll()
-                                .max_h(px(PALETTE_LIST_HEIGHT))
-                                .p(px(6.0))
+                                .max_h(t.size(PALETTE_LIST_HEIGHT))
+                                .p(t.size(6.0))
                                 .children(rows)
                                 .children(none),
                         ),
@@ -2476,18 +2480,18 @@ impl Shell {
             .aria_label(label)
             .aria_selected(selected)
             .items_center()
-            .gap(px(10.0))
-            .px(px(10.0))
-            .py(px(7.0))
-            .rounded(px(6.0))
+            .gap(t.size(10.0))
+            .px(t.size(10.0))
+            .py(t.size(7.0))
+            .rounded(t.size(6.0))
             .cursor_pointer()
             .when(selected, |r| r.bg(t.hover))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.run_palette(Some(at), window, cx);
             }))
             .when(nested, |r| {
-                r.pl(px(PALETTE_INDENT))
-                    .child(div().flex_none().w(px(1.0)).h(px(16.0)).bg(t.muted))
+                r.pl(t.size(PALETTE_INDENT))
+                    .child(div().flex_none().w(px(1.0)).h(t.size(16.0)).bg(t.muted))
             })
             .when_some(entry.state, |r, state| r.child(self.state_mark(state)))
             .child(
@@ -2532,9 +2536,9 @@ impl Shell {
             }))
             .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .py(px(3.0))
+            .gap(t.size(6.0))
+            .px(t.size(10.0))
+            .py(t.size(3.0))
             .rounded_full()
             .border_1()
             .text_size(t.text(12.5))
@@ -2553,6 +2557,7 @@ impl Shell {
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.tab_menu.next_frame();
         let t = self.theme;
         let selected = self.workspace.selected_tab().map(|tab| tab.id);
         let by_state = self.workspace.groups_by_state();
@@ -2564,9 +2569,9 @@ impl Shell {
         let head = h_flex()
             .flex_none()
             .items_center()
-            .pl(px(12.0))
-            .pr(px(6.0))
-            .pt(px(6.0))
+            .pl(t.size(12.0))
+            .pr(t.size(6.0))
+            .pt(t.size(6.0))
             .text_size(t.text(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(t.faint)
@@ -2604,8 +2609,8 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(TAB_LIST_PAD))
-                    .pb(px(10.0))
+                    .px(t.size(TAB_LIST_PAD))
+                    .pb(t.size(10.0))
                     .children(groups),
             )
             .when(self.ringed(Region::TabBar), |bar| bar.child(focus_ring(&t)))
@@ -2633,10 +2638,10 @@ impl Shell {
                     .child(
                         h_flex()
                             .items_center()
-                            .gap(px(6.0))
-                            .px(px(6.0))
-                            .pt(px(10.0))
-                            .pb(px(4.0))
+                            .gap(t.size(6.0))
+                            .px(t.size(6.0))
+                            .pt(t.size(10.0))
+                            .pb(t.size(4.0))
                             .text_size(t.text(12.5))
                             .text_color(t.muted)
                             .child(self.state_mark(state))
@@ -2708,7 +2713,7 @@ impl Shell {
         };
         let chevron = svg()
             .path(assets::CHEVRON)
-            .size(px(11.0))
+            .size(t.size(11.0))
             .flex_none()
             .text_color(t.faint)
             .when(folded, |c| {
@@ -2720,10 +2725,10 @@ impl Shell {
             .aria_label(label)
             .aria_expanded(!folded)
             .items_center()
-            .gap(px(6.0))
-            .px(px(6.0))
-            .pt(px(10.0))
-            .pb(px(4.0))
+            .gap(t.size(6.0))
+            .px(t.size(6.0))
+            .pt(t.size(10.0))
+            .pb(t.size(4.0))
             .text_size(t.text(12.5))
             .text_color(t.muted)
             .cursor_pointer()
@@ -2769,15 +2774,20 @@ impl Shell {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .size(px(20.0))
-                    .rounded(px(4.0))
+                    .size(t.size(20.0))
+                    .rounded(t.size(4.0))
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.request_close(id, window, cx);
                     }))
-                    .child(svg().path(assets::CLOSE).size(px(12.0)).text_color(t.faint)),
+                    .child(
+                        svg()
+                            .path(assets::CLOSE)
+                            .size(t.size(12.0))
+                            .text_color(t.faint),
+                    ),
             )
     }
 
@@ -2820,11 +2830,11 @@ impl Shell {
             .relative()
             .flex()
             .flex_col()
-            .gap(px(1.0))
+            .gap(t.size(1.0))
             .w_full()
-            .px(px(TAB_ROW_PAD))
-            .py(px(5.0))
-            .rounded(px(6.0))
+            .px(t.size(TAB_ROW_PAD))
+            .py(t.size(5.0))
+            .rounded(t.size(6.0))
             .border_1()
             .cursor_pointer()
             .map(|row| {
@@ -2858,7 +2868,7 @@ impl Shell {
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(TAB_ROW_GAP))
+                    .gap(t.size(TAB_ROW_GAP))
                     .child(self.lead_mark(
                         self.workspace.tab_badge(tab),
                         self.workspace.tab_mark(tab),
@@ -2869,7 +2879,7 @@ impl Shell {
                         row.child(
                             div()
                                 .min_w_0()
-                                .max_w(px(90.0))
+                                .max_w(t.size(90.0))
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -2883,7 +2893,7 @@ impl Shell {
                             svg()
                                 .flex_none()
                                 .path(assets::BRANCH)
-                                .size(px(TAB_ROW_BRANCH))
+                                .size(t.size(TAB_ROW_BRANCH))
                                 .text_color(t.ai),
                         )
                     })
@@ -2892,8 +2902,8 @@ impl Shell {
             .when(second_line, |row| {
                 row.child(
                     h_flex()
-                        .pl(px(agent_badge::SIDE + TAB_ROW_GAP))
-                        .gap(px(8.0))
+                        .pl(t.size(agent_badge::SIDE + TAB_ROW_GAP))
+                        .gap(t.size(8.0))
                         .min_w_0()
                         .whitespace_nowrap()
                         .text_size(t.text(12.0))
@@ -2921,10 +2931,10 @@ impl Shell {
                     div()
                         .absolute()
                         .left_0()
-                        .top(px(6.0))
-                        .bottom(px(6.0))
-                        .w(px(2.0))
-                        .rounded(px(2.0))
+                        .top(t.size(6.0))
+                        .bottom(t.size(6.0))
+                        .w(t.size(2.0))
+                        .rounded(t.size(2.0))
                         .bg(red),
                 )
             })
@@ -2949,8 +2959,8 @@ impl Shell {
         let Some(badge) = badge else {
             return self
                 .mark_element(mark, agent_badge::SIDE)
-                .size(px(agent_badge::SIDE))
-                .line_height(px(agent_badge::SIDE));
+                .size(t.size(agent_badge::SIDE))
+                .line_height(t.size(agent_badge::SIDE));
         };
         let corner = assets::corner_mark_visual(mark, self.spinner.frame()).map(|visual| {
             let color = t.tab_mark_color(mark);
@@ -2959,8 +2969,8 @@ impl Shell {
             });
             match visual {
                 assets::MarkVisual::Glyph(glyph) => disc
-                    .text_size(px(glyph.size))
-                    .line_height(px(agent_badge::CORNER))
+                    .text_size(t.text(glyph.size))
+                    .line_height(t.size(agent_badge::CORNER))
                     .font_weight(if glyph.bold {
                         FontWeight::BOLD
                     } else {
@@ -2972,13 +2982,13 @@ impl Shell {
                 assets::MarkVisual::Spinner(path) => disc.child(
                     svg()
                         .path(path)
-                        .size(px(agent_badge::CORNER))
+                        .size(t.size(agent_badge::CORNER))
                         .flex_none()
                         .text_color(color),
                 ),
             }
         });
-        agent_badge::badge(badge, corner, self.fonts.mono.clone())
+        agent_badge::badge(badge, corner, self.fonts.mono.clone(), &t)
     }
 
     /// A state's mark outside the tab rows, the same visual and colour as a
@@ -2986,7 +2996,7 @@ impl Shell {
     /// "needs you" by shape (RN-01). No id, like the tab row's.
     fn state_mark(&self, state: AgentState) -> Div {
         self.mark_element(TabMark::State(state), 14.0)
-            .size(px(14.0))
+            .size(self.theme.size(14.0))
             .line_height(self.theme.text(14.0))
     }
 
@@ -3008,7 +3018,7 @@ impl Shell {
             assets::MarkVisual::Spinner(path) => slot.child(
                 svg()
                     .path(path)
-                    .size(px(slot_size))
+                    .size(t.size(slot_size))
                     .flex_none()
                     .text_color(color),
             ),
@@ -3023,8 +3033,8 @@ impl Shell {
                 .flex_1()
                 .min_w_0()
                 .key_context(RENAME_CONTEXT)
-                .px(px(4.0))
-                .rounded(px(4.0))
+                .px(t.size(4.0))
+                .rounded(t.size(4.0))
                 .border_1()
                 .border_color(t.ai)
                 .bg(t.bg)
@@ -3056,7 +3066,7 @@ impl Shell {
             .min_w_0()
             .h_full()
             .bg(t.bg)
-            .p(px(HALF_GUTTER));
+            .p(t.size(HALF_GUTTER));
         if self.workspace.has_no_projects() {
             return self.render_no_project(area, cx);
         }
@@ -3083,7 +3093,7 @@ impl Shell {
                 let pane = self.workspace.pane(id);
                 // Before the first paint the area is unknown: draw it wide.
                 let cell = if area_width > 0.0 {
-                    area_width * rect.w - 2.0 * HALF_GUTTER
+                    area_width * rect.w - 2.0 * t.dim(HALF_GUTTER)
                 } else {
                     f32::INFINITY
                 };
@@ -3093,7 +3103,7 @@ impl Shell {
                     .top(relative(rect.y))
                     .w(relative(rect.w))
                     .h(relative(rect.h))
-                    .p(px(HALF_GUTTER))
+                    .p(t.size(HALF_GUTTER))
                     .child(self.render_pane(tab, &pane, cell, cx))
                     .into_any_element()
             })
@@ -3117,7 +3127,7 @@ impl Shell {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
+            .gap(t.size(12.0))
             .child(
                 div()
                     .text_color(t.muted)
@@ -3139,10 +3149,10 @@ impl Shell {
                     .role(Role::Button)
                     .aria_label(format!("Add project ({ADD_PROJECT_KEYS})"))
                     .items_center()
-                    .gap(px(10.0))
-                    .px(px(14.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
+                    .gap(t.size(10.0))
+                    .px(t.size(14.0))
+                    .py(t.size(6.0))
+                    .rounded(t.size(6.0))
                     .border_1()
                     .border_color(t.line)
                     .bg(t.raised)
@@ -3153,7 +3163,12 @@ impl Shell {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_project(&AddProject, window, cx);
                     }))
-                    .child(svg().path(assets::PLUS).size(px(14.0)).text_color(t.muted))
+                    .child(
+                        svg()
+                            .path(assets::PLUS)
+                            .size(t.size(14.0))
+                            .text_color(t.muted),
+                    )
                     .child("Add project")
                     .child(
                         div()
@@ -3200,7 +3215,7 @@ impl Shell {
             state: pane.state.label(),
             signal_lost: pane.signal_lost.then_some(SIGNAL_LOST),
         };
-        let shows = PaneHeadLayout::at(cell - 2.0 * border, f32::from(t.text(1.0)), &text);
+        let shows = PaneHeadLayout::at(cell - 2.0 * border, t.scale(), &text);
         let separate = text.separate_name();
         // Text shrinks and ellipsizes; buttons never do, so a wrong width
         // guess cuts words, not a button.
@@ -3230,11 +3245,11 @@ impl Shell {
             .relative()
             .flex_none()
             .items_center()
-            .gap(px(pane_head::GAP))
+            .gap(t.size(pane_head::GAP))
             .min_w_0()
             .overflow_hidden()
-            .px(px(pane_head::PADDING))
-            .py(px(5.0))
+            .px(t.size(pane_head::PADDING))
+            .py(t.size(5.0))
             .border_b_1()
             .border_color(t.term_line)
             .whitespace_nowrap()
@@ -3345,9 +3360,9 @@ impl Shell {
             h_flex()
                 .flex_none()
                 .items_center()
-                .gap(px(8.0))
-                .px(px(8.0))
-                .py(px(4.0))
+                .gap(t.size(8.0))
+                .px(t.size(8.0))
+                .py(t.size(4.0))
                 .border_b_1()
                 .border_color(t.term_line)
                 .bg(t.term_raised)
@@ -3359,9 +3374,9 @@ impl Shell {
                         .role(Role::Button)
                         .aria_label(format!("Relaunch {}", pane.name))
                         .flex_none()
-                        .px(px(8.0))
-                        .py(px(2.0))
-                        .rounded(px(5.0))
+                        .px(t.size(8.0))
+                        .py(t.size(2.0))
+                        .rounded(t.size(5.0))
                         .border_1()
                         .border_color(t.term_strong)
                         .text_color(t.term_text)
@@ -3397,7 +3412,7 @@ impl Shell {
             .relative()
             .size_full()
             .overflow_hidden()
-            .rounded(px(8.0))
+            .rounded(t.size(8.0))
             .bg(t.term_bg)
             .text_color(t.term_text)
             .border(px(border))
@@ -3446,9 +3461,9 @@ impl Shell {
                     .aria_label(format!("File tab {path}"))
                     .aria_selected(is_active)
                     .items_center()
-                    .gap(px(6.0))
-                    .pl(px(9.0))
-                    .pr(px(7.0))
+                    .gap(t.size(6.0))
+                    .pl(t.size(9.0))
+                    .pr(t.size(7.0))
                     .border_b_2()
                     .border_color(if is_active {
                         t.text
@@ -3472,7 +3487,7 @@ impl Shell {
                     }))
                     .child(
                         div()
-                            .max_w(px(160.0))
+                            .max_w(t.size(160.0))
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
@@ -3488,8 +3503,8 @@ impl Shell {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .size(px(16.0))
-                            .rounded(px(3.0))
+                            .size(t.size(16.0))
+                            .rounded(t.size(3.0))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3504,7 +3519,7 @@ impl Shell {
                             .child(
                                 svg()
                                     .path(assets::CLOSE)
-                                    .size(px(10.0))
+                                    .size(t.size(10.0))
                                     .text_color(t.term_muted),
                             ),
                     )
@@ -3523,9 +3538,9 @@ impl Shell {
             .flex_none()
             .items_center()
             .justify_center()
-            .h(px(20.0))
-            .px(px(6.0))
-            .rounded(px(4.0))
+            .h(t.size(20.0))
+            .px(t.size(6.0))
+            .rounded(t.size(4.0))
             .border_1()
             .border_color(if wrap_on {
                 t.term_strong
@@ -3547,7 +3562,7 @@ impl Shell {
         let top_rail = h_flex()
             .relative()
             .flex_none()
-            .h(px(28.0))
+            .h(t.size(28.0))
             .items_stretch()
             .min_w_0()
             .overflow_hidden()
@@ -3576,8 +3591,8 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .items_stretch()
-                    .gap(px(2.0))
-                    .pl(px(4.0))
+                    .gap(t.size(2.0))
+                    .pl(t.size(4.0))
                     .overflow_x_hidden()
                     .children(tabs),
             )
@@ -3585,8 +3600,8 @@ impl Shell {
                 h_flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(4.0))
-                    .px(px(6.0))
+                    .gap(t.size(4.0))
+                    .px(t.size(6.0))
                     .child(wrap_btn)
                     .child(self.split_button(pane, Orientation::Horizontal, cx))
                     .child(self.split_button(pane, Orientation::Vertical, cx))
@@ -3632,10 +3647,10 @@ impl Shell {
         let crumb_rail = h_flex()
             .id(("file-crumb", id.get()))
             .flex_none()
-            .h(px(22.0))
+            .h(t.size(22.0))
             .items_center()
-            .gap(px(5.0))
-            .px(px(10.0))
+            .gap(t.size(5.0))
+            .px(t.size(10.0))
             .border_b_1()
             .border_color(t.term_line)
             .bg(t.term_raised)
@@ -3648,7 +3663,7 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .items_center()
-                    .gap(px(5.0))
+                    .gap(t.size(5.0))
                     .overflow_hidden()
                     .children(crumb_items),
             )
@@ -3675,7 +3690,7 @@ impl Shell {
             .relative()
             .size_full()
             .overflow_hidden()
-            .rounded(px(8.0))
+            .rounded(t.size(8.0))
             .bg(t.term_bg)
             .text_color(t.term_text)
             .border(px(border))
@@ -3725,15 +3740,15 @@ impl Shell {
             .flex_none()
             .items_center()
             .justify_center()
-            .size(px(20.0))
-            .rounded(px(4.0))
+            .size(t.size(20.0))
+            .rounded(t.size(4.0))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .when(open, |b| b.bg(t.term_raised))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_split_menu(id, orientation, cx);
             }))
-            .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+            .child(svg().path(icon).size(t.size(14.0)).text_color(t.term_muted))
     }
 
     /// Gives `pane` the focus and the keyboard (palette or `pane.focus`).
@@ -3777,11 +3792,11 @@ impl Shell {
             .flex_none()
             .items_center()
             .justify_center()
-            .size(px(20.0))
-            .rounded(px(4.0))
+            .size(t.size(20.0))
+            .rounded(t.size(4.0))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .child(svg().path(icon).size(px(14.0)).text_color(t.term_muted))
+            .child(svg().path(icon).size(t.size(14.0)).text_color(t.term_muted))
     }
 
     /// Opens the pane's menu of actions (RF-PAN-20), as in the prototype.
@@ -3841,8 +3856,8 @@ impl Shell {
             .flat_map(|(at, profile)| {
                 let separator = new_tab_menu::agents_start_at(profiles, at).then(|| {
                     div()
-                        .mx(px(6.0))
-                        .my(px(4.0))
+                        .mx(t.size(6.0))
+                        .my(t.size(4.0))
                         .h(px(1.0))
                         .bg(t.term_line)
                         .into_any_element()
@@ -3859,10 +3874,10 @@ impl Shell {
                     .role(Role::MenuItem)
                     .aria_label(format!("Start {}", profile.name))
                     .items_center()
-                    .gap(px(12.0))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(5.0))
+                    .gap(t.size(12.0))
+                    .px(t.size(10.0))
+                    .py(t.size(5.0))
+                    .rounded(t.size(5.0))
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -3885,11 +3900,11 @@ impl Shell {
             .role(Role::Menu)
             .aria_label("Start in the new pane")
             .absolute()
-            .top(px(32.0))
-            .right(px(8.0))
-            .w(px(240.0))
-            .p(px(4.0))
-            .rounded(px(7.0))
+            .top(t.size(32.0))
+            .right(t.size(8.0))
+            .w(t.size(240.0))
+            .p(t.size(4.0))
+            .rounded(t.size(7.0))
             .border_1()
             .border_color(t.term_strong)
             .bg(t.term_bg)
@@ -3933,8 +3948,8 @@ impl Shell {
             // With no tab selected there is no branch to speak of.
             return self.context_bar_frame(cx).child(
                 div()
-                    .px(px(12.0))
-                    .py(px(10.0))
+                    .px(t.size(12.0))
+                    .py(t.size(10.0))
                     .text_size(t.text(12.5))
                     .text_color(t.faint)
                     .child(no_tab_label(&self.workspace)),
@@ -3976,16 +3991,16 @@ impl Shell {
                         }
                     }))
                     .items_center()
-                    .gap(px(8.0))
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .rounded(px(5.0))
+                    .gap(t.size(8.0))
+                    .px(t.size(6.0))
+                    .py(t.size(4.0))
+                    .rounded(t.size(5.0))
                     .text_size(t.text(12.5))
                     .when_some(mono.clone(), |d, family| d.font_family(family))
                     .child(
                         div()
                             .flex_none()
-                            .w(px(16.0))
+                            .w(t.size(16.0))
                             .text_center()
                             .text_size(t.text(11.5))
                             .font_weight(FontWeight::MEDIUM)
@@ -4015,9 +4030,9 @@ impl Shell {
                 h_flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(8.0))
-                    .px(px(10.0))
-                    .py(px(8.0))
+                    .gap(t.size(8.0))
+                    .px(t.size(10.0))
+                    .py(t.size(8.0))
                     .border_b_1()
                     .border_color(t.line)
                     .child(
@@ -4028,10 +4043,10 @@ impl Shell {
                             .flex_shrink_1()
                             .min_w_0()
                             .items_center()
-                            .gap(px(6.0))
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(6.0))
+                            .gap(t.size(6.0))
+                            .px(t.size(8.0))
+                            .py(t.size(4.0))
+                            .rounded(t.size(6.0))
                             .border_1()
                             .border_color(t.line)
                             .bg(t.bg)
@@ -4042,7 +4057,7 @@ impl Shell {
                                 svg()
                                     .flex_none()
                                     .path(assets::BRANCH)
-                                    .size(px(13.0))
+                                    .size(t.size(13.0))
                                     .text_color(t.muted),
                             )
                             .child(
@@ -4072,8 +4087,8 @@ impl Shell {
                                 .id("git-dirty")
                                 .aria_label("Uncommitted changes")
                                 .flex_none()
-                                .px(px(6.0))
-                                .py(px(1.0))
+                                .px(t.size(6.0))
+                                .py(t.size(1.0))
                                 .rounded_full()
                                 .border_1()
                                 .border_color(t.line)
@@ -4103,9 +4118,9 @@ impl Shell {
                 bar.child(
                     div()
                         .flex_none()
-                        .pt(px(10.0))
-                        .px(px(12.0))
-                        .pb(px(8.0))
+                        .pt(t.size(10.0))
+                        .px(t.size(12.0))
+                        .pb(t.size(8.0))
                         .text_size(t.text(12.5))
                         .text_color(t.muted)
                         .child(note),
@@ -4120,14 +4135,14 @@ impl Shell {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .px(px(6.0))
-                        .pb(px(8.0))
+                        .px(t.size(6.0))
+                        .pb(t.size(8.0))
                         .children(rows)
                         .when(hidden > 0, |list| {
                             list.child(
                                 div()
-                                    .px(px(6.0))
-                                    .py(px(4.0))
+                                    .px(t.size(6.0))
+                                    .py(t.size(4.0))
                                     .text_size(t.text(12.0))
                                     .text_color(t.faint)
                                     .child(format!("and {hidden} more")),
@@ -4168,10 +4183,10 @@ impl Shell {
             .id("status-bar")
             .role(Role::ContentInfo)
             .flex_none()
-            .h(px(STATUS_BAR_HEIGHT))
+            .h(t.size(STATUS_BAR_HEIGHT))
             .items_center()
-            .gap(px(16.0))
-            .px(px(10.0))
+            .gap(t.size(16.0))
+            .px(t.size(10.0))
             .border_t_1()
             .border_color(t.line)
             .bg(t.panel)
@@ -4252,7 +4267,11 @@ impl Render for Shell {
         self.save_side_bars(cx);
         self.forget_ended_tab_drag(cx);
         self.finish_divider_drag(cx);
-        self.bar_widths = sidebars::drawn(&self.side_bars, window.viewport_size().width.as_f32());
+        self.bar_widths = sidebars::drawn(
+            &self.side_bars,
+            window.viewport_size().width.as_f32(),
+            self.theme.scale(),
+        );
         self.keep_spinning(window, cx);
         let t = self.theme;
         v_flex()
@@ -4419,15 +4438,15 @@ impl Render for Shell {
 fn drop_line(above: bool, t: &Theme) -> Div {
     let line = div()
         .absolute()
-        .left(px(4.0))
-        .right(px(4.0))
-        .h(px(2.0))
-        .rounded(px(1.0))
+        .left(t.size(4.0))
+        .right(t.size(4.0))
+        .h(t.size(2.0))
+        .rounded(t.size(1.0))
         .bg(t.ai);
     if above {
-        line.top(px(-2.0))
+        line.top(t.size(-2.0))
     } else {
-        line.bottom(px(-2.0))
+        line.bottom(t.size(-2.0))
     }
 }
 
@@ -4452,11 +4471,11 @@ fn icon_button(id: &'static str, icon: &'static str, t: &Theme) -> Stateful<Div>
         .flex_none()
         .items_center()
         .justify_center()
-        .size(px(30.0))
-        .rounded(px(6.0))
+        .size(t.size(30.0))
+        .rounded(t.size(6.0))
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .child(svg().path(icon).size(px(16.0)).text_color(t.muted))
+        .child(svg().path(icon).size(t.size(16.0)).text_color(t.muted))
 }
 
 /// The key beside a dialog button's label. In the label's family: the mono

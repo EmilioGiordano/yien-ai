@@ -2,7 +2,7 @@
 //! on a tab row, or Shift+F10 on the tab bar's cursor, offers the tab
 //! commands for that tab, whichever tab is selected.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -104,11 +104,18 @@ pub(super) fn menu_returns_to_bar(keyboard_in_bar: bool, region: Region) -> bool
     keyboard_in_bar && region == Region::TabBar
 }
 
+/// A row's painted bounds and the frame stamp of the render that painted it.
+type Painted = (Bounds<Pixels>, u64);
+
 /// The tab menu while open, and where the tab rows were painted.
 #[derive(Default)]
 pub(super) struct TabMenuState {
     open: Option<OpenTabMenu>,
-    rows: Rc<RefCell<HashMap<TabId, Bounds<Pixels>>>>,
+    /// Each row's painted bounds and the tab bar render that painted it.
+    rows: Rc<RefCell<HashMap<TabId, Painted>>>,
+    /// Counts the tab bar's renders: a row whose stamp is older was not
+    /// painted in the latest frame (a folded project, a closed bar).
+    frame: Cell<u64>,
 }
 
 struct OpenTabMenu {
@@ -127,6 +134,25 @@ impl TabMenuState {
     pub(super) fn forget(&mut self) {
         self.open = None;
     }
+
+    /// Starts a render of the tab bar's rows.
+    pub(super) fn next_frame(&self) {
+        self.frame.set(self.frame.get().wrapping_add(1));
+    }
+
+    /// Where `tab`'s row was painted in the latest frame, if it shows in
+    /// the tab list's visible bounds `list`.
+    pub(super) fn shown_row(&self, tab: TabId, list: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+        let painted = self.rows.borrow().get(&tab).copied()?;
+        on_screen(painted, self.frame.get(), list)
+    }
+}
+
+/// A row's bounds when it was painted in frame `frame` and its centre is in
+/// the list's visible bounds `list`: a row scrolled out, or one a folded
+/// project no longer paints, is not on screen.
+fn on_screen((bounds, stamp): Painted, frame: u64, list: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+    (stamp == frame && list.contains(&bounds.center())).then_some(bounds)
 }
 
 impl Shell {
@@ -139,6 +165,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let rows = Rc::clone(&self.tab_menu.rows);
+        let frame = self.tab_menu.frame.get();
         row.on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -155,7 +182,7 @@ impl Shell {
         .child(
             canvas(
                 move |bounds, _, _| {
-                    rows.borrow_mut().insert(tab, bounds);
+                    rows.borrow_mut().insert(tab, (bounds, frame));
                 },
                 |_, _, _, _| {},
             )
@@ -235,10 +262,11 @@ impl Shell {
         let Some(tab) = self.keyboard_tab(window, cx) else {
             return;
         };
-        let row = self.tab_menu.rows.borrow().get(&tab).copied();
+        let row = self.tab_menu.rows.borrow().get(&tab).map(|(b, _)| *b);
+        let t = self.theme;
         let at = row.map_or_else(
-            || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-            |row| point(row.left() + px(8.0), row.bottom() + px(2.0)),
+            || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+            |row| point(row.left() + t.size(8.0), row.bottom() + t.size(2.0)),
         );
         self.open_tab_menu(tab, at, window, cx);
     }
@@ -307,10 +335,11 @@ impl Shell {
             Some(TabEffect::Move { tab, project, to }) => self.move_tab_to(tab, project, to, cx),
             Some(TabEffect::Close(tab)) => self.close_tab_now(tab, window, cx),
             Some(TabEffect::NewTabWith(project)) => {
-                let row = self.tab_menu.rows.borrow().get(&tab).copied();
+                let row = self.tab_menu.rows.borrow().get(&tab).map(|(b, _)| *b);
+                let t = self.theme;
                 let at = row.map_or_else(
-                    || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-                    |row| point(row.left() + px(8.0), row.bottom() + px(2.0)),
+                    || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+                    |row| point(row.left() + t.size(8.0), row.bottom() + t.size(2.0)),
                 );
                 self.open_new_tab_menu(project, at, window, cx);
             }
@@ -324,7 +353,7 @@ mod tests {
     // Not `super::*`: the gpui glob there would shadow `#[test]`.
     use super::{
         Menu, MenuEntry, MenuEvent, MenuOutcome, TabAction, TabEffect, menu_returns_to_bar,
-        tab_effect, tab_menu,
+        on_screen, tab_effect, tab_menu,
     };
     use crate::catalog::{default_keys, spec};
     use crate::model::WorkspaceView;
@@ -484,5 +513,20 @@ mod tests {
         });
         assert_eq!(move_up, default_keys("tab.move_up"));
         assert!(move_up.is_some());
+    }
+
+    #[test]
+    fn rf_cfg_02_only_rows_painted_in_the_latest_frame_and_in_view_are_on_screen() {
+        use gpui_kit::{Bounds, point, px, size};
+        let list = Bounds::new(point(px(0.0), px(80.0)), size(px(264.0), px(400.0)));
+        let row = |y: f32| Bounds::new(point(px(6.0), px(y)), size(px(250.0), px(30.0)));
+        assert_eq!(on_screen((row(100.0), 7), 7, list), Some(row(100.0)));
+        // A folded project's row keeps the stamp of the last frame it was painted in.
+        assert_eq!(on_screen((row(100.0), 6), 7, list), None);
+        // Scrolled above or below the list's visible bounds.
+        assert_eq!(on_screen((row(20.0), 7), 7, list), None);
+        assert_eq!(on_screen((row(470.0), 7), 7, list), None);
+        // Half in view: its centre decides, as a click there must land on it.
+        assert_eq!(on_screen((row(460.0), 7), 7, list), Some(row(460.0)));
     }
 }

@@ -1069,8 +1069,9 @@ pub struct SideBars {
 pub struct SideBar {
     /// The user hid the bar.
     pub hidden: bool,
-    /// The width the user dragged it to, in logical pixels; `None` is the
-    /// default width. The UI clamps it to the window.
+    /// The width the user dragged it to, in logical pixels at the default
+    /// interface size (`ui.font.size` 13); `None` is the default width. The
+    /// UI scales it with the interface and clamps it to the window.
     pub width: Option<f32>,
 }
 

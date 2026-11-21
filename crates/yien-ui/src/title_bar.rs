@@ -1,5 +1,9 @@
 //! Which optional title bar pieces to draw at a window width. Flex keeps the
 //! window buttons in view; this only trims the pieces that would be clipped.
+//! YIEN's own pieces scale with the interface; gpui-component's padding and
+//! window buttons do not.
+
+use crate::theme::scaled;
 
 /// A generous guess at what the window buttons and padding take; flex, not
 /// this number, keeps the buttons visible.
@@ -31,25 +35,25 @@ const CONTROLS: f32 = 3.0;
 const CONTROL_WIDTH: f32 = 34.0;
 pub(crate) const ROW_RIGHT_PADDING: f32 = 10.0;
 
-/// The margins that put the pill on the window's centre: the end margin of the
-/// left group and the start margin of the right group. Flex shares the room
-/// left after margins equally, so the side with less outside the row needs
-/// the margin.
-pub(crate) fn centring_margins() -> (f32, f32) {
-    let right = CONTROLS * CONTROL_WIDTH + ROW_RIGHT_PADDING;
+/// The margins that put the pill on the window's centre at the interface
+/// `scale`: the end margin of the left group and the start margin of the
+/// right group. Flex shares the room left after margins equally, so the side
+/// with less outside the row needs the margin.
+pub(crate) fn centring_margins(scale: f32) -> (f32, f32) {
+    let right = CONTROLS * CONTROL_WIDTH + scaled(ROW_RIGHT_PADDING, scale);
     let extra = right - BAR_LEFT_PADDING;
     (extra.max(0.0), (-extra).max(0.0))
 }
 
 /// The width the pill's `max_w` percentage resolves against: the row's content
 /// box, inside the bar's padding, the window buttons and the row's padding.
-pub(crate) fn row_width(window: f32) -> f32 {
-    window - BAR_LEFT_PADDING - CONTROLS * CONTROL_WIDTH - ROW_RIGHT_PADDING
+pub(crate) fn row_width(window: f32, scale: f32) -> f32 {
+    window - BAR_LEFT_PADDING - CONTROLS * CONTROL_WIDTH - scaled(ROW_RIGHT_PADDING, scale)
 }
 
 /// The most the pill may take, as the shell caps it.
-pub(crate) fn pill_cap(window: f32) -> f32 {
-    PILL_SHARE * row_width(window)
+pub(crate) fn pill_cap(window: f32, scale: f32) -> f32 {
+    PILL_SHARE * row_width(window, scale)
 }
 
 /// What the title bar draws at a given width.
@@ -65,28 +69,31 @@ pub(crate) struct TitleLayout {
 }
 
 impl TitleLayout {
-    /// The layout for a window `window` px wide, text scaled by `scale`
-    /// (`ui.font.size` over 13). Buttons go theme, context bar, tab bar; the
-    /// pill's shortcut goes when the pill has no room for it beside its text.
+    /// The layout for a window `window` px wide, the interface scaled by
+    /// `scale` (`ui.font.size` over 13). Buttons go theme, context bar, tab
+    /// bar; the pill's shortcut goes when the pill has no room for it beside
+    /// its text.
     pub(crate) fn at(window: f32, scale: f32) -> Self {
-        let room = window - RESERVE - RIGHT_PADDING;
-        let fixed = LOGO + (LOGO_TEXT + COUNTER) * scale;
-        let keys_need = PILL_MARGIN * (PILL_TEXT + PILL_KEYS) * scale + PILL_CHROME;
-        let text_need = PILL_MARGIN * PILL_TEXT * scale + PILL_CHROME;
+        let s = |base: f32| scaled(base, scale);
+        let (gap, button, logo, chrome) = (s(GAP), s(BUTTON), s(LOGO), s(PILL_CHROME));
+        let room = window - RESERVE - s(RIGHT_PADDING);
+        let fixed = logo + (LOGO_TEXT + COUNTER) * scale;
+        let keys_need = PILL_MARGIN * (PILL_TEXT + PILL_KEYS) * scale + chrome;
+        let text_need = PILL_MARGIN * PILL_TEXT * scale + chrome;
         let mut buttons = 3_usize;
         let pill = loop {
-            let gaps = (3 + buttons) as f32 * GAP;
-            let rest = room - fixed - buttons as f32 * BUTTON - gaps;
-            let pill = rest.min(PILL_WIDTH).min(pill_cap(window));
+            let gaps = (3 + buttons) as f32 * gap;
+            let rest = room - fixed - buttons as f32 * button - gaps;
+            let pill = rest.min(s(PILL_WIDTH)).min(pill_cap(window, scale));
             if pill >= text_need || buttons == 0 {
                 break pill;
             }
             buttons -= 1;
         };
-        let (left_margin, right_margin) = centring_margins();
-        let left_min = LOGO + LOGO_TEXT * scale + GAP;
-        let right_min = COUNTER * scale + buttons as f32 * (BUTTON + GAP);
-        let equal_room = room - 2.0 * GAP - pill - left_margin - right_margin;
+        let (left_margin, right_margin) = centring_margins(scale);
+        let left_min = logo + LOGO_TEXT * scale + gap;
+        let right_min = COUNTER * scale + buttons as f32 * (button + gap);
+        let equal_room = room - 2.0 * gap - pill - left_margin - right_margin;
         Self {
             centred: equal_room >= 2.0 * left_min.max(right_min),
             pill_keys: pill >= keys_need,
@@ -104,7 +111,10 @@ mod tests {
         centring_margins, pill_cap, row_width,
     };
 
+    use crate::theme::scaled;
+
     const BIGGEST: f32 = 20.0 / 13.0;
+    const SCALES: [f32; 5] = [8.0 / 13.0, 1.0, 15.0 / 13.0, 17.0 / 13.0, BIGGEST];
 
     #[test]
     fn rnf_19_wide_window_keeps_every_piece() {
@@ -115,7 +125,7 @@ mod tests {
 
     #[test]
     fn rnf_19_narrowing_drops_pieces_in_order_and_never_brings_them_back() {
-        for scale in [1.0, 1.25, 1.5, BIGGEST] {
+        for scale in SCALES {
             let mut last = TitleLayout::at(2400.0, scale);
             let mut window = 2400.0;
             while window >= 300.0 {
@@ -155,7 +165,7 @@ mod tests {
     fn rf_nav_01_pill_is_centred_when_wide_and_centring_gives_way_once_for_good() {
         assert!(TitleLayout::at(1600.0, 1.0).centred);
         assert!(!TitleLayout::at(960.0, BIGGEST).centred);
-        for scale in [1.0, 1.25, 1.5, BIGGEST] {
+        for scale in SCALES {
             let mut window = 2400.0;
             let mut gave_way = false;
             while window >= 300.0 {
@@ -171,34 +181,41 @@ mod tests {
 
     #[test]
     fn rf_nav_01_centring_margins_put_the_pill_on_the_window_centre() {
-        let (left, right) = centring_margins();
-        assert!(left == 0.0 || right == 0.0);
-        for window in [960.0_f32, 1280.0, 1600.0, 1920.0] {
-            let pill = 300.0;
-            let gap = 12.0;
-            let controls = CONTROLS * CONTROL_WIDTH;
-            let boxes = (window
-                - BAR_LEFT_PADDING
-                - controls
-                - ROW_RIGHT_PADDING
-                - pill
-                - 2.0 * gap
-                - left
-                - right)
-                / 2.0;
-            let centre = BAR_LEFT_PADDING + boxes + left + gap + pill / 2.0;
-            assert!((centre - window / 2.0).abs() < 0.01, "off at {window}");
+        for scale in SCALES {
+            let (left, right) = centring_margins(scale);
+            assert!(left == 0.0 || right == 0.0);
+            for window in [960.0_f32, 1280.0, 1600.0, 1920.0] {
+                let pill = 300.0;
+                let gap = scaled(12.0, scale);
+                let controls = CONTROLS * CONTROL_WIDTH;
+                let boxes = (window
+                    - BAR_LEFT_PADDING
+                    - controls
+                    - scaled(ROW_RIGHT_PADDING, scale)
+                    - pill
+                    - 2.0 * gap
+                    - left
+                    - right)
+                    / 2.0;
+                let centre = BAR_LEFT_PADDING + boxes + left + gap + pill / 2.0;
+                assert!(
+                    (centre - window / 2.0).abs() < 0.01,
+                    "off at {window} {scale}"
+                );
+            }
         }
     }
 
     #[test]
     fn rnf_19_centring_only_when_both_groups_can_grow_with_the_margin() {
-        for scale in [1.0, 1.25, 1.5, BIGGEST] {
+        for scale in SCALES {
             let mut window = 2400.0;
             while window >= 300.0 {
                 if TitleLayout::at(window, scale).centred {
-                    let (l, r) = centring_margins();
-                    assert!(row_width(window) - 24.0 - l - r >= 2.0 * 28.0, "{window}");
+                    let (l, r) = centring_margins(scale);
+                    let gaps = 2.0 * scaled(12.0, scale);
+                    let logo = 2.0 * scaled(28.0, scale);
+                    assert!(row_width(window, scale) - gaps - l - r >= logo, "{window}");
                 }
                 window -= 5.0;
             }
@@ -209,8 +226,10 @@ mod tests {
     fn rnf_19_pill_budget_is_the_share_of_the_real_row() {
         for window in [960.0_f32, 1280.0, 1920.0] {
             let row = window - BAR_LEFT_PADDING - CONTROLS * CONTROL_WIDTH - ROW_RIGHT_PADDING;
-            assert_eq!(row_width(window), row);
-            assert_eq!(pill_cap(window), PILL_SHARE * row);
+            assert_eq!(row_width(window, 1.0), row);
+            assert_eq!(pill_cap(window, 1.0), PILL_SHARE * row);
+            let big = 17.0 / 13.0;
+            assert_eq!(row_width(window, big), row - 3.0, "the row's padding is 13");
         }
     }
 }

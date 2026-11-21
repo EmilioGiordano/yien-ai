@@ -35,11 +35,26 @@ impl ThemeKind {
 /// The window text size the prototype's sizes are drawn at.
 pub(crate) const BASE_UI_SIZE: f32 = 13.0;
 
+/// A dimension of the prototype, `base` px at 13 px, at `scale`: on whole
+/// pixels, except at 13 px, which draws the prototype's own. Layout math
+/// that must agree with what is drawn uses this too.
+///
+/// ```ignore
+/// assert_eq!(scaled(8.0, 17.0 / 13.0), 10.0);
+/// ```
+pub(crate) fn scaled(base: f32, scale: f32) -> f32 {
+    if scale == 1.0 {
+        base
+    } else {
+        (base * scale).round()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Theme {
     pub(crate) kind: ThemeKind,
     /// The configured window text size (`ui.font.size`); every text size
-    /// is scaled by it over [`BASE_UI_SIZE`].
+    /// and interface dimension is scaled by it over [`BASE_UI_SIZE`].
     pub(crate) ui_size: f32,
     pub(crate) bg: Rgba,
     pub(crate) panel: Rgba,
@@ -99,9 +114,32 @@ impl Theme {
         }
     }
 
+    /// The interface's zoom: the configured size over [`BASE_UI_SIZE`],
+    /// kept within the sizes the settings accept.
+    pub(crate) fn scale(&self) -> f32 {
+        if !self.ui_size.is_finite() {
+            return 1.0;
+        }
+        let size = self
+            .ui_size
+            .clamp(yien_config::MIN_FONT_SIZE, yien_config::MAX_UI_FONT_SIZE);
+        size / BASE_UI_SIZE
+    }
+
     /// A text size of the prototype, `base` at 13 px, at the configured size.
     pub(crate) fn text(&self, base: f32) -> Pixels {
-        px(base * self.ui_size / BASE_UI_SIZE)
+        px(base * self.scale())
+    }
+
+    /// An interface dimension of the prototype (height, width, padding, gap,
+    /// radius, icon), `base` at 13 px, at the configured size on whole pixels.
+    pub(crate) fn size(&self, base: f32) -> Pixels {
+        px(self.dim(base))
+    }
+
+    /// [`Theme::size`] as a number, for layout math and hit-testing.
+    pub(crate) fn dim(&self, base: f32) -> f32 {
+        scaled(base, self.scale())
     }
 
     fn sumi() -> Self {
@@ -556,10 +594,50 @@ mod tests {
     fn rf_cfg_02_text_sizes_follow_the_configured_ui_size() {
         let t = Theme::of(ThemeKind::Sumi);
         assert_eq!(t.text(12.5), px(12.5), "13 px draws the prototype's sizes");
-        let big = t.with_ui_size(26.0);
-        assert_eq!(big.text(12.5), px(25.0));
+        let big = t.with_ui_size(19.5);
+        assert_eq!(big.text(12.5), px(18.75));
         assert_eq!(big.kind, t.kind);
         assert_eq!(big.shu, t.shu);
+    }
+
+    #[test]
+    fn rf_cfg_02_dimensions_follow_the_configured_ui_size() {
+        let t = Theme::of(ThemeKind::Sumi);
+        for base in [0.0, 1.0, 2.0, 6.0, 18.0, 26.0, 40.0, 264.0, -2.0] {
+            assert_eq!(t.size(base), px(base), "13 px draws the prototype's {base}");
+        }
+        let at = |size: f32| t.with_ui_size(size);
+        assert_eq!(at(15.0).dim(40.0), 46.0, "40 x 15/13 = 46.15");
+        assert_eq!(at(17.0).dim(26.0), 34.0);
+        assert_eq!(at(17.0).dim(264.0), 345.0, "264 x 17/13 = 345.2");
+        assert_eq!(
+            at(17.0).size(8.0),
+            px(10.0),
+            "10.46 rounds to a whole pixel"
+        );
+        assert_eq!(at(8.0).dim(6.0), 4.0, "3.69 rounds up");
+        assert_eq!(at(20.0).dim(1.0), 2.0, "1.54 rounds up");
+        assert_eq!(at(17.0).dim(-2.0), -3.0);
+        assert_eq!(at(26.0).dim(10.0), 15.0, "past 20 px the scale stops");
+    }
+
+    #[test]
+    fn rf_cfg_02_the_scale_stays_within_the_sizes_the_settings_accept() {
+        let t = Theme::of(ThemeKind::Washi);
+        assert_eq!(t.scale(), 1.0);
+        assert_eq!(t.with_ui_size(17.0).scale(), 17.0 / 13.0);
+        assert_eq!(t.with_ui_size(2.0).scale(), 8.0 / 13.0);
+        assert_eq!(t.with_ui_size(40.0).scale(), 20.0 / 13.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(t.with_ui_size(bad).scale(), 1.0, "{bad}");
+            assert_eq!(t.with_ui_size(bad).size(26.0), px(26.0), "{bad}");
+        }
+        assert_eq!(
+            scaled(12.5, 1.0),
+            12.5,
+            "13 px keeps the prototype's half pixels"
+        );
+        assert_eq!(scaled(12.5, 15.0 / 13.0), 14.0);
     }
 
     #[test]
