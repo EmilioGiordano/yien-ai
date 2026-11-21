@@ -147,10 +147,21 @@ pub fn set_value(text: &str, key: &str, value: &SettingValue) -> Result<String, 
             Err(EditError::Unplaced(key.to_owned()))
         };
     }
+    if old.config.value(key).as_ref() == Some(&expected) {
+        // Already in effect: writing it could only move other text around.
+        return Ok(text.to_owned());
+    }
+    // A candidate counts only if the key now parses where it was put: a
+    // commented line inside a string or under another table never does.
     placements(text, key, &repr)
         .into_iter()
-        .find(|new| keeps_the_rest(&old, new, key, &expected))
+        .find(|new| written_at(new, key) && keeps_the_rest(&old, new, key, &expected))
         .ok_or_else(|| EditError::Unplaced(key.to_owned()))
+}
+
+/// Whether `key` has a value in `text`, at its own dotted path.
+fn written_at(text: &str, key: &str) -> bool {
+    value_span(text, key).is_some()
 }
 
 /// The value as TOML: a whole number without a fraction, a string in single
@@ -610,6 +621,69 @@ mod tests {
         assert_eq!(
             set("", "terminal.font.size", number(14.5)),
             "terminal.font.size = 14.5\n"
+        );
+    }
+
+    #[test]
+    fn rf_cfg_05_a_missing_key_set_to_its_value_in_effect_changes_nothing() {
+        // The commented line sits in a string; uncommenting it would change
+        // the string and still not set the key.
+        let in_string = "notes = \"\"\"\n# ui.font.size = 13\n\"\"\"\n";
+        assert_eq!(set(in_string, "ui.font.size", number(13.0)), in_string);
+        let other_table = "[extra]\n# theme = \"sumi\"\n";
+        assert_eq!(set(other_table, "theme", text("sumi")), other_table);
+    }
+
+    #[test]
+    fn rf_cfg_05_a_commented_key_inside_a_string_is_left_alone() {
+        let before = "notes = \"\"\"\n# theme = \"sumi\"\n\"\"\"\n";
+        let after = set(before, "theme", text("washi"));
+        assert!(after.starts_with(before), "{after}");
+        assert_eq!(parse(&after).unwrap().config.theme, ThemeSetting::Washi);
+    }
+
+    #[test]
+    fn rf_cfg_05_a_commented_key_under_another_table_is_left_alone() {
+        for before in [
+            "[extra]\n# theme = \"sumi\"\n",
+            "[keys]\n# theme = \"sumi\"\n\"pane.close\" = []\n",
+        ] {
+            let after = set(before, "theme", text("washi"));
+            assert!(after.ends_with(before), "{after}");
+            assert_eq!(after, format!("theme = \"washi\"\n{before}"));
+            assert_eq!(parse(&after).unwrap().config.theme, ThemeSetting::Washi);
+        }
+    }
+
+    #[test]
+    fn rf_cfg_05_a_file_with_a_bom_keeps_it() {
+        let before = "\u{feff}# Mine.\ntheme = \"sumi\"\n";
+        let after = set(before, "theme", text("washi"));
+        assert_eq!(after, "\u{feff}# Mine.\ntheme = \"washi\"\n");
+        let added = set(before, "editor", text("code"));
+        assert!(added.starts_with('\u{feff}'), "{added:?}");
+        assert_eq!(
+            parse(&added).unwrap().config.editor.as_deref(),
+            Some("code")
+        );
+    }
+
+    #[test]
+    fn rf_cfg_05_a_duplicate_key_is_an_invalid_file() {
+        let twice = "theme = \"sumi\"\ntheme = \"washi\"\n";
+        assert!(matches!(
+            set_value(twice, "theme", &text("system")),
+            Err(EditError::Invalid(p)) if p.line == 2
+        ));
+    }
+
+    #[test]
+    fn rf_cfg_05_a_key_whose_table_is_inline_is_not_placed() {
+        // TOML does not let an inline table be extended from outside it.
+        let before = "ui = { tabs = { group = \"state\" } }\n";
+        assert_eq!(
+            set_value(before, "ui.font.size", &number(15.0)),
+            Err(EditError::Unplaced("ui.font.size".into()))
         );
     }
 
