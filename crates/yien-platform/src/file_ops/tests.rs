@@ -547,6 +547,7 @@ fn reveal_and_trash_refuse_before_reaching_the_shell() {
     ));
 }
 
+#[cfg(windows)]
 #[test]
 fn rnf_14_a_path_part_win32_reads_as_another_item_is_found() {
     for path in [
