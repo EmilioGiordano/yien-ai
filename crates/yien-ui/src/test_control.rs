@@ -105,6 +105,7 @@ pub(crate) const ARGUMENT_COMMANDS: &[&str] = &[
     "file.open",
     "files.menu",
     "files.menu_pick",
+    "settings.set",
 ];
 
 /// What a command id runs.
@@ -121,6 +122,9 @@ pub(crate) enum Run {
     /// Run the open Files menu's item with this label, typing `name` into
     /// the name field it opens and confirming it.
     FilesMenuPick { item: String, name: Option<String> },
+    /// Set a setting the way the open settings screen's control does
+    /// (RF-CFG-05).
+    SettingsSet { key: String, value: String },
 }
 
 /// Which command `id` runs with `args`, checked against what the window
@@ -212,6 +216,17 @@ pub(crate) fn resolve_command(
                 return Err("no tab is selected".to_owned());
             }
             return Ok(Run::FilesMenu { path });
+        }
+        "settings.set" => {
+            let key = args
+                .key
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.key: a settings file key"))?;
+            let value = args
+                .value
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.value"))?;
+            return Ok(Run::SettingsSet { key, value });
         }
         "files.menu_pick" => {
             let item = args
@@ -794,6 +809,8 @@ mod tests {
             path: Some("src/main.rs".into()),
             item: Some("Rename…".into()),
             name: Some("lib.rs".into()),
+            key: Some("theme".into()),
+            value: Some("washi".into()),
         }),
     ];
 
@@ -877,6 +894,29 @@ mod tests {
     }
 
     #[test]
+    fn rf_cfg_05_settings_set_needs_a_key_and_a_value() {
+        let ws = workspace();
+        let args = |key: Option<&str>, value: Option<&str>| CommandArgs {
+            key: key.map(str::to_owned),
+            value: value.map(str::to_owned),
+            ..CommandArgs::default()
+        };
+        assert_eq!(
+            resolve_command("settings.set", &args(Some("ui.font.size"), Some("17")), &ws),
+            Ok(Run::SettingsSet {
+                key: "ui.font.size".into(),
+                value: "17".into()
+            })
+        );
+        assert!(resolve_command("settings.set", &args(None, Some("17")), &ws).is_err());
+        assert!(resolve_command("settings.set", &args(Some("theme"), None), &ws).is_err());
+        assert_eq!(
+            resolve_command("settings.open", &CommandArgs::default(), &ws),
+            Ok(Run::Catalog("settings.open"))
+        );
+    }
+
+    #[test]
     fn rf_ctx_01_the_file_menu_opens_on_a_row_and_picks_an_item_by_label() {
         let ws = workspace();
         let args = |path: Option<&str>, item: Option<&str>, name: Option<&str>| CommandArgs {
@@ -930,6 +970,8 @@ mod tests {
             path: None,
             item: None,
             name: None,
+            key: None,
+            value: None,
         };
         for id in ARGUMENT_COMMANDS {
             assert!(resolve_command(id, &unknown, &ws).is_err(), "{id}");

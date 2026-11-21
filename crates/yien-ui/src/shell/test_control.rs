@@ -108,6 +108,12 @@ impl Shell {
                         Err(error) => Reply::error(error),
                     }
                 }
+                Ok(Run::SettingsSet { key, value }) => {
+                    match self.test_set_setting(&key, &value, window, cx) {
+                        Ok(()) => Reply::done(),
+                        Err(error) => Reply::error(error),
+                    }
+                }
                 Ok(Run::FilesMenuPick { item, name }) => {
                     match self.test_pick_file_menu(&item, name, window, cx) {
                         Ok(()) => Reply::done(),
@@ -230,6 +236,7 @@ impl Shell {
             panes,
             files: self.files_test_state(cx),
             layout,
+            settings: self.settings_test_state(window),
         }
     }
 }
