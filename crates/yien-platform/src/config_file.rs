@@ -10,6 +10,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use yien_config::{MAX_FILE_BYTES, Reload, ReloadGate};
+use yien_session::Store;
+
+use crate::state_store::FileStore;
 
 #[cfg(windows)]
 mod windows;
@@ -44,6 +47,35 @@ pub fn create_if_absent(path: &Path, text: &str) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Replaces the file with `text` the way the saved session is replaced:
+/// written beside it, flushed, then renamed over it, so the watcher reads
+/// the old file or the new one, never half of it (RF-CFG-05). A link in the
+/// file's place is refused rather than replaced, so a user's linked dotfile
+/// is never turned into a copy.
+///
+/// ```no_run
+/// let file = yien_platform::paths::config_file()?;
+/// yien_platform::config_file::write(&file, "theme = \"washi\"\n")?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn write(path: &Path, text: &str) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the file is a link; change it in its editor",
+        ));
+    }
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the settings file has no folder or name",
+        ));
+    };
+    FileStore::new(dir)
+        .write_atomic(name, text.as_bytes())
+        .map_err(|e| e.source)
 }
 
 /// The file's stamp now.
@@ -499,6 +531,39 @@ mod tests {
         fs::write(&file, "theme = \"washi\"\n").unwrap();
         assert!(!create_if_absent(&file, "# first\n").unwrap());
         assert_eq!(read(&file).unwrap().as_deref(), Some("theme = \"washi\"\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rf_cfg_05_a_write_replaces_the_file_and_leaves_no_temp_behind() {
+        let dir = scratch("write");
+        let file = dir.join("config.toml");
+        write(&file, "theme = \"washi\"\n").unwrap();
+        assert_eq!(read(&file).unwrap().as_deref(), Some("theme = \"washi\"\n"));
+        write(&file, "# mine\ntheme = \"sumi\"\n").unwrap();
+        assert_eq!(
+            read(&file).unwrap().as_deref(),
+            Some("# mine\ntheme = \"sumi\"\n")
+        );
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["config.toml"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rf_cfg_05_a_linked_settings_file_is_not_replaced() {
+        let dir = scratch("link");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("dotfile.toml");
+        fs::write(&target, "theme = \"sumi\"\n").unwrap();
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write(&link, "theme = \"washi\"\n").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "theme = \"sumi\"\n");
         let _ = fs::remove_dir_all(&dir);
     }
 
