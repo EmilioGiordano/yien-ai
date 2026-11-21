@@ -13,6 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::file_ops::FileAction;
+use crate::file_preview::PreviewMode;
 use crate::frame::{SelectionKind, Side, ViewportPoint};
 use crate::{PaneId, ProjectId, ShellKind, TabGit, TabId};
 
@@ -523,6 +524,14 @@ pub enum Command {
         /// The file preview pane.
         pane: PaneId,
     },
+    /// Shows Markdown files in a file preview pane rendered or as source
+    /// (RF-CTX-02). The mode stays with the pane across its file tabs.
+    SetFilePreviewMode {
+        /// The file preview pane.
+        pane: PaneId,
+        /// The mode to show.
+        mode: PreviewMode,
+    },
     /// Runs a Files context menu action on the tab's folder (RF-CTX-01).
     /// Its paths are relative to the tab's folder and must resolve inside
     /// it; one that writes into `.git` is refused (RNF-14). Success answers
@@ -966,6 +975,7 @@ pub struct PaneInfo {
 ///     files: vec!["src/main.rs".into()],
 ///     active: Some(0),
 ///     wrap: false,
+///     mode: Default::default(),
 /// });
 /// assert!(matches!(file, PaneKind::File(_)));
 /// ```
@@ -979,8 +989,8 @@ pub enum PaneKind {
     File(FilePaneInfo),
 }
 
-/// The open file tabs and wrap preference of a read-only file preview pane
-/// (RF-CTX-02).
+/// The open file tabs, wrap preference and Markdown mode of a read-only file
+/// preview pane (RF-CTX-02).
 ///
 /// ```
 /// use yien_proto::FilePaneInfo;
@@ -989,6 +999,7 @@ pub enum PaneKind {
 ///     files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
 ///     active: Some(1),
 ///     wrap: true,
+///     mode: Default::default(),
 /// };
 /// assert_eq!(info.active_file(), Some("Cargo.toml"));
 /// ```
@@ -1000,6 +1011,9 @@ pub struct FilePaneInfo {
     pub active: Option<usize>,
     /// Whether soft line wrapping is enabled for this pane.
     pub wrap: bool,
+    /// How Markdown files show in this pane.
+    #[serde(default)]
+    pub mode: PreviewMode,
 }
 
 impl FilePaneInfo {
@@ -1416,6 +1430,10 @@ mod tests {
             Command::ToggleFileWrap {
                 pane: PaneId::new(4),
             },
+            Command::SetFilePreviewMode {
+                pane: PaneId::new(4),
+                mode: PreviewMode::Source,
+            },
             Command::FileAction {
                 tab: TabId::new(2),
                 action: FileAction::Paste {
@@ -1485,6 +1503,19 @@ mod tests {
         for msg in msgs {
             assert_eq!(round_trip(&msg), msg);
         }
+    }
+
+    #[test]
+    fn rf_ctx_02_a_file_pane_from_before_the_markdown_mode_shows_rendered() {
+        let json = r#"{"files":["README.md"],"active":0,"wrap":true}"#;
+        let info: FilePaneInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.mode, PreviewMode::Rendered);
+        let source = FilePaneInfo {
+            mode: PreviewMode::Source,
+            ..info
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains(r#""mode":"source""#), "{json}");
     }
 
     #[test]
@@ -1581,6 +1612,7 @@ mod tests {
                     files: vec!["crates/yien-core/src/workspace.rs".into()],
                     active: Some(0),
                     wrap: true,
+                    mode: PreviewMode::Source,
                 }),
             }),
             CoreMsg::NotificationsMuted { muted: true },

@@ -11,9 +11,12 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use synoptic::TokOpt;
+use synoptic::{Highlighter, TokOpt};
 use yien_proto::PaneId;
-use yien_proto::file_preview::{FileFrame, FileLine, FileNotice, SyntaxKind, SyntaxSpan};
+use yien_proto::file_preview::{
+    FileFrame, FileLine, FileNotice, MARKDOWN_EXTENSIONS, MdRow, PreviewMode, SyntaxKind,
+    SyntaxSpan, is_markdown_path,
+};
 
 /// Maximum bytes read and highlighted for a previewed file (2 MiB).
 ///
@@ -79,22 +82,37 @@ struct FileView {
     /// The load the pane waits for; an older one finishing late is dropped.
     request: u64,
     doc: Option<Arc<LoadedDocument>>,
+    mode: PreviewMode,
 }
 
 impl FileViews {
-    /// Starts a new load in `pane` at its top, keeping the rows the UI last
-    /// reported. Returns the request number the load's result must carry.
-    pub fn start(&mut self, pane: PaneId) -> u64 {
+    /// Starts a new load in `pane` at its top, shown in `mode`, keeping the
+    /// rows the UI last reported. Returns the request number the load's
+    /// result must carry.
+    pub fn start(&mut self, pane: PaneId, mode: PreviewMode) -> u64 {
         let view = self.0.entry(pane).or_insert(FileView {
             top_line: 0,
             rows: DEFAULT_VIEWPORT_ROWS,
             request: 0,
             doc: None,
+            mode,
         });
         view.request = view.request.wrapping_add(1);
         view.top_line = 0;
         view.doc = None;
+        view.mode = mode;
         view.request
+    }
+
+    /// Shows `pane`'s file in `mode` from its top: the new frame once its
+    /// file is loaded, `None` when the mode did not change.
+    pub fn set_mode(&mut self, pane: PaneId, mode: PreviewMode) -> Option<FileFrame> {
+        let view = self.0.get_mut(&pane).filter(|v| v.mode != mode)?;
+        view.mode = mode;
+        view.top_line = 0;
+        let frame = view.doc.as_ref()?.frame_in(mode, 0, view.rows);
+        view.top_line = frame.top_line;
+        Some(frame)
     }
 
     /// A finished load: the frame to show, or `None` when the pane is gone or
@@ -106,7 +124,7 @@ impl FileViews {
         doc: Arc<LoadedDocument>,
     ) -> Option<FileFrame> {
         let view = self.0.get_mut(&pane).filter(|v| v.request == request)?;
-        let frame = doc.frame(view.top_line, view.rows);
+        let frame = doc.frame_in(view.mode, view.top_line, view.rows);
         view.top_line = frame.top_line;
         view.doc = Some(doc);
         Some(frame)
@@ -118,7 +136,10 @@ impl FileViews {
         let view = self.0.get_mut(&pane)?;
         view.rows = rows.max(1);
         view.top_line = top_line;
-        let frame = view.doc.as_ref()?.frame(view.top_line, view.rows);
+        let frame = view
+            .doc
+            .as_ref()?
+            .frame_in(view.mode, view.top_line, view.rows);
         view.top_line = frame.top_line;
         Some(frame)
     }
@@ -146,6 +167,9 @@ pub struct LoadedDocument {
     pub lines: Vec<FileLine>,
     /// Banner or replacement notice (truncated, binary, or error), if any.
     pub notice: Option<FileNotice>,
+    /// The rendered rows of a Markdown file, from the same capped text as
+    /// `lines`; `None` for other files.
+    pub rendered: Option<Vec<MdRow>>,
 }
 
 impl LoadedDocument {
@@ -175,6 +199,7 @@ impl LoadedDocument {
                 top_line: 0,
                 lines: Vec::new(),
                 notice: self.notice.clone(),
+                rendered: None,
             };
         }
         let top_line = top_line.min(total_lines.saturating_sub(rows));
@@ -186,6 +211,47 @@ impl LoadedDocument {
             top_line,
             lines: self.lines[top_line..end].to_vec(),
             notice: self.notice.clone(),
+            rendered: None,
+        }
+    }
+
+    /// Slices the visible rendered rows `[top_line .. top_line + rows]` of a
+    /// Markdown file, or `None` for another file. Rows differ in height, so
+    /// only the UI knows the last full page: any row may be the top one.
+    ///
+    /// ```
+    /// use yien_core::file_preview::load_bytes;
+    ///
+    /// let doc = load_bytes("README.md", b"# A\n\nB\n\nC\n", 10, false);
+    /// let frame = doc.rendered_frame(9, 2).unwrap();
+    /// assert_eq!((frame.top_line, frame.total_lines), (2, 3));
+    /// assert_eq!(frame.rendered.unwrap().len(), 1);
+    /// assert!(load_bytes("a.rs", b"fn a() {}", 9, false).rendered_frame(0, 5).is_none());
+    /// ```
+    pub fn rendered_frame(&self, top_line: usize, rows: usize) -> Option<FileFrame> {
+        let rendered = self.rendered.as_ref()?;
+        let total = rendered.len();
+        let top_line = top_line.min(total.saturating_sub(1));
+        let end = top_line.saturating_add(rows.max(1)).min(total);
+        Some(FileFrame {
+            path: self.path.clone(),
+            language: self.language.clone(),
+            total_lines: total,
+            top_line,
+            lines: Vec::new(),
+            notice: self.notice.clone(),
+            rendered: Some(rendered[top_line..end].to_vec()),
+        })
+    }
+
+    /// The frame `mode` shows: rendered rows for a Markdown file in
+    /// [`PreviewMode::Rendered`], its lines otherwise.
+    pub fn frame_in(&self, mode: PreviewMode, top_line: usize, rows: usize) -> FileFrame {
+        match mode {
+            PreviewMode::Rendered => self
+                .rendered_frame(top_line, rows)
+                .unwrap_or_else(|| self.frame(top_line, rows)),
+            PreviewMode::Source => self.frame(top_line, rows),
         }
     }
 }
@@ -233,6 +299,7 @@ fn error_document(rel_path: &str, message: String) -> LoadedDocument {
         language: None,
         lines: Vec::new(),
         notice: Some(FileNotice::Error(message)),
+        rendered: None,
     }
 }
 
@@ -298,6 +365,7 @@ pub fn load_bytes(
             language: None,
             lines: Vec::new(),
             notice: Some(FileNotice::Binary { bytes: total_bytes }),
+            rendered: None,
         };
     }
 
@@ -327,12 +395,15 @@ pub fn load_bytes(
 
     let (language, ext_key) = detect_language(rel_path);
     let lines = highlight_lines(&raw_lines, ext_key);
+    let rendered =
+        is_markdown_path(rel_path).then(|| crate::markdown::render(&raw_lines.join("\n")));
 
     LoadedDocument {
         path: rel_path.to_owned(),
         language,
         lines,
         notice,
+        rendered,
     }
 }
 
@@ -424,7 +495,7 @@ const EXTENSIONS: &[(&[&str], &str, &str)] = &[
     (&["rs"], "Rust", "rs"),
     (&["toml", "lock"], "TOML", "toml"),
     (&["json", "jsonl"], "JSON", "json"),
-    (&["md", "markdown"], "Markdown", "md"),
+    (MARKDOWN_EXTENSIONS, "Markdown", "md"),
     (&["yaml", "yml"], "YAML", "yaml"),
     (&["html", "htm", "xhtml"], "HTML", "html"),
     (&["css"], "CSS", "css"),
@@ -474,6 +545,15 @@ fn detect_language(rel_path: &str) -> (Option<String>, Option<&'static str>) {
         })
 }
 
+/// The highlighter key for a lowercase file extension, or `None` when no
+/// language has it.
+pub(crate) fn extension_key(ext: &str) -> Option<&'static str> {
+    EXTENSIONS
+        .iter()
+        .find(|(exts, ..)| exts.contains(&ext))
+        .map(|(.., key)| *key)
+}
+
 fn highlight_lines(raw_lines: &[String], ext_key: Option<&'static str>) -> Vec<FileLine> {
     if raw_lines.is_empty() {
         return Vec::new();
@@ -484,7 +564,11 @@ fn highlight_lines(raw_lines: &[String], ext_key: Option<&'static str>) -> Vec<F
     let Some(mut highlighter) = synoptic::from_extension(ext, 4) else {
         return plain_lines(raw_lines);
     };
+    highlight_with(&mut highlighter, raw_lines)
+}
 
+/// Highlights `raw_lines` with `highlighter`, which forgets any earlier run.
+pub(crate) fn highlight_with(highlighter: &mut Highlighter, raw_lines: &[String]) -> Vec<FileLine> {
     // Guard regex evaluation against huge single-line minified files.
     let safe_lines: Vec<String> = raw_lines
         .iter()
@@ -719,8 +803,8 @@ mod tests {
     fn rf_ctx_02_a_load_replaced_by_a_newer_one_is_dropped() {
         let pane = PaneId::new(4);
         let mut views = FileViews::default();
-        let first = views.start(pane);
-        let second = views.start(pane);
+        let first = views.start(pane, PreviewMode::Source);
+        let second = views.start(pane, PreviewMode::Source);
         assert_eq!(
             views
                 .loaded(pane, second, numbered("b.txt", 3))
@@ -737,7 +821,7 @@ mod tests {
     fn rf_ctx_02_a_load_that_ends_after_its_pane_closed_is_dropped() {
         let pane = PaneId::new(4);
         let mut views = FileViews::default();
-        let request = views.start(pane);
+        let request = views.start(pane, PreviewMode::Source);
         views.forget(pane);
         assert_eq!(views.loaded(pane, request, numbered("a.txt", 3)), None);
         assert_eq!(views.len(), 0);
@@ -747,7 +831,7 @@ mod tests {
     fn rf_ctx_02_the_viewport_slices_the_rows_the_ui_reported() {
         let pane = PaneId::new(4);
         let mut views = FileViews::default();
-        let request = views.start(pane);
+        let request = views.start(pane, PreviewMode::Source);
         // Rows reported before the file is read apply to its first frame.
         assert_eq!(views.viewport(pane, 0, 12), None);
         let frame = views.loaded(pane, request, numbered("a.txt", 100)).unwrap();
@@ -756,9 +840,54 @@ mod tests {
         assert_eq!((frame.top_line, frame.lines.len()), (40, 5));
         assert_eq!(frame.lines[0].number, 41);
         // A new file starts at its top with the same rows.
-        let request = views.start(pane);
+        let request = views.start(pane, PreviewMode::Source);
         let frame = views.loaded(pane, request, numbered("b.txt", 100)).unwrap();
         assert_eq!((frame.top_line, frame.lines.len()), (0, 5));
+    }
+
+    #[test]
+    fn rf_ctx_02_a_markdown_pane_switches_between_rendered_rows_and_source_lines() {
+        let pane = PaneId::new(4);
+        let mut views = FileViews::default();
+        let text: String = (1..=50).map(|n| format!("Paragraph {n}\n\n")).collect();
+        let doc = Arc::new(load_bytes(
+            "README.md",
+            text.as_bytes(),
+            text.len() as u64,
+            false,
+        ));
+        // Before its file is read a mode change has nothing to show.
+        let request = views.start(pane, PreviewMode::Rendered);
+        assert_eq!(views.set_mode(pane, PreviewMode::Source), None);
+        assert_eq!(views.set_mode(pane, PreviewMode::Rendered), None);
+        let frame = views.loaded(pane, request, doc).unwrap();
+        assert_eq!(frame.total_lines, 50);
+        assert!(frame.lines.is_empty());
+        let rows = frame.rendered.unwrap();
+        assert_eq!(rows[0].plain_text(), "Paragraph 1");
+        // Rows differ in height, so any row may be the top one.
+        let frame = views.viewport(pane, 49, 20).unwrap();
+        assert_eq!((frame.top_line, frame.rendered.unwrap().len()), (49, 1));
+
+        let frame = views.set_mode(pane, PreviewMode::Source).unwrap();
+        assert_eq!((frame.top_line, frame.total_lines), (0, 100));
+        assert_eq!(frame.rendered, None);
+        assert_eq!(frame.lines[0].text, "Paragraph 1");
+        // The same mode again sends nothing.
+        assert_eq!(views.set_mode(pane, PreviewMode::Source), None);
+        let frame = views.viewport(pane, 98, 20).unwrap();
+        assert_eq!(frame.top_line, 80);
+        assert_eq!(views.set_mode(PaneId::new(9), PreviewMode::Source), None);
+    }
+
+    #[test]
+    fn rf_ctx_02_a_non_markdown_file_shows_its_lines_in_either_mode() {
+        let doc = numbered("notes.txt", 10);
+        for mode in [PreviewMode::Rendered, PreviewMode::Source] {
+            let frame = doc.frame_in(mode, 0, 5);
+            assert_eq!(frame.rendered, None);
+            assert_eq!(frame.lines.len(), 5);
+        }
     }
 
     #[test]

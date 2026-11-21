@@ -224,6 +224,7 @@ fn rf_ctx_02_file_pane_record_round_trips_in_schema_1() {
         ],
         active: Some(1),
         wrap: true,
+        source: true,
     });
     let bytes = serialize(&with_files).unwrap();
     let doc: Value = serde_json::from_slice(&bytes).unwrap();

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use yien_layout::{Rect, Tree};
 use yien_proto::file_ops::FileAction;
+use yien_proto::file_preview::PreviewMode;
 use yien_proto::{
     AgentState, Command, CoreMsg, FilePaneInfo, MIN_DIVIDER_SHARE, PaneId, PaneInfo, PaneKind,
     PendingQuestion, ProfileId, ProfileInfo, ProjectId, ProjectInfo, SessionTitle, SideBars, TabId,
@@ -84,7 +85,11 @@ pub(crate) enum Effect {
         pane: PaneId,
         root: String,
         path: String,
+        mode: PreviewMode,
     },
+    /// Show the file of preview `pane` rendered or as source from now on
+    /// (RF-CTX-02).
+    FileMode { pane: PaneId, mode: PreviewMode },
     /// Run a Files context menu action on the folder `root` of `tab` off the
     /// command loop, answering [`CoreMsg::FilesChanged`] or an error.
     FileAction {
@@ -288,6 +293,8 @@ pub(crate) struct FilePane {
     pub active: usize,
     /// Whether soft line wrapping is enabled for this pane.
     pub wrap: bool,
+    /// How Markdown files show in this pane.
+    pub mode: PreviewMode,
 }
 
 impl FilePane {
@@ -306,6 +313,7 @@ impl FilePane {
             files: self.files.clone(),
             active: self.active_index(),
             wrap: self.wrap,
+            mode: self.mode,
         }
     }
 }
@@ -788,6 +796,9 @@ impl Workspace {
             Command::SelectFileTab { pane, path } => self.select_file_tab(pane, &path, &mut fx)?,
             Command::CloseFileTab { pane, path } => self.close_file_tab(pane, &path, &mut fx)?,
             Command::ToggleFileWrap { pane } => self.toggle_file_wrap(pane, &mut fx)?,
+            Command::SetFilePreviewMode { pane, mode } => {
+                self.set_file_preview_mode(pane, mode, &mut fx)?;
+            }
             Command::FileAction { tab, action } => {
                 let root = self.tab(tab)?.dir.clone();
                 fx.push(Effect::FileAction { tab, root, action });
@@ -1135,14 +1146,16 @@ impl Workspace {
                 }
                 let active_path = files.active_file().unwrap_or(&path).to_owned();
                 p.default_name = file_leaf_name(&active_path);
-                active_path
+                (active_path, files.mode)
             };
+            let (active_path, mode) = active_path;
             self.focus(pane, fx)?;
             self.emit_pane(pane, fx);
             fx.push(Effect::LoadFile {
                 pane,
                 root,
                 path: active_path,
+                mode,
             });
             return Ok(());
         }
@@ -1190,6 +1203,7 @@ impl Workspace {
                     files: vec![path.clone()],
                     active: 0,
                     wrap: false,
+                    mode: PreviewMode::default(),
                 }),
             },
         );
@@ -1199,6 +1213,7 @@ impl Workspace {
             pane: new,
             root,
             path,
+            mode: PreviewMode::default(),
         });
         Ok(())
     }
@@ -1226,7 +1241,7 @@ impl Workspace {
             files.active = idx;
             let active_path = files.files[idx].clone();
             p.default_name = file_leaf_name(&active_path);
-            (changed, active_path)
+            (changed, active_path, files.mode)
         };
         self.focus(pane, fx)?;
         self.emit_pane(pane, fx);
@@ -1235,6 +1250,7 @@ impl Workspace {
                 pane,
                 root,
                 path: switched.1,
+                mode: switched.2,
             });
         }
         Ok(())
@@ -1250,7 +1266,9 @@ impl Workspace {
         let root = self.tab(tab_id)?.dir.clone();
         enum Outcome {
             ClosePane,
-            Remaining { reload: Option<String> },
+            Remaining {
+                reload: Option<(String, PreviewMode)>,
+            },
         }
         let outcome = {
             let p = self
@@ -1276,7 +1294,7 @@ impl Workspace {
                 let active_path = files.active_file().unwrap_or_default().to_owned();
                 p.default_name = file_leaf_name(&active_path);
                 Outcome::Remaining {
-                    reload: was_active.then_some(active_path),
+                    reload: was_active.then_some((active_path, files.mode)),
                 }
             }
         };
@@ -1284,11 +1302,12 @@ impl Workspace {
             Outcome::ClosePane => self.close_pane(pane, fx)?,
             Outcome::Remaining { reload } => {
                 self.emit_pane(pane, fx);
-                if let Some(active_path) = reload {
+                if let Some((active_path, mode)) = reload {
                     fx.push(Effect::LoadFile {
                         pane,
                         root,
                         path: active_path,
+                        mode,
                     });
                 }
             }
@@ -1307,6 +1326,26 @@ impl Workspace {
         };
         files.wrap = !files.wrap;
         self.emit_pane(pane, fx);
+        Ok(())
+    }
+
+    fn set_file_preview_mode(
+        &mut self,
+        pane: PaneId,
+        mode: PreviewMode,
+        fx: &mut Vec<Effect>,
+    ) -> Result<(), CoreError> {
+        self.tab_of(pane)?;
+        let p = self
+            .panes
+            .get_mut(&pane)
+            .ok_or(CoreError::UnknownPane(pane))?;
+        let Some(files) = p.files.as_mut().filter(|f| f.mode != mode) else {
+            return Ok(());
+        };
+        files.mode = mode;
+        self.emit_pane(pane, fx);
+        fx.push(Effect::FileMode { pane, mode });
         Ok(())
     }
 
@@ -3715,7 +3754,7 @@ mod tests {
         assert_ne!(file_pane, term_pane);
         assert!(fx.iter().any(|e| matches!(
             e,
-            Effect::LoadFile { pane, root, path }
+            Effect::LoadFile { pane, root, path, .. }
             if *pane == file_pane && root == "C:/Code/yien" && path == "src/main.rs"
         )));
         let snap = ws.snapshot();
@@ -3726,6 +3765,7 @@ mod tests {
                 files: vec!["src/main.rs".into()],
                 active: Some(0),
                 wrap: false,
+                mode: PreviewMode::Rendered,
             })
         );
 
@@ -3754,6 +3794,7 @@ mod tests {
                 files: vec!["src/main.rs".into(), "Cargo.toml".into()],
                 active: Some(1),
                 wrap: false,
+                mode: PreviewMode::Rendered,
             })
         );
 
@@ -3778,6 +3819,7 @@ mod tests {
                 files: vec!["src/main.rs".into(), "Cargo.toml".into()],
                 active: Some(0),
                 wrap: false,
+                mode: PreviewMode::Rendered,
             })
         );
     }
@@ -3788,12 +3830,14 @@ mod tests {
             files: Vec::new(),
             active: 0,
             wrap: false,
+            mode: PreviewMode::Rendered,
         };
         assert_eq!(empty.to_info().active, None);
         let stale = FilePane {
             files: vec!["a.rs".into(), "b.rs".into()],
             active: 7,
             wrap: false,
+            mode: PreviewMode::Rendered,
         };
         assert_eq!(stale.to_info().active, Some(1));
     }
@@ -3863,6 +3907,99 @@ mod tests {
             e,
             Effect::Emit(CoreMsg::PaneClosed { pane }) if *pane == file_pane
         )));
+    }
+
+    #[test]
+    fn rf_ctx_02_markdown_mode_stays_with_the_pane_across_its_file_tabs() {
+        let mut ws = Workspace::new();
+        ws.apply(
+            Command::NewProject {
+                root: "C:/Code/yien".into(),
+                name: None,
+            },
+            &resolve,
+        )
+        .unwrap();
+        let tab = ws.tabs[0].id;
+        let open = |ws: &mut Workspace, path: &str| {
+            ws.apply(
+                Command::OpenFile {
+                    tab,
+                    path: path.into(),
+                },
+                &resolve,
+            )
+            .unwrap()
+        };
+        let fx = open(&mut ws, "README.md");
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { mode: PreviewMode::Rendered, path, .. } if path == "README.md"
+        )));
+        let file_pane = ws.tabs[0].focused;
+        let set = |ws: &mut Workspace, mode| {
+            ws.apply(
+                Command::SetFilePreviewMode {
+                    pane: file_pane,
+                    mode,
+                },
+                &resolve,
+            )
+            .unwrap()
+        };
+        let fx = set(&mut ws, PreviewMode::Source);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::FileMode { pane, mode: PreviewMode::Source } if *pane == file_pane
+        )));
+        let info = |ws: &Workspace| match &ws
+            .snapshot()
+            .panes
+            .iter()
+            .find(|p| p.id == file_pane)
+            .unwrap()
+            .kind
+        {
+            PaneKind::File(info) => info.clone(),
+            PaneKind::Terminal => panic!("not a file pane"),
+        };
+        assert_eq!(info(&ws).mode, PreviewMode::Source);
+        // Setting the mode it already has changes nothing.
+        assert!(set(&mut ws, PreviewMode::Source).is_empty());
+
+        // Another file and back: each load keeps the pane's mode.
+        let fx = open(&mut ws, "docs/guide.md");
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { mode: PreviewMode::Source, path, .. } if path == "docs/guide.md"
+        )));
+        let fx = ws
+            .apply(
+                Command::SelectFileTab {
+                    pane: file_pane,
+                    path: "README.md".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { mode: PreviewMode::Source, path, .. } if path == "README.md"
+        )));
+        let fx = ws
+            .apply(
+                Command::CloseFileTab {
+                    pane: file_pane,
+                    path: "README.md".into(),
+                },
+                &resolve,
+            )
+            .unwrap();
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { mode: PreviewMode::Source, path, .. } if path == "docs/guide.md"
+        )));
+        assert_eq!(info(&ws).mode, PreviewMode::Source);
     }
 
     #[test]

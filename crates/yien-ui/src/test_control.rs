@@ -900,6 +900,7 @@ mod tests {
                 files: vec!["src/main.rs".into(), "Cargo.toml".into()],
                 active: Some(0),
                 wrap: true,
+                mode: Default::default(),
             }),
             ..pane_info(4, 2, "file", "main.rs", yien_proto::AgentState::Idle)
         });

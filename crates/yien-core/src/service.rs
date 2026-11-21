@@ -16,7 +16,7 @@ use yien_agent::{HookError, HookEvent};
 use yien_platform::agent_sessions::{self, MAX_SESSIONS};
 use yien_platform::file_ops;
 use yien_proto::file_ops::FileAction;
-use yien_proto::file_preview::{FileFrame, FileNotice};
+use yien_proto::file_preview::{FileFrame, FileNotice, PreviewMode};
 use yien_proto::{
     AgentSession, ClientMsg, Command, CoreMsg, PaneId, PendingQuestion, ProfileId, ProfileInfo,
     ProjectId, SessionTitle, ShellKind, TabGit, TabId, is_shell_profile,
@@ -615,15 +615,18 @@ impl Service {
         }
     }
 
-    async fn start_file_load(&mut self, pane: PaneId, root: String, path: String) {
-        let request = self.file_views.start(pane);
+    async fn start_file_load(
+        &mut self,
+        pane: PaneId,
+        root: String,
+        path: String,
+        mode: PreviewMode,
+    ) {
+        let request = self.file_views.start(pane, mode);
         let loading = FileFrame {
             path: path.clone(),
-            language: None,
-            top_line: 0,
-            total_lines: 0,
-            lines: Vec::new(),
             notice: Some(FileNotice::Loading),
+            ..FileFrame::default()
         };
         if self.file_frames.put(pane, loading) {
             self.emit(CoreMsg::FileFrameReady { pane }).await;
@@ -859,8 +862,20 @@ impl Service {
                     self.to_pane(pane, PaneCmd::Program { launch, program })
                         .await
                 }
-                Effect::LoadFile { pane, root, path } => {
-                    self.start_file_load(pane, root, path).await;
+                Effect::LoadFile {
+                    pane,
+                    root,
+                    path,
+                    mode,
+                } => {
+                    self.start_file_load(pane, root, path, mode).await;
+                }
+                Effect::FileMode { pane, mode } => {
+                    if let Some(frame) = self.file_views.set_mode(pane, mode)
+                        && self.file_frames.put(pane, frame)
+                    {
+                        self.emit(CoreMsg::FileFrameReady { pane }).await;
+                    }
                 }
                 Effect::FileAction { tab, root, action } => {
                     self.run_file_action(tab, root, action);
@@ -972,7 +987,8 @@ fn command_pane(command: &Command) -> Option<PaneId> {
         | Command::TerminatePane { pane }
         | Command::SelectFileTab { pane, .. }
         | Command::CloseFileTab { pane, .. }
-        | Command::ToggleFileWrap { pane } => Some(*pane),
+        | Command::ToggleFileWrap { pane }
+        | Command::SetFilePreviewMode { pane, .. } => Some(*pane),
         Command::SwapPanes { a, .. } => Some(*a),
         Command::SetDivider { before, .. } => Some(*before),
         Command::NewProject { .. }

@@ -34,6 +34,7 @@ pub mod file_preview;
 mod git;
 mod hooks;
 mod launch;
+pub mod markdown;
 mod opencode;
 mod pane;
 mod persist;
