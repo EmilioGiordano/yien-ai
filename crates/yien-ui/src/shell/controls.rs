@@ -120,18 +120,29 @@ pub(super) fn switch(
         )
 }
 
+/// What a stepper shows: its value, as a number and as read, and its bounds.
+pub(super) struct Size {
+    pub(super) value: f32,
+    pub(super) text: String,
+    pub(super) min: f32,
+    pub(super) max: f32,
+}
+
 /// A size with a minus and a plus beside it: a spin button.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn stepper(
     id: &'static str,
     label: &'static str,
-    value: f32,
-    text: String,
-    (min, max): (f32, f32),
+    size: Size,
     t: &Theme,
     mono: Option<SharedString>,
     on_pick: OnPick,
 ) -> Stateful<Div> {
+    let Size {
+        value,
+        text,
+        min,
+        max,
+    } = size;
     let hover = t.hover;
     let button = |part: usize, sign: &'static str, name: &'static str, enabled: bool| {
         let pick = Rc::clone(&on_pick);
