@@ -246,7 +246,9 @@ impl Shell {
             }
         };
         if let Some(dialog) = self.settings_screen.as_mut() {
-            dialog.model.written(key, value.clone());
+            dialog
+                .model
+                .written(key, value.clone(), self.settings.config());
         }
         let (done, outcome) = oneshot::channel();
         self.settings_host.set_setting(
@@ -279,7 +281,7 @@ impl Shell {
     /// text fields not being edited take its values.
     pub(super) fn settings_screen_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dialog) = self.settings_screen.as_mut() {
-            dialog.model.file_read();
+            dialog.model.file_read(self.settings.config());
         }
         self.refresh_settings_fields(window, cx);
     }
@@ -997,9 +999,12 @@ impl Shell {
                 controls::stepper(
                     key,
                     row.label,
-                    value,
-                    size_label(&shown),
-                    (min, max),
+                    controls::Size {
+                        value,
+                        text: size_label(&shown),
+                        min,
+                        max,
+                    },
                     &t,
                     mono.clone(),
                     self.settings_picker(key, false, cx),

@@ -286,8 +286,18 @@ pub(crate) struct Screen {
     cursor: Option<usize>,
     /// The select whose list is open, and the choice under the keyboard.
     open_select: Option<(&'static str, usize)>,
-    /// Values written and not yet read back, shown in place of the file's.
-    pending: Vec<(&'static str, SettingValue)>,
+    /// Values written and not yet read back, oldest first; the last of a
+    /// key shows in place of the file's.
+    pending: Vec<Pending>,
+}
+
+/// A value sent to the file and not yet read back.
+#[derive(Debug, Clone, PartialEq)]
+struct Pending {
+    key: &'static str,
+    value: SettingValue,
+    /// What the file held for the key before the first of its writes.
+    before: Option<SettingValue>,
 }
 
 impl Default for Screen {
@@ -543,26 +553,59 @@ impl Screen {
         self.pending
             .iter()
             .rev()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v.clone())
+            .find(|p| p.key == key)
+            .map(|p| p.value.clone())
             .or_else(|| config.value(key))
             .unwrap_or(SettingValue::Text(String::new()))
     }
 
-    /// A value was sent to the file.
-    pub(crate) fn written(&mut self, key: &'static str, value: SettingValue) {
-        self.pending.retain(|(k, _)| *k != key);
-        self.pending.push((key, value));
+    /// A value was sent to the file, which held `config`'s.
+    pub(crate) fn written(&mut self, key: &'static str, value: SettingValue, config: &Config) {
+        let before = match self.pending.iter().find(|p| p.key == key) {
+            Some(first) => first.before.clone(),
+            None => config.value(key),
+        };
+        self.pending.push(Pending { key, value, before });
     }
 
     /// The write of `key` failed: the file's value shows again.
     pub(crate) fn write_failed(&mut self, key: &str) {
-        self.pending.retain(|(k, _)| *k != key);
+        self.pending.retain(|p| p.key != key);
     }
 
-    /// The file was read: what it says is shown from now on.
-    pub(crate) fn file_read(&mut self) {
-        self.pending.clear();
+    /// The file was read and holds `config`. A key whose value is one it
+    /// was sent drops that write and the ones before it; a key still at
+    /// its old value keeps waiting, as its writes are queued; any other
+    /// value was written by someone else, and wins.
+    pub(crate) fn file_read(&mut self, config: &Config) {
+        let mut keys: Vec<&'static str> = self.pending.iter().map(|p| p.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            let now = config.value(key);
+            let mine: Vec<usize> = (0..self.pending.len())
+                .filter(|&at| self.pending[at].key == key)
+                .collect();
+            let confirmed = mine
+                .iter()
+                .position(|&at| Some(&self.pending[at].value) == now.as_ref());
+            let drop: Vec<usize> = match confirmed {
+                Some(upto) => mine[..=upto].to_vec(),
+                None if mine
+                    .first()
+                    .is_some_and(|&at| self.pending[at].before == now) =>
+                {
+                    Vec::new()
+                }
+                None => mine,
+            };
+            let mut at = 0;
+            self.pending.retain(|_| {
+                let keep = !drop.contains(&at);
+                at += 1;
+                keep
+            });
+        }
     }
 }
 
@@ -903,7 +946,7 @@ mod tests {
     fn rf_cfg_05_a_written_value_shows_until_the_file_is_read() {
         let config = Config::default();
         let mut screen = Screen::default();
-        screen.written("ui.font.size", SettingValue::Number(17.0));
+        screen.written("ui.font.size", SettingValue::Number(17.0), &config);
         assert_eq!(
             screen.shown("ui.font.size", &config),
             SettingValue::Number(17.0)
@@ -913,16 +956,55 @@ mod tests {
             screen.click_step("ui.font.size", true, &config),
             Act::Write("ui.font.size", SettingValue::Number(18.0))
         );
-        screen.file_read();
+        screen.file_read(&config);
+        assert_eq!(
+            screen.shown("ui.font.size", &config),
+            SettingValue::Number(17.0),
+            "the file still has the old value: the write is queued"
+        );
+        screen.file_read(&self::config("ui.font.size = 17"));
         assert_eq!(
             screen.shown("ui.font.size", &config),
             SettingValue::Number(13.0)
         );
-        screen.written("theme", SettingValue::Text("washi".into()));
+        screen.written("theme", SettingValue::Text("washi".into()), &config);
         screen.write_failed("theme");
         assert_eq!(
             screen.shown("theme", &config),
             SettingValue::Text("sumi".into())
+        );
+    }
+
+    #[test]
+    fn rf_cfg_05_a_reading_drops_only_the_writes_it_confirms() {
+        let at_13 = Config::default();
+        let size = |n: f32| SettingValue::Number(n);
+        let mut screen = Screen::default();
+        for n in [14.0, 15.0] {
+            screen.written("ui.font.size", size(n), &at_13);
+        }
+        screen.written("theme", SettingValue::Text("washi".into()), &at_13);
+        // The reading of the first write lands between the clicks.
+        let at_14 = config("ui.font.size = 14");
+        screen.file_read(&at_14);
+        assert_eq!(screen.shown("ui.font.size", &at_14), size(15.0));
+        assert_eq!(
+            screen.click_step("ui.font.size", true, &at_14),
+            Act::Write("ui.font.size", size(16.0)),
+            "the third click steps from the last written value"
+        );
+        assert_eq!(
+            screen.shown("theme", &at_14),
+            SettingValue::Text("washi".into()),
+            "another key's write keeps waiting"
+        );
+        // A hand edit to another value wins over what is waiting.
+        let by_hand = config("ui.font.size = 19\ntheme = \"system\"");
+        screen.file_read(&by_hand);
+        assert_eq!(screen.shown("ui.font.size", &by_hand), size(19.0));
+        assert_eq!(
+            screen.shown("theme", &by_hand),
+            SettingValue::Text("system".into())
         );
     }
 
