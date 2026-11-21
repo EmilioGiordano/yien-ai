@@ -21,7 +21,7 @@ use crate::{PaneId, ProfileId, ProjectId, TabId};
 /// ```
 /// assert!(yien_proto::test_control::TEST_CONTROL_VERSION >= 1);
 /// ```
-pub const TEST_CONTROL_VERSION: u32 = 4;
+pub const TEST_CONTROL_VERSION: u32 = 5;
 
 /// The longest request line, in bytes, without its newline.
 ///
@@ -167,6 +167,17 @@ impl Request {
                 if let Some(typed) = &args.name {
                     text_arg("name", typed)?;
                 }
+                if let Some(key) = &args.key {
+                    name("key", key)?;
+                }
+                if let Some(value) = &args.value {
+                    // Empty is a value: it puts a setting back to its default.
+                    if value.len() > MAX_TEXT_LEN || value.chars().any(char::is_control) {
+                        return Err(format!(
+                            "value is longer than {MAX_TEXT_LEN} bytes or has a control character"
+                        ));
+                    }
+                }
                 Ok(())
             }
             Self::Text { text, .. } => {
@@ -273,6 +284,14 @@ pub struct CommandArgs {
     /// (New File, New Folder, Rename), which is then committed as Enter does.
     #[serde(default)]
     pub name: Option<String>,
+    /// For `settings.set`: the settings file key the screen sets
+    /// (RF-CFG-05), such as `ui.font.size`.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// For `settings.set`: the value, as the screen's control makes it:
+    /// `true` or `false`, a number, or text (`""` for the default).
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 /// Which way a split with a profile goes, as the split menu offers.
@@ -434,6 +453,45 @@ pub struct UiState {
     /// The interface's size and what it measures (RF-CFG-02).
     #[serde(default)]
     pub layout: LayoutState,
+    /// The settings screen, while open (RF-CFG-05).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SettingsState>,
+}
+
+/// The settings screen as drawn (RF-CFG-05).
+///
+/// ```
+/// let settings = yien_proto::test_control::SettingsState::default();
+/// assert!(settings.cursor.is_none() && settings.rows.is_empty());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsState {
+    /// The section shown: `Appearance`, `Tabs`, `Terminal`, `General`, `Keys`.
+    pub section: String,
+    /// The find field's text; while it is not blank the rows are its matches.
+    pub query: String,
+    /// What the arrows are on: a setting's key, `edit_keys`, or a command
+    /// id in the Keys section; `None` while the find field has the keyboard.
+    pub cursor: Option<String>,
+    /// The rows, not a field, hold the keyboard.
+    pub body_has_keyboard: bool,
+    /// The key whose text field is being edited.
+    pub editing: Option<String>,
+    /// The key whose select list is open.
+    pub open_select: Option<String>,
+    /// Why the file on disk is not in effect; the screen writes nothing then.
+    pub problem: Option<String>,
+    /// The settings rows drawn, top to bottom, with the values they show.
+    pub rows: Vec<SettingRowState>,
+}
+
+/// One settings row and the value it shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingRowState {
+    /// The settings file key.
+    pub key: String,
+    /// As the file would read: `true`, `17`, `washi`, `""` for a default.
+    pub value: String,
 }
 
 /// The interface size in effect and dimensions it sets, in logical pixels,
@@ -965,6 +1023,25 @@ mod tests {
     }
 
     #[test]
+    fn rf_cfg_05_settings_set_takes_a_key_and_any_plain_value() {
+        let set = |key: &str, value: &str| Request::Command {
+            id: "settings.set".into(),
+            args: CommandArgs {
+                key: Some(key.into()),
+                value: Some(value.into()),
+                ..CommandArgs::default()
+            },
+        };
+        assert_eq!(set("ui.font.size", "17").check(), Ok(()));
+        assert_eq!(set("editor", "").check(), Ok(()), "empty is the default");
+        assert!(set("", "17").check().is_err());
+        assert!(set("editor", "code\n").check().is_err());
+        let json = r#"{"op":"command","id":"settings.set","args":{"key":"theme","value":"washi"}}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, set("theme", "washi"));
+    }
+
+    #[test]
     fn adr_21_state_serialises_as_documented_and_round_trips() {
         let state = UiState {
             version: TEST_CONTROL_VERSION,
@@ -1048,8 +1125,23 @@ mod tests {
                     height: 38.0,
                 }],
             },
+            settings: Some(SettingsState {
+                section: "Appearance".into(),
+                query: String::new(),
+                cursor: Some("ui.font.size".into()),
+                body_has_keyboard: true,
+                editing: None,
+                open_select: None,
+                problem: None,
+                rows: vec![SettingRowState {
+                    key: "ui.font.size".into(),
+                    value: "17".into(),
+                }],
+            }),
         };
         let json = serde_json::to_value(Reply::state(state.clone())).unwrap();
+        assert_eq!(json["state"]["settings"]["rows"][0]["value"], "17");
+        assert_eq!(json["state"]["settings"]["cursor"], "ui.font.size");
         assert_eq!(
             json["state"]["files"]["menu"]["items"][0]["label"],
             "Rename…"
@@ -1068,6 +1160,7 @@ mod tests {
         assert!(json["state"]["layout"]["context_bar_width"].is_null());
         let mut older = json.clone();
         older["state"].as_object_mut().unwrap().remove("layout");
+        older["state"].as_object_mut().unwrap().remove("settings");
         let older: Reply = serde_json::from_value(older).unwrap();
         assert_eq!(older.state.unwrap().layout, LayoutState::default());
         let back: Reply = serde_json::from_value(json).unwrap();
