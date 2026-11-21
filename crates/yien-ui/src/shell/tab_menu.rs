@@ -127,6 +127,11 @@ impl TabMenuState {
     pub(super) fn forget(&mut self) {
         self.open = None;
     }
+
+    /// Where `tab`'s row was last painted, if it was.
+    pub(super) fn painted_row(&self, tab: TabId) -> Option<Bounds<Pixels>> {
+        self.rows.borrow().get(&tab).copied()
+    }
 }
 
 impl Shell {
@@ -236,9 +241,10 @@ impl Shell {
             return;
         };
         let row = self.tab_menu.rows.borrow().get(&tab).copied();
+        let t = self.theme;
         let at = row.map_or_else(
-            || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-            |row| point(row.left() + px(8.0), row.bottom() + px(2.0)),
+            || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+            |row| point(row.left() + t.size(8.0), row.bottom() + t.size(2.0)),
         );
         self.open_tab_menu(tab, at, window, cx);
     }
@@ -308,9 +314,10 @@ impl Shell {
             Some(TabEffect::Close(tab)) => self.close_tab_now(tab, window, cx),
             Some(TabEffect::NewTabWith(project)) => {
                 let row = self.tab_menu.rows.borrow().get(&tab).copied();
+                let t = self.theme;
                 let at = row.map_or_else(
-                    || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-                    |row| point(row.left() + px(8.0), row.bottom() + px(2.0)),
+                    || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+                    |row| point(row.left() + t.size(8.0), row.bottom() + t.size(2.0)),
                 );
                 self.open_new_tab_menu(project, at, window, cx);
             }
