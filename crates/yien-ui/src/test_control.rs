@@ -389,7 +389,8 @@ fn badge_key(badge: Badge) -> &'static str {
 /// The interface size and what it measures (RF-CFG-02): the title and status
 /// bars at `theme`'s size from their prototype heights `bars`, the side bars
 /// as drawn, and the rows of `tabs` where `painted` says they were last
-/// painted (`[x, y, width, height]`); no rows while the tab bar is hidden.
+/// painted and on screen (`[x, y, width, height]`); no rows while the tab
+/// bar is hidden.
 pub(crate) fn layout_state(
     theme: &Theme,
     bars: (f32, f32),

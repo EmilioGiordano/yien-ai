@@ -200,8 +200,9 @@ impl Shell {
                 })
         };
         let (projects, tabs, panes) = workspace_state(&self.workspace, keyboard, &terminal);
+        let list = self.tab_drag.scroll.bounds();
         let painted = |tab| {
-            self.tab_menu.painted_row(tab).map(|b| {
+            self.tab_menu.shown_row(tab, list).map(|b| {
                 [
                     b.origin.x.as_f32(),
                     b.origin.y.as_f32(),

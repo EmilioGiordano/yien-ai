@@ -513,8 +513,9 @@ pub struct LayoutState {
     pub tab_bar_width: Option<f32>,
     /// The context bar's width; `None` while it is hidden.
     pub context_bar_width: Option<f32>,
-    /// Where each tab row was last painted, in tab bar order; empty while
-    /// the tab bar is hidden.
+    /// The tab rows on screen: painted in the latest frame with their centre
+    /// in the tab list's view, in the order of `tabs`; empty while the tab
+    /// bar is hidden.
     pub tab_rows: Vec<RowBounds>,
 }
 
