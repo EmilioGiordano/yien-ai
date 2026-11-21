@@ -16,6 +16,7 @@ use gpui_kit::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::sync::mpsc;
 use yien_proto::file_ops::{FileAction, rel_name};
+use yien_proto::file_preview::is_markdown_path;
 use yien_proto::{
     ClientMsg, Command, CoreMsg, Direction, FilePaneInfo, Orientation, PaneId, ProfileId,
     ProjectId, SHELL_PROFILE, SideBars, TabGit, TabId, TerminalPalette,
@@ -27,6 +28,7 @@ use crate::assets;
 use crate::attention::{Alerts, OsAttention, launch_pane};
 use crate::bridge::{Link, core_busy, deliver};
 use crate::catalog::{CATALOG, Scope, shortcut};
+use crate::file_markdown;
 use crate::file_pane::{FilePaneEvent, FilePaneView};
 use crate::file_tree::join_relative;
 use crate::files::Files;
@@ -1605,6 +1607,35 @@ impl Shell {
         } else {
             self.say("There is no file preview pane in this tab.".to_owned(), cx);
         }
+    }
+
+    fn toggle_file_preview_mode(
+        &mut self,
+        _: &ToggleFilePreviewMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self
+            .focused_pane()
+            .filter(|p| self.workspace.pane(*p).is_file())
+            .or_else(|| {
+                let tab = self.workspace.selected_tab()?.id;
+                self.workspace.file_pane_of_tab(tab).map(|(p, _)| p)
+            });
+        let Some(pane) = pane else {
+            self.say("There is no file preview pane in this tab.".to_owned(), cx);
+            return;
+        };
+        let info = self.workspace.pane(pane);
+        let Some(file) = info.file_pane() else {
+            return;
+        };
+        if !file.active_file().is_some_and(is_markdown_path) {
+            self.say("The file shown is not Markdown.".to_owned(), cx);
+            return;
+        }
+        let mode = file.mode.toggled();
+        self.command(Command::SetFilePreviewMode { pane, mode }, cx);
     }
 
     fn file_tab(&mut self, step: FileTabStep, cx: &mut Context<Self>) {
@@ -3542,6 +3573,14 @@ impl Shell {
                 this.command(Command::ToggleFileWrap { pane: id }, cx);
             }))
             .child("Wrap");
+        let entity = cx.entity().downgrade();
+        let mode_toggle = is_markdown_path(active_path).then(|| {
+            file_markdown::mode_toggle(id, file_info.mode, &t, mono.clone(), move |mode, _, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    this.command(Command::SetFilePreviewMode { pane: id, mode }, cx);
+                });
+            })
+        });
 
         let heads = Rc::clone(&self.pane_heads);
         let top_rail = h_flex()
@@ -3587,6 +3626,7 @@ impl Shell {
                     .items_center()
                     .gap(px(4.0))
                     .px(px(6.0))
+                    .children(mode_toggle)
                     .child(wrap_btn)
                     .child(self.split_button(pane, Orientation::Horizontal, cx))
                     .child(self.split_button(pane, Orientation::Vertical, cx))
@@ -4361,6 +4401,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::file_name_confirm))
             .on_action(cx.listener(Self::file_name_cancel))
             .on_action(cx.listener(Self::toggle_file_wrap))
+            .on_action(cx.listener(Self::toggle_file_preview_mode))
             .on_action(cx.listener(|this, _: &NextFileTab, _, cx| {
                 this.file_tab(FileTabStep::Next, cx);
             }))
@@ -4527,6 +4568,7 @@ const MOUSE_COMMANDS: &[(&str, &str)] = &[
     ("changed file double-click", "files.show"),
     ("file tree row double-click", "files.show"),
     ("file pane wrap button", "file.toggle_wrap"),
+    ("file pane Rendered/Source toggle", "file.toggle_rendered"),
     ("file pane tab", "file.next_tab"),
     ("file pane tab", "file.previous_tab"),
     ("file pane tab close button", "file.close_tab"),
