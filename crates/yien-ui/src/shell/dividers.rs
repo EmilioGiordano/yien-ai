@@ -15,16 +15,17 @@ use crate::actions::*;
 use crate::layout::{self, Divider};
 use crate::model::TabView;
 use crate::region::{self, DividerKey, Region};
+use crate::theme::Theme;
 
 /// The least terminal a drag or an arrow leaves a pane.
 const MIN_COLS: f32 = 10.0;
 const MIN_ROWS: f32 = 3.0;
-/// What a pane draws around its grid: gutters, border and the terminal's
-/// padding across; that plus the head down.
-const PANE_CHROME_W: f32 = 2.0 * HALF_GUTTER + 2.0 + 20.0;
-const PANE_CHROME_H: f32 = 2.0 * HALF_GUTTER + 2.0 + 16.0 + 28.0;
-/// The hit strip over the gutter between two panes.
-const STRIP: f32 = 2.0 * HALF_GUTTER;
+/// The terminal's padding around its grid, across and down, and the pane's
+/// border both sides: these do not follow the interface size.
+const GRID_PADDING: (f32, f32) = (20.0, 16.0);
+const BORDERS: f32 = 2.0;
+/// The pane head's padding down and its badge, which set its height.
+const HEAD_PADDING: f32 = 5.0;
 
 /// What a drag of a divider carries.
 pub(super) struct DividerDrag;
@@ -60,13 +61,22 @@ const SAME_SHARE: f32 = 1e-4;
 /// The pane area's width and height in pixels at the last paint.
 pub(super) type PaneArea = Rc<Cell<(f32, f32)>>;
 
-/// The least width and height of a pane holding a `cell`-sized grid of
-/// [`MIN_COLS`] by [`MIN_ROWS`].
-fn min_leaf(cell: (f32, f32)) -> (f32, f32) {
+/// What a pane draws around its grid at `t`'s interface size: gutters,
+/// border and the terminal's padding across; that plus the head down.
+fn pane_chrome(t: &Theme) -> (f32, f32) {
+    let gutters = 2.0 * t.dim(HALF_GUTTER);
+    let head = t.dim(crate::agent_badge::SIDE) + 2.0 * t.dim(HEAD_PADDING);
     (
-        MIN_COLS * cell.0 + PANE_CHROME_W,
-        MIN_ROWS * cell.1 + PANE_CHROME_H,
+        gutters + BORDERS + GRID_PADDING.0,
+        gutters + BORDERS + GRID_PADDING.1 + head,
     )
+}
+
+/// The least width and height of a pane holding a `cell`-sized grid of
+/// [`MIN_COLS`] by [`MIN_ROWS`] at `t`'s interface size.
+fn min_leaf(cell: (f32, f32), t: &Theme) -> (f32, f32) {
+    let (chrome_w, chrome_h) = pane_chrome(t);
+    (MIN_COLS * cell.0 + chrome_w, MIN_ROWS * cell.1 + chrome_h)
 }
 
 /// What a screen reader says a divider is.
@@ -106,7 +116,7 @@ impl Shell {
         if tab.maximized.is_some() {
             return Vec::new();
         }
-        let min = min_leaf(self.cell(tab, cx));
+        let min = min_leaf(self.cell(tab, cx), &self.theme);
         match self.shown_layout(tab) {
             Some(shown) => layout::dividers(&shown, min),
             None => layout::dividers(&tab.layout, min),
@@ -408,16 +418,16 @@ impl Shell {
                         .aria_orientation(accesskit::Orientation::Vertical)
                         .cursor_col_resize()
                         .left(relative(d.at))
-                        .ml(px(-STRIP / 2.0))
-                        .w(px(STRIP))
+                        .ml(-t.size(HALF_GUTTER))
+                        .w(t.size(HALF_GUTTER) * 2.0)
                         .top(relative(d.across.0))
                         .h(relative(d.across.1)),
                     Orientation::Vertical => strip
                         .aria_orientation(accesskit::Orientation::Horizontal)
                         .cursor_row_resize()
                         .top(relative(d.at))
-                        .mt(px(-STRIP / 2.0))
-                        .h(px(STRIP))
+                        .mt(-t.size(HALF_GUTTER))
+                        .h(t.size(HALF_GUTTER) * 2.0)
                         .left(relative(d.across.0))
                         .w(relative(d.across.1)),
                 };
@@ -457,13 +467,26 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{PANE_CHROME_H, PANE_CHROME_W, divider_label, min_leaf};
+    use super::{divider_label, min_leaf};
+    use crate::theme::{Theme, ThemeKind};
 
     #[test]
     fn rf_pan_02_a_pane_keeps_at_least_ten_columns_and_three_rows() {
-        let (w, h) = min_leaf((8.0, 16.0));
-        assert_eq!(w, 80.0 + PANE_CHROME_W);
-        assert_eq!(h, 48.0 + PANE_CHROME_H);
+        let t = Theme::of(ThemeKind::Sumi);
+        let (w, h) = min_leaf((8.0, 16.0), &t);
+        // Gutters 6, borders 2, the grid's padding 20 by 16, the head 28.
+        assert_eq!((w, h), (80.0 + 28.0, 48.0 + 52.0));
+    }
+
+    #[test]
+    fn rf_cfg_02_the_pane_minimum_grows_only_by_the_scaled_chrome() {
+        let t = Theme::of(ThemeKind::Sumi).with_ui_size(17.0);
+        let (w, h) = min_leaf((8.0, 16.0), &t);
+        // Gutters 2 x 4, the head 24 + 2 x 7; borders and grid padding stay.
+        assert_eq!(
+            (w, h),
+            (80.0 + 8.0 + 2.0 + 20.0, 48.0 + 8.0 + 2.0 + 16.0 + 38.0)
+        );
     }
 
     #[test]
