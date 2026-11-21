@@ -588,7 +588,7 @@ impl Screen {
                 .collect();
             let confirmed = mine
                 .iter()
-                .position(|&at| Some(&self.pending[at].value) == now.as_ref());
+                .rposition(|&at| Some(&self.pending[at].value) == now.as_ref());
             let drop: Vec<usize> = match confirmed {
                 Some(upto) => mine[..=upto].to_vec(),
                 None if mine
@@ -973,6 +973,24 @@ mod tests {
             screen.shown("theme", &config),
             SettingValue::Text("sumi".into())
         );
+    }
+
+    #[test]
+    fn rf_cfg_05_one_reading_of_merged_writes_drops_all_it_covers() {
+        let at_13 = Config::default();
+        let size = |n: f32| SettingValue::Number(n);
+        let mut screen = Screen::default();
+        for n in [14.0, 13.0, 14.0] {
+            screen.written("ui.font.size", size(n), &at_13);
+        }
+        // The watcher saw only the last of the three writes.
+        let at_14 = config("ui.font.size = 14");
+        screen.file_read(&at_14);
+        assert_eq!(screen.shown("ui.font.size", &at_14), size(14.0));
+        // Nothing stale is left to cover a later hand edit.
+        let by_hand = config("ui.font.size = 13");
+        screen.file_read(&by_hand);
+        assert_eq!(screen.shown("ui.font.size", &by_hand), size(13.0));
     }
 
     #[test]
