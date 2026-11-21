@@ -366,9 +366,9 @@ impl Shell {
                 .aria_label(label)
                 .track_focus(focus)
                 .items_center()
-                .px(px(12.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
+                .px(t.size(12.0))
+                .py(t.size(5.0))
+                .rounded(t.size(6.0))
                 .border_1()
                 .border_color(t.line)
                 .cursor_pointer()
@@ -392,12 +392,12 @@ impl Shell {
                         .aria_label(title.clone())
                         .track_focus(&notes.focus)
                         .key_context(WHATS_NEW_CONTEXT)
-                        .mt(px(PALETTE_TOP))
-                        .w(px(NOTES_WIDTH.max(CONFIRM_WIDTH)))
+                        .mt(t.size(PALETTE_TOP))
+                        .w(t.size(NOTES_WIDTH.max(CONFIRM_WIDTH)))
                         .max_w(relative(0.9))
-                        .gap(px(10.0))
-                        .p(px(16.0))
-                        .rounded(px(10.0))
+                        .gap(t.size(10.0))
+                        .p(t.size(16.0))
+                        .rounded(t.size(10.0))
                         .border_1()
                         .border_color(t.line)
                         .bg(t.raised)
@@ -424,17 +424,17 @@ impl Shell {
                                 .aria_label("Release notes")
                                 .track_scroll(&notes.scroll)
                                 .overflow_y_scroll()
-                                .max_h(px(NOTES_HEIGHT))
-                                .gap(px(8.0))
-                                .pr(px(6.0))
+                                .max_h(t.size(NOTES_HEIGHT))
+                                .gap(t.size(8.0))
+                                .pr(t.size(6.0))
                                 .text_size(t.text(13.0))
                                 .children(body),
                         )
                         .child(
                             h_flex()
                                 .justify_end()
-                                .gap(px(8.0))
-                                .pt(px(4.0))
+                                .gap(t.size(8.0))
+                                .pt(t.size(4.0))
                                 .text_size(t.text(13.0))
                                 .child(button("whats-new-close", "Close", &notes.close).on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -465,7 +465,7 @@ impl Shell {
         let id = format!("notes-{n}");
         let inner = match &block.kind {
             Kind::Heading(level) => div()
-                .pt(px(if *level <= 2 { 6.0 } else { 2.0 }))
+                .pt(t.size(if *level <= 2 { 6.0 } else { 2.0 }))
                 .text_size(t.text(match level {
                     1 => 18.0,
                     2 => 16.0,
@@ -480,12 +480,12 @@ impl Shell {
                 .into_any_element(),
             Kind::Item { depth, marker } => h_flex()
                 .items_start()
-                .gap(px(6.0))
-                .pl(px(f32::from(*depth) * 18.0))
+                .gap(t.size(6.0))
+                .pl(t.size(f32::from(*depth) * 18.0))
                 .child(
                     div()
                         .flex_none()
-                        .min_w(px(16.0))
+                        .min_w(t.size(16.0))
                         .text_color(t.muted)
                         .child(marker.clone()),
                 )
@@ -497,8 +497,8 @@ impl Shell {
                 )
                 .into_any_element(),
             Kind::Code => div()
-                .p(px(8.0))
-                .rounded(px(6.0))
+                .p(t.size(8.0))
+                .rounded(t.size(6.0))
                 .bg(t.panel)
                 .border_1()
                 .border_color(t.line)
@@ -510,7 +510,7 @@ impl Shell {
         };
         if block.quote {
             div()
-                .pl(px(10.0))
+                .pl(t.size(10.0))
                 .border_l_2()
                 .border_color(t.line)
                 .text_color(t.muted)
