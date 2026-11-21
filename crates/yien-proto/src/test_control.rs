@@ -21,7 +21,7 @@ use crate::{PaneId, ProfileId, ProjectId, TabId};
 /// ```
 /// assert!(yien_proto::test_control::TEST_CONTROL_VERSION >= 1);
 /// ```
-pub const TEST_CONTROL_VERSION: u32 = 3;
+pub const TEST_CONTROL_VERSION: u32 = 4;
 
 /// The longest request line, in bytes, without its newline.
 ///
@@ -104,6 +104,15 @@ pub enum Request {
         /// The new height.
         height: f32,
     },
+    /// Clicks the left button once at a point of the window's content area,
+    /// in logical pixels from its top left, as the pointer would: a move
+    /// there, a press and a release.
+    Click {
+        /// From the left edge.
+        x: f32,
+        /// From the top edge.
+        y: f32,
+    },
     /// Closes the window the way its close button does: with the default
     /// settings it hides the window and YIEN keeps running (RF-SES-09);
     /// otherwise it quits, asking first while agents work (RF-SES-13).
@@ -125,6 +134,7 @@ impl Request {
             Self::Text { .. } => "text",
             Self::Key { .. } => "key",
             Self::Resize { .. } => "resize",
+            Self::Click { .. } => "click",
             Self::WindowClose {} => "window.close",
         }
     }
@@ -138,6 +148,7 @@ impl Request {
     /// assert!(Request::Text { pane: None, text: TypedText::new("ls") }.check().is_ok());
     /// assert!(Request::Text { pane: None, text: TypedText::new("ls\r") }.check().is_err());
     /// assert!(Request::Resize { width: f32::NAN, height: 600.0 }.check().is_err());
+    /// assert!(Request::Click { x: -1.0, y: 10.0 }.check().is_err());
     /// ```
     pub fn check(&self) -> Result<(), String> {
         match self {
@@ -180,6 +191,16 @@ impl Request {
                     if !side.is_finite() || !(MIN_WINDOW_SIDE..=MAX_WINDOW_SIDE).contains(side) {
                         return Err(format!(
                             "window sides must be between {MIN_WINDOW_SIDE} and {MAX_WINDOW_SIDE}"
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Self::Click { x, y } => {
+                for at in [x, y] {
+                    if !at.is_finite() || !(0.0..=MAX_WINDOW_SIDE).contains(at) {
+                        return Err(format!(
+                            "a click must be between 0 and {MAX_WINDOW_SIDE} on each axis"
                         ));
                     }
                 }
@@ -410,6 +431,56 @@ pub struct UiState {
     /// The context bar's Files view, while it shows (RF-CTX-01).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<FilesState>,
+    /// The interface's size and what it measures (RF-CFG-02).
+    #[serde(default)]
+    pub layout: LayoutState,
+}
+
+/// The interface size in effect and dimensions it sets, in logical pixels,
+/// so a check can tell the interface followed `ui.font.size` (RF-CFG-02).
+///
+/// ```
+/// let layout = yien_proto::test_control::LayoutState::default();
+/// assert!(layout.tab_rows.is_empty() && layout.tab_bar_width.is_none());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LayoutState {
+    /// The interface size in effect: `ui.font.size`, 13 by default.
+    pub ui_size: f32,
+    /// The title bar's height.
+    pub title_bar_height: f32,
+    /// The status bar's height.
+    pub status_bar_height: f32,
+    /// The tab bar's width; `None` while it is hidden.
+    pub tab_bar_width: Option<f32>,
+    /// The context bar's width; `None` while it is hidden.
+    pub context_bar_width: Option<f32>,
+    /// Where each tab row was last painted, in tab bar order; empty while
+    /// the tab bar is hidden.
+    pub tab_rows: Vec<RowBounds>,
+}
+
+/// Where a tab row was painted, in the window's logical pixels.
+///
+/// ```
+/// use yien_proto::TabId;
+/// use yien_proto::test_control::RowBounds;
+///
+/// let row = RowBounds { tab: TabId::new(1), x: 6.0, y: 80.0, width: 250.0, height: 30.0 };
+/// assert_eq!(row.x + row.width / 2.0, 131.0);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RowBounds {
+    /// The row's tab.
+    pub tab: TabId,
+    /// Its left edge.
+    pub x: f32,
+    /// Its top edge.
+    pub y: f32,
+    /// Its width.
+    pub width: f32,
+    /// Its height.
+    pub height: f32,
 }
 
 /// The Files view as drawn: its rows, cursor, open menu and name field.
@@ -782,6 +853,11 @@ mod tests {
             parse(r#"{"op":"window.close"}"#).unwrap(),
             Request::WindowClose {}
         );
+        assert_eq!(
+            parse(r#"{"op":"click","x":120.5,"y":96}"#).unwrap(),
+            Request::Click { x: 120.5, y: 96.0 }
+        );
+        assert_eq!(Request::Click { x: 0.0, y: 0.0 }.op(), "click");
     }
 
     #[test]
@@ -794,6 +870,8 @@ mod tests {
             r#"{"op":"command","id":"x","args":{"direction":"diagonal"}}"#,
             r#"{"op":"text","pane":-1,"text":"a"}"#,
             r#"{"op":"text","pane":"1","text":"a"}"#,
+            r#"{"op":"click","x":1}"#,
+            r#"{"op":"click","x":1,"y":2,"button":"right"}"#,
             r#"{"text":"a"}"#,
             r#"[]"#,
             r#"null"#,
@@ -844,6 +922,15 @@ mod tests {
             Request::Resize {
                 width: 800.0,
                 height: f32::INFINITY,
+            },
+            Request::Click { x: -0.5, y: 10.0 },
+            Request::Click {
+                x: 10.0,
+                y: f32::NAN,
+            },
+            Request::Click {
+                x: MAX_WINDOW_SIDE + 1.0,
+                y: 10.0,
             },
             Request::Command {
                 id: "files.menu_pick".into(),
@@ -947,6 +1034,20 @@ mod tests {
                     cut: true,
                 }),
             }),
+            layout: LayoutState {
+                ui_size: 17.0,
+                title_bar_height: 52.0,
+                status_bar_height: 34.0,
+                tab_bar_width: Some(345.0),
+                context_bar_width: None,
+                tab_rows: vec![RowBounds {
+                    tab: TabId::new(2),
+                    x: 8.0,
+                    y: 90.0,
+                    width: 328.0,
+                    height: 38.0,
+                }],
+            },
         };
         let json = serde_json::to_value(Reply::state(state.clone())).unwrap();
         assert_eq!(
@@ -961,6 +1062,14 @@ mod tests {
         assert_eq!(json["state"]["panes"][0]["badge"], "powershell");
         assert_eq!(json["state"]["panes"][0]["rows"][0], "> hi");
         assert_eq!(json["state"]["panes"][0]["size"][0], 80);
+        assert_eq!(json["state"]["layout"]["ui_size"], 17.0);
+        assert_eq!(json["state"]["layout"]["tab_rows"][0]["tab"], 2);
+        assert_eq!(json["state"]["layout"]["tab_rows"][0]["height"], 38.0);
+        assert!(json["state"]["layout"]["context_bar_width"].is_null());
+        let mut older = json.clone();
+        older["state"].as_object_mut().unwrap().remove("layout");
+        let older: Reply = serde_json::from_value(older).unwrap();
+        assert_eq!(older.state.unwrap().layout, LayoutState::default());
         let back: Reply = serde_json::from_value(json).unwrap();
         assert_eq!(back.state.as_deref(), Some(&state));
     }
