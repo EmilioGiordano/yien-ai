@@ -320,14 +320,20 @@ impl Shell {
         let Some(target) = self.cursor_target() else {
             return;
         };
+        let t = self.theme;
         let rows = self.file_menu.rows.borrow();
         let at = match rows.get(&target.path) {
             Some(row) if !target.path.is_empty() => {
-                point(row.left() + px(24.0), row.bottom() + px(2.0))
+                point(row.left() + t.size(24.0), row.bottom() + t.size(2.0))
             }
             _ => rows.get(BLANK).map_or_else(
-                || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-                |tree| point(tree.left() + px(EDGE_MARGIN), tree.top() + px(EDGE_MARGIN)),
+                || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+                |tree| {
+                    point(
+                        tree.left() + t.size(EDGE_MARGIN),
+                        tree.top() + t.size(EDGE_MARGIN),
+                    )
+                },
             ),
         };
         drop(rows);
@@ -785,13 +791,14 @@ impl Shell {
                 FileTarget { path, kind }
             }
         };
+        let t = self.theme;
         let at = self
             .file_menu
             .rows
             .borrow()
             .get(&target.path)
-            .map_or(point(px(EDGE_MARGIN), px(EDGE_MARGIN)), |b| {
-                point(b.left() + px(24.0), b.bottom())
+            .map_or(point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)), |b| {
+                point(b.left() + t.size(24.0), b.bottom())
             });
         self.open_file_menu(target, at, window, cx);
         if self.file_menu.is_open() {
