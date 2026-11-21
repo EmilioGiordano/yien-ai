@@ -60,6 +60,7 @@ impl Shell {
         if let Notice::Show(text) = self.settings.apply(update) {
             notices.push(text);
         }
+        self.settings_screen_read(window, cx);
         // A reading is when a newly installed font can be picked up.
         self.installed_fonts = cx.text_system().all_font_names();
         notices.extend(self.apply_look(window, cx));

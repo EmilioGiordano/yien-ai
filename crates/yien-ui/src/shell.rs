@@ -63,6 +63,7 @@ use crate::update::Updates;
 use crate::window_close::{CloseMode, close_mode};
 
 mod bars;
+mod controls;
 mod default_tab;
 mod dividers;
 mod file_menu;
@@ -71,6 +72,7 @@ mod menu;
 mod new_tab_menu;
 mod pane_menu;
 mod settings;
+mod settings_screen;
 mod spinner;
 mod status;
 mod tab_controls;
@@ -210,6 +212,8 @@ pub(crate) struct Shell {
     quit_confirmed: bool,
     /// The attention tray, while open (RF-ATN-13).
     tray: Option<Tray>,
+    /// The settings screen, while open (RF-CFG-05).
+    settings_screen: Option<settings_screen::SettingsDialog>,
     /// When a mouse-down outside the tray last closed it. The click that
     /// follows on the counter must not open it again.
     tray_closed_at: Option<Instant>,
@@ -467,6 +471,7 @@ impl Shell {
             confirm: None,
             quit_confirmed: false,
             tray,
+            settings_screen: None,
             tray_closed_at: None,
             renaming: None,
             worktree_prompt: None,
@@ -866,6 +871,7 @@ impl Shell {
             (self.worktree_prompt.is_some(), "worktree_prompt"),
             (self.worktree_close.is_some(), "worktree_close"),
             (self.updates.notes_open(), "release_notes"),
+            (self.settings_screen.is_some(), "settings"),
         ]
         .into_iter()
         .find_map(|(open, name)| open.then_some(name))
@@ -1724,6 +1730,7 @@ impl Shell {
         self.split_menu = None;
         self.tray = None;
         self.palette = None;
+        self.settings_screen = None;
         // Both draw over the window and would hide the question.
         self.worktree_prompt = None;
         self.worktree_close = None;
@@ -4279,6 +4286,7 @@ impl Render for Shell {
             .child(self.watch_pointer(cx))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::open_config_file))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::toggle_tab_bar))
             .on_action(cx.listener(Self::toggle_context_bar))
             .on_action(cx.listener(Self::toggle_review_mode))
@@ -4428,6 +4436,7 @@ impl Render for Shell {
             .children(self.render_file_menu(cx))
             .children(self.render_new_tab_menu(cx))
             .children(self.render_whats_new(cx))
+            .children(self.render_settings(window, cx))
             .children(self.render_confirm(cx))
     }
 }
