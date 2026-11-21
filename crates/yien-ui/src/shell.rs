@@ -2557,6 +2557,7 @@ impl Shell {
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.tab_menu.next_frame();
         let t = self.theme;
         let selected = self.workspace.selected_tab().map(|tab| tab.id);
         let by_state = self.workspace.groups_by_state();
