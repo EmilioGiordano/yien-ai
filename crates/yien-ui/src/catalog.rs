@@ -334,6 +334,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ["ctrl-shift-l"]
     ),
     command!(
+        "settings.open",
+        "settings: open settings",
+        OpenSettings,
+        ["ctrl-,"]
+    ),
+    command!(
         "settings.open_config",
         "settings: open config file",
         OpenConfigFile,
@@ -728,5 +734,6 @@ mod tests {
         assert_eq!(label("ctrl-shift-enter"), "Ctrl+Shift+Enter");
         assert_eq!(label("ctrl-1"), "Ctrl+1");
         assert_eq!(label("escape"), "Esc");
+        assert_eq!(label("ctrl-,"), "Ctrl+,");
     }
 }

@@ -54,6 +54,9 @@ pub(crate) const DIVIDER_CONTEXT: &str = "YienDivider";
 /// Key context of a newer release's notes.
 pub(crate) const WHATS_NEW_CONTEXT: &str = "YienWhatsNew";
 
+/// Key context of the settings screen (RF-CFG-05).
+pub(crate) const SETTINGS_CONTEXT: &str = "YienSettings";
+
 actions!(
     yien,
     [
@@ -61,6 +64,24 @@ actions!(
         ToggleTheme,
         /// Opens the settings file in the configured editor (RF-CFG-01).
         OpenConfigFile,
+        /// Opens or closes the settings screen (RF-CFG-05).
+        OpenSettings,
+        /// Moves the settings screen's keyboard one place up.
+        SettingsUp,
+        /// Moves the settings screen's keyboard one place down.
+        SettingsDown,
+        /// The previous choice or one pixel less on the settings row.
+        SettingsLeft,
+        /// The next choice or one pixel more on the settings row.
+        SettingsRight,
+        /// Flips, opens or picks on the settings row.
+        SettingsActivate,
+        /// Leaves a settings text field, a select list, or the screen.
+        SettingsClose,
+        /// Shows the next settings section.
+        SettingsNextSection,
+        /// Shows the previous settings section.
+        SettingsPreviousSection,
         /// Shows or hides the tab bar.
         ToggleTabBar,
         /// Shows or hides the context bar.
@@ -395,6 +416,12 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
     let menu = Some(MENU_CONTEXT);
     let divider = Some(DIVIDER_CONTEXT);
     let whats_new = Some(WHATS_NEW_CONTEXT);
+    // The body's keys stay out of the find and text fields, where Space and
+    // the side arrows belong to the text.
+    let settings = format!("{SETTINGS_CONTEXT} && !Input");
+    let settings = Some(settings.as_str());
+    let settings_field = format!("{SETTINGS_CONTEXT} > Input");
+    let settings_field = Some(settings_field.as_str());
     let mut all = vec![
         // The window root binds Tab and Shift+Tab to move the focus; a
         // focused terminal sends them to the shell (completion) and to
@@ -458,6 +485,23 @@ pub(crate) fn bindings_with(rebinds: &Rebinds) -> Vec<KeyBinding> {
         KeyBinding::new("down", WhatsNewDown, whats_new),
         KeyBinding::new("pageup", WhatsNewPageUp, whats_new),
         KeyBinding::new("pagedown", WhatsNewPageDown, whats_new),
+        KeyBinding::new("up", SettingsUp, settings),
+        KeyBinding::new("down", SettingsDown, settings),
+        KeyBinding::new("left", SettingsLeft, settings),
+        KeyBinding::new("right", SettingsRight, settings),
+        KeyBinding::new("enter", SettingsActivate, settings),
+        KeyBinding::new("space", SettingsActivate, settings),
+        KeyBinding::new("escape", SettingsClose, settings),
+        KeyBinding::new("pagedown", SettingsNextSection, settings),
+        KeyBinding::new("pageup", SettingsPreviousSection, settings),
+        KeyBinding::new("ctrl-tab", SettingsNextSection, settings),
+        KeyBinding::new("ctrl-shift-tab", SettingsPreviousSection, settings),
+        KeyBinding::new("up", SettingsUp, settings_field),
+        KeyBinding::new("down", SettingsDown, settings_field),
+        KeyBinding::new("enter", SettingsActivate, settings_field),
+        KeyBinding::new("escape", SettingsClose, settings_field),
+        KeyBinding::new("ctrl-tab", SettingsNextSection, settings_field),
+        KeyBinding::new("ctrl-shift-tab", SettingsPreviousSection, settings_field),
     ];
     for spec in CATALOG {
         let context = match spec.scope {
@@ -551,6 +595,14 @@ pub(crate) fn is_internal(action: &dyn Action) -> bool {
         Box::new(WhatsNewDown),
         Box::new(WhatsNewPageUp),
         Box::new(WhatsNewPageDown),
+        Box::new(SettingsUp),
+        Box::new(SettingsDown),
+        Box::new(SettingsLeft),
+        Box::new(SettingsRight),
+        Box::new(SettingsActivate),
+        Box::new(SettingsClose),
+        Box::new(SettingsNextSection),
+        Box::new(SettingsPreviousSection),
     ]
     .iter()
     .any(|internal| internal.partial_eq(action))
@@ -729,6 +781,53 @@ mod tests {
         assert_eq!(matches("r", &stack), 0);
         for keys in ["alt-r", "ctrl-enter"] {
             assert_eq!(matches(keys, &TERMINAL_STACK), 0, "{keys}");
+        }
+    }
+
+    #[test]
+    fn rf_cfg_05_the_settings_screen_opens_from_a_terminal() {
+        assert!(first_is("ctrl-,", &TERMINAL_STACK, &OpenSettings));
+        let body = ["Root", CONTEXT, SETTINGS_CONTEXT];
+        assert!(first_is("ctrl-,", &body, &OpenSettings), "and closes");
+    }
+
+    #[test]
+    fn rf_cfg_05_the_settings_body_owns_the_arrows_space_and_escape() {
+        let body = ["Root", CONTEXT, SETTINGS_CONTEXT];
+        for (keys, action) in [
+            ("up", &SettingsUp as &dyn Action),
+            ("down", &SettingsDown),
+            ("left", &SettingsLeft),
+            ("right", &SettingsRight),
+            ("enter", &SettingsActivate),
+            ("space", &SettingsActivate),
+            ("escape", &SettingsClose),
+            ("pagedown", &SettingsNextSection),
+            ("pageup", &SettingsPreviousSection),
+            ("ctrl-tab", &SettingsNextSection),
+            ("ctrl-shift-tab", &SettingsPreviousSection),
+        ] {
+            assert!(first_is(keys, &body, action), "{keys}");
+            assert!(!first_is(keys, &TERMINAL_STACK, action), "{keys}");
+        }
+    }
+
+    #[test]
+    fn rf_cfg_05_settings_fields_keep_their_text_keys() {
+        let field = ["Root", CONTEXT, SETTINGS_CONTEXT, "Input"];
+        for (keys, action) in [
+            ("up", &SettingsUp as &dyn Action),
+            ("down", &SettingsDown),
+            ("enter", &SettingsActivate),
+            ("escape", &SettingsClose),
+            ("ctrl-tab", &SettingsNextSection),
+        ] {
+            assert!(first_is(keys, &field, action), "{keys}");
+        }
+        // Space types, and the side arrows move the caret.
+        assert_eq!(matches("space", &field), 0);
+        for keys in ["left", "right"] {
+            assert!(first_is(keys, &field, &InputKey), "{keys}");
         }
     }
 
