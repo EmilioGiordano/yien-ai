@@ -6,6 +6,7 @@ use yien_proto::{SessionTitle, ShellKind, is_shell_profile};
 
 use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
 use crate::model::{AgentState, PaneView, TabMark};
+use crate::theme::scaled;
 
 /// The head's own horizontal padding, each side.
 pub(crate) const PADDING: f32 = 8.0;
@@ -187,8 +188,8 @@ impl PaneHeadLayout {
         close_button: true,
     };
 
-    /// The layout for a head `width` px wide, text scaled by `scale`
-    /// (`ui.font.size` over 13). Pieces go in this order: the profile's
+    /// The layout for a head `width` px wide, the interface scaled by
+    /// `scale` (`ui.font.size` over 13). Pieces go in this order: the profile's
     /// display name, the state word, the split buttons, the menu button,
     /// the folder's lead, its last name, "signal lost", the session title, a
     /// renamed pane's name, the room for a shell's name, the close button.
@@ -222,7 +223,7 @@ impl PaneHeadLayout {
     /// their first letters.
     pub(crate) fn need(&self, scale: f32, text: &HeadText<'_>) -> f32 {
         let words = |s: &str| chars(s, TEXT_SIZE, scale);
-        let mut pieces = vec![GLYPH];
+        let mut pieces = vec![scaled(GLYPH, scale)];
         let separate = text.separate_name();
         if separate && self.name {
             pieces.push(words(text.name));
@@ -264,9 +265,9 @@ impl PaneHeadLayout {
         let buttons = 2 * usize::from(self.split_buttons)
             + usize::from(self.menu_button)
             + usize::from(self.close_button);
-        pieces.extend(std::iter::repeat_n(BUTTON, buttons));
-        let gaps = (pieces.len() - 1) as f32 * GAP;
-        2.0 * PADDING + gaps + pieces.iter().sum::<f32>()
+        pieces.extend(std::iter::repeat_n(scaled(BUTTON, scale), buttons));
+        let gaps = (pieces.len() - 1) as f32 * scaled(GAP, scale);
+        2.0 * scaled(PADDING, scale) + gaps + pieces.iter().sum::<f32>()
     }
 }
 
@@ -440,7 +441,11 @@ mod tests {
             let text = claude();
             let tag = 6.0 * 0.6 * 12.5 * scale;
             // Glyph, tag, the spacer and the button: three gaps.
-            let width = 2.0 * PADDING + GLYPH + tag + 3.0 * GAP + BUTTON;
+            let width = 2.0 * d(PADDING, scale)
+                + d(GLYPH, scale)
+                + tag
+                + 3.0 * d(GAP, scale)
+                + d(BUTTON, scale);
             assert!(PaneHeadLayout::at(width + 1.0, scale, &text).close_button);
             assert!(!PaneHeadLayout::at(width - 1.0, scale, &text).close_button);
         }
@@ -462,10 +467,16 @@ mod tests {
     /// The least width that holds the glyph and these buttons with the head's
     /// padding and gaps, and nothing else: counted here from the constants,
     /// not through `need`.
-    fn bare(buttons: usize) -> f32 {
+    fn bare(buttons: usize, scale: f32) -> f32 {
         // Glyph, the program (shrunk to nothing), the spacer, the buttons.
         let children = 3 + buttons;
-        2.0 * PADDING + GLYPH + buttons as f32 * BUTTON + (children - 1) as f32 * GAP
+        let button = buttons as f32 * d(BUTTON, scale);
+        2.0 * d(PADDING, scale) + d(GLYPH, scale) + button + (children - 1) as f32 * d(GAP, scale)
+    }
+
+    /// A head dimension at `scale`, as the head draws it.
+    fn d(base: f32, scale: f32) -> f32 {
+        crate::theme::scaled(base, scale)
     }
 
     #[test]
@@ -475,7 +486,7 @@ mod tests {
                 + usize::from(now.menu_button)
                 + usize::from(now.close_button);
             if buttons > 0 {
-                assert!(bare(buttons) <= width, "{now:?} at {width}, {scale}");
+                assert!(bare(buttons, scale) <= width, "{now:?} at {width}, {scale}");
             }
         });
     }
@@ -486,10 +497,10 @@ mod tests {
             let text = claude();
             let tag = 6.0 * 0.6 * 12.5 * scale;
             // Room for the glyph and the whole tag, not for the button too.
-            let width = 2.0 * PADDING + GLYPH + tag + 2.0 * GAP;
+            let width = 2.0 * d(PADDING, scale) + d(GLYPH, scale) + tag + 2.0 * d(GAP, scale);
             let now = PaneHeadLayout::at(width, scale, &text);
             assert!(!now.close_button, "{now:?} at {scale}");
-            let left = width - 2.0 * PADDING - GLYPH - 2.0 * GAP;
+            let left = width - 2.0 * d(PADDING, scale) - d(GLYPH, scale) - 2.0 * d(GAP, scale);
             assert!(left >= tag, "the tag has its full width at {scale}");
         }
     }
@@ -510,7 +521,12 @@ mod tests {
             let tag = 6.0 * 0.6 * 12.5 * scale;
             let title = 8.0 * 0.6 * 12.5 * scale;
             // Glyph, tag, title, the spacer and the close button.
-            let width = 2.0 * PADDING + GLYPH + tag + title + 4.0 * GAP + BUTTON;
+            let width = 2.0 * d(PADDING, scale)
+                + d(GLYPH, scale)
+                + tag
+                + title
+                + 4.0 * d(GAP, scale)
+                + d(BUTTON, scale);
             let now = PaneHeadLayout::at(width + 1.0, scale, &text);
             assert!(now.title && now.close_button, "{now:?} at {scale}");
             let now = PaneHeadLayout::at(width - 1.0, scale, &text);
@@ -618,11 +634,11 @@ mod tests {
             for scale in SCALES {
                 let tag = cli.chars().count() as f32 * 0.6 * 12.5 * scale;
                 // Room for the glyph and the whole tag, not for the button.
-                let width = 2.0 * PADDING + GLYPH + tag + 2.0 * GAP;
+                let width = 2.0 * d(PADDING, scale) + d(GLYPH, scale) + tag + 2.0 * d(GAP, scale);
                 let now = PaneHeadLayout::at(width, scale, &text);
                 assert!(!now.close_button, "{cli} {now:?} at {scale}");
                 // With the button too, both stay and the tag is not cut.
-                let width = width + GAP + BUTTON + 1.0;
+                let width = width + d(GAP, scale) + d(BUTTON, scale) + 1.0;
                 let now = PaneHeadLayout::at(width, scale, &text);
                 assert!(now.close_button, "{cli} {now:?} at {scale}");
                 assert!(now.need(scale, &text) <= width, "{cli} at {scale}");
