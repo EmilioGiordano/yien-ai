@@ -109,6 +109,95 @@ pub(crate) fn scroll_rows(
     })
 }
 
+/// Which rendered rows a frame holds: from `top_line`, `len` of `total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameRows {
+    pub(crate) top_line: usize,
+    pub(crate) len: usize,
+    pub(crate) total: usize,
+}
+
+impl FrameRows {
+    /// It holds the document's last row.
+    pub(crate) fn reaches_end(self) -> bool {
+        self.top_line + self.len >= self.total
+    }
+
+    fn holds(self, row: usize) -> bool {
+        (self.top_line..self.top_line + self.len).contains(&row)
+    }
+}
+
+/// The scroll state once a new rendered frame arrives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FrameScroll {
+    pub(crate) pos: ScrollPos,
+    /// End is still pending.
+    pub(crate) pin_end: bool,
+    /// The core must be asked for the document's end again.
+    pub(crate) ask_end: bool,
+}
+
+/// What a new frame does to the scroll state. Another file or view starts
+/// at its top. A pending End survives any frame: one that does not reach
+/// the end (an older reply, or a paint that came first) asks for the end
+/// again instead of undoing it. Otherwise the position stays while the
+/// frame holds its row.
+pub(crate) fn on_frame(
+    pos: ScrollPos,
+    pin_end: bool,
+    same_view: bool,
+    frame: FrameRows,
+) -> FrameScroll {
+    if !same_view {
+        return FrameScroll {
+            pos: ScrollPos {
+                row: frame.top_line,
+                offset: 0.0,
+            },
+            pin_end: false,
+            ask_end: false,
+        };
+    }
+    if pin_end {
+        return FrameScroll {
+            pos,
+            pin_end: true,
+            ask_end: !frame.reaches_end(),
+        };
+    }
+    let pos = if frame.holds(pos.row) {
+        pos
+    } else {
+        ScrollPos {
+            row: frame.top_line,
+            offset: 0.0,
+        }
+    };
+    FrameScroll {
+        pos,
+        pin_end: false,
+        ask_end: false,
+    }
+}
+
+/// Where a pending End lands, counted from the document's first row: only
+/// once the frame reaches the end and all its rows are measured.
+pub(crate) fn settled_end(
+    frame: FrameRows,
+    heights: Option<&[f32]>,
+    avail: f32,
+) -> Option<ScrollPos> {
+    if !frame.reaches_end() {
+        return None;
+    }
+    let end = scroll_rows(heights?, ScrollPos::default(), f32::MAX, avail)?;
+    Some(ScrollPos {
+        row: frame.top_line + end.row,
+        offset: end.offset,
+    })
+}
+
 /// The rows from `from` that are at least partly in the view.
 pub(crate) fn shown_rows(heights: &[f32], from: ScrollPos, avail: f32) -> usize {
     let tops = tops(heights);
@@ -483,8 +572,9 @@ mod tests {
     use std::ops::Range;
 
     use super::{
-        ScrollPos, code_ranges, column_width, heading_metrics, heights, inline_highlights,
-        rows_for, scroll_rows, shown_rows, space_after, whole_rows,
+        FrameRows, ScrollPos, code_ranges, column_width, heading_metrics, heights,
+        inline_highlights, on_frame, rows_for, scroll_rows, settled_end, shown_rows, space_after,
+        whole_rows,
     };
     use crate::theme::{Theme, ThemeKind};
 
@@ -547,6 +637,83 @@ mod tests {
         // A row that is not in the frame gives no position.
         assert_eq!(scroll_rows(&h, pos(7, 0.0), 1.0, 300.0), None);
         assert_eq!(scroll_rows(&[], pos(0, 0.0), 1.0, 300.0), None);
+    }
+
+    fn rows(top_line: usize, len: usize, total: usize) -> FrameRows {
+        FrameRows {
+            top_line,
+            len,
+            total,
+        }
+    }
+
+    #[test]
+    fn rf_ctx_02_markdown_end_waits_for_a_frame_that_reaches_the_end_when_the_paint_comes_first() {
+        // End pressed at the top of a 1,000 row file: pinned on its last row.
+        let pinned = pos(999, 0.0);
+        let old = rows(0, 40, 1000);
+        // The window paints the old frame first: its rows are measured but
+        // End does not settle on them.
+        let h = vec![20.0; 40];
+        assert_eq!(settled_end(old, Some(&h), 300.0), None);
+        // An older reply arrives that does not reach the end: End stays
+        // pending and asks again, and the position is not reset.
+        let next = on_frame(pinned, true, true, rows(10, 40, 1000));
+        assert_eq!((next.pos, next.pin_end, next.ask_end), (pinned, true, true));
+        // The end frame arrives; once measured, End lands on the last page.
+        let end = rows(920, 80, 1000);
+        let next = on_frame(next.pos, next.pin_end, true, end);
+        assert_eq!((next.pin_end, next.ask_end), (true, false));
+        let h = vec![20.0; 80];
+        assert_eq!(settled_end(end, Some(&h), 300.0), Some(pos(985, 0.0)));
+    }
+
+    #[test]
+    fn rf_ctx_02_markdown_end_settles_once_measured_when_the_reply_comes_first() {
+        let pinned = pos(999, 0.0);
+        let end = rows(920, 80, 1000);
+        let next = on_frame(pinned, true, true, end);
+        assert_eq!(
+            (next.pos, next.pin_end, next.ask_end),
+            (pinned, true, false)
+        );
+        // Not drawn yet: nothing to settle on.
+        assert_eq!(settled_end(end, None, 300.0), None);
+        // A stale frame lands before the paint: End still waits and asks again.
+        let stale = on_frame(next.pos, next.pin_end, true, rows(0, 40, 1000));
+        assert_eq!((stale.pin_end, stale.ask_end), (true, true));
+        // The end frame comes back and is drawn: End lands.
+        let next = on_frame(stale.pos, stale.pin_end, true, end);
+        assert!(!next.ask_end);
+        let mut h = vec![20.0; 80];
+        h[79] = 100.0;
+        assert_eq!(settled_end(end, Some(&h), 300.0), Some(pos(989, 0.0)));
+    }
+
+    #[test]
+    fn rf_ctx_02_markdown_a_new_frame_keeps_the_position_it_holds() {
+        let at = pos(50, 12.0);
+        // A scroll reply that holds the row keeps the pixel offset.
+        let next = on_frame(at, false, true, rows(20, 60, 1000));
+        assert_eq!((next.pos, next.pin_end, next.ask_end), (at, false, false));
+        // A reload that starts elsewhere goes to its top.
+        assert_eq!(
+            on_frame(at, false, true, rows(0, 40, 1000)).pos,
+            pos(0, 0.0)
+        );
+        // Another file, or a switch from source, starts at the top and drops
+        // a pending End.
+        let next = on_frame(pos(999, 0.0), true, false, rows(0, 40, 1000));
+        assert_eq!(
+            (next.pos, next.pin_end, next.ask_end),
+            (pos(0, 0.0), false, false)
+        );
+        // A short file is its own end.
+        assert!(rows(0, 5, 5).reaches_end());
+        assert_eq!(
+            settled_end(rows(0, 2, 2), Some(&[20.0, 30.0]), 300.0),
+            Some(pos(0, 0.0))
+        );
     }
 
     #[test]

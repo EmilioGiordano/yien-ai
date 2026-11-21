@@ -16,8 +16,8 @@ use yien_proto::{ClientMsg, Command, PaneId};
 
 use crate::bridge::{Link, Sent, deliver};
 use crate::file_markdown::{
-    self, BODY_PAD_BOTTOM, BODY_PAD_TOP, BODY_PAD_X, Look, RowSpans, ScrollPos, heights,
-    prose_line_h, rows_for, scroll_rows, shown_rows, whole_rows,
+    self, BODY_PAD_BOTTOM, BODY_PAD_TOP, BODY_PAD_X, FrameRows, Look, RowSpans, ScrollPos, heights,
+    on_frame, prose_line_h, rows_for, scroll_rows, settled_end, shown_rows, whole_rows,
 };
 use crate::test_control::TerminalFacts;
 use crate::theme::Theme;
@@ -252,21 +252,43 @@ impl FilePaneView {
         let same_view = self.frame.as_ref().is_some_and(|f| {
             f.path == frame.path && f.rendered.is_some() == frame.rendered.is_some()
         });
+        let mut ask_end = false;
         if let Some(rendered) = &frame.rendered {
-            let holds_pos =
-                (frame.top_line..frame.top_line + rendered.len()).contains(&self.pos.row);
-            if !same_view || (!self.pin_end && !holds_pos) {
-                self.pos = ScrollPos {
-                    row: frame.top_line,
-                    offset: 0.0,
-                };
-                self.pin_end = false;
-            }
+            let rows = FrameRows {
+                top_line: frame.top_line,
+                len: rendered.len(),
+                total: frame.total_lines,
+            };
+            let next = on_frame(self.pos, self.pin_end, same_view, rows);
+            self.pos = next.pos;
+            self.pin_end = next.pin_end;
+            ask_end = next.ask_end;
         } else {
             self.pin_end = false;
         }
         self.frame = Some(frame);
+        if ask_end {
+            self.ask_end(cx);
+        }
         cx.notify();
+    }
+
+    /// The frame's rendered rows: where they start, how many, of how many.
+    fn frame_rows(&self) -> Option<FrameRows> {
+        let frame = self.frame.as_ref()?;
+        Some(FrameRows {
+            top_line: frame.top_line,
+            len: frame.rendered.as_ref()?.len(),
+            total: frame.total_lines,
+        })
+    }
+
+    /// Asks the core for the document's last rows, two views' worth so the
+    /// end page is full.
+    fn ask_end(&mut self, cx: &mut Context<Self>) {
+        let total = self.frame.as_ref().map_or(0, |f| f.total_lines);
+        let rows = 2 * self.rendered_rows();
+        self.send_viewport(total.saturating_sub(rows), rows, cx);
     }
 
     pub(crate) fn set_wrap(&mut self, wrap: bool, cx: &mut Context<Self>) {
@@ -463,22 +485,19 @@ impl FilePaneView {
     /// Shows the end of rendered Markdown: at once when the frame holds it,
     /// else bottom-aligned until the rows there are measured.
     fn end_rendered(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = &self.frame else {
+        let Some(frame) = self.frame_rows() else {
             return;
         };
-        let len = frame.rendered.as_ref().map_or(0, Vec::len);
-        let total = frame.total_lines;
-        if frame.top_line + len >= total && self.rendered_layout().is_some() {
+        if frame.reaches_end() && self.rendered_layout().is_some() {
             self.scroll_rendered(f32::MAX, cx);
             return;
         }
-        let rows = 2 * self.rendered_rows();
         self.pin_end = true;
         self.pos = ScrollPos {
-            row: total.saturating_sub(1),
+            row: frame.total.saturating_sub(1),
             offset: 0.0,
         };
-        self.send_viewport(total.saturating_sub(rows), rows, cx);
+        self.ask_end(cx);
         cx.notify();
     }
 
@@ -508,15 +527,12 @@ impl FilePaneView {
         if !self.pin_end {
             return;
         }
-        let Some((h, avail)) = self.rendered_layout() else {
+        let (Some(frame), Some(avail)) = (self.frame_rows(), self.rendered_avail()) else {
             return;
         };
-        let top = self.frame.as_ref().map_or(0, |f| f.top_line);
-        if let Some(end) = scroll_rows(&h, ScrollPos::default(), f32::MAX, avail) {
-            self.pos = ScrollPos {
-                row: top + end.row,
-                offset: end.offset,
-            };
+        let h = heights(&self.row_spans.borrow(), frame.len);
+        if let Some(end) = settled_end(frame, h.as_deref(), avail) {
+            self.pos = end;
             self.pin_end = false;
             self.request_rendered(cx);
             cx.notify();
@@ -763,7 +779,7 @@ impl FilePaneView {
             .text_size(t.text(13.0))
             .line_height(relative(1.55))
             .text_color(t.term_text);
-        if self.pin_end {
+        if self.pin_end && self.frame_rows().is_some_and(FrameRows::reaches_end) {
             return body
                 .child(column().bottom(px(BODY_PAD_BOTTOM)).children(rows))
                 .into_any_element();
