@@ -43,11 +43,13 @@ fn file_pane_seed() -> impl Strategy<Value = FilePaneRecord> {
         prop::collection::vec(text(), 1..4),
         proptest::option::of(0usize..3),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(files, active, wrap)| FilePaneRecord {
+        .prop_map(|(files, active, wrap, source)| FilePaneRecord {
             active: active.map(|i| i % files.len()),
             files,
             wrap,
+            source,
         })
 }
 

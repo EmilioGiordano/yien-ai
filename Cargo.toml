@@ -48,6 +48,7 @@ raw-window-handle = "0.6.2"
 semver = "1.0.28"
 sha2 = "0.10.9"
 synoptic = "2.2.9"
+pulldown-cmark = { version = "0.13.0", default-features = false }
 tray-icon = { version = "0.26.1", default-features = false }
 png = "0.18.1"
 

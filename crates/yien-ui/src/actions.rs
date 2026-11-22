@@ -323,6 +323,9 @@ actions!(
         /// Toggles soft line wrapping in the selected tab's file preview pane
         /// (RF-CTX-02).
         ToggleFileWrap,
+        /// Shows the Markdown file of the selected tab's file preview pane
+        /// rendered or as source (RF-CTX-02).
+        ToggleFilePreviewMode,
         /// Shows the next file tab of the selected tab's file preview pane.
         NextFileTab,
         /// Shows the previous file tab of the selected tab's file preview pane.

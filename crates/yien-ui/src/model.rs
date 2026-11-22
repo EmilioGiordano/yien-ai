@@ -2933,6 +2933,7 @@ mod tests {
                 files: vec!["src/main.rs".into()],
                 active: Some(0),
                 wrap: true,
+                mode: Default::default(),
             }),
             ..pane(101, 10, P::Idle)
         };
@@ -2965,6 +2966,7 @@ mod tests {
                 files: files.iter().map(|f| (*f).to_owned()).collect(),
                 active: Some(active),
                 wrap: false,
+                mode: Default::default(),
             }),
             ..pane(101, 10, P::Idle)
         };

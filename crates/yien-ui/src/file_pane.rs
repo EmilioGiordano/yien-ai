@@ -1,6 +1,7 @@
 //! The read-only file preview pane body (RF-CTX-02, ADR-06): draws only the
 //! visible line slice from [`FileFrame`], with line numbers, syntax highlights,
-//! soft wrap toggle, and scrolling by wheel, keys and scrollbar.
+//! soft wrap toggle, and scrolling by wheel, keys and scrollbar. A Markdown
+//! file shown rendered draws its visible rows instead.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -9,11 +10,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use yien_proto::file_preview::{FileFrame, FileLine, FileNotice};
+use yien_proto::file_preview::{FileFrame, FileLine, FileNotice, MdRow};
 use yien_proto::test_control::FileScroll;
 use yien_proto::{ClientMsg, Command, PaneId};
 
 use crate::bridge::{Link, Sent, deliver};
+use crate::file_markdown::{
+    self, BODY_PAD_BOTTOM, BODY_PAD_TOP, BODY_PAD_X, FrameRows, Look, RowSpans, ScrollPos, heights,
+    on_frame, prose_line_h, rows_for, scroll_rows, settled_end, shown_rows, whole_rows,
+};
 use crate::test_control::TerminalFacts;
 use crate::theme::Theme;
 
@@ -191,6 +196,14 @@ pub(crate) struct FilePaneView {
     track: Option<(f32, f32)>,
     /// The thumb the pointer holds, from its press to its release.
     grab: Option<ThumbGrab>,
+    /// Where each rendered Markdown row lay at the last paint.
+    row_spans: RowSpans,
+    /// Where rendered Markdown is scrolled to: `row` counts from the
+    /// document's first row. Rows differ in height, so it scrolls by pixels.
+    pos: ScrollPos,
+    /// Rendered Markdown shows its end, aligned to the bottom, until the
+    /// rows there are measured.
+    pin_end: bool,
 }
 
 impl FilePaneView {
@@ -224,6 +237,9 @@ impl FilePaneView {
             wheel_rest: 0.0,
             track: None,
             grab: None,
+            row_spans: RowSpans::default(),
+            pos: ScrollPos::default(),
+            pin_end: false,
         }
     }
 
@@ -233,8 +249,46 @@ impl FilePaneView {
 
     pub(crate) fn set_frame(&mut self, frame: FileFrame, cx: &mut Context<Self>) {
         self.frame_at_ms = stamp_frame(self.test_control);
+        let same_view = self.frame.as_ref().is_some_and(|f| {
+            f.path == frame.path && f.rendered.is_some() == frame.rendered.is_some()
+        });
+        let mut ask_end = false;
+        if let Some(rendered) = &frame.rendered {
+            let rows = FrameRows {
+                top_line: frame.top_line,
+                len: rendered.len(),
+                total: frame.total_lines,
+            };
+            let next = on_frame(self.pos, self.pin_end, same_view, rows);
+            self.pos = next.pos;
+            self.pin_end = next.pin_end;
+            ask_end = next.ask_end;
+        } else {
+            self.pin_end = false;
+        }
         self.frame = Some(frame);
+        if ask_end {
+            self.ask_end(cx);
+        }
         cx.notify();
+    }
+
+    /// The frame's rendered rows: where they start, how many, of how many.
+    fn frame_rows(&self) -> Option<FrameRows> {
+        let frame = self.frame.as_ref()?;
+        Some(FrameRows {
+            top_line: frame.top_line,
+            len: frame.rendered.as_ref()?.len(),
+            total: frame.total_lines,
+        })
+    }
+
+    /// Asks the core for the document's last rows, two views' worth so the
+    /// end page is full.
+    fn ask_end(&mut self, cx: &mut Context<Self>) {
+        let total = self.frame.as_ref().map_or(0, |f| f.total_lines);
+        let rows = 2 * self.rendered_rows();
+        self.send_viewport(total.saturating_sub(rows), rows, cx);
     }
 
     pub(crate) fn set_wrap(&mut self, wrap: bool, cx: &mut Context<Self>) {
@@ -263,20 +317,31 @@ impl FilePaneView {
     /// What `test-control` reads for `state` with `text: true`.
     pub(crate) fn facts(&self, with_text: bool) -> Option<TerminalFacts> {
         let frame = self.frame.as_ref()?;
+        let content = content_len(frame);
         let rows = with_text.then(|| {
-            if frame.lines.is_empty()
+            if content == 0
                 && let Some(notice) = &frame.notice
             {
                 vec![notice_label(notice)]
+            } else if let Some(rendered) = &frame.rendered {
+                rendered.iter().map(MdRow::plain_text).collect()
             } else {
                 frame.lines.iter().map(|l| l.text.clone()).collect()
             }
         });
-        let shown = self
-            .rows
-            .map_or(frame.lines.len(), |r| r.min(frame.lines.len()));
+        let (skip, shown) = match (frame.rendered.as_ref(), self.anchor()) {
+            (Some(_), Some(k)) => {
+                let shown = self.rendered_layout().map_or(content - k, |(h, avail)| {
+                    shown_rows(&h, self.local_pos(k), avail)
+                });
+                (k, shown)
+            }
+            (Some(_), None) => (0, content),
+            (None, _) => (0, self.rows.map_or(content, |r| r.min(content))),
+        };
         let rows = rows.map(|mut rows| {
-            if !frame.lines.is_empty() {
+            if content > 0 {
+                rows.drain(..skip.min(rows.len()));
                 rows.truncate(shown);
             }
             rows
@@ -289,7 +354,7 @@ impl FilePaneView {
             frame_at_ms: self.frame_at_ms,
             rows,
             scroll: Some(FileScroll {
-                top_line: frame.top_line,
+                top_line: self.top_and_total().0,
                 rows: self.page_rows(),
                 total_lines: frame.total_lines,
             }),
@@ -303,18 +368,175 @@ impl FilePaneView {
     }
 
     /// The lines a page holds: the measured ones, or the frame's before the
-    /// first paint.
+    /// first paint. Rendered Markdown counts the rows wholly in view.
     fn page_rows(&self) -> usize {
+        if let (Some(k), Some((h, avail))) = (self.anchor(), self.rendered_layout()) {
+            return whole_rows(&h, self.local_pos(k), avail).max(1);
+        }
         self.rows
-            .or_else(|| self.frame.as_ref().map(|f| f.lines.len()))
+            .or_else(|| self.frame.as_ref().map(content_len))
             .unwrap_or(1)
             .max(1)
     }
 
+    fn rendered(&self) -> bool {
+        self.frame.as_ref().is_some_and(|f| f.rendered.is_some())
+    }
+
+    /// The first line, or for rendered Markdown the row at the top edge,
+    /// and how many there are.
     fn top_and_total(&self) -> (usize, usize) {
-        self.frame
-            .as_ref()
-            .map_or((0, 0), |f| (f.top_line, f.total_lines))
+        match &self.frame {
+            Some(f) if f.rendered.is_some() => (self.pos.row, f.total_lines),
+            Some(f) => (f.top_line, f.total_lines),
+            None => (0, 0),
+        }
+    }
+
+    /// The scroll position's row as an index into the frame's rendered
+    /// rows, when the frame holds it.
+    fn anchor(&self) -> Option<usize> {
+        let frame = self.frame.as_ref()?;
+        let len = frame.rendered.as_ref()?.len();
+        self.pos
+            .row
+            .checked_sub(frame.top_line)
+            .filter(|k| *k < len)
+    }
+
+    fn local_pos(&self, k: usize) -> ScrollPos {
+        ScrollPos {
+            row: k,
+            offset: self.pos.offset,
+        }
+    }
+
+    /// The rendered body's height for rows, between its paddings.
+    fn rendered_avail(&self) -> Option<f32> {
+        let (_, height) = self.track?;
+        Some((height - BODY_PAD_TOP - BODY_PAD_BOTTOM).max(1.0))
+    }
+
+    /// The measured heights of the frame's rendered rows and the height
+    /// they are seen through, once all were drawn.
+    fn rendered_layout(&self) -> Option<(Vec<f32>, f32)> {
+        let len = self.frame.as_ref()?.rendered.as_ref()?.len();
+        let h = heights(&self.row_spans.borrow(), len)?;
+        Some((h, self.rendered_avail()?))
+    }
+
+    /// The rendered rows asked for below the scroll position: enough of the
+    /// shortest row, a prose line at the UI size or a code line, to fill
+    /// the view.
+    fn rendered_rows(&self) -> usize {
+        let shortest = prose_line_h(&self.theme).min(self.code_metrics().1);
+        self.rendered_avail()
+            .map_or(DEFAULT_RENDERED_ROWS, |avail| rows_for(avail, shortest))
+    }
+
+    /// Asks for a page of rows above the scroll position and a page below,
+    /// so scrolling either way has rows to draw.
+    fn request_rendered(&mut self, cx: &mut Context<Self>) {
+        let rows = self.rendered_rows();
+        let back = rows.min(self.pos.row);
+        if self.send_viewport(self.pos.row - back, back + rows, cx) {
+            self.sent_rows = Some(rows);
+        }
+    }
+
+    /// Scrolls rendered Markdown `by` pixels; nothing until its rows were
+    /// measured.
+    fn scroll_rendered(&mut self, by: f32, cx: &mut Context<Self>) {
+        let (Some(k), Some((h, avail))) = (self.anchor(), self.rendered_layout()) else {
+            return;
+        };
+        let top = self.frame.as_ref().map_or(0, |f| f.top_line);
+        let Some(next) = scroll_rows(&h, self.local_pos(k), by, avail) else {
+            return;
+        };
+        let next = ScrollPos {
+            row: top + next.row,
+            offset: next.offset,
+        };
+        if next == self.pos {
+            return;
+        }
+        let moved = next.row != self.pos.row;
+        self.pos = next;
+        self.pin_end = false;
+        if moved {
+            self.request_rendered(cx);
+        }
+        cx.notify();
+    }
+
+    /// Puts rendered row `row` at the top edge.
+    fn jump_rendered(&mut self, row: usize, cx: &mut Context<Self>) {
+        let (_, total) = self.top_and_total();
+        self.pos = ScrollPos {
+            row: row.min(total.saturating_sub(1)),
+            offset: 0.0,
+        };
+        self.pin_end = false;
+        self.request_rendered(cx);
+        cx.notify();
+    }
+
+    /// Shows the end of rendered Markdown: at once when the frame holds it,
+    /// else bottom-aligned until the rows there are measured.
+    fn end_rendered(&mut self, cx: &mut Context<Self>) {
+        let Some(frame) = self.frame_rows() else {
+            return;
+        };
+        if frame.reaches_end() && self.rendered_layout().is_some() {
+            self.scroll_rendered(f32::MAX, cx);
+            return;
+        }
+        self.pin_end = true;
+        self.pos = ScrollPos {
+            row: frame.total.saturating_sub(1),
+            offset: 0.0,
+        };
+        self.ask_end(cx);
+        cx.notify();
+    }
+
+    /// Scrolls rendered Markdown for a key; `false` for a key that does not
+    /// scroll.
+    fn rendered_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let line = prose_line_h(&self.theme);
+        let page = self.rendered_avail().map_or(line, |a| (a - line).max(line));
+        match key {
+            "up" => self.scroll_rendered(-line, cx),
+            "down" => self.scroll_rendered(line, cx),
+            "pageup" => self.scroll_rendered(-page, cx),
+            "pagedown" => self.scroll_rendered(page, cx),
+            "home" if self.frame.as_ref().is_some_and(|f| f.top_line == 0) => {
+                self.scroll_rendered(-f32::MAX, cx);
+            }
+            "home" => self.jump_rendered(0, cx),
+            "end" => self.end_rendered(cx),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Once the bottom-aligned end is measured, keeps that place as a
+    /// scroll position.
+    fn settle_end(&mut self, cx: &mut Context<Self>) {
+        if !self.pin_end {
+            return;
+        }
+        let (Some(frame), Some(avail)) = (self.frame_rows(), self.rendered_avail()) else {
+            return;
+        };
+        let h = heights(&self.row_spans.borrow(), frame.len);
+        if let Some(end) = settled_end(frame, h.as_deref(), avail) {
+            self.pos = end;
+            self.pin_end = false;
+            self.request_rendered(cx);
+            cx.notify();
+        }
     }
 
     /// Takes the code area's bounds at a paint; a new number of rows goes
@@ -328,6 +550,13 @@ impl FilePaneView {
         if self.rows != Some(rows) {
             self.rows = Some(rows);
             cx.notify();
+        }
+        if self.rendered() {
+            self.settle_end(cx);
+            if !self.pin_end && self.sent_rows != Some(self.rendered_rows()) {
+                self.request_rendered(cx);
+            }
+            return;
         }
         if self.sent_rows == Some(rows) {
             return;
@@ -367,6 +596,15 @@ impl FilePaneView {
     }
 
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.rendered() {
+            let line = prose_line_h(&self.theme);
+            let by = match event.delta {
+                ScrollDelta::Lines(point) => -point.y * line,
+                ScrollDelta::Pixels(point) => -f32::from(point.y),
+            };
+            self.scroll_rendered(by, cx);
+            return;
+        }
         let line_h = self.code_metrics().1;
         let delta_y: f32 = match event.delta {
             ScrollDelta::Lines(point) => -point.y * line_h,
@@ -384,6 +622,12 @@ impl FilePaneView {
         let m = &event.keystroke.modifiers;
         if m.control || m.alt || m.platform || m.function {
             cx.propagate();
+            return;
+        }
+        if self.rendered() {
+            if !self.rendered_key(&event.keystroke.key, cx) {
+                cx.propagate();
+            }
             return;
         }
         let (top, total) = self.top_and_total();
@@ -413,6 +657,10 @@ impl FilePaneView {
             TrackHit::PageUp => "pageup",
             TrackHit::PageDown => "pagedown",
         };
+        if self.rendered() {
+            self.rendered_key(key, cx);
+            return;
+        }
         if let Some(to) = scroll_key(key, top, rows, total) {
             self.scroll_to(to, cx);
         }
@@ -444,6 +692,12 @@ impl FilePaneView {
             self.page_rows(),
             total,
         );
+        if self.rendered() {
+            if to != self.pos.row {
+                self.jump_rendered(to, cx);
+            }
+            return;
+        }
         self.scroll_to(to, cx);
     }
 
@@ -451,9 +705,10 @@ impl FilePaneView {
     /// when the whole file fits.
     fn render_scrollbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (_, track_h) = self.track?;
-        let frame = self.frame.as_ref().filter(|f| !f.lines.is_empty())?;
+        let frame = self.frame.as_ref().filter(|f| content_len(f) > 0)?;
         let rows = self.page_rows();
-        let thumb = scroll_thumb(track_h, frame.top_line, rows, frame.total_lines)?;
+        let (top, _) = self.top_and_total();
+        let thumb = scroll_thumb(track_h, top, rows, frame.total_lines)?;
         let t = self.theme;
         let thumb = div()
             .id(("file-scroll-thumb", self.id.get()))
@@ -475,7 +730,7 @@ impl FilePaneView {
                 .aria_orientation(accesskit::Orientation::Vertical)
                 .aria_min_numeric_value(0.0)
                 .aria_max_numeric_value(last_top(rows, frame.total_lines) as f64)
-                .aria_numeric_value(frame.top_line as f64)
+                .aria_numeric_value(top as f64)
                 .absolute()
                 .top_0()
                 .right_0()
@@ -489,6 +744,54 @@ impl FilePaneView {
                 .child(thumb)
                 .into_any_element(),
         )
+    }
+
+    /// The rendered rows: from the scroll position down, drawn from the top
+    /// edge less its offset; the rows above it, drawn up from that same
+    /// line, so neither waits on a measurement. At the pinned end all rows
+    /// sit on the bottom edge.
+    fn render_rendered(&self, rendered: &[MdRow], top_line: usize, look: &Look) -> AnyElement {
+        let t = &look.theme;
+        {
+            let mut spans = self.row_spans.borrow_mut();
+            spans.clear();
+            spans.resize(rendered.len(), (f32::NAN, f32::NAN));
+        }
+        let mut rows: Vec<AnyElement> = rendered
+            .iter()
+            .enumerate()
+            .map(|(k, row)| {
+                file_markdown::render_row(row, k, top_line + k == 0, look, &self.row_spans)
+            })
+            .collect();
+        let column = || {
+            v_flex()
+                .absolute()
+                .left(px(BODY_PAD_X))
+                .right(px(BODY_PAD_X.max(SCROLLBAR_W)))
+        };
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .text_size(t.text(13.0))
+            .line_height(relative(1.55))
+            .text_color(t.term_text);
+        if self.pin_end && self.frame_rows().is_some_and(FrameRows::reaches_end) {
+            return body
+                .child(column().bottom(px(BODY_PAD_BOTTOM)).children(rows))
+                .into_any_element();
+        }
+        let (k, offset) = self.anchor().map_or((0, 0.0), |k| (k, self.pos.offset));
+        let below = rows.split_off(k);
+        let edge = BODY_PAD_TOP - offset;
+        body.child(column().top(px(edge)).children(below))
+            .when_some(self.track.filter(|_| !rows.is_empty()), |d, (_, height)| {
+                d.child(column().bottom(px(height - edge)).children(rows))
+            })
+            .into_any_element()
     }
 
     fn render_line(&self, line: &FileLine, gutter_w: f32) -> AnyElement {
@@ -563,7 +866,7 @@ impl Render for FilePaneView {
             .frame
             .as_ref()
             .and_then(|f| f.notice.as_ref())
-            .filter(|_| !self.frame.as_ref().is_some_and(|f| f.lines.is_empty()))
+            .filter(|_| self.frame.as_ref().is_some_and(|f| content_len(f) > 0))
             .map(|notice| {
                 div()
                     .flex_none()
@@ -587,7 +890,7 @@ impl Render for FilePaneView {
                 .text_color(t.term_faint)
                 .child("Loading…")
                 .into_any_element(),
-            Some(frame) if frame.lines.is_empty() => {
+            Some(frame) if content_len(frame) == 0 => {
                 let msg = frame
                     .notice
                     .as_ref()
@@ -602,6 +905,20 @@ impl Render for FilePaneView {
                     .text_color(t.term_muted)
                     .child(msg)
                     .into_any_element()
+            }
+            Some(FileFrame {
+                rendered: Some(rendered),
+                top_line,
+                ..
+            }) => {
+                let look = Look {
+                    theme: t,
+                    mono: self.family.clone(),
+                    code_size: font_size,
+                    code_line_h: line_h,
+                    wrap: self.wrap,
+                };
+                self.render_rendered(rendered, *top_line, &look)
             }
             Some(frame) => {
                 let rows: Vec<AnyElement> = frame
@@ -686,6 +1003,14 @@ impl Render for FilePaneView {
                     .children(scrollbar),
             )
     }
+}
+
+/// Rendered rows asked for before the pane's height is known.
+const DEFAULT_RENDERED_ROWS: usize = 40;
+
+/// The lines or rendered rows a frame carries.
+fn content_len(frame: &FileFrame) -> usize {
+    frame.rendered.as_ref().map_or(frame.lines.len(), Vec::len)
 }
 
 pub(crate) fn notice_label(notice: &FileNotice) -> String {

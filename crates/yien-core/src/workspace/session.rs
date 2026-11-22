@@ -3,6 +3,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use yien_layout::{Shape, Tree};
+use yien_proto::file_preview::PreviewMode;
 use yien_proto::{
     AgentState, PaneId, ProjectId, SideBar, SideBars, TabId, is_shell_profile, same_folder,
 };
@@ -241,6 +242,11 @@ impl Workspace {
                         files: saved_files.files.clone(),
                         active,
                         wrap: saved_files.wrap,
+                        mode: if saved_files.source {
+                            PreviewMode::Source
+                        } else {
+                            PreviewMode::Rendered
+                        },
                     },
                 });
                 continue;
@@ -356,6 +362,7 @@ impl Workspace {
                 }
                 RestoredPane::File { pane, files } => {
                     let active_path = files.active_file().unwrap_or_default().to_owned();
+                    let mode = files.mode;
                     let default_name = file_leaf_name(&active_path);
                     self.panes.insert(
                         pane.id,
@@ -391,6 +398,7 @@ impl Workspace {
                         pane: pane.id,
                         root: dir.clone(),
                         path: active_path,
+                        mode,
                     });
                 }
             }
@@ -503,6 +511,7 @@ fn pane_record(id: PaneId, p: &Pane) -> PaneRecord {
                 files: files.files.clone(),
                 active: files.active_index(),
                 wrap: files.wrap,
+                source: files.mode == PreviewMode::Source,
             }),
         };
     }
@@ -1355,6 +1364,62 @@ mod tests {
     }
 
     #[test]
+    fn rf_ctx_02_a_file_pane_saved_before_the_markdown_mode_restores_rendered() {
+        let (mut ws, _) = workspace("claude");
+        let tab = ws.tabs[1].id;
+        ws.apply(
+            Command::OpenFile {
+                tab,
+                path: "README.md".into(),
+            },
+            &resolve,
+        )
+        .unwrap();
+        let file_pane = ws.tabs[1].focused;
+        ws.apply(
+            Command::SetFilePreviewMode {
+                pane: file_pane,
+                mode: PreviewMode::Source,
+            },
+            &resolve,
+        )
+        .unwrap();
+        // A session file written before `source` existed has no such key.
+        let bytes = yien_session::serialize(&ws.to_session()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut removed = 0;
+        for pane in doc["projects"][0]["tabs"][1]["panes"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(files) = pane.get_mut("files").and_then(|f| f.as_object_mut()) {
+                removed += usize::from(files.remove("source").is_some());
+            }
+        }
+        assert_eq!(removed, 1);
+        let old = yien_session::deserialize(&serde_json::to_vec(&doc).unwrap()).unwrap();
+
+        let (back, fx, _) = restore(&old, &all_exist(&old));
+        let info = back
+            .snapshot()
+            .panes
+            .into_iter()
+            .find(|p| p.id == file_pane)
+            .unwrap();
+        assert!(matches!(
+            info.kind,
+            yien_proto::PaneKind::File(yien_proto::FilePaneInfo {
+                mode: PreviewMode::Rendered,
+                ..
+            })
+        ));
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::LoadFile { pane, mode: PreviewMode::Rendered, .. } if *pane == file_pane
+        )));
+    }
+
+    #[test]
     fn rf_ctx_02_file_preview_panes_survive_session_save_and_restore() {
         let (mut ws, term_pane) = workspace("claude");
         let tab = ws.tabs[1].id;
@@ -1378,8 +1443,22 @@ mod tests {
         assert_ne!(file_pane, term_pane);
         ws.apply(Command::ToggleFileWrap { pane: file_pane }, &resolve)
             .unwrap();
+        ws.apply(
+            Command::SetFilePreviewMode {
+                pane: file_pane,
+                mode: PreviewMode::Source,
+            },
+            &resolve,
+        )
+        .unwrap();
 
         let saved = ws.to_session();
+        let record = saved.projects[0].tabs[1]
+            .panes
+            .iter()
+            .find_map(|p| p.files.as_ref())
+            .unwrap();
+        assert!(record.source && record.wrap);
         let bytes = yien_session::serialize(&saved).unwrap();
         let decoded = yien_session::deserialize(&bytes).unwrap();
         let (back, fx, notes) = restore(&decoded, &all_exist(&decoded));
@@ -1393,8 +1472,9 @@ mod tests {
         );
         assert!(fx.iter().any(|e| matches!(
             e,
-            Effect::LoadFile { pane, root, path }
+            Effect::LoadFile { pane, root, path, mode }
             if *pane == file_pane && root == ROOT && path == "Cargo.toml"
+                && *mode == PreviewMode::Source
         )));
     }
 

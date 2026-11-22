@@ -19,6 +19,7 @@ yien-git = { workspace = true }
 yien-which = { workspace = true }
 getrandom = { workspace = true }
 synoptic = { workspace = true }
+pulldown-cmark = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -26,6 +27,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 yien-pty = { workspace = true, features = ["fake"] }
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -310,6 +310,7 @@ pub struct PaneRecord {
 ///     files: vec!["src/main.rs".into(), "Cargo.toml".into()],
 ///     active: Some(0),
 ///     wrap: true,
+///     source: false,
 /// };
 /// assert_eq!(files.files.len(), 2);
 /// ```
@@ -324,6 +325,9 @@ pub struct FilePaneRecord {
     /// Whether soft line wrapping is enabled for this file preview pane.
     #[serde(default)]
     pub wrap: bool,
+    /// Whether Markdown files show their source instead of rendered.
+    #[serde(default)]
+    pub source: bool,
 }
 
 /// The agent session a pane holds.

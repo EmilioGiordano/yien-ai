@@ -626,6 +626,10 @@ pub struct PaneState {
     /// Whether soft line wrap is enabled, when `kind` is `"file"` (RF-CTX-02).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<bool>,
+    /// How the shown file is drawn, when `kind` is `"file"`: `"rendered"`
+    /// for a Markdown file shown rendered, `"source"` otherwise (RF-CTX-02).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Where its scrollbar stands, when `kind` is `"file"` and a frame came.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<FileScroll>,
@@ -720,6 +724,7 @@ mod tests {
             open_files: None,
             active_file: None,
             wrap: None,
+            mode: None,
             scroll: None,
         }
     }
@@ -1042,6 +1047,7 @@ mod tests {
             open_files: Some(vec!["src/main.rs".into(), "Cargo.toml".into()]),
             active_file: Some("src/main.rs".into()),
             wrap: Some(true),
+            mode: Some("rendered".into()),
             scroll: Some(FileScroll {
                 top_line: 270,
                 rows: 30,
@@ -1053,6 +1059,7 @@ mod tests {
         assert_eq!(json["kind"], "file");
         assert_eq!(json["active_file"], "src/main.rs");
         assert_eq!(json["wrap"], true);
+        assert_eq!(json["mode"], "rendered");
         assert_eq!(json["scroll"]["top_line"], 270);
         assert_eq!(json["scroll"]["rows"], 30);
         assert_eq!(json["scroll"]["total_lines"], 300);

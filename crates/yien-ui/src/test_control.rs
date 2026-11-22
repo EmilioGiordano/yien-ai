@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use gpui_kit::Keystroke;
 use tokio::sync::mpsc;
+use yien_proto::file_preview::{PreviewMode, is_markdown_path};
 use yien_proto::frame::Frame;
 use yien_proto::test_control::{
     CommandArgs, FileScroll, PaneState, ProjectState, Reply, Request, SplitWay, TabState,
@@ -315,14 +316,15 @@ pub(crate) fn workspace_state(
             for id in ids {
                 let pane = ws.pane(id);
                 let facts = terminal(id);
-                let (kind, open_files, active_file, wrap) = match pane.file_pane() {
+                let (kind, open_files, active_file, wrap, mode) = match pane.file_pane() {
                     Some(file) => (
                         "file".to_owned(),
                         Some(file.files.clone()),
                         file.active_file().map(str::to_owned),
                         Some(file.wrap),
+                        Some(shown_mode(file).key().to_owned()),
                     ),
-                    None => ("terminal".to_owned(), None, None, None),
+                    None => ("terminal".to_owned(), None, None, None, None),
                 };
                 panes.push(PaneState {
                     id,
@@ -349,11 +351,22 @@ pub(crate) fn workspace_state(
                     open_files,
                     active_file,
                     wrap,
+                    mode,
                 });
             }
         }
     }
     (projects, tabs, panes)
+}
+
+/// How a file pane draws its shown file: a Markdown file in the pane's
+/// mode, any other file as source.
+fn shown_mode(file: &yien_proto::FilePaneInfo) -> PreviewMode {
+    if file.active_file().is_some_and(is_markdown_path) {
+        file.mode
+    } else {
+        PreviewMode::Source
+    }
 }
 
 /// A badge as a snake case key, as `badge` carries it.
@@ -900,6 +913,7 @@ mod tests {
                 files: vec!["src/main.rs".into(), "Cargo.toml".into()],
                 active: Some(0),
                 wrap: true,
+                mode: PreviewMode::Rendered,
             }),
             ..pane_info(4, 2, "file", "main.rs", yien_proto::AgentState::Idle)
         });
@@ -926,6 +940,8 @@ mod tests {
         );
         assert_eq!(file_pane.active_file.as_deref(), Some("src/main.rs"));
         assert_eq!(file_pane.wrap, Some(true));
+        // A Rust file shows its source whatever the pane's Markdown mode.
+        assert_eq!(file_pane.mode.as_deref(), Some("source"));
 
         assert_eq!(
             resolve_command(
@@ -945,6 +961,38 @@ mod tests {
             resolve_command("file.toggle_wrap", &CommandArgs::default(), &ws),
             Ok(Run::Catalog("file.toggle_wrap"))
         );
+        assert_eq!(
+            resolve_command("file.toggle_rendered", &CommandArgs::default(), &ws),
+            Ok(Run::Catalog("file.toggle_rendered"))
+        );
+    }
+
+    #[test]
+    fn rf_ctx_02_test_control_reports_how_a_markdown_file_is_drawn() {
+        let mode_of = |mode: PreviewMode| {
+            let mut ws = workspace();
+            ws.pane_updated(&PaneInfo {
+                name: "README.md".into(),
+                profile: "Files".into(),
+                profile_id: ProfileId::new("file"),
+                running: false,
+                runs_session: false,
+                kind: yien_proto::PaneKind::File(yien_proto::FilePaneInfo {
+                    files: vec!["README.md".into()],
+                    active: Some(0),
+                    wrap: false,
+                    mode,
+                }),
+                ..pane_info(4, 2, "file", "README.md", yien_proto::AgentState::Idle)
+            });
+            let (_, _, panes) = workspace_state(&ws, None, &|_| None);
+            panes
+                .into_iter()
+                .find(|p| p.id == PaneId::new(4))
+                .and_then(|p| p.mode)
+        };
+        assert_eq!(mode_of(PreviewMode::Rendered).as_deref(), Some("rendered"));
+        assert_eq!(mode_of(PreviewMode::Source).as_deref(), Some("source"));
     }
 
     #[test]

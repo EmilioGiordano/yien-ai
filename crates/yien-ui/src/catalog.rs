@@ -352,6 +352,12 @@ pub(crate) const CATALOG: &[CommandSpec] = &[
         ToggleFileWrap,
         []
     ),
+    command!(
+        "file.toggle_rendered",
+        "file: toggle rendered markdown",
+        ToggleFilePreviewMode,
+        []
+    ),
     command!("file.next_tab", "file: next file tab", NextFileTab, []),
     command!(
         "file.previous_tab",
