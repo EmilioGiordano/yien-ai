@@ -232,8 +232,8 @@ impl<A> OpenMenu<A> {
             .enumerate()
             .map(|(at, entry)| match entry {
                 MenuEntry::Separator => div()
-                    .mx(px(6.0))
-                    .my(px(4.0))
+                    .mx(t.size(6.0))
+                    .my(t.size(4.0))
                     .h(px(1.0))
                     .bg(t.term_line)
                     .into_any_element(),
@@ -249,10 +249,10 @@ impl<A> OpenMenu<A> {
                         .when_some(item.keys.clone(), |d, keys| d.aria_keyshortcuts(keys))
                         .when(!enabled, |d| d.aria_description("Unavailable"))
                         .items_center()
-                        .gap(px(12.0))
-                        .px(px(10.0))
-                        .py(px(5.0))
-                        .rounded(px(5.0))
+                        .gap(t.size(12.0))
+                        .px(t.size(10.0))
+                        .py(t.size(5.0))
+                        .rounded(t.size(5.0))
                         .when(selected, |d| d.bg(t.term_raised))
                         .when(enabled, |d| {
                             d.cursor_pointer()
@@ -287,9 +287,9 @@ impl<A> OpenMenu<A> {
             .track_focus(&self.focus)
             .key_context(MENU_CONTEXT)
             .occlude()
-            .w(px(MENU_WIDTH))
-            .p(px(4.0))
-            .rounded(px(7.0))
+            .w(t.size(MENU_WIDTH))
+            .p(t.size(4.0))
+            .rounded(t.size(7.0))
             .border_1()
             .border_color(t.term_strong)
             .bg(t.term_bg)
@@ -304,7 +304,7 @@ impl<A> OpenMenu<A> {
         deferred(
             anchored()
                 .position(self.at)
-                .snap_to_window_with_margin(px(EDGE_MARGIN))
+                .snap_to_window_with_margin(t.size(EDGE_MARGIN))
                 .child(menu),
         )
         .into_any_element()

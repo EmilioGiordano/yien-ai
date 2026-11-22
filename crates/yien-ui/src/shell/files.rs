@@ -601,9 +601,9 @@ impl Shell {
                 .aria_label(label)
                 .aria_selected(selected)
                 .items_center()
-                .gap(px(6.0))
-                .px(px(10.0))
-                .py(px(6.0))
+                .gap(t.size(6.0))
+                .px(t.size(10.0))
+                .py(t.size(6.0))
                 .border_b_2()
                 .border_color(if selected {
                     t.text
@@ -620,9 +620,9 @@ impl Shell {
             .role(Role::TabList)
             .aria_label("Context views")
             .flex_none()
-            .gap(px(2.0))
-            .px(px(8.0))
-            .pt(px(6.0))
+            .gap(t.size(2.0))
+            .px(t.size(8.0))
+            .pt(t.size(6.0))
             .border_b_1()
             .border_color(t.line)
             .child(
@@ -665,10 +665,10 @@ impl Shell {
             ))
             .aria_toggled(super::toggled(review))
             .flex_none()
-            .mb(px(4.0))
-            .px(px(8.0))
-            .py(px(2.0))
-            .rounded(px(5.0))
+            .mb(t.size(4.0))
+            .px(t.size(8.0))
+            .py(t.size(2.0))
+            .rounded(t.size(5.0))
             .border_1()
             .border_color(if review { t.ai } else { t.line })
             .text_size(t.text(12.0))
@@ -708,8 +708,8 @@ impl Shell {
             .child(
                 div()
                     .flex_none()
-                    .px(px(12.0))
-                    .py(px(8.0))
+                    .px(t.size(12.0))
+                    .py(t.size(8.0))
                     .border_b_1()
                     .border_color(t.line)
                     .text_size(t.text(13.0))
@@ -737,16 +737,16 @@ impl Shell {
                     .track_scroll(&self.files.scroll)
                     .flex_1()
                     .min_h_0()
-                    .px(px(6.0))
-                    .py(px(4.0)),
+                    .px(t.size(6.0))
+                    .py(t.size(4.0)),
                 ),
             )
             .when_some(note, |view, note| {
                 view.child(
                     div()
                         .flex_none()
-                        .px(px(12.0))
-                        .py(px(8.0))
+                        .px(t.size(12.0))
+                        .py(t.size(8.0))
                         .text_size(t.text(12.5))
                         .text_color(t.muted)
                         .child(note),
@@ -788,11 +788,11 @@ impl Shell {
                 };
                 let base = h_flex()
                     .id(("file-row", at))
-                    .h(px(ROW_HEIGHT))
+                    .h(t.size(ROW_HEIGHT))
                     .items_center()
-                    .gap(px(6.0))
-                    .pr(px(6.0))
-                    .rounded(px(5.0))
+                    .gap(t.size(6.0))
+                    .pr(t.size(6.0))
+                    .rounded(t.size(5.0))
                     .border_1()
                     .border_color(transparent_black())
                     .text_size(t.text(12.5))
@@ -833,7 +833,7 @@ impl Shell {
                             .role(Role::TreeItem)
                             .aria_label(label)
                             .when(kind.is_dir(), |row| row.aria_expanded(expanded))
-                            .pl(px(8.0 + depth as f32 * INDENT))
+                            .pl(t.size(8.0 + depth as f32 * INDENT))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
                             .child(chevron(kind, expanded, &t))
@@ -864,7 +864,7 @@ impl Shell {
                         let row = base
                             .role(Role::TreeItem)
                             .aria_label(entry_label(&path, kind, None))
-                            .pl(px(8.0))
+                            .pl(t.size(8.0))
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover))
                             .when_some(mono.clone(), |d, family| d.font_family(family))
@@ -904,7 +904,7 @@ impl Shell {
                         let what = if folder { "folder" } else { "file" };
                         match &field {
                             Some(input) => base
-                                .pl(px(8.0 + depth as f32 * INDENT))
+                                .pl(t.size(8.0 + depth as f32 * INDENT))
                                 .child(chevron(kind, false, &t))
                                 .child(icon(kind, &t))
                                 .child(name_field(input, &format!("Name of the new {what}"), &t))
@@ -912,10 +912,10 @@ impl Shell {
                             None => base.into_any_element(),
                         }
                     }
-                    Row::Loading { depth } => note_row(base, depth, "Loading…", t.faint),
-                    Row::More { depth } => note_row(base, depth, "… more", t.faint),
+                    Row::Loading { depth } => note_row(base, depth, "Loading…", t.faint, &t),
+                    Row::More { depth } => note_row(base, depth, "… more", t.faint, &t),
                     Row::Failed { depth, reason } => {
-                        note_row(base, depth, &format!("Cannot list: {reason}"), t.muted)
+                        note_row(base, depth, &format!("Cannot list: {reason}"), t.muted, &t)
                     }
                 }
             })
@@ -944,8 +944,8 @@ fn name_field(input: &Entity<InputState>, label: &str, t: &crate::theme::Theme) 
         .flex_1()
         .min_w_0()
         .key_context(FILE_NAME_CONTEXT)
-        .px(px(4.0))
-        .rounded(px(4.0))
+        .px(t.size(4.0))
+        .rounded(t.size(4.0))
         .border_1()
         .border_color(t.ai)
         .bg(t.bg)
@@ -957,8 +957,14 @@ fn name_field(input: &Entity<InputState>, label: &str, t: &crate::theme::Theme) 
         .into_any_element()
 }
 
-fn note_row(row: Stateful<Div>, depth: usize, text: &str, color: Rgba) -> AnyElement {
-    row.pl(px(8.0 + depth as f32 * INDENT + 30.0))
+fn note_row(
+    row: Stateful<Div>,
+    depth: usize,
+    text: &str,
+    color: Rgba,
+    t: &crate::theme::Theme,
+) -> AnyElement {
+    row.pl(t.size(8.0 + depth as f32 * INDENT + 30.0))
         .text_color(color)
         .child(text.to_owned())
         .into_any_element()
@@ -966,11 +972,11 @@ fn note_row(row: Stateful<Div>, depth: usize, text: &str, color: Rgba) -> AnyEle
 
 fn chevron(kind: EntryKind, expanded: bool, t: &crate::theme::Theme) -> AnyElement {
     if !kind.is_dir() {
-        return div().flex_none().w(px(11.0)).into_any_element();
+        return div().flex_none().w(t.size(11.0)).into_any_element();
     }
     svg()
         .path(assets::CHEVRON)
-        .size(px(11.0))
+        .size(t.size(11.0))
         .flex_none()
         .text_color(t.faint)
         .when(!expanded, |c| {
@@ -981,11 +987,11 @@ fn chevron(kind: EntryKind, expanded: bool, t: &crate::theme::Theme) -> AnyEleme
 
 fn icon(kind: EntryKind, t: &crate::theme::Theme) -> AnyElement {
     if !kind.is_dir() {
-        return div().flex_none().w(px(13.0)).into_any_element();
+        return div().flex_none().w(t.size(13.0)).into_any_element();
     }
     svg()
         .path(assets::FOLDER)
-        .size(px(13.0))
+        .size(t.size(13.0))
         .flex_none()
         .text_color(t.muted)
         .into_any_element()

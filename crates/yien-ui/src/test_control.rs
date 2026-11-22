@@ -8,10 +8,10 @@ use gpui_kit::Keystroke;
 use tokio::sync::mpsc;
 use yien_proto::frame::Frame;
 use yien_proto::test_control::{
-    CommandArgs, FileScroll, PaneState, ProjectState, Reply, Request, SplitWay, TabState,
-    VisibleRows,
+    CommandArgs, FileScroll, LayoutState, PaneState, ProjectState, Reply, Request, RowBounds,
+    SplitWay, TabState, VisibleRows,
 };
-use yien_proto::{Orientation, PaneId};
+use yien_proto::{Orientation, PaneId, TabId};
 
 use crate::agent_badge::{AgentBadge, Badge, ShellBadge};
 use crate::catalog::spec;
@@ -19,6 +19,8 @@ use crate::grid::named_key;
 use crate::model::{AgentState, TabMark, WorkspaceView};
 use crate::palette::Target;
 use crate::pane_head::{pane_badge, program_tag};
+use crate::sidebars::Drawn;
+use crate::theme::Theme;
 
 /// One request from the test control pipe and where its reply goes.
 ///
@@ -103,6 +105,7 @@ pub(crate) const ARGUMENT_COMMANDS: &[&str] = &[
     "file.open",
     "files.menu",
     "files.menu_pick",
+    "settings.set",
 ];
 
 /// What a command id runs.
@@ -119,6 +122,9 @@ pub(crate) enum Run {
     /// Run the open Files menu's item with this label, typing `name` into
     /// the name field it opens and confirming it.
     FilesMenuPick { item: String, name: Option<String> },
+    /// Set a setting the way the open settings screen's control does
+    /// (RF-CFG-05).
+    SettingsSet { key: String, value: String },
 }
 
 /// Which command `id` runs with `args`, checked against what the window
@@ -210,6 +216,17 @@ pub(crate) fn resolve_command(
                 return Err("no tab is selected".to_owned());
             }
             return Ok(Run::FilesMenu { path });
+        }
+        "settings.set" => {
+            let key = args
+                .key
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.key: a settings file key"))?;
+            let value = args
+                .value
+                .clone()
+                .ok_or_else(|| format!("{id} needs args.value"))?;
+            return Ok(Run::SettingsSet { key, value });
         }
         "files.menu_pick" => {
             let item = args
@@ -369,6 +386,44 @@ fn badge_key(badge: Badge) -> &'static str {
     }
 }
 
+/// The interface size and what it measures (RF-CFG-02): the title and status
+/// bars at `theme`'s size from their prototype heights `bars`, the side bars
+/// as drawn, and the rows of `tabs` where `painted` says they were last
+/// painted and on screen (`[x, y, width, height]`); no rows while the tab
+/// bar is hidden.
+pub(crate) fn layout_state(
+    theme: &Theme,
+    bars: (f32, f32),
+    drawn: Drawn,
+    tabs: &[TabState],
+    painted: &dyn Fn(TabId) -> Option<[f32; 4]>,
+) -> LayoutState {
+    let tab_rows = if drawn.tab_bar.is_some() {
+        tabs.iter()
+            .filter_map(|tab| {
+                let [x, y, width, height] = painted(tab.id)?;
+                Some(RowBounds {
+                    tab: tab.id,
+                    x,
+                    y,
+                    width,
+                    height,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    LayoutState {
+        ui_size: theme.ui_size,
+        title_bar_height: theme.dim(bars.0),
+        status_bar_height: theme.dim(bars.1),
+        tab_bar_width: drawn.tab_bar,
+        context_bar_width: drawn.context_bar,
+        tab_rows,
+    }
+}
+
 /// A state as a snake case key, as `mark` carries it.
 fn state_key(state: AgentState) -> &'static str {
     match state {
@@ -511,6 +566,41 @@ mod tests {
             cursor_color: Rgb::default(),
             modes: Default::default(),
         }
+    }
+
+    #[test]
+    fn rf_cfg_02_the_layout_reports_the_interface_size_and_its_bars() {
+        use crate::sidebars;
+        use crate::theme::ThemeKind;
+        use yien_proto::SideBars;
+
+        let ws = workspace();
+        let (_, tabs, _) = workspace_state(&ws, None, &|_| None);
+        let row = |tab: TabId| (tab == TabId::new(2)).then_some([8.0, 90.0, 329.0, 38.0]);
+        for (size, title, status, tab_bar) in [(13.0, 40.0, 26.0, 264.0), (17.0, 52.0, 34.0, 345.0)]
+        {
+            let theme = Theme::of(ThemeKind::Sumi).with_ui_size(size);
+            let drawn = sidebars::drawn(&SideBars::default(), 1440.0, theme.scale());
+            let layout = layout_state(&theme, (40.0, 26.0), drawn, &tabs, &row);
+            assert_eq!(layout.ui_size, size);
+            assert_eq!(
+                (layout.title_bar_height, layout.status_bar_height),
+                (title, status),
+                "{size}"
+            );
+            assert_eq!(layout.tab_bar_width, Some(tab_bar), "{size}");
+            // Only the rows painted are reported.
+            assert_eq!(layout.tab_rows.len(), 1);
+            assert_eq!(layout.tab_rows[0].tab, TabId::new(2));
+            assert_eq!(layout.tab_rows[0].height, 38.0);
+        }
+        let mut hidden = SideBars::default();
+        sidebars::toggle(&mut hidden, sidebars::Bar::Tab);
+        let theme = Theme::of(ThemeKind::Sumi);
+        let drawn = sidebars::drawn(&hidden, 1440.0, 1.0);
+        let layout = layout_state(&theme, (40.0, 26.0), drawn, &tabs, &row);
+        assert_eq!(layout.tab_bar_width, None);
+        assert!(layout.tab_rows.is_empty(), "a hidden bar's rows are stale");
     }
 
     #[test]
@@ -720,6 +810,8 @@ mod tests {
             path: Some("src/main.rs".into()),
             item: Some("Rename…".into()),
             name: Some("lib.rs".into()),
+            key: Some("theme".into()),
+            value: Some("washi".into()),
         }),
     ];
 
@@ -803,6 +895,29 @@ mod tests {
     }
 
     #[test]
+    fn rf_cfg_05_settings_set_needs_a_key_and_a_value() {
+        let ws = workspace();
+        let args = |key: Option<&str>, value: Option<&str>| CommandArgs {
+            key: key.map(str::to_owned),
+            value: value.map(str::to_owned),
+            ..CommandArgs::default()
+        };
+        assert_eq!(
+            resolve_command("settings.set", &args(Some("ui.font.size"), Some("17")), &ws),
+            Ok(Run::SettingsSet {
+                key: "ui.font.size".into(),
+                value: "17".into()
+            })
+        );
+        assert!(resolve_command("settings.set", &args(None, Some("17")), &ws).is_err());
+        assert!(resolve_command("settings.set", &args(Some("theme"), None), &ws).is_err());
+        assert_eq!(
+            resolve_command("settings.open", &CommandArgs::default(), &ws),
+            Ok(Run::Catalog("settings.open"))
+        );
+    }
+
+    #[test]
     fn rf_ctx_01_the_file_menu_opens_on_a_row_and_picks_an_item_by_label() {
         let ws = workspace();
         let args = |path: Option<&str>, item: Option<&str>, name: Option<&str>| CommandArgs {
@@ -856,6 +971,8 @@ mod tests {
             path: None,
             item: None,
             name: None,
+            key: None,
+            value: None,
         };
         for id in ARGUMENT_COMMANDS {
             assert!(resolve_command(id, &unknown, &ws).is_err(), "{id}");

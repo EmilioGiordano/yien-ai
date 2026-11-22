@@ -14,7 +14,9 @@ use gpui_kit::{
 };
 use yien_proto::ShellKind;
 
-/// The badge's side, in px at any UI font size.
+use crate::theme::Theme;
+
+/// The badge's side at the default UI font size; it scales with the window.
 pub(crate) const SIDE: f32 = 18.0;
 /// The side of the disc a corner mark sits on.
 pub(crate) const CORNER: f32 = 10.0;
@@ -204,17 +206,23 @@ impl Mark {
     }
 }
 
-/// The badge, [`SIDE`] px and fixed, with `corner` on a [`CORNER`] px disc
-/// over its bottom-right edge. The caller fills the corner (its ground colour
+/// The badge, [`SIDE`] px scaled by `t`, with `corner` on a [`CORNER`] px
+/// disc over its bottom-right edge. The caller fills the corner (its ground colour
 /// and its mark); this only places and rounds it. A shell's glyph is set in
 /// `mono`. Decorative: no id or label, as the row and head name the program
 /// and state.
-pub(crate) fn badge(badge: Badge, corner: Option<Div>, mono: Option<SharedString>) -> Div {
-    let disc = div().flex_none().relative().size(px(SIDE)).rounded_full();
+pub(crate) fn badge(
+    badge: Badge,
+    corner: Option<Div>,
+    mono: Option<SharedString>,
+    t: &Theme,
+) -> Div {
+    let side = t.dim(SIDE);
+    let disc = div().flex_none().relative().size(px(side)).rounded_full();
     let disc = match badge.face() {
         Face::Mark(mark) => {
-            let art = mark.art_side();
-            let offset = (SIDE - art) / 2.0;
+            let art = t.dim(mark.art_side());
+            let offset = (side - art) / 2.0;
             disc.when_some(mark.ground(), |d, ground| d.bg(rgb(ground)))
                 .child(
                     img(move |window: &mut Window, cx: &mut App| {
@@ -233,8 +241,8 @@ pub(crate) fn badge(badge: Badge, corner: Option<Div>, mono: Option<SharedString
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(look.size))
-            .line_height(px(SIDE))
+            .text_size(t.text(look.size))
+            .line_height(px(side))
             .text_color(rgb(look.ink))
             .when(look.bold, |d| d.font_weight(FontWeight::BOLD))
             .when_some(mono, |d, family| d.font_family(family))
@@ -244,9 +252,9 @@ pub(crate) fn badge(badge: Badge, corner: Option<Div>, mono: Option<SharedString
         d.child(
             corner
                 .absolute()
-                .right(px(-CORNER_OVERHANG))
-                .bottom(px(-CORNER_OVERHANG))
-                .size(px(CORNER))
+                .right(t.size(-CORNER_OVERHANG))
+                .bottom(t.size(-CORNER_OVERHANG))
+                .size(t.size(CORNER))
                 .rounded_full()
                 .flex()
                 .items_center()

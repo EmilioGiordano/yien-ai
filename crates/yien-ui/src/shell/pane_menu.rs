@@ -239,9 +239,10 @@ impl Shell {
     /// the right end of the pane's head.
     fn pane_menu_anchor(&self, pane: PaneId) -> Option<Point<Pixels>> {
         let head = *self.pane_heads.borrow().get(&pane)?;
+        let t = self.theme;
         Some(point(
-            head.right() - px(MENU_WIDTH + 4.0),
-            head.bottom() + px(2.0),
+            head.right() - t.size(MENU_WIDTH) - t.size(4.0),
+            head.bottom() + t.size(2.0),
         ))
     }
 
@@ -285,7 +286,7 @@ impl Shell {
         };
         let at = self
             .pane_menu_anchor(pane)
-            .unwrap_or_else(|| point(px(EDGE_MARGIN), px(EDGE_MARGIN)));
+            .unwrap_or_else(|| point(self.theme.size(EDGE_MARGIN), self.theme.size(EDGE_MARGIN)));
         self.open_menu(pane, MenuKind::Pane, at, false, window, cx);
     }
 

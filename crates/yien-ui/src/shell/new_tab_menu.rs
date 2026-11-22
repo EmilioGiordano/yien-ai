@@ -19,6 +19,7 @@ use super::tab_menu::menu_returns_to_bar;
 use super::{CLAUDE_PROFILE, Shell};
 use crate::actions::NewTabMenu;
 use crate::catalog::{shortcut, spec};
+use crate::theme::Theme;
 
 /// The catalog command that opens the same tab as an item, by profile id.
 fn keyed_command(profile: &str) -> Option<&'static str> {
@@ -111,10 +112,10 @@ impl NewTabMenuState {
 
     /// Where a menu opened by keyboard goes for `project`: under its
     /// chevron, else the window's corner.
-    fn anchor(&self, project: ProjectId) -> Point<Pixels> {
+    fn anchor(&self, project: ProjectId, t: &Theme) -> Point<Pixels> {
         self.buttons.borrow().get(&project).map_or_else(
-            || point(px(EDGE_MARGIN), px(EDGE_MARGIN)),
-            |b| point(b.left(), b.bottom() + px(2.0)),
+            || point(t.size(EDGE_MARGIN), t.size(EDGE_MARGIN)),
+            |b| point(b.left(), b.bottom() + t.size(2.0)),
         )
     }
 }
@@ -145,8 +146,8 @@ impl Shell {
             .flex_none()
             .items_center()
             .justify_center()
-            .size(px(16.0))
-            .rounded(px(4.0))
+            .size(t.size(16.0))
+            .rounded(t.size(4.0))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -156,13 +157,13 @@ impl Shell {
                 if closed_by_this_click(closed.as_ref(), &project, Instant::now()) {
                     return;
                 }
-                let at = this.new_tab_menu.anchor(project);
+                let at = this.new_tab_menu.anchor(project, &this.theme);
                 this.open_new_tab_menu(project, at, window, cx);
             }))
             .child(
                 svg()
                     .path(crate::assets::CHEVRON)
-                    .size(px(10.0))
+                    .size(t.size(10.0))
                     .text_color(t.faint),
             )
             .child(
@@ -243,7 +244,7 @@ impl Shell {
     ) {
         match self.workspace.project_for_new_tab() {
             Some(project) => {
-                let at = self.new_tab_menu.anchor(project);
+                let at = self.new_tab_menu.anchor(project, &self.theme);
                 self.open_new_tab_menu(project, at, window, cx);
             }
             None => self.say("There is no project to open a tab in.".to_owned(), cx),

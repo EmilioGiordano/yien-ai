@@ -55,11 +55,11 @@ fn small_button(id: ElementId, icon: &'static str, t: &Theme) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .justify_center()
-        .size(px(20.0))
-        .rounded(px(4.0))
+        .size(t.size(20.0))
+        .rounded(t.size(4.0))
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .child(svg().path(icon).size(px(12.0)).text_color(t.faint))
+        .child(svg().path(icon).size(t.size(12.0)).text_color(t.faint))
 }
 
 impl Shell {
@@ -120,7 +120,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         small_button(("close-tab", tab.get()).into(), assets::CLOSE, &self.theme)
-            .size(px(crate::sidebars::TAB_ROW_CLOSE))
+            .size(self.theme.size(crate::sidebars::TAB_ROW_CLOSE))
             .aria_label(close_tab_label(name))
             .when(!always, |button| {
                 button

@@ -4,7 +4,7 @@
 //! thread; nothing here touches the disk.
 
 use tokio::sync::mpsc;
-use yien_config::{Config, Loaded, Problem, TabGrouping, ThemeSetting};
+use yien_config::{Config, Loaded, Problem, SettingValue, TabGrouping, ThemeSetting};
 
 use crate::theme::ThemeKind;
 
@@ -19,15 +19,24 @@ pub enum ConfigUpdate {
     Unreadable(String),
 }
 
-/// Opens the settings file for the user, on the platform layer.
+/// Opens and writes the settings file for the user, on the platform layer.
 ///
 /// ```
+/// use yien_config::SettingValue;
 /// use yien_ui::SettingsHost;
 ///
 /// struct Nowhere;
 /// impl SettingsHost for Nowhere {
 ///     fn open_config(&self, _editor: Option<String>, done: Box<dyn FnOnce(Option<String>) + Send>) {
 ///         done(Some("no editor here".into()));
+///     }
+///     fn set_setting(
+///         &self,
+///         _key: &'static str,
+///         _value: SettingValue,
+///         done: Box<dyn FnOnce(Option<String>) + Send>,
+///     ) {
+///         done(Some("no file here".into()));
 ///     }
 /// }
 /// ```
@@ -36,6 +45,18 @@ pub trait SettingsHost {
     /// app when `None`. Returns at once; `done` runs later, from any thread,
     /// with what went wrong, if anything.
     fn open_config(&self, editor: Option<String>, done: Box<dyn FnOnce(Option<String>) + Send>);
+
+    /// Sets `key` to `value` in the file as it is on disk now, keeping the
+    /// rest of it (RF-CFG-05); the file's watcher then applies it like any
+    /// other save. Writes are made in the order asked. Returns at once;
+    /// `done` runs later, from any thread, with what went wrong, if
+    /// anything: an invalid file is never written over.
+    fn set_setting(
+        &self,
+        key: &'static str,
+        value: SettingValue,
+        done: Box<dyn FnOnce(Option<String>) + Send>,
+    );
 }
 
 /// What the binary hands the window about settings.
@@ -113,11 +134,19 @@ pub(crate) struct SettingsModel {
     /// Whether the grouping toggle picked tabs by state, until the file is
     /// next applied (RF-ATN-07).
     grouping_toggled: Option<bool>,
+    /// Why the last reading was not applied; `None` after a valid one.
+    problem: Option<String>,
 }
 
 impl SettingsModel {
     pub(crate) fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Why the file on disk is not the settings in effect, while it is not:
+    /// the settings screen shows it and writes nothing (RF-CFG-05).
+    pub(crate) fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
     }
 
     /// Applies a reading. A valid file replaces the settings and drops the
@@ -128,6 +157,7 @@ impl SettingsModel {
                 self.config = loaded.config;
                 self.toggled = None;
                 self.grouping_toggled = None;
+                self.problem = None;
                 match loaded.warnings.as_slice() {
                     [] => Notice::Clear,
                     [only] => Notice::Show(format!("{FILE}: {only}.")),
@@ -139,11 +169,15 @@ impl SettingsModel {
                 }
             }
             ConfigUpdate::Invalid(problem) => {
+                self.problem = Some(format!("{FILE}: {problem}."));
                 Notice::Show(format!("{FILE}: {problem}. The last valid settings stay."))
             }
-            ConfigUpdate::Unreadable(why) => Notice::Show(format!(
-                "{FILE} could not be read: {why}. The last valid settings stay."
-            )),
+            ConfigUpdate::Unreadable(why) => {
+                self.problem = Some(format!("{FILE} could not be read: {why}."));
+                Notice::Show(format!(
+                    "{FILE} could not be read: {why}. The last valid settings stay."
+                ))
+            }
         }
     }
 
@@ -377,6 +411,22 @@ mod tests {
         let notice = m.apply(ConfigUpdate::Unreadable("access denied".into()));
         assert!(matches!(notice, Notice::Show(s) if s.contains("access denied")));
         assert_eq!(m.config().terminal_font.size, 18.0);
+    }
+
+    #[test]
+    fn rf_cfg_05_the_screen_knows_while_the_file_is_not_in_effect() {
+        let mut m = SettingsModel::default();
+        assert_eq!(m.problem(), None);
+        m.apply(invalid("theme = 3"));
+        let problem = m.problem().unwrap();
+        assert!(
+            problem.starts_with("config.toml: line 1, column 9"),
+            "{problem}"
+        );
+        m.apply(loaded("theme = \"washi\""));
+        assert_eq!(m.problem(), None, "a valid reading clears it");
+        m.apply(ConfigUpdate::Unreadable("access denied".into()));
+        assert!(m.problem().unwrap().contains("access denied"));
     }
 
     #[test]

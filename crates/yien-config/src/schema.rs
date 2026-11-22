@@ -30,7 +30,8 @@ pub const SCHEMA: &[Setting] = &[
     Setting {
         key: "ui.font.size",
         default: "13",
-        doc: "The window's text size in pixels, 8 to 20.",
+        doc: "The interface size: the window's text size in pixels, 8 to 20. Bars, rows, \
+              paddings and icons scale with it; terminals follow terminal.font.size.",
     },
     Setting {
         key: "ui.tabs.group",

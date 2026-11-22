@@ -33,6 +33,7 @@ mod pane_head;
 mod region;
 mod release_notes;
 mod settings;
+mod settings_screen;
 mod shell;
 mod sidebars;
 mod tab_order;

@@ -3,7 +3,8 @@
 //! Layer 1: no window, no OS calls, no clock. [`parse`] turns the file's text
 //! into a [`Config`] or the [`Problem`] that makes it invalid, with its line
 //! and column; [`default_file`] is the commented file written on first run;
-//! [`ReloadGate`] decides when a changed file is read again.
+//! [`ReloadGate`] decides when a changed file is read again; [`set_value`]
+//! sets one key in the file's text for the settings screen.
 //!
 //! ```
 //! use yien_config::{ThemeSetting, parse};
@@ -20,12 +21,14 @@
 
 mod command;
 mod dir;
+mod edit;
 mod parse;
 mod reload;
 mod schema;
 
 pub use command::split_command;
 pub use dir::expand_dir;
+pub use edit::{EditError, SettingValue, check_value, set_value};
 pub use parse::parse;
 pub use reload::{Reload, ReloadGate};
 pub use schema::{SCHEMA, Setting, default_file};
